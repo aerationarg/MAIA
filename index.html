@@ -590,6 +590,7 @@ let msalInstance = null;
 let msAccount = null;
 let npPdfB64 = null;
 let npExtractedData = null;
+let rendManualValues = {};
 
 // ── Storage helpers ────────────────────────────────────
 function getRendFields()  { return JSON.parse(localStorage.getItem(FIELDS_KEY) || 'null') || DEFAULT_REND_FIELDS; }
@@ -1831,15 +1832,34 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
       );
       if (!pdfResp.ok) throw new Error('Error al convertir a PDF: HTTP '+pdfResp.status);
 
-      const pdfBlob = await pdfResp.blob();
+      const pdfBytes = await pdfResp.arrayBuffer();
+      const pdfName = fileName.replace('.xlsx','.pdf');
+
+      // Upload PDF to same destination folder in SharePoint
+      btn.textContent = '⏳ Subiendo PDF a SharePoint...';
+      let pdfUploadUrl;
+      if (dest.id) {
+        pdfUploadUrl = `https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${dest.id}:/${encodeURIComponent(pdfName)}:/content`;
+      } else {
+        const ep = (dest.path||'').split('/').map(encodeURIComponent).join('/');
+        pdfUploadUrl = `https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/root:/${ep}/${encodeURIComponent(pdfName)}:/content`;
+      }
+      await fetch(pdfUploadUrl, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer '+token, 'Content-Type': 'application/pdf' },
+        body: pdfBytes
+      });
+
+      // Also download PDF locally
+      const pdfBlob = new Blob([pdfBytes], {type:'application/pdf'});
       const pdfUrl = URL.createObjectURL(pdfBlob);
       const a = document.createElement('a');
       a.href = pdfUrl;
-      a.download = fileName.replace('.xlsx','.pdf');
+      a.download = pdfName;
       a.click();
       URL.revokeObjectURL(pdfUrl);
 
-      showMsg(pfx+'-gen-status','success',`✓ NP generada y descargada como PDF. El Excel queda guardado en SharePoint.`);
+      showMsg(pfx+'-gen-status','success',`✓ PDF generado, subido a SharePoint y descargado localmente.`);
     }
   } catch(e) {
     showMsg(pfx+'-gen-status','error','✕ Error: '+e.message);
@@ -1929,7 +1949,7 @@ async function npConfirmSave(pfx) {
   spD.mode = spMode;
   npSaveSp(pfx, spD);
   const btn = document.getElementById('sp-confirm-btn');
-  if (spMode==='local') { spModalClose(); return; }
+  if (spMode==='local') { exportExcel(); spModalClose(); return; }
   if (spMode==='existing'&&!spD.excelId&&!spD.excelPath){alert('Seleccion\u00e1 un Excel destino.');return;}
   if (spMode==='new'&&!spD.newFolderId&&!spD.newFolder){alert('Seleccion\u00e1 una carpeta destino.');return;}
 
