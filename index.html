@@ -1933,11 +1933,35 @@ async function npCargarUltimoNP(pfx, itemId, siteId) {
     const ab = await resp.arrayBuffer();
     const wb = XLSX.read(ab,{type:'array'});
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1});
-    let ultimo=0;
-    for (let i=1;i<rows.length;i++){const v=rows[i][3];if(v&&!isNaN(parseInt(v)))ultimo=Math.max(ultimo,parseInt(v));}
+    const headers = (rows[0]||[]).map(h=>String(h||''));
     const manualFields = npGetManual(pfx);
     const npField = manualFields.find(f=>f.auto||f.name.toLowerCase().includes('np'));
-    if (npField) {
+    if (!npField) return;
+
+    // Try to find NP column via saved mapping first
+    const mapKey = NP_KEYS[pfx]?.map || NP_MAPPING_KEY;
+    const savedMapping = getMapping(mapKey);
+    let npColIdx = null;
+    if (Object.keys(savedMapping).length > 0) {
+      const entry = Object.entries(savedMapping).find(([col, field]) => field === npField.name);
+      if (entry) npColIdx = parseInt(entry[0]);
+    }
+    // Fallback: search headers for NP-like column
+    if (npColIdx === null) {
+      npColIdx = headers.findIndex(h => {
+        const hl = h.toLowerCase();
+        return hl.includes('nota') || hl.includes('nº') || (hl.includes('np') && !hl.includes('imp'));
+      });
+    }
+    // Last fallback: column D (index 3)
+    if (npColIdx === null || npColIdx < 0) npColIdx = 3;
+
+    let ultimo = 0;
+    for (let i=1;i<rows.length;i++){
+      const v = rows[i][npColIdx];
+      if(v&&!isNaN(parseInt(v))) ultimo=Math.max(ultimo,parseInt(v));
+    }
+    if (ultimo > 0) {
       npState[pfx].manualValues[npField.name] = String(ultimo+1);
       npRenderManualInputs(pfx);
     }
@@ -2172,7 +2196,35 @@ async function loadExcelHeadersAndShowMapping(target, itemId, siteId) {
     if (!headers.length) return;
     const mapKey = target === 'rend' ? REND_MAPPING_KEY : (NP_KEYS[target]?.map || NP_MAPPING_KEY);
     const savedMapping = getMapping(mapKey);
-    showMappingModal(target, headers, savedMapping, async () => {});
+
+    // After confirming mapping, for NP targets also update the NP number
+    // by reading the correct column based on the mapping
+    const pendingAction = async (confirmedMapping) => {
+      if (target !== 'rend') {
+        // Find which column is mapped to the NP auto field
+        const pfx = target;
+        const manualFields = npGetManual(pfx);
+        const npField = manualFields.find(f => f.auto || f.name.toLowerCase().includes('np'));
+        if (npField) {
+          // Find the column index mapped to NP field
+          const npColIdx = Object.entries(confirmedMapping).find(([col, field]) => field === npField.name)?.[0];
+          if (npColIdx !== undefined) {
+            // Read last value in that column
+            let ultimo = 0;
+            for (let i = 1; i < rows.length; i++) {
+              const v = rows[i][parseInt(npColIdx)];
+              if (v && !isNaN(parseInt(v))) ultimo = Math.max(ultimo, parseInt(v));
+            }
+            if (ultimo > 0) {
+              npState[pfx].manualValues[npField.name] = String(ultimo + 1);
+              npRenderManualInputs(pfx);
+            }
+          }
+        }
+      }
+    };
+
+    showMappingModal(target, headers, savedMapping, pendingAction);
   } catch(e) {
     console.log('Could not load Excel headers:', e.message);
   }
