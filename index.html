@@ -2156,19 +2156,35 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
         });
       };
 
-      // Build field→value lookup from all sources
-      const fieldValues = { ...state.manualValues };
+      // Build field→value lookup from all sources (case-insensitive keys)
+      const fieldValues = {};
+      // Auto + manual values from state
+      Object.entries(state.manualValues).forEach(([k,v]) => {
+        fieldValues[k] = v;
+        fieldValues[k.toLowerCase()] = v;
+      });
+      // IA extracted values
       npGetIA(pfx).filter(f=>f.name.trim()).forEach(f => {
-        if (d[f.name] != null) fieldValues[f.name] = d[f.name];
+        if (d[f.name] != null) {
+          fieldValues[f.name] = d[f.name];
+          fieldValues[f.name.toLowerCase()] = d[f.name];
+        }
+      });
+      // Also add raw extracted fields (in case name differs slightly)
+      Object.entries(d).forEach(([k,v]) => {
+        if (k !== '__archivo__' && v != null) {
+          fieldValues[k] = v;
+          fieldValues[k.toLowerCase()] = v;
+        }
       });
       fieldValues['Fecha'] = today();
       fieldValues['Fecha NP'] = today();
 
-      // Apply cell map
+      // Apply cell map - try exact match then lowercase match
       const cellMap = tmplGetCellMap(pfx);
       for (const entry of cellMap) {
         if (!entry.field || !entry.cell) continue;
-        const val = fieldValues[entry.field];
+        const val = fieldValues[entry.field] ?? fieldValues[entry.field.toLowerCase()];
         if (val !== undefined && val !== null && val !== '') {
           await setCellVal(entry.cell, val);
         }
@@ -2181,15 +2197,18 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
 
       if (items.length > templateItemRows) {
         const extraRows = items.length - templateItemRows;
-        btn.textContent = `\u23F3 Insertando ${extraRows} filas extra...`;
+        btn.textContent = `⏳ Insertando ${extraRows} filas extra...`;
+        // Insert rows at the LAST template item row (push down), copy format from row above
+        const insertRow = ir.end; // insert before last row to preserve border formatting
         for (let e=0; e<extraRows; e++) {
           await fetch(
-            excelBase + `range(address='${ir.itemCol}${ir.end}:${ir.totalCol}${ir.end}')/insert`,
+            excelBase + `range(address='A${insertRow}:Z${insertRow}')/insert`,
             { method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-              body: JSON.stringify({shift:'Down'}) }
+              body: JSON.stringify({shift:'Down', copyOrigin:'formatFromLeftOrAbove'}) }
           );
+          await new Promise(r=>setTimeout(r,500));
         }
-        await new Promise(r=>setTimeout(r,2000));
+        await new Promise(r=>setTimeout(r,1500));
       }
 
       btn.textContent = `\u23F3 Insertando items...`;
@@ -3044,23 +3063,41 @@ function tmplCellRemove(pfx, i) {
   tmplRenderCellMap(pfx);
 }
 
+function tmplGetAllFields(pfx) {
+  const auto = getAutoFields(pfx).filter(f=>f.name.trim()).map(f=>f.name);
+  let manual = [], ia = [];
+  if (pfx === 'rend') {
+    manual = getRendManualFields().filter(f=>f.name.trim()).map(f=>f.name);
+    ia = getRendFields().filter(f=>f.name.trim()).map(f=>f.name);
+  } else {
+    manual = npGetManual(pfx).filter(f=>f.name.trim()).map(f=>f.name);
+    ia = npGetIA(pfx).filter(f=>f.name.trim()).map(f=>f.name);
+  }
+  return [...new Set([...auto, ...manual, ...ia, 'Fecha'])];
+}
+
 function tmplRenderCellMap(pfx) {
   const map = tmplGetCellMap(pfx);
   const el = document.getElementById(pfx+'-cell-map-list');
   if (!el) return;
-  // Render current saved map into the inputs
-  const rows = map.map((m,i) => `
+  const allFields = tmplGetAllFields(pfx);
+  el.innerHTML = map.map((m,i) => {
+    const opts = ['', ...allFields].map(f =>
+      `<option value="${esc(f)}" ${f===m.field?'selected':''}>${f ? esc(f) : '— Elegir campo —'}</option>`
+    ).join('');
+    return `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-      <input type="text" value="${esc(m.field)}" placeholder="Campo IA/manual" style="flex:2;padding:7px 10px;font-size:13px"
-        oninput="tmplCellUpdate('${pfx}',${i},'field',this.value)"
-        onblur="tmplCellUpdate('${pfx}',${i},'field',this.value)" />
-      <span style="color:var(--text2);font-size:13px">\u2192</span>
+      <select style="flex:2;padding:7px 10px;font-size:13px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);font-family:inherit"
+        onchange="tmplCellUpdate('${pfx}',${i},'field',this.value)">
+        ${opts}
+      </select>
+      <span style="color:var(--text2);font-size:13px">→</span>
       <input type="text" value="${esc(m.cell)}" placeholder="Celda" style="width:70px;padding:7px 10px;font-size:13px;font-family:monospace;text-transform:uppercase"
         oninput="tmplCellUpdate('${pfx}',${i},'cell',this.value.toUpperCase())"
         onblur="tmplCellUpdate('${pfx}',${i},'cell',this.value.toUpperCase())" />
       <button class="remove-btn" onclick="tmplCellRemove('${pfx}',${i})">&#x2715;</button>
-    </div>`).join('');
-  el.innerHTML = rows;
+    </div>`;
+  }).join('');
 }
 
 // Call tmplRenderCellMap when opening cfg panels
