@@ -1483,15 +1483,42 @@ let fbCurrentSiteId = null;
 let fbCurrentSiteName = null;
 let fbLevel = 'sites'; // 'sites' | 'files'
 
+// Storage for last location per target
+function fbGetLastLoc(target) {
+  return JSON.parse(localStorage.getItem('fb_last_loc_' + target) || 'null');
+}
+function fbSaveLastLoc(target, loc) {
+  localStorage.setItem('fb_last_loc_' + target, JSON.stringify(loc));
+}
+
 async function fbOpen(mode, target) {
   fbMode = mode;
   fbTarget = target;
   fbStack = [];
   fbLevel = 'sites';
   fbCurrentSiteId = null;
-  document.getElementById('fb-title').textContent = mode === 'file' ? 'Seleccionar archivo Excel' : 'Seleccionar carpeta';
-  document.getElementById('fb-select-btn').style.display = 'none'; // hidden at site level
+  document.getElementById('fb-title').textContent = mode === 'file' ? 'Seleccionar archivo' : 'Seleccionar carpeta';
+  document.getElementById('fb-select-btn').style.display = 'none';
   document.getElementById('fbOverlay').classList.remove('hidden');
+
+  // Try to restore last location for this target
+  const lastLoc = fbGetLastLoc(target);
+  if (lastLoc && lastLoc.siteId && lastLoc.folderId !== undefined) {
+    try {
+      fbCurrentSiteId = lastLoc.siteId;
+      fbCurrentSiteName = lastLoc.siteName || '';
+      fbLevel = 'files';
+      fbStack = [{type:'sites', label:'Sitios'}, ...(lastLoc.stack||[])];
+      const listEl = document.getElementById('fb-list');
+      listEl.innerHTML = '<div class="fb-loading">⏳ Abriendo última ubicación...</div>';
+      await fbLoadFolder(lastLoc.folderId || null, lastLoc.folderPath || '', lastLoc.folderLabel || lastLoc.siteName || '');
+      return;
+    } catch(e) {
+      console.log('Could not restore last location:', e.message);
+      // Fall through to sites
+      fbCurrentSiteId = null; fbStack = []; fbLevel = 'sites';
+    }
+  }
   await fbLoadSites();
 }
 
@@ -1568,6 +1595,17 @@ async function fbSelectSite(idx) {
 }
 
 async function fbLoadFolder(itemId, path, label) {
+  // Save current location for this target
+  if (fbCurrentSiteId && fbTarget) {
+    fbSaveLastLoc(fbTarget, {
+      siteId: fbCurrentSiteId,
+      siteName: fbCurrentSiteName,
+      folderId: itemId || null,
+      folderPath: path || '',
+      folderLabel: label || '',
+      stack: fbStack.slice(0, -1) // don't include the current level
+    });
+  }
   const listEl = document.getElementById('fb-list');
   listEl.innerHTML = '<div class="fb-loading">⏳ Cargando...</div>';
   document.getElementById('fb-breadcrumb').textContent = (fbCurrentSiteName||'') + (path ? ' › ' + path.replace(/\//g,' › ') : '');
