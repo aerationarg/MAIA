@@ -2488,13 +2488,22 @@ async function npConfirmSave(pfx) {
       const exSite = spD.excelS || step0Cfg.regSiteId || siteId;
       if (!excelItemId) throw new Error('No se seleccionó el Registro NP. Volvé al Paso 0.');
 
+      // Get first sheet name dynamically (don't assume 'Hoja1')
+      const sheetsResp = await fetch(
+        `https://graph.microsoft.com/v1.0/sites/${exSite}/drive/items/${excelItemId}/workbook/worksheets`,
+        {headers:{Authorization:'Bearer '+token}}
+      );
+      if (!sheetsResp.ok) throw new Error('No se pudo leer las hojas del Excel');
+      const sheetsData = await sheetsResp.json();
+      const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
+      const encodedSheet = encodeURIComponent(sheetName);
+
       // Use Graph Excel API to read headers and find first empty row
-      // This avoids downloading/re-uploading which would lose formatting
-      const excelBase2 = `https://graph.microsoft.com/v1.0/sites/${exSite}/drive/items/${excelItemId}/workbook/worksheets('Hoja1')/`;
+      const excelBase2 = `https://graph.microsoft.com/v1.0/sites/${exSite}/drive/items/${excelItemId}/workbook/worksheets('${encodedSheet}')/`;
 
       // Read used range to find first empty row
       const usedResp = await fetch(
-        `https://graph.microsoft.com/v1.0/sites/${exSite}/drive/items/${excelItemId}/workbook/worksheets('Hoja1')/usedRange?$select=address,values`,
+        excelBase2 + `usedRange?$select=address,values`,
         {headers:{Authorization:'Bearer '+token}}
       );
       if (!usedResp.ok) throw new Error('No se pudo leer el Excel');
@@ -2533,13 +2542,30 @@ async function npConfirmSave(pfx) {
         }
 
         // Write row via Graph Excel API — only touches that specific row, no format changes
-        const lastCol = String.fromCharCode(64 + Math.max(newRow.length, 1));
-        await fetch(
+        // Filter out trailing empty values but keep at least the mapped columns
+        // Trim row to exact header count to match range dimensions
+        const colCount = npHeaders.length || 18;
+        const rowToWrite = newRow.slice(0, colCount);
+        // Pad if shorter
+        while (rowToWrite.length < colCount) rowToWrite.push('');
+        // Build column letter (supports up to Z=26, AA=27+)
+        const colNum = colCount;
+        const lastCol = colNum <= 26
+          ? String.fromCharCode(64 + colNum)
+          : String.fromCharCode(64 + Math.floor((colNum-1)/26)) + String.fromCharCode(65 + ((colNum-1)%26));
+        console.log(`Writing row ${firstEmptyRow} to A:${lastCol}, values:`, rowToWrite);
+        const writeResp = await fetch(
           excelBase2 + `range(address='A${firstEmptyRow}:${lastCol}${firstEmptyRow}')`,
           { method:'PATCH',
             headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-            body: JSON.stringify({values:[newRow]}) }
+            body: JSON.stringify({values:[rowToWrite]}) }
         );
+        if (!writeResp.ok) {
+          const errData = await writeResp.json().catch(()=>({}));
+          console.error('Write error:', writeResp.status, errData);
+          throw new Error(`Error al escribir fila ${firstEmptyRow}: HTTP ${writeResp.status} - ${errData?.error?.message||''}`);
+        }
+        console.log(`Row ${firstEmptyRow} written OK`);
         firstEmptyRow++;
       }
 
