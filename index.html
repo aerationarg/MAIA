@@ -209,6 +209,19 @@
     .reorder-btn { background:var(--surface2); border:1px solid var(--border); border-radius:4px; width:24px; height:22px; cursor:pointer; font-size:12px; display:flex; align-items:center; justify-content:center; color:var(--text2); padding:0; }
     .reorder-btn:hover { background:var(--border); color:var(--text); }
     .reorder-btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+    /* ── Login ── */
+    .login-screen { min-height:100dvh; display:flex; align-items:center; justify-content:center; background:var(--bg); padding:20px; }
+    .login-card { background:var(--surface); border-radius:var(--radius); padding:32px 28px; width:100%; max-width:380px; box-shadow:0 4px 24px rgba(0,0,0,0.12); }
+    .login-logo { text-align:center; margin-bottom:28px; }
+    .login-logo h1 { font-size:28px; font-weight:700; color:var(--text); }
+    .login-logo h1 span { font-size:14px; font-weight:400; color:var(--text3); }
+    .login-logo p { font-size:13px; color:var(--text2); margin-top:4px; }
+    .login-label { display:block; font-size:13px; color:var(--text2); margin-bottom:6px; font-weight:500; }
+    .login-input { width:100%; padding:11px 14px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface2); color:var(--text); font-family:inherit; font-size:14px; outline:none; box-sizing:border-box; }
+    .login-input:focus { border-color:var(--blue); }
+    .login-error { background:#fee2e2; color:#dc2626; border-radius:var(--radius-sm); padding:10px 14px; font-size:13px; margin-bottom:16px; }
+    .hidden { display:none !important; }
   </style>
 </head>
 <body>
@@ -218,7 +231,13 @@
       <h1>DAIA <span>v1.0</span></h1>
       <p>Documentación IA · Aeration Argentina</p>
     </div>
-    <button id="msLoginBtn" onclick="toggleMsLogin()">Iniciar sesión</button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="msLoginBtn" onclick="toggleMsLogin()">Iniciar sesión</button>
+      <button onclick="doLogout()" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:4px">
+        <span id="user-name-display" style="max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <span>✕</span>
+      </button>
+    </div>
   </div>
 
   <div class="content">
@@ -744,6 +763,14 @@
 
     <!-- ═══ PANEL: Admin ═══ -->
     <div class="panel" id="panel-admin">
+      <div class="card">
+        <div class="card-label">Mi cuenta</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Cambiar contraseña de acceso a DAIA.</p>
+        <input type="password" id="admin-new-pass" placeholder="Nueva contraseña (mín. 6 caracteres)" style="margin-bottom:8px;font-size:14px" />
+        <input type="password" id="admin-new-pass2" placeholder="Repetir contraseña" style="margin-bottom:8px;font-size:14px" />
+        <button class="btn btn-primary" onclick="changePassword()" style="margin-bottom:4px">Cambiar contraseña</button>
+        <div id="admin-pass-status"></div>
+      </div>
       <div id="adminContent"></div>
     </div>
 
@@ -2305,29 +2332,7 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
         if (items[r].p_total) await setCellVal(ir.totalCol+row, Number(items[r].p_total)||0);
       }
 
-            // Step 4: Remove print title rows before converting to PDF
-      btn.textContent = `⏳ Preparando PDF...`;
-      try {
-        // Get worksheet name
-        const wsListResp = await fetch(
-          `https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${copiedItemId}/workbook/worksheets`,
-          {headers:{Authorization:'Bearer '+token}}
-        );
-        if (wsListResp.ok) {
-          const wsListData = await wsListResp.json();
-          const wsName = wsListData.value?.[0]?.name || 'Hoja1';
-          const encodedWs = encodeURIComponent(wsName);
-          // Clear print title rows (rows that repeat on each page)
-          await fetch(
-            `https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${copiedItemId}/workbook/worksheets('${encodedWs}')/pageLayout`,
-            { method:'PATCH',
-              headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-              body: JSON.stringify({ printTitleRows: '', printTitleColumns: '' }) }
-          );
-        }
-      } catch(e) { console.log('Could not clear print titles:', e.message); }
-
-      // Convert to PDF via Graph
+            // Convert to PDF via Graph
       btn.textContent = `⏳ Convirtiendo a PDF...`;
       showMsg(pfx+'-gen-status','loading','Convirtiendo a PDF...');
       await new Promise(r=>setTimeout(r,1000)); // let Excel API settle
@@ -3258,6 +3263,149 @@ function tmplRenderCellMap(pfx) {
 // Call tmplRenderCellMap when opening cfg panels
 // (already called via switchPanel -> npCfgRender, extend it)
 // npCfgRender override removed - merged into original
+
+// ── Supabase Auth ─────────────────────────────────────
+const SUPA_URL = 'https://pamrmkiadojnypmaqzfm.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhbXJta2lhZG9qbnlwbWFxemZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1ODYzNzgsImV4cCI6MjA5NzE2MjM3OH0.LDFWO_oGKkVgnPRJfpzsYX8CwzpLI0tobL-eIFgJO_M';
+
+let currentUser = null;
+let currentSector = null;
+
+const SECTOR_TABS = {
+  'Admin':          ['rend','np-loc','np-int','cfg-rend','cfg-np-loc','cfg-np-int','admin'],
+  'Compras':        ['rend','np-loc','np-int','cfg-rend','cfg-np-loc','cfg-np-int'],
+  'COMEX':          ['rend','np-loc','np-int','cfg-rend','cfg-np-loc','cfg-np-int'],
+  'Administración': ['rend','cfg-rend'],
+  'RRHH':           ['rend','cfg-rend'],
+  'Coordinación':   ['rend','cfg-rend'],
+  'Ingeniería':     ['rend','cfg-rend'],
+  'Procesos':       ['rend','cfg-rend'],
+  'Comercial':      ['rend','cfg-rend'],
+  'Servicios':      ['rend','cfg-rend'],
+};
+
+async function supaFetch(path, opts={}) {
+  const res = await fetch(SUPA_URL + path, {
+    ...opts,
+    headers: {
+      'apikey': SUPA_KEY,
+      'Content-Type': 'application/json',
+      ...(opts.headers || {})
+    }
+  });
+  return res;
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  const btn   = document.getElementById('login-btn');
+  const errEl = document.getElementById('login-error');
+  errEl.style.display = 'none';
+  if (!email || !pass) { errEl.textContent = 'Completá email y contraseña.'; errEl.style.display='block'; return; }
+  btn.disabled = true; btn.textContent = 'Ingresando...';
+  try {
+    const res = await supaFetch('/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      body: JSON.stringify({ email, password: pass })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || data.message || 'Credenciales incorrectas');
+    const profRes = await supaFetch('/rest/v1/profiles?select=nombre,sector&id=eq.' + data.user.id, {
+      headers: { Authorization: 'Bearer ' + data.access_token }
+    });
+    const profiles = await profRes.json();
+    const profile = profiles[0];
+    if (!profile || !profile.sector) throw new Error('Tu usuario no tiene sector asignado. Contactá al administrador.');
+    currentUser = { ...data.user, ...profile, token: data.access_token, refresh: data.refresh_token };
+    currentSector = profile.sector;
+    localStorage.setItem('daia_session', JSON.stringify({ token: data.access_token, refresh: data.refresh_token, user: currentUser, sector: currentSector }));
+    onLoginSuccess();
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Iniciar sesión';
+  }
+}
+
+async function doLogout() {
+  try {
+    const s = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (s?.token) await supaFetch('/auth/v1/logout', { method:'POST', headers:{ Authorization:'Bearer '+s.token } });
+  } catch(e) {}
+  localStorage.removeItem('daia_session');
+  currentUser = null; currentSector = null; msAccount = null;
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('login-pass').value = '';
+  document.getElementById('login-error').style.display = 'none';
+  document.getElementById('msLoginBtn').textContent = 'Iniciar sesión';
+}
+
+async function tryRestoreSession() {
+  const saved = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!saved?.token) return false;
+  try {
+    const res = await supaFetch('/auth/v1/user', { headers:{ Authorization:'Bearer '+saved.token } });
+    if (res.ok) {
+      currentUser = saved.user; currentSector = saved.sector; return true;
+    }
+    if (saved.refresh) {
+      const r = await supaFetch('/auth/v1/token?grant_type=refresh_token', { method:'POST', body:JSON.stringify({ refresh_token: saved.refresh }) });
+      if (r.ok) {
+        const d = await r.json();
+        currentUser = saved.user; currentSector = saved.sector;
+        localStorage.setItem('daia_session', JSON.stringify({ ...saved, token: d.access_token, refresh: d.refresh_token }));
+        return true;
+      }
+    }
+  } catch(e) {}
+  localStorage.removeItem('daia_session');
+  return false;
+}
+
+function onLoginSuccess() {
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  const nameEl = document.getElementById('user-name-display');
+  if (nameEl) nameEl.textContent = currentUser.nombre || currentUser.email.split('@')[0];
+  applyTabAccess();
+  initApp();
+}
+
+function applyTabAccess() {
+  const allowed = SECTOR_TABS[currentSector] || ['rend','cfg-rend'];
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    const id = btn.id.replace('nav-','');
+    btn.style.display = allowed.includes(id) ? '' : 'none';
+  });
+  const first = allowed[0] || 'rend';
+  switchPanel(first);
+}
+
+// ── Password change ───────────────────────────────────
+async function changePassword() {
+  const p1 = document.getElementById('admin-new-pass').value;
+  const p2 = document.getElementById('admin-new-pass2').value;
+  const statusEl = document.getElementById('admin-pass-status');
+  if (!p1 || p1.length < 6) { showMsg('admin-pass-status','error','La contraseña debe tener al menos 6 caracteres.'); return; }
+  if (p1 !== p2) { showMsg('admin-pass-status','error','Las contraseñas no coinciden.'); return; }
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch('/auth/v1/user', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + session.token },
+      body: JSON.stringify({ password: p1 })
+    });
+    if (!res.ok) { const e=await res.json(); throw new Error(e.message||'Error'); }
+    showMsg('admin-pass-status','success','✓ Contraseña actualizada');
+    document.getElementById('admin-new-pass').value = '';
+    document.getElementById('admin-new-pass2').value = '';
+  } catch(e) {
+    showMsg('admin-pass-status','error','✕ Error: ' + e.message);
+  }
+}
 
 // ── Admin panel ────────────────────────────────────────
 function renderAdmin() {
