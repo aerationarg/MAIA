@@ -1,4 +1,4 @@
-const CACHE = 'rendiciones-v1';
+const CACHE = 'maia-v1';
 const ASSETS = [
   '/',
   '/index.html',
