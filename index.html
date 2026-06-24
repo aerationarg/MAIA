@@ -82,6 +82,8 @@
 
     .header { padding: 16px 20px 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; padding-top: max(16px, env(safe-area-inset-top, 16px)); display: flex; justify-content: flex-start; align-items: center; gap: 12px; }
     .page-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.2px; }
+    .empresa-toggle-btn { padding: 6px 13px; border: none; background: transparent; border-radius: 6px; font-size: 12.5px; font-weight: 600; color: var(--text2); cursor: pointer; font-family: inherit; transition: background 0.15s, color 0.15s; }
+    .empresa-toggle-btn.active { background: var(--blue); color: #fff; }
     .main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
     .content { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
@@ -349,6 +351,10 @@
       <h2 id="page-title" class="page-title">Rendiciones</h2>
       <div style="flex:1"></div>
       <div style="display:flex;align-items:center;gap:8px">
+        <div id="empresa-selector" style="display:none;align-items:center;background:var(--surface2);border-radius:var(--radius-sm);padding:3px;gap:2px">
+          <button id="empresa-btn-AA" class="empresa-toggle-btn" onclick="switchEmpresa('AA')">AA</button>
+          <button id="empresa-btn-AS" class="empresa-toggle-btn" onclick="switchEmpresa('AS')">AS</button>
+        </div>
         <button id="msLoginBtn" onclick="toggleMsLogin()">Iniciar sesión</button>
         <div style="position:relative">
           <button id="account-btn" onclick="toggleAccountMenu()" style="background:var(--blue);color:#fff;border:none;border-radius:50%;width:34px;height:34px;font-size:15px;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;font-weight:600" title="Mi cuenta">
@@ -1040,8 +1046,8 @@ async function supaFetch(path, opts) {
 
 // ── Constants ──────────────────────────────────────────
 const ADMIN_PIN_KEY  = 'rend_admin_pin';
-const FIELDS_KEY     = 'rend_fields';
-const NP_FIELDS_KEY  = 'np_fields';
+function FIELDS_KEY()     { return 'rend_fields_' + currentEmpresa; }
+function NP_FIELDS_KEY()  { return 'np_fields_' + currentEmpresa; }
 const API_KEY_KEY    = 'rend_api_key';
 
 const DEFAULT_REND_FIELDS = [
@@ -1088,22 +1094,30 @@ const REND_COMPROBANTES = 'Operaciones y Mantenimiento/IA/Admin/Comprobantes';
 const NP_FOLDER   = 'Operaciones y Mantenimiento/IA/Compras-COMEX';
 const NP_REGISTRO = 'Operaciones y Mantenimiento/IA/Compras-COMEX/Registro NP prueba.xlsx';
 
-const NP_KEYS = {
-  'np-loc': {
-    ia:     'np_loc_ia_fields',
-    manual: 'np_loc_manual_fields',
-    sp:     'np_loc_sp_defaults',
-    map:    'np_loc_col_mapping',
-    tmpl:   'np_loc_tmpl',
-  },
-  'np-int': {
-    ia:     'np_int_ia_fields',
-    manual: 'np_int_manual_fields',
-    sp:     'np_int_sp_defaults',
-    map:    'np_int_col_mapping',
-    tmpl:   'np_int_tmpl',
-  },
-};
+function NP_KEYS(pfx) {
+  const e = '_' + currentEmpresa;
+  const base = {
+    'np-loc': {
+      ia:     'np_loc_ia_fields',
+      manual: 'np_loc_manual_fields',
+      sp:     'np_loc_sp_defaults',
+      map:    'np_loc_col_mapping',
+      tmpl:   'np_loc_tmpl',
+    },
+    'np-int': {
+      ia:     'np_int_ia_fields',
+      manual: 'np_int_manual_fields',
+      sp:     'np_int_sp_defaults',
+      map:    'np_int_col_mapping',
+      tmpl:   'np_int_tmpl',
+    },
+  };
+  const keys = base[pfx];
+  if (!keys) return undefined;
+  const out = {};
+  Object.keys(keys).forEach(k => out[k] = keys[k] + e);
+  return out;
+}
 
 
 function getNpDefaults(pfx) {
@@ -1115,7 +1129,7 @@ function getNpDefaults(pfx) {
 
 // ── State ──────────────────────────────────────────────
 let files = [];
-let results = JSON.parse(localStorage.getItem('rend_results') || '[]');
+let results = [];
 let cancelled = false;
 let adminUnlocked = false;
 let msalInstance = null;
@@ -1125,10 +1139,10 @@ let npExtractedData = null;
 let rendManualValues = {};
 
 // ── Storage helpers ────────────────────────────────────
-function getRendFields()  { return JSON.parse(localStorage.getItem(FIELDS_KEY) || 'null') || DEFAULT_REND_FIELDS; }
-function saveRendFields(f){ localStorage.setItem(FIELDS_KEY, JSON.stringify(f)); }
-function getNpFields()    { return JSON.parse(localStorage.getItem(NP_FIELDS_KEY) || 'null') || DEFAULT_NP_FIELDS; }
-function saveNpFields(f)  { localStorage.setItem(NP_FIELDS_KEY, JSON.stringify(f)); }
+function getRendFields()  { return JSON.parse(localStorage.getItem(FIELDS_KEY()) || 'null') || DEFAULT_REND_FIELDS; }
+function saveRendFields(f){ localStorage.setItem(FIELDS_KEY(), JSON.stringify(f)); }
+function getNpFields()    { return JSON.parse(localStorage.getItem(NP_FIELDS_KEY()) || 'null') || DEFAULT_NP_FIELDS; }
+function saveNpFields(f)  { localStorage.setItem(NP_FIELDS_KEY(), JSON.stringify(f)); }
 let _cachedApiKey = '';
 function getApiKey() { return _cachedApiKey; }
 function saveApiKey(k) { _cachedApiKey = k; } // kept for compatibility
@@ -1157,9 +1171,9 @@ async function loadApiKeyFromSupabase() {
 }
 function getPin()               { return localStorage.getItem(ADMIN_PIN_KEY) || ''; }
 function savePin(p)             { localStorage.setItem(ADMIN_PIN_KEY, p); }
-function getRendManualFields()  { return JSON.parse(localStorage.getItem('rend_manual_fields') || 'null') || []; }
-function saveRendManualFields(f){ localStorage.setItem('rend_manual_fields', JSON.stringify(f)); }
-function saveResults()          { try { localStorage.setItem('rend_results', JSON.stringify(results)); } catch(e){} }
+function getRendManualFields()  { return JSON.parse(localStorage.getItem('rend_manual_fields_' + currentEmpresa) || 'null') || []; }
+function saveRendManualFields(f){ localStorage.setItem('rend_manual_fields_' + currentEmpresa, JSON.stringify(f)); }
+function saveResults()          { try { localStorage.setItem('rend_results_' + currentEmpresa, JSON.stringify(results)); } catch(e){} }
 // Aliases for NP manual fields (used in fieldListGetters)
 function getNpManualFields(pfx)  { return npGetManual ? npGetManual(pfx||'np-loc') : []; }
 function saveNpManualFields(pfx,f){ if(npSaveManual) npSaveManual(pfx||'np-loc',f); }
@@ -1521,10 +1535,10 @@ async function uploadToSharePoint(token, siteId, folderPath, fileName, content, 
 }
 
 // ── SharePoint Modal & File Browser ───────────────────
-var SP_DEFAULTS_KEY = 'sp_defaults';
+function SP_DEFAULTS_KEY() { return 'sp_defaults_' + currentEmpresa; }
 
 function getSpDefaults() {
-  return JSON.parse(localStorage.getItem(SP_DEFAULTS_KEY) || 'null') || {
+  return JSON.parse(localStorage.getItem(SP_DEFAULTS_KEY()) || 'null') || {
     comprobantesFolder: REND_COMPROBANTES,
     comprobantesLabel: 'Admin/Comprobantes',
     excelPath: null, excelLabel: 'Sin seleccionar',
@@ -1532,7 +1546,7 @@ function getSpDefaults() {
     mode: 'existing'
   };
 }
-function saveSpDefaults(d) { localStorage.setItem(SP_DEFAULTS_KEY, JSON.stringify(d)); }
+function saveSpDefaults(d) { localStorage.setItem(SP_DEFAULTS_KEY(), JSON.stringify(d)); }
 
 let spDefaults = getSpDefaults();
 let fbMode = 'folder'; // 'folder' | 'file'
@@ -1633,7 +1647,7 @@ async function spConfirm() {
       const fieldNames = fields.map(f => f.name);
       // Append rows
       const manualFields = getRendManualFields().filter(f=>f.name.trim());
-      const savedMapping = getMapping(REND_MAPPING_KEY);
+      const savedMapping = getMapping(REND_MAPPING_KEY());
       const useMapping = Object.keys(savedMapping).length > 0;
 
       // Find first empty row (don't rebuild sheet — preserve formatting)
@@ -1757,7 +1771,7 @@ async function spConfirm() {
       const tmplHeaders = (usedData.values?.[0] || []).map(h => String(h||''));
 
       const manualFieldsTmpl = getRendManualFields().filter(f=>f.name.trim());
-      const savedMappingTmpl = getMapping(REND_MAPPING_KEY);
+      const savedMappingTmpl = getMapping(REND_MAPPING_KEY());
       const useMappingTmpl = Object.keys(savedMappingTmpl).length > 0 && tmplHeaders.length > 0;
 
       // Write each result row starting at row 2
@@ -2100,14 +2114,14 @@ var DEFAULT_NP_INT_MANUAL = [
   { name: 'Responsable',       desc: 'Iniciales o nombre del responsable' },
 ];
 
-function npGetIA(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS[pfx].ia)    || 'null') || getNpDefaults(pfx).ia; }
-function npSaveIA(pfx,f)  { localStorage.setItem(NP_KEYS[pfx].ia, JSON.stringify(f)); }
-function npGetManual(pfx) { return JSON.parse(localStorage.getItem(NP_KEYS[pfx].manual)|| 'null') || getNpDefaults(pfx).manual; }
-function npSaveManual(pfx,f){ localStorage.setItem(NP_KEYS[pfx].manual, JSON.stringify(f)); }
-function npGetSp(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS[pfx].sp)   || 'null') || {mode:'existing'}; }
-function npSaveSp(pfx,d)  { localStorage.setItem(NP_KEYS[pfx].sp, JSON.stringify(d)); }
-function npGetTmpl(pfx)   { return JSON.parse(localStorage.getItem(NP_KEYS[pfx].tmpl) || 'null') || {}; }
-function npSaveTmpl(pfx,d){ localStorage.setItem(NP_KEYS[pfx].tmpl, JSON.stringify(d)); }
+function npGetIA(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).ia)    || 'null') || getNpDefaults(pfx).ia; }
+function npSaveIA(pfx,f)  { localStorage.setItem(NP_KEYS(pfx).ia, JSON.stringify(f)); }
+function npGetManual(pfx) { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).manual)|| 'null') || getNpDefaults(pfx).manual; }
+function npSaveManual(pfx,f){ localStorage.setItem(NP_KEYS(pfx).manual, JSON.stringify(f)); }
+function npGetSp(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).sp)   || 'null') || {mode:'existing'}; }
+function npSaveSp(pfx,d)  { localStorage.setItem(NP_KEYS(pfx).sp, JSON.stringify(d)); }
+function npGetTmpl(pfx)   { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).tmpl) || 'null') || {}; }
+function npSaveTmpl(pfx,d){ localStorage.setItem(NP_KEYS(pfx).tmpl, JSON.stringify(d)); }
 
 // Per-prefix state
 var npState = {
@@ -2385,7 +2399,7 @@ async function npDescargarNP(pfx) {
   if (!state.extracted.length) { alert('Primero extraé los datos con IA.'); return; }
 
   // Ask for destination folder (with last used pre-loaded)
-  const destKey = pfx + '_np_dest';
+  const destKey = pfx + '_np_dest_' + currentEmpresa;
   const lastDest = JSON.parse(localStorage.getItem(destKey) || 'null');
 
   // Show destination folder picker modal
@@ -2772,7 +2786,7 @@ async function npCargarUltimoNP(pfx, itemId, siteId) {
     if (!npField) return;
 
     // Try to find NP column via saved mapping first
-    const mapKey = NP_KEYS[pfx]?.map || NP_MAPPING_KEY;
+    const mapKey = NP_KEYS(pfx)?.map || NP_MAPPING_KEY;
     const savedMapping = getMapping(mapKey);
     let npColIdx = null;
     if (Object.keys(savedMapping).length > 0) {
@@ -2860,7 +2874,7 @@ async function npConfirmSave(pfx) {
       const usedData = await usedResp.json();
       const allRows = usedData.values || [];
       const npHeaders = allRows[0] || [];
-      const savedMap = getMapping(NP_KEYS[pfx].map);
+      const savedMap = getMapping(NP_KEYS(pfx).map);
       const useMap = Object.keys(savedMap).length>0 && npHeaders.length>0;
 
       // Find first completely empty row after headers
@@ -2985,7 +2999,7 @@ async function npConfirmSave(pfx) {
       const usedDataT = await usedRespT.json();
       const tmplHeadersT = (usedDataT.values?.[0] || []).map(h => String(h||''));
 
-      const savedMapT = getMapping(NP_KEYS[pfx].map);
+      const savedMapT = getMapping(NP_KEYS(pfx).map);
       const useMapT = Object.keys(savedMapT).length > 0 && tmplHeadersT.length > 0;
 
       for (let ri=0; ri<state.extracted.length; ri++) {
@@ -3054,11 +3068,14 @@ function npClearAll(pfx) {
 
 // ── Automatic Fields ──────────────────────────────────
 // Storage keys
-const AUTO_KEYS = {
-  'rend':   'rend_auto_fields',
-  'np-loc': 'np_loc_auto_fields',
-  'np-int': 'np_int_auto_fields',
-};
+function AUTO_KEYS(target) {
+  const base = {
+    'rend':   'rend_auto_fields',
+    'np-loc': 'np_loc_auto_fields',
+    'np-int': 'np_int_auto_fields',
+  };
+  return base[target] ? base[target] + '_' + currentEmpresa : undefined;
+}
 
 // Default auto fields - NP Nº migrated here from manual
 const DEFAULT_AUTO = {
@@ -3073,10 +3090,10 @@ const DEFAULT_AUTO = {
 };
 
 function getAutoFields(target) {
-  return JSON.parse(localStorage.getItem(AUTO_KEYS[target]) || 'null') || DEFAULT_AUTO[target] || [];
+  return JSON.parse(localStorage.getItem(AUTO_KEYS(target)) || 'null') || DEFAULT_AUTO[target] || [];
 }
 function saveAutoFields(target, fields) {
-  localStorage.setItem(AUTO_KEYS[target], JSON.stringify(fields));
+  localStorage.setItem(AUTO_KEYS(target), JSON.stringify(fields));
 }
 
 // Render auto fields in config panel
@@ -3220,7 +3237,7 @@ async function npCalcAndApplyAutoFields(pfx, itemId, siteId) {
     const wb = XLSX.read(ab, {type:'array'});
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1});
     const headers = (rows[0]||[]).map(h=>String(h||''));
-    const mapKey = NP_KEYS[pfx]?.map || NP_MAPPING_KEY;
+    const mapKey = NP_KEYS(pfx)?.map || NP_MAPPING_KEY;
     const savedMapping = getMapping(mapKey);
 
     const autoValues = await calcAutoFields(pfx, rows, headers, savedMapping);
@@ -3239,16 +3256,16 @@ async function npCalcAndApplyAutoFields(pfx, itemId, siteId) {
 }
 
 // ── NP Step 0 ─────────────────────────────────────────
-const NP_STEP0_KEY = {
-  'np-loc': 'np_loc_step0',
-  'np-int': 'np_int_step0',
-};
+function NP_STEP0_KEY(pfx) {
+  const base = { 'np-loc': 'np_loc_step0', 'np-int': 'np_int_step0' };
+  return base[pfx] ? base[pfx] + '_' + currentEmpresa : undefined;
+}
 
 function npStep0GetConfig(pfx) {
-  return JSON.parse(localStorage.getItem(NP_STEP0_KEY[pfx]) || 'null') || {};
+  return JSON.parse(localStorage.getItem(NP_STEP0_KEY(pfx)) || 'null') || {};
 }
 function npStep0SaveConfig(pfx, cfg) {
-  localStorage.setItem(NP_STEP0_KEY[pfx], JSON.stringify(cfg));
+  localStorage.setItem(NP_STEP0_KEY(pfx), JSON.stringify(cfg));
 }
 
 async function npStep0InitAndCalc(pfx) {
@@ -3376,7 +3393,7 @@ async function npStep0Confirm(pfx) {
 }
 
 // ── Column Mapping ────────────────────────────────────
-var REND_MAPPING_KEY = 'rend_col_mapping';
+function REND_MAPPING_KEY() { return 'rend_col_mapping_' + currentEmpresa; }
 var NP_MAPPING_KEY   = 'np_col_mapping';
 var mapContext = null;
 
@@ -3478,7 +3495,7 @@ function showMappingModal(target, excelHeaders, savedMapping, pendingAction) {
 
 async function mapModalConfirm() {
   const target = mapContext.target;
-  const mapKey = target === 'rend' ? REND_MAPPING_KEY : (NP_KEYS[target]?.map || NP_MAPPING_KEY);
+  const mapKey = target === 'rend' ? REND_MAPPING_KEY() : (NP_KEYS(target)?.map || NP_MAPPING_KEY);
   saveMapping(mapKey, mapContext.mapping);
   mapModalClose();
   if (mapContext.pendingAction) await mapContext.pendingAction(mapContext.mapping);
@@ -3505,7 +3522,7 @@ async function loadExcelHeadersAndShowMapping(target, itemId, siteId) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1});
     const headers = (rows[0] || []).map(h => String(h||''));
     if (!headers.length) { alert('El archivo seleccionado no tiene encabezados en la primera fila.'); return; }
-    const mapKey = target === 'rend' ? REND_MAPPING_KEY : (NP_KEYS[target]?.map || NP_MAPPING_KEY);
+    const mapKey = target === 'rend' ? REND_MAPPING_KEY() : (NP_KEYS(target)?.map || NP_MAPPING_KEY);
     const savedMapping = getMapping(mapKey);
 
     // After confirming mapping, for NP targets also update the NP number
@@ -3566,8 +3583,14 @@ function buildRowFromMapping(mapping, excelHeaders, record, manualValues, manual
 }
 
 // ── Template Cell Mapping ─────────────────────────────
-const TMPL_CELL_MAP_KEY = { 'np-loc': 'np_loc_cell_map', 'np-int': 'np_int_cell_map' };
-const TMPL_ITEM_ROWS_KEY = { 'np-loc': 'np_loc_item_rows', 'np-int': 'np_int_item_rows' };
+function TMPL_CELL_MAP_KEY(pfx) {
+  const base = { 'np-loc': 'np_loc_cell_map', 'np-int': 'np_int_cell_map' };
+  return base[pfx] ? base[pfx] + '_' + currentEmpresa : undefined;
+}
+function TMPL_ITEM_ROWS_KEY(pfx) {
+  const base = { 'np-loc': 'np_loc_item_rows', 'np-int': 'np_int_item_rows' };
+  return base[pfx] ? base[pfx] + '_' + currentEmpresa : undefined;
+}
 
 const DEFAULT_CELL_MAP = {
   'np-loc': [
@@ -3591,11 +3614,11 @@ const DEFAULT_ITEM_ROWS = {
 };
 
 function tmplGetCellMap(pfx) {
-  return JSON.parse(localStorage.getItem(TMPL_CELL_MAP_KEY[pfx])||'null') || DEFAULT_CELL_MAP[pfx];
+  return JSON.parse(localStorage.getItem(TMPL_CELL_MAP_KEY(pfx))||'null') || DEFAULT_CELL_MAP[pfx];
 }
-function tmplSaveCellMap(pfx, map) { localStorage.setItem(TMPL_CELL_MAP_KEY[pfx], JSON.stringify(map)); }
+function tmplSaveCellMap(pfx, map) { localStorage.setItem(TMPL_CELL_MAP_KEY(pfx), JSON.stringify(map)); }
 function tmplGetItemRows(pfx) {
-  return JSON.parse(localStorage.getItem(TMPL_ITEM_ROWS_KEY[pfx])||'null') || DEFAULT_ITEM_ROWS[pfx];
+  return JSON.parse(localStorage.getItem(TMPL_ITEM_ROWS_KEY(pfx))||'null') || DEFAULT_ITEM_ROWS[pfx];
 }
 function tmplSaveItemRows(pfx) {
   const start = parseInt(document.getElementById(pfx+'-items-start')?.value)||8;
@@ -3603,7 +3626,7 @@ function tmplSaveItemRows(pfx) {
   const tc    = (document.getElementById(pfx+'-items-total-col')?.value||'F').toUpperCase();
   const uc    = (document.getElementById(pfx+'-items-unit-col')?.value||(pfx==='np-int'?'D':'E')).toUpperCase();
   const cur = tmplGetItemRows(pfx);
-  localStorage.setItem(TMPL_ITEM_ROWS_KEY[pfx], JSON.stringify({...cur, start, end, totalCol:tc, unitCol:uc}));
+  localStorage.setItem(TMPL_ITEM_ROWS_KEY(pfx), JSON.stringify({...cur, start, end, totalCol:tc, unitCol:uc}));
 }
 
 function tmplCellUpdate(pfx, i, key, val) {
@@ -3668,6 +3691,8 @@ function tmplRenderCellMap(pfx) {
 
 let currentUser = null;
 let currentSector = null;
+let currentEmpresas = ['AA','AS'];
+let currentEmpresa = 'AA';
 
 const SECTOR_TABS = {
   'Admin':          ['rend','np-loc','np-int','cfg-rend','cfg-np-loc','cfg-np-int','admin'],
@@ -3699,7 +3724,7 @@ async function doLogin() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error_description || data.message || 'Credenciales incorrectas');
-    const profRes = await supaFetch('/rest/v1/profiles?select=nombre,sector&id=eq.' + data.user.id, {
+    const profRes = await supaFetch('/rest/v1/profiles?select=nombre,sector,empresas&id=eq.' + data.user.id, {
       headers: { Authorization: 'Bearer ' + data.access_token }
     });
     const profiles = await profRes.json();
@@ -3707,7 +3732,11 @@ async function doLogin() {
     if (!profile || !profile.sector) throw new Error('Tu usuario no tiene sector asignado. Contactá al administrador.');
     currentUser = { ...data.user, ...profile, token: data.access_token, refresh: data.refresh_token };
     currentSector = profile.sector;
-    localStorage.setItem('daia_session', JSON.stringify({ token: data.access_token, refresh: data.refresh_token, user: currentUser, sector: currentSector }));
+    currentEmpresas = (profile.empresas || 'AA,AS').split(',').map(s=>s.trim()).filter(Boolean);
+    currentEmpresa = localStorage.getItem('daia_empresa_activa');
+    if (!currentEmpresas.includes(currentEmpresa)) currentEmpresa = currentEmpresas[0] || 'AA';
+    localStorage.setItem('daia_empresa_activa', currentEmpresa);
+    localStorage.setItem('daia_session', JSON.stringify({ token: data.access_token, refresh: data.refresh_token, user: currentUser, sector: currentSector, empresas: currentEmpresas }));
     onLoginSuccess();
   } catch(e) {
     errEl.textContent = e.message;
@@ -3724,6 +3753,7 @@ async function doLogout() {
   } catch(e) {}
   localStorage.removeItem('daia_session');
   currentUser = null; currentSector = null; msAccount = null;
+  currentEmpresas = ['AA','AS']; currentEmpresa = 'AA';
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
   document.getElementById('login-pass').value = '';
@@ -3737,13 +3767,20 @@ async function tryRestoreSession() {
   try {
     const res = await supaFetch('/auth/v1/user', { headers:{ Authorization:'Bearer '+saved.token } });
     if (res.ok) {
-      currentUser = saved.user; currentSector = saved.sector; return true;
+      currentUser = saved.user; currentSector = saved.sector;
+      currentEmpresas = saved.empresas || ['AA','AS'];
+      currentEmpresa = localStorage.getItem('daia_empresa_activa');
+      if (!currentEmpresas.includes(currentEmpresa)) currentEmpresa = currentEmpresas[0] || 'AA';
+      return true;
     }
     if (saved.refresh) {
       const r = await supaFetch('/auth/v1/token?grant_type=refresh_token', { method:'POST', body:JSON.stringify({ refresh_token: saved.refresh }) });
       if (r.ok) {
         const d = await r.json();
         currentUser = saved.user; currentSector = saved.sector;
+        currentEmpresas = saved.empresas || ['AA','AS'];
+        currentEmpresa = localStorage.getItem('daia_empresa_activa');
+        if (!currentEmpresas.includes(currentEmpresa)) currentEmpresa = currentEmpresas[0] || 'AA';
         localStorage.setItem('daia_session', JSON.stringify({ ...saved, token: d.access_token, refresh: d.refresh_token }));
         return true;
       }
@@ -3762,7 +3799,46 @@ async function initApp() {
   if (btn && files.length > 0) btn.disabled = !_cachedApiKey;
 }
 
+function migrateOldStorageToAA() {
+  if (localStorage.getItem('daia_migrated_empresa_v1')) return;
+  const oldToNew = [
+    ['rend_fields', 'rend_fields_AA'],
+    ['np_fields', 'np_fields_AA'],
+    ['rend_manual_fields', 'rend_manual_fields_AA'],
+    ['rend_results', 'rend_results_AA'],
+    ['sp_defaults', 'sp_defaults_AA'],
+    ['rend_col_mapping', 'rend_col_mapping_AA'],
+    ['rend_auto_fields', 'rend_auto_fields_AA'],
+    ['np_loc_auto_fields', 'np_loc_auto_fields_AA'],
+    ['np_int_auto_fields', 'np_int_auto_fields_AA'],
+    ['np_loc_ia_fields', 'np_loc_ia_fields_AA'],
+    ['np_loc_manual_fields', 'np_loc_manual_fields_AA'],
+    ['np_loc_sp_defaults', 'np_loc_sp_defaults_AA'],
+    ['np_loc_col_mapping', 'np_loc_col_mapping_AA'],
+    ['np_loc_tmpl', 'np_loc_tmpl_AA'],
+    ['np_int_ia_fields', 'np_int_ia_fields_AA'],
+    ['np_int_manual_fields', 'np_int_manual_fields_AA'],
+    ['np_int_sp_defaults', 'np_int_sp_defaults_AA'],
+    ['np_int_col_mapping', 'np_int_col_mapping_AA'],
+    ['np_int_tmpl', 'np_int_tmpl_AA'],
+    ['np_loc_step0', 'np_loc_step0_AA'],
+    ['np_int_step0', 'np_int_step0_AA'],
+    ['np_loc_cell_map', 'np_loc_cell_map_AA'],
+    ['np_int_cell_map', 'np_int_cell_map_AA'],
+    ['np_loc_item_rows', 'np_loc_item_rows_AA'],
+    ['np_int_item_rows', 'np_int_item_rows_AA'],
+  ];
+  oldToNew.forEach(([oldKey, newKey]) => {
+    const oldVal = localStorage.getItem(oldKey);
+    if (oldVal !== null && localStorage.getItem(newKey) === null) {
+      localStorage.setItem(newKey, oldVal);
+    }
+  });
+  localStorage.setItem('daia_migrated_empresa_v1', '1');
+}
+
 function onLoginSuccess() {
+  migrateOldStorageToAA();
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').style.display = '';
   const name = currentUser.nombre || currentUser.email.split('@')[0];
@@ -3772,6 +3848,8 @@ function onLoginSuccess() {
   if (nameEl) nameEl.textContent = name;
   if (sectorEl) sectorEl.textContent = currentSector;
   if (initialEl) initialEl.textContent = name.charAt(0).toUpperCase();
+  applyEmpresaSelector();
+  refreshAllForEmpresa();
   applyTabAccess();
   initApp();
 }
@@ -3817,6 +3895,52 @@ if (localStorage.getItem('daia_sidebar_collapsed') === '1') {
   document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('sidebar')?.classList.add('collapsed');
   });
+}
+
+function applyEmpresaSelector() {
+  const sel = document.getElementById('empresa-selector');
+  if (!sel) return;
+  if (currentEmpresas.length <= 1) {
+    sel.style.display = 'none';
+    return;
+  }
+  sel.style.display = 'flex';
+  document.getElementById('empresa-btn-AA').style.display = currentEmpresas.includes('AA') ? '' : 'none';
+  document.getElementById('empresa-btn-AS').style.display = currentEmpresas.includes('AS') ? '' : 'none';
+  document.getElementById('empresa-btn-AA').classList.toggle('active', currentEmpresa === 'AA');
+  document.getElementById('empresa-btn-AS').classList.toggle('active', currentEmpresa === 'AS');
+}
+
+function switchEmpresa(empresa) {
+  if (empresa === currentEmpresa) return;
+  if (!currentEmpresas.includes(empresa)) return;
+  currentEmpresa = empresa;
+  localStorage.setItem('daia_empresa_activa', empresa);
+  applyEmpresaSelector();
+  // Re-render everything that depends on empresa-scoped data
+  refreshAllForEmpresa();
+}
+
+function refreshAllForEmpresa() {
+  // Reset in-memory working state (files in progress are kept separate per empresa)
+  results = JSON.parse(localStorage.getItem('rend_results_' + currentEmpresa) || '[]');
+  files = [];
+  rendManualValues = {};
+  npState['np-loc'] = { files: [], extracted: [], manualValues: {} };
+  npState['np-int'] = { files: [], extracted: [], manualValues: {} };
+  spDefaults = getSpDefaults();
+
+  // Re-render whichever panel is currently visible
+  if (typeof renderFileList === 'function') renderFileList();
+  if (typeof renderRendResults === 'function') renderRendResults();
+  if (typeof npRenderFileList === 'function') { npRenderFileList('np-loc'); npRenderFileList('np-int'); }
+  if (typeof npRenderManualInputs === 'function') { npRenderManualInputs('np-loc'); npRenderManualInputs('np-int'); }
+  if (typeof npStep0Init === 'function') { npStep0Init('np-loc'); npStep0Init('np-int'); }
+
+  // Re-render config panels if open
+  if (typeof renderAutoFields === 'function') { renderAutoFields('rend'); renderAutoFields('np-loc'); renderAutoFields('np-int'); }
+  if (typeof renderRendManualFields === 'function') renderRendManualFields();
+  if (typeof npCfgRender === 'function') { npCfgRender('np-loc'); npCfgRender('np-int'); }
 }
 
 function applyTabAccess() {
@@ -3920,14 +4044,16 @@ async function adminLoadUsers() {
   el.innerHTML = '<div style="font-size:13px;color:var(--text2)">Cargando...</div>';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch('/rest/v1/profiles?select=id,email,nombre,sector&order=nombre', {
+    const res = await supaFetch('/rest/v1/profiles?select=id,email,nombre,sector,empresas&order=nombre', {
       headers:{Authorization:'Bearer '+session.token}
     });
     const users = await res.json();
     if (!users.length) { el.innerHTML='<p style="font-size:13px;color:var(--text2)">No hay usuarios.</p>'; return; }
-    el.innerHTML = users.map(u=>`
+    el.innerHTML = users.map(u=>{
+      const emp = (u.empresas||'AA,AS').split(',').map(s=>s.trim()).filter(Boolean);
+      return `
       <div style="padding:10px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
           <div>
             <div style="font-size:13px;font-weight:600">${esc(u.nombre||'Sin nombre')}</div>
             <div style="font-size:12px;color:var(--text2)">${esc(u.email||'')}</div>
@@ -3936,8 +4062,32 @@ async function adminLoadUsers() {
             ${['Administración','RRHH','Coordinación','Ingeniería','Procesos','Compras','COMEX','Comercial','Servicios','Admin'].map(s=>`<option value="${s}" ${s===u.sector?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
-      </div>`).join('');
+        <div style="display:flex;align-items:center;gap:14px;margin-top:8px">
+          <span style="font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase">Empresas:</span>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer">
+            <input type="checkbox" ${emp.includes('AA')?'checked':''} onchange="adminToggleEmpresa('${u.id}','AA',this.checked)" /> AA
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer">
+            <input type="checkbox" ${emp.includes('AS')?'checked':''} onchange="adminToggleEmpresa('${u.id}','AS',this.checked)" /> AS
+          </label>
+        </div>
+      </div>`;
+    }).join('');
   } catch(e) { el.innerHTML='<p style="font-size:13px;color:#dc2626">Error al cargar usuarios.</p>'; }
+}
+
+async function adminToggleEmpresa(userId, empresa, checked) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/profiles?id=eq.${userId}&select=empresas`, {headers:{Authorization:'Bearer '+session.token}});
+  const data = await res.json();
+  let emp = (data[0]?.empresas||'AA,AS').split(',').map(s=>s.trim()).filter(Boolean);
+  if (checked && !emp.includes(empresa)) emp.push(empresa);
+  if (!checked) emp = emp.filter(e=>e!==empresa);
+  if (!emp.length) emp = [empresa]; // never allow zero empresas
+  await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({empresas: emp.join(',')})
+  });
 }
 
 async function adminUpdateSector(userId, sector) {
@@ -3953,6 +4103,9 @@ async function adminCreateUser() {
   const pass  = document.getElementById('admin-new-user-pass').value;
   const nombre= document.getElementById('admin-new-nombre').value.trim();
   const sector= document.getElementById('admin-new-sector').value;
+  const empAA = document.getElementById('admin-new-empresa-aa').checked;
+  const empAS = document.getElementById('admin-new-empresa-as').checked;
+  const empresas = [empAA?'AA':null, empAS?'AS':null].filter(Boolean).join(',') || 'AA,AS';
   const st = document.getElementById('admin-create-status');
   if (!email||!pass||!nombre||!sector) { showMsg('admin-create-status','error','Completá todos los campos.'); return; }
   if (pass.length < 6) { showMsg('admin-create-status','error','Contraseña mínimo 6 caracteres.'); return; }
@@ -3968,13 +4121,15 @@ async function adminCreateUser() {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     await supaFetch(`/rest/v1/profiles?id=eq.${data.user?.id||data.id}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-      body: JSON.stringify({nombre, sector})
+      body: JSON.stringify({nombre, sector, empresas})
     });
     showMsg('admin-create-status','success','✓ Usuario creado: '+email);
     document.getElementById('admin-new-email').value='';
     document.getElementById('admin-new-user-pass').value='';
     document.getElementById('admin-new-nombre').value='';
     document.getElementById('admin-new-sector').value='';
+    document.getElementById('admin-new-empresa-aa').checked=true;
+    document.getElementById('admin-new-empresa-as').checked=true;
     adminLoadUsers();
   } catch(e) { showMsg('admin-create-status','error','✕ '+e.message); }
 }
@@ -4002,6 +4157,15 @@ function renderAdmin() {
           <option>Ingeniería</option><option>Procesos</option><option>Compras</option>
           <option>COMEX</option><option>Comercial</option><option>Servicios</option><option>Admin</option>
         </select>
+        <div style="margin-bottom:12px">
+          <div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;margin-bottom:6px">Empresas</div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;margin-bottom:4px;cursor:pointer">
+            <input type="checkbox" id="admin-new-empresa-aa" checked /> Aeration Argentina (AA)
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
+            <input type="checkbox" id="admin-new-empresa-as" checked /> Aeration Servicios (AS)
+          </label>
+        </div>
         <button class="btn btn-primary" onclick="adminCreateUser()">Crear usuario</button>
         <div id="admin-create-status" style="margin-top:8px"></div>
       </div>
