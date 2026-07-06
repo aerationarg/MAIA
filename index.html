@@ -931,7 +931,7 @@
       <div class="modal-body">
 
         <!-- Carpeta comprobantes -->
-        <div class="sp-section">
+        <div class="sp-section" id="sp-comprobantes-section">
           <div class="sp-section-title">📁 Carpeta para los comprobantes</div>
           <div class="sp-selected" id="sp-folder-display">
             <span id="sp-folder-label">Cargando...</span>
@@ -1114,8 +1114,6 @@ const MSAL_CONFIG = {
 const SCOPES = ['Files.ReadWrite', 'Sites.Read.All', 'Sites.ReadWrite.All', 'User.Read'];
 const SHAREPOINT_HOST = 'aerationargentina.sharepoint.com';
 const SITE_NAME = 'as';
-const REND_PENDIENTES  = 'Operaciones y Mantenimiento/IA/Admin/Pendientes';
-const REND_COMPROBANTES = 'Operaciones y Mantenimiento/IA/Admin/Comprobantes';
 const NP_FOLDER   = 'Operaciones y Mantenimiento/IA/Compras-COMEX';
 const NP_REGISTRO = 'Operaciones y Mantenimiento/IA/Compras-COMEX/Registro NP prueba.xlsx';
 
@@ -1616,8 +1614,6 @@ function SP_DEFAULTS_KEY() { return 'sp_defaults_' + currentEmpresa; }
 
 function getSpDefaults() {
   return JSON.parse(localStorage.getItem(SP_DEFAULTS_KEY()) || 'null') || {
-    comprobantesFolder: REND_COMPROBANTES,
-    comprobantesLabel: 'Admin/Comprobantes',
     excelPath: null, excelLabel: 'Sin seleccionar',
     newFolder: null, newFolderLabel: 'Sin seleccionar',
     mode: 'existing'
@@ -1644,21 +1640,28 @@ function spSetMode(mode) {
   document.getElementById('sp-confirm-btn').textContent = mode === 'local' ? '⬇ Descargar Excel' : (mode === 'template' ? '✦ Generar y subir' : 'Confirmar y subir');
 }
 
+// Rendiciones sólo ofrece Excel existente / plantilla — NP conserva las 4 opciones originales.
+function spConfigureModalForContext(isRend) {
+  document.getElementById('sp-comprobantes-section').style.display = isRend ? 'none' : '';
+  document.getElementById('sp-mode-new').style.display = isRend ? 'none' : '';
+  document.getElementById('sp-mode-local').style.display = isRend ? 'none' : '';
+  if (isRend) document.getElementById('sp-new-section').style.display = 'none';
+}
+
 async function sendToSharePoint() {
   // Open modal
+  npCurrentModal = null;
   spDefaults = getSpDefaults();
   spMode = spDefaults.mode || 'existing';
-  document.getElementById('sp-folder-label').textContent = spDefaults.comprobantesLabel || 'Admin/Comprobantes';
+  if (spMode === 'new' || spMode === 'local') spMode = 'existing';
+  spConfigureModalForContext(true);
   document.getElementById('sp-excel-label').textContent = spDefaults.excelLabel || 'Sin seleccionar';
-  document.getElementById('sp-newfolder-label').textContent = spDefaults.newFolderLabel || 'Sin seleccionar';
   document.getElementById('sp-tmpl-label').textContent = spDefaults.tmplLabel || 'Sin seleccionar';
   document.getElementById('sp-tmpl-destfolder-label').textContent = spDefaults.tmplDestLabel || 'Sin seleccionar';
   document.getElementById('sp-tmpl-btn').onclick = () => fbOpen('file', 'rend-tmpl');
   document.getElementById('sp-tmpl-dest-btn').onclick = () => fbOpen('folder', 'rend-tmpl-dest');
   document.getElementById('sp-confirm-btn').onclick = () => spConfirm();
-  document.querySelector('#sp-folder-display button').onclick = () => fbOpen('folder', 'comprobantes');
   document.querySelector('#sp-existing-section button').onclick = () => fbOpen('file', 'excel');
-  document.querySelector('#sp-new-section button').onclick = () => fbOpen('folder', 'newfolder');
   spSetMode(spMode);
   document.getElementById('spModal').classList.remove('hidden');
 }
@@ -1667,15 +1670,72 @@ function spModalClose() {
   document.getElementById('spModal').classList.add('hidden');
 }
 
+// ── Comprobantes: carpeta destino (misma que el Excel) + subcarpetas Método de pago / Año-Mes ──
+function spYearMonth() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+function spRendicionFileName() {
+  const d = new Date();
+  return `Rendicion_${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}.xlsx`;
+}
+function spMetodoPagoValue() {
+  const f = getRendManualFields().find(mf => ['método de pago','metodo de pago'].includes(mf.name.trim().toLowerCase()));
+  if (!f) return null;
+  return (rendManualValueFor(f, {}) || '').trim() || null;
+}
+async function spGetParentOfItem(token, siteId, itemId) {
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}?$select=parentReference`, {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) throw new Error('No se pudo obtener la carpeta del Excel destino.');
+  const data = await resp.json();
+  if (!data.parentReference?.id) throw new Error('No se pudo obtener la carpeta del Excel destino.');
+  return data.parentReference.id;
+}
+async function spGetFolderIdByPath(token, siteId, path) {
+  const encodedPath = (path||'').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/root` + (encodedPath ? `:/${encodedPath}` : '');
+  const resp = await fetch(url + '?$select=id', {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) throw new Error('No se pudo ubicar la carpeta destino.');
+  const data = await resp.json();
+  return data.id;
+}
+async function spEnsureFolder(token, siteId, parentId, name) {
+  const base = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${parentId}`;
+  const createResp = await fetch(base + '/children', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer '+token, 'Content-Type':'application/json' },
+    body: JSON.stringify({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' })
+  });
+  if (createResp.ok) { const item = await createResp.json(); return item.id; }
+  if (createResp.status === 409) {
+    const listResp = await fetch(base + '/children?$select=id,name,folder', { headers: { Authorization: 'Bearer '+token } });
+    const listData = await listResp.json();
+    const existing = (listData.value||[]).find(it => it.folder && it.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+  }
+  throw new Error('No se pudo crear/encontrar la carpeta "' + name + '".');
+}
+async function spResolveCompFolder(token, siteId, baseFolderId) {
+  const metodoPago = spMetodoPagoValue();
+  if (!metodoPago) return baseFolderId;
+  const level1Id = await spEnsureFolder(token, siteId, baseFolderId, metodoPago);
+  return await spEnsureFolder(token, siteId, level1Id, spYearMonth());
+}
+async function spUploadComprobantes(token, siteId, folderId, doneFiles, btn) {
+  for (let i = 0; i < doneFiles.length; i++) {
+    if (btn) btn.textContent = `⏳ Subiendo ${doneFiles[i].file.name}...`;
+    const b64 = await fileToBase64(doneFiles[i].file);
+    const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}:/${encodeURIComponent(doneFiles[i].file.name)}:/content`;
+    await fetch(uploadUrl, {method:'PUT', headers:{Authorization:'Bearer '+token}, body: Uint8Array.from(atob(b64),c=>c.charCodeAt(0))});
+  }
+}
+
 async function spConfirm() {
   const btn = document.getElementById('sp-confirm-btn');
   spDefaults.mode = spMode;
   saveSpDefaults(spDefaults);
 
-  if (spMode === 'local') { exportExcel(); spModalClose(); return; }
-
-  if (spMode === 'existing' && !spDefaults.excelPath) { alert('Seleccioná un archivo Excel destino.'); return; }
-  if (spMode === 'new' && !spDefaults.newFolder) { alert('Seleccioná una carpeta destino.'); return; }
+  if (spMode === 'existing' && !spDefaults.excelPath && !spDefaults.excelId) { alert('Seleccioná un archivo Excel destino.'); return; }
   if (spMode === 'template' && (!spDefaults.tmplId || (!spDefaults.tmplDestId && !spDefaults.tmplDestFolder))) { alert('Seleccioná la plantilla y la carpeta destino.'); return; }
 
   btn.disabled = true;
@@ -1687,21 +1747,6 @@ async function spConfirm() {
     const siteId = await getSiteId(token);
     const fields = getRendFields().filter(f => f.name.trim());
     const doneFiles = files.filter(f => f.status === 'done');
-
-    // Upload comprobantes
-    const compSite = spDefaults.comprobantesS || siteId;
-    for (let i = 0; i < doneFiles.length; i++) {
-      btn.textContent = `⏳ Subiendo ${doneFiles[i].file.name}...`;
-      const b64 = await fileToBase64(doneFiles[i].file);
-      let uploadUrl;
-      if (spDefaults.comprobantesId) {
-        uploadUrl = `https://graph.microsoft.com/v1.0/sites/${compSite}/drive/items/${spDefaults.comprobantesId}:/${encodeURIComponent(doneFiles[i].file.name)}:/content`;
-      } else {
-        const ep = (spDefaults.comprobantesFolder||REND_COMPROBANTES).split('/').map(encodeURIComponent).join('/');
-        uploadUrl = `https://graph.microsoft.com/v1.0/sites/${compSite}/drive/root:/${ep}/${encodeURIComponent(doneFiles[i].file.name)}:/content`;
-      }
-      await fetch(uploadUrl, {method:'PUT', headers:{Authorization:'Bearer '+token}, body: Uint8Array.from(atob(b64),c=>c.charCodeAt(0))});
-    }
 
     if (spMode === 'existing') {
       btn.textContent = '⏳ Actualizando Excel...';
@@ -1772,25 +1817,12 @@ async function spConfirm() {
         );
       }
 
-    } else if (spMode === 'new') {
-      btn.textContent = '⏳ Creando Excel...';
-      const headers = ['Archivo','Fecha de análisis',...fields.map(f=>f.name)];
-      const rows = results.map(r => [r['__archivo__']||'',r['__fecha_analisis__']||'',...fields.map(f=>r[f.name]!=null?r[f.name]:'')]);
-      const wb2 = XLSX.utils.book_new();
-      const ws2 = XLSX.utils.aoa_to_sheet([headers,...rows]);
-      ws2['!cols'] = headers.map((_,i)=>({wch:Math.min(Math.max(headers[i].length,...rows.map(r=>String(r[i]||'').length))+2,40)}));
-      XLSX.utils.book_append_sheet(wb2,ws2,'Rendiciones');
-      const wbOut2 = XLSX.write(wb2,{type:'array',bookType:'xlsx'});
-      const fileName = `rendiciones_${new Date().toISOString().slice(0,10)}.xlsx`;
-      const newSite = spDefaults.newFolderS || siteId;
-      let newUrl;
-      if (spDefaults.newFolderId) {
-        newUrl = `https://graph.microsoft.com/v1.0/sites/${newSite}/drive/items/${spDefaults.newFolderId}:/${encodeURIComponent(fileName)}:/content`;
-      } else {
-        const ef = (spDefaults.newFolder||REND_PENDIENTES).split('/').map(encodeURIComponent).join('/');
-        newUrl = `https://graph.microsoft.com/v1.0/sites/${newSite}/drive/root:/${ef}/${encodeURIComponent(fileName)}:/content`;
-      }
-      await fetch(newUrl, {method:'PUT', headers:{Authorization:'Bearer '+token,'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}, body:new Uint8Array(wbOut2)});
+      // Comprobantes: misma carpeta que el Excel, organizados por Método de pago / Año-Mes
+      const excelBaseFolderId = spDefaults.excelId
+        ? await spGetParentOfItem(token, excelSite, spDefaults.excelId)
+        : await spGetFolderIdByPath(token, excelSite, (spDefaults.excelPath||'').split('/').slice(0,-1).join('/'));
+      const compFolderIdExisting = await spResolveCompFolder(token, excelSite, excelBaseFolderId);
+      await spUploadComprobantes(token, excelSite, compFolderIdExisting, doneFiles, btn);
 
     } else if (spMode === 'template') {
       if (!spDefaults.tmplId) throw new Error('Seleccioná una plantilla.');
@@ -1799,8 +1831,7 @@ async function spConfirm() {
       btn.textContent = '⏳ Copiando plantilla...';
       const tmplSite = spDefaults.tmplS || siteId;
       const destSite = spDefaults.tmplDestS || siteId;
-      const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-      const newFileName = `Rendiciones_${ts}.xlsx`;
+      const newFileName = spRendicionFileName();
 
       const copyBody = spDefaults.tmplDestId
         ? { parentReference: { driveId: undefined, id: spDefaults.tmplDestId }, name: newFileName }
@@ -1811,7 +1842,7 @@ async function spConfirm() {
         { method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify(copyBody) }
       );
       if (copyResp.status !== 202 && !copyResp.ok) {
-        if (copyResp.status === 409) throw new Error('Ya existe un archivo con ese nombre. Probá de nuevo.');
+        if (copyResp.status === 409) throw new Error(`Ya existe "${newFileName}" en esa carpeta (rendición de este mes ya generada).`);
         throw new Error('Error al copiar plantilla: HTTP '+copyResp.status);
       }
       // Wait for async copy to complete, then find the new file
@@ -1877,10 +1908,15 @@ async function spConfirm() {
           { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]}) }
         );
       }
+
+      // Comprobantes: carpeta destino de la plantilla, organizados por Método de pago / Año-Mes
+      const destBaseFolderId = spDefaults.tmplDestId || await spGetFolderIdByPath(token, destSite, spDefaults.tmplDestFolder||'');
+      const compFolderIdTmpl = await spResolveCompFolder(token, destSite, destBaseFolderId);
+      await spUploadComprobantes(token, destSite, compFolderIdTmpl, doneFiles, btn);
     }
 
     spModalClose();
-    const excelMsg = spMode === 'local' ? '' : (spMode === 'template' ? '\n• Plantilla duplicada e info insertada' : '\n• Datos actualizados en Excel');
+    const excelMsg = spMode === 'template' ? '\n• Plantilla duplicada e info insertada' : '\n• Datos actualizados en Excel';
     alert('✅ Listo!\n• ' + doneFiles.length + ' comprobante(s) guardados en SharePoint' + excelMsg);
   } catch(e) {
     alert('❌ Error: ' + e.message);
@@ -2093,13 +2129,7 @@ function fbSelectCurrent() {
   const siteName = fbCurrentSiteName || '';
   const label = siteName + (path ? ' › ' + path.replace(/\//g,' › ') : '');
 
-  if (fbTarget === 'comprobantes') {
-    spDefaults.comprobantesFolder = path;
-    spDefaults.comprobantesLabel = label;
-    spDefaults.comprobantesId = itemId;
-    spDefaults.comprobantesS = fbCurrentSiteId;
-    document.getElementById('sp-folder-label').textContent = label;
-  } else if (fbTarget === 'newfolder') {
+  if (fbTarget === 'newfolder') {
     spDefaults.newFolder = path;
     spDefaults.newFolderLabel = label;
     spDefaults.newFolderId = itemId;
@@ -2784,6 +2814,7 @@ let npCurrentModal = null;
 
 function npShowModal(pfx) {
   npCurrentModal = pfx;
+  spConfigureModalForContext(false);
   const spD = npGetSp(pfx);
   document.getElementById('sp-folder-label').textContent = spD.comprobantesLabel || 'Sin seleccionar';
   document.getElementById('sp-excel-label').textContent  = spD.excelLabel  || 'Sin seleccionar';
