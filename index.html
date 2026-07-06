@@ -1162,6 +1162,15 @@ let msAccount = null;
 let npPdfB64 = null;
 let npExtractedData = null;
 let rendManualValues = {};
+let rendManualMode = {}; // per-session choice for 'custom'-scope manual fields: 'global' | 'perfile'
+
+function rendIsCustomScope(f) { return f.scope === 'custom' || f.scope === 'perfile'; }
+function rendFieldMode(f) {
+  if (!rendIsCustomScope(f)) return 'global';
+  if (rendManualMode[f.name] !== undefined) return rendManualMode[f.name];
+  return f.scope === 'perfile' ? 'perfile' : 'global'; // legacy fields default to their old fixed behavior
+}
+function rendSetFieldMode(name, mode) { rendManualMode[name] = mode; }
 
 // ── Storage helpers ────────────────────────────────────
 function getRendFields()  { return JSON.parse(localStorage.getItem(FIELDS_KEY()) || 'null') || DEFAULT_REND_FIELDS; }
@@ -1276,8 +1285,8 @@ function renderRendManualFields() {
       </div>
       <div class="field-row-type-wrap">
         <select class="type-select" onchange="rendUpdateManualField(${i},'scope',this.value)">
-          <option value="global" ${f.scope!=='perfile'?'selected':''}>Igual para todos los archivos</option>
-          <option value="perfile" ${f.scope==='perfile'?'selected':''}>Distinto para cada archivo</option>
+          <option value="global" ${!rendIsCustomScope(f)?'selected':''}>Igual para todos los archivos</option>
+          <option value="custom" ${rendIsCustomScope(f)?'selected':''}>Personalizar (elegís en Rendiciones)</option>
         </select>
       </div>
     </div>`).join('');
@@ -1448,20 +1457,28 @@ function rendManualKey(name) { return '__manual_' + name; }
 function renderRendResults() {
   const area = document.getElementById('rendResultsArea');
   if (!results.length) { area.innerHTML = ''; return; }
-  // Render manual fields section — split by scope
+  // Render manual fields section — split by effective mode (fixed 'global', or session choice for 'custom' fields)
   const allManualFields = getRendManualFields();
-  const globalManualFields = allManualFields.filter(f=>f.scope!=='perfile');
-  const perFileManualFields = allManualFields.filter(f=>f.scope==='perfile');
-  const manualSection = globalManualFields.length ? `
+  const globalManualFields = allManualFields.filter(f=>rendFieldMode(f)==='global');
+  const perFileManualFields = allManualFields.filter(f=>rendFieldMode(f)==='perfile');
+  const manualSection = allManualFields.length ? `
     <div class="card" style="margin-bottom:12px">
-      <div class="card-label">Campos manuales (se aplican a todos)</div>
-      ${globalManualFields.map((f,i)=>{
+      <div class="card-label">Campos manuales</div>
+      ${allManualFields.map((f,i)=>{
         const fieldNameEsc = f.name.replace(/'/g,"\\'");
+        const modeSelector = rendIsCustomScope(f) ? `
+          <select style="font-size:13px;margin-bottom:6px" onchange="rendSetFieldMode('${fieldNameEsc}',this.value);renderRendResults()">
+            <option value="global" ${rendFieldMode(f)==='global'?'selected':''}>Igual para todos los archivos</option>
+            <option value="perfile" ${rendFieldMode(f)==='perfile'?'selected':''}>Distinto para cada archivo</option>
+          </select>` : '';
+        if (rendFieldMode(f) !== 'global') {
+          return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<div class="hint">Se completa por separado en cada comprobante, más abajo.</div></div>`;
+        }
         if (f.type === 'select') {
           const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
-          return `<div style="margin-bottom:8px"><label>${esc(f.name)}</label><select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="">${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
+          return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="">${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
         }
-        return `<div style="margin-bottom:8px"><label>${esc(f.name)}</label><input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
+        return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
       }).join('')}
     </div>` : '';
   const fields = getRendFields().filter(f => f.name.trim());
@@ -1511,7 +1528,7 @@ function renderRendResults() {
 }
 
 function rendManualValueFor(f, record) {
-  return f.scope === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
+  return rendFieldMode(f) === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
 }
 
 function exportExcel() {
@@ -4022,6 +4039,7 @@ function refreshAllForEmpresa() {
   results = JSON.parse(localStorage.getItem('rend_results_' + currentEmpresa) || '[]');
   files = [];
   rendManualValues = {};
+  rendManualMode = {};
   npState['np-loc'] = { files: [], extracted: [], manualValues: {} };
   npState['np-int'] = { files: [], extracted: [], manualValues: {} };
   spDefaults = getSpDefaults();
