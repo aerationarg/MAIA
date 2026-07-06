@@ -1274,11 +1274,17 @@ function renderRendManualFields() {
         </select>
         ${f.type==='select' ? `<input class="options-input" value="${esc(f.options||'')}" placeholder="Opciones separadas por coma (ej: Sí, No, N/A)" oninput="rendUpdateManualField(${i},'options',this.value)" />` : ''}
       </div>
+      <div class="field-row-type-wrap">
+        <select class="type-select" onchange="rendUpdateManualField(${i},'scope',this.value)">
+          <option value="global" ${f.scope!=='perfile'?'selected':''}>Igual para todos los archivos</option>
+          <option value="perfile" ${f.scope==='perfile'?'selected':''}>Distinto para cada archivo</option>
+        </select>
+      </div>
     </div>`).join('');
 }
 function rendUpdateManualField(i, key, val) { const f=getRendManualFields(); f[i][key]=val; saveRendManualFields(f); }
 function rendRemoveManualField(i) { const f=getRendManualFields(); f.splice(i,1); saveRendManualFields(f); renderRendManualFields(); }
-function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',desc:'',type:'text',options:''}); saveRendManualFields(f); renderRendManualFields(); }
+function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',desc:'',type:'text',options:'',scope:'global'}); saveRendManualFields(f); renderRendManualFields(); }
 
 var fieldListGetters = {
   'rend-ia':       [()=>getRendFields(),       f=>saveRendFields(f),       ()=>renderRendFields()],
@@ -1437,15 +1443,19 @@ async function analyzeAll() {
 }
 
 // ── Results (Rendiciones) ──────────────────────────────
+function rendManualKey(name) { return '__manual_' + name; }
+
 function renderRendResults() {
   const area = document.getElementById('rendResultsArea');
   if (!results.length) { area.innerHTML = ''; return; }
-  // Render manual fields section
-  const manualFields = getRendManualFields();
-  const manualSection = manualFields.length ? `
+  // Render manual fields section — split by scope
+  const allManualFields = getRendManualFields();
+  const globalManualFields = allManualFields.filter(f=>f.scope!=='perfile');
+  const perFileManualFields = allManualFields.filter(f=>f.scope==='perfile');
+  const manualSection = globalManualFields.length ? `
     <div class="card" style="margin-bottom:12px">
       <div class="card-label">Campos manuales (se aplican a todos)</div>
-      ${manualFields.map((f,i)=>{
+      ${globalManualFields.map((f,i)=>{
         const fieldNameEsc = f.name.replace(/'/g,"\\'");
         if (f.type === 'select') {
           const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
@@ -1462,9 +1472,30 @@ function renderRendResults() {
         <span class="result-key">${esc(f.name)}</span>
         <input class="result-val" value="${esc(r[f.name]!=null?String(r[f.name]):'')}" oninput="results[${ri}]['${f.name.replace(/'/g,"\\'")}'] = this.value; saveResults()" />
       </div>`).join('');
+    const manualRows = perFileManualFields.map(f => {
+      const key = rendManualKey(f.name);
+      const val = r[key]!=null ? String(r[key]) : '';
+      if (f.type === 'select') {
+        const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
+        return `
+      <div class="result-field">
+        <span class="result-key">${esc(f.name)}</span>
+        <select class="result-val" onchange="results[${ri}]['${key}'] = this.value; saveResults()">
+          <option value="" ${!val?'selected':''}>${esc(f.desc||'Seleccionar...')}</option>
+          ${opts.map(o=>`<option value="${esc(o)}" ${val===o?'selected':''}>${esc(o)}</option>`).join('')}
+        </select>
+      </div>`;
+      }
+      return `
+      <div class="result-field">
+        <span class="result-key">${esc(f.name)}</span>
+        <input class="result-val" placeholder="${esc(f.desc||f.name)}" value="${esc(val)}" oninput="results[${ri}]['${key}'] = this.value; saveResults()" />
+      </div>`;
+    }).join('');
     return `
       <div class="result-card">
         <div class="result-filename">📄 ${esc(r['__archivo__']||'')} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
+        ${manualRows}
         ${fieldRows}
       </div>`;
   }).join('');
@@ -1479,11 +1510,15 @@ function renderRendResults() {
     ${cards}`;
 }
 
+function rendManualValueFor(f, record) {
+  return f.scope === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
+}
+
 function exportExcel() {
   const fields = getRendFields().filter(f => f.name.trim());
   const manualFields = getRendManualFields().filter(f=>f.name.trim());
   const headers = ['Archivo','Fecha de análisis',...manualFields.map(f=>f.name),...fields.map(f=>f.name)];
-  const rows = results.map(r => [r['__archivo__']||'',r['__fecha_analisis__']||'',...manualFields.map(f=>rendManualValues[f.name]||''),...fields.map(f=>r[f.name]!=null?r[f.name]:'')]);
+  const rows = results.map(r => [r['__archivo__']||'',r['__fecha_analisis__']||'',...manualFields.map(f=>rendManualValueFor(f,r)),...fields.map(f=>r[f.name]!=null?r[f.name]:'')]);
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([headers,...rows]);
   ws['!cols'] = headers.map((_,i)=>({wch:Math.min(Math.max(headers[i].length,...rows.map(r=>String(r[i]||'').length))+2,40)}));
@@ -1699,7 +1734,7 @@ async function spConfirm() {
             if (hl.includes('archivo')) { newRow[i] = r['__archivo__'] || ''; return; }
             if (hl.includes('fecha anal')) { newRow[i] = r['__fecha_analisis__'] || ''; return; }
             const mf = manualFields.find(f=>strSimilarity(f.name,String(h))>0.5);
-            if (mf) { newRow[i] = rendManualValues[mf.name] || ''; return; }
+            if (mf) { newRow[i] = rendManualValueFor(mf, r); return; }
             const ia = fields.find(f=>strSimilarity(f.name,String(h))>0.5);
             if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
           });
@@ -1813,7 +1848,7 @@ async function spConfirm() {
             if (hl.includes('archivo')) { newRow[i] = r['__archivo__'] || ''; return; }
             if (hl.includes('fecha anal')) { newRow[i] = r['__fecha_analisis__'] || ''; return; }
             const mf = manualFieldsTmpl.find(f=>strSimilarity(f.name,String(h))>0.5);
-            if (mf) { newRow[i] = rendManualValues[mf.name] || ''; return; }
+            if (mf) { newRow[i] = rendManualValueFor(mf, r); return; }
             const ia = fields.find(f=>strSimilarity(f.name,String(h))>0.5);
             if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
           });
@@ -3594,7 +3629,7 @@ function buildRowFromMapping(mapping, excelHeaders, record, manualValues, manual
     if (fieldName === '__fecha_analisis__') { row[i] = record.__fecha_analisis__ || ''; return; }
     // Check manual fields (includes values set by user)
     const mf = manualFields.find(f => f.name === fieldName);
-    if (mf) { row[i] = manualValues[fieldName] || ''; return; }
+    if (mf) { row[i] = rendManualValueFor(mf, record); return; }
     // Check manualValues directly — covers auto fields (NP Nº, IMPO, etc.)
     // whose values are stored there by calcAutoFields/npCalcAndApplyAutoFields
     if (manualValues && manualValues[fieldName] !== undefined && manualValues[fieldName] !== '') {
