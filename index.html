@@ -1828,14 +1828,17 @@ async function spConfirm() {
       if (!spDefaults.tmplId) throw new Error('Seleccioná una plantilla.');
       if (!spDefaults.tmplDestId && !spDefaults.tmplDestFolder) throw new Error('Seleccioná una carpeta destino.');
 
-      btn.textContent = '⏳ Copiando plantilla...';
+      btn.textContent = '⏳ Preparando carpeta destino...';
       const tmplSite = spDefaults.tmplS || siteId;
       const destSite = spDefaults.tmplDestS || siteId;
       const newFileName = spRendicionFileName();
 
-      const copyBody = spDefaults.tmplDestId
-        ? { parentReference: { driveId: undefined, id: spDefaults.tmplDestId }, name: newFileName }
-        : { parentReference: { path: '/drive/root:/' + (spDefaults.tmplDestFolder||'') }, name: newFileName };
+      // La plantilla copiada y los comprobantes van a la misma subcarpeta (Método de pago / Año-Mes)
+      const destBaseFolderId = spDefaults.tmplDestId || await spGetFolderIdByPath(token, destSite, spDefaults.tmplDestFolder||'');
+      const compFolderIdTmpl = await spResolveCompFolder(token, destSite, destBaseFolderId);
+
+      btn.textContent = '⏳ Copiando plantilla...';
+      const copyBody = { parentReference: { id: compFolderIdTmpl }, name: newFileName };
 
       const copyResp = await fetch(
         `https://graph.microsoft.com/v1.0/sites/${tmplSite}/drive/items/${spDefaults.tmplId}/copy`,
@@ -1850,13 +1853,7 @@ async function spConfirm() {
 
       // Find the copied file by name in destination folder
       btn.textContent = '⏳ Buscando archivo copiado...';
-      let listUrl;
-      if (spDefaults.tmplDestId) {
-        listUrl = `https://graph.microsoft.com/v1.0/sites/${destSite}/drive/items/${spDefaults.tmplDestId}/children?$select=id,name`;
-      } else {
-        const ep = (spDefaults.tmplDestFolder||'').split('/').map(encodeURIComponent).join('/');
-        listUrl = `https://graph.microsoft.com/v1.0/sites/${destSite}/drive/root:/${ep}:/children?$select=id,name`;
-      }
+      const listUrl = `https://graph.microsoft.com/v1.0/sites/${destSite}/drive/items/${compFolderIdTmpl}/children?$select=id,name`;
       const listResp = await fetch(listUrl, {headers:{Authorization:'Bearer '+token}});
       const listData = await listResp.json();
       const copiedItem = (listData.value||[]).find(f => f.name === newFileName);
@@ -1909,9 +1906,7 @@ async function spConfirm() {
         );
       }
 
-      // Comprobantes: carpeta destino de la plantilla, organizados por Método de pago / Año-Mes
-      const destBaseFolderId = spDefaults.tmplDestId || await spGetFolderIdByPath(token, destSite, spDefaults.tmplDestFolder||'');
-      const compFolderIdTmpl = await spResolveCompFolder(token, destSite, destBaseFolderId);
+      // Comprobantes: misma subcarpeta donde quedó la plantilla copiada
       await spUploadComprobantes(token, destSite, compFolderIdTmpl, doneFiles, btn);
     }
 
