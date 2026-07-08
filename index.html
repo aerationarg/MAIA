@@ -2028,6 +2028,28 @@ function fbEncodeShareUrl(url) {
   return 'u!' + b64.replace(/=+$/,'').replace(/\//g,'_').replace(/\+/g,'-');
 }
 
+// Resuelve el siteId (formato host,siteGuid,webGuid) de un drive compartido.
+// /drives/{id} no siempre expone sharepointIds de forma confiable, así que se
+// consulta la raíz del drive (driveItem, que sí lo soporta) con fallback a
+// derivar el sitio desde su webUrl usando el mismo patrón de fbSelectSite.
+async function fbResolveSiteIdFromDrive(token, driveId) {
+  const rootResp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}/root?$select=webUrl,sharepointIds`, {headers:{Authorization:'Bearer '+token}});
+  if (!rootResp.ok) throw new Error('No se pudo resolver el sitio de ese elemento.');
+  const rootData = await rootResp.json();
+  const sp = rootData.sharepointIds;
+  if (sp?.siteId && sp?.webId && sp?.siteUrl) {
+    return `${new URL(sp.siteUrl).hostname},${sp.siteId},${sp.webId}`;
+  }
+  if (rootData.webUrl) {
+    const u = new URL(rootData.webUrl);
+    const m = u.pathname.match(/^(\/(?:sites|teams)\/[^\/]+)/);
+    const sitePath = m ? m[1] : '';
+    const siteResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${u.hostname}:${sitePath}`, {headers:{Authorization:'Bearer '+token}});
+    if (siteResp.ok) { const siteData = await siteResp.json(); return siteData.id; }
+  }
+  throw new Error('No se pudo resolver el sitio de ese elemento.');
+}
+
 // Resuelve cualquier link de SharePoint/OneDrive directo, sin depender de que
 // Graph lo haya indexado en "Compartido conmigo" (cubre permisos otorgados
 // por biblioteca/grupo en vez de por el botón Compartir).
@@ -2046,11 +2068,7 @@ async function fbOpenPasteLink() {
     const item = await resp.json();
     const driveId = item.parentReference?.driveId;
     if (!driveId) throw new Error('No se pudo determinar la ubicación de ese elemento.');
-    const driveResp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}?$select=sharepointIds`, {headers:{Authorization:'Bearer '+token}});
-    if (!driveResp.ok) throw new Error('No se pudo resolver el sitio de ese elemento.');
-    const sp = (await driveResp.json()).sharepointIds;
-    if (!sp?.siteId || !sp?.webId || !sp?.siteUrl) throw new Error('No se pudo resolver el sitio de ese elemento.');
-    fbCurrentSiteId = `${new URL(sp.siteUrl).hostname},${sp.siteId},${sp.webId}`;
+    fbCurrentSiteId = await fbResolveSiteIdFromDrive(token, driveId);
     fbCurrentSiteName = item.name;
     fbLevel = 'files';
     fbStack = [{type:'sites', label:'Sitios'}];
@@ -2108,11 +2126,7 @@ async function fbSharedItemClick(idx) {
     const token = await getMsToken();
     const driveId = remote.parentReference?.driveId;
     if (!driveId) throw new Error('No se pudo resolver la ubicación compartida.');
-    const driveResp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}?$select=sharepointIds`, {headers:{Authorization:'Bearer '+token}});
-    if (!driveResp.ok) throw new Error('No se pudo resolver el sitio de esa carpeta compartida.');
-    const sp = (await driveResp.json()).sharepointIds;
-    if (!sp?.siteId || !sp?.webId || !sp?.siteUrl) throw new Error('No se pudo resolver el sitio de esa carpeta compartida.');
-    fbCurrentSiteId = `${new URL(sp.siteUrl).hostname},${sp.siteId},${sp.webId}`;
+    fbCurrentSiteId = await fbResolveSiteIdFromDrive(token, driveId);
     fbCurrentSiteName = item.name;
     fbLevel = 'files';
     fbStack = [{type:'sites', label:'Sitios'}];
