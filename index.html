@@ -2014,7 +2014,54 @@ function fbSharedWithMeRow() {
     <span class="fb-item-icon">🔗</span>
     <span class="fb-item-name">Compartido conmigo</span>
     <span class="fb-item-arrow">›</span>
+  </div>
+  <div class="fb-item" onclick="fbOpenPasteLink()">
+    <span class="fb-item-icon">📋</span>
+    <span class="fb-item-name">Pegar link de SharePoint</span>
+    <span class="fb-item-arrow">›</span>
   </div>`;
+}
+
+function fbEncodeShareUrl(url) {
+  const utf8 = unescape(encodeURIComponent(url));
+  const b64 = btoa(utf8);
+  return 'u!' + b64.replace(/=+$/,'').replace(/\//g,'_').replace(/\+/g,'-');
+}
+
+// Resuelve cualquier link de SharePoint/OneDrive directo, sin depender de que
+// Graph lo haya indexado en "Compartido conmigo" (cubre permisos otorgados
+// por biblioteca/grupo en vez de por el botón Compartir).
+async function fbOpenPasteLink() {
+  const url = prompt('Pegá el link de SharePoint de la carpeta o archivo:');
+  if (!url || !url.trim()) return;
+  const listEl = document.getElementById('fb-list');
+  listEl.innerHTML = '<div class="fb-loading">⏳ Resolviendo link...</div>';
+  document.getElementById('fb-breadcrumb').textContent = 'Link de SharePoint';
+  document.getElementById('fb-select-btn').style.display = 'none';
+  try {
+    const token = await getMsToken();
+    const shareId = fbEncodeShareUrl(url.trim());
+    const resp = await fetch(`https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem?$select=id,name,folder,file,parentReference`, {headers:{Authorization:'Bearer '+token}});
+    if (!resp.ok) throw new Error('No se pudo resolver ese link. Verificá que sea un link de SharePoint/OneDrive válido y que tengas acceso.');
+    const item = await resp.json();
+    const driveId = item.parentReference?.driveId;
+    if (!driveId) throw new Error('No se pudo determinar la ubicación de ese elemento.');
+    const driveResp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}?$select=sharepointIds`, {headers:{Authorization:'Bearer '+token}});
+    if (!driveResp.ok) throw new Error('No se pudo resolver el sitio de ese elemento.');
+    const sp = (await driveResp.json()).sharepointIds;
+    if (!sp?.siteId || !sp?.webId || !sp?.siteUrl) throw new Error('No se pudo resolver el sitio de ese elemento.');
+    fbCurrentSiteId = `${new URL(sp.siteUrl).hostname},${sp.siteId},${sp.webId}`;
+    fbCurrentSiteName = item.name;
+    fbLevel = 'files';
+    fbStack = [{type:'sites', label:'Sitios'}];
+    if (item.folder) {
+      await fbLoadFolder(item.id, item.name, item.name);
+    } else {
+      await fbSelectFile({ id: item.id, name: item.name }, item.name);
+    }
+  } catch(e) {
+    listEl.innerHTML = `<div class="fb-loading">❌ ${esc(e.message)}</div>`;
+  }
 }
 
 // Permite saltar directo a una carpeta/archivo compartido aunque no tengas acceso a sus carpetas padre
