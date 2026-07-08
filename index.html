@@ -1986,7 +1986,7 @@ async function fbLoadSites() {
     const sites = (data.value||[]).filter(s => s.displayName && s.name !== 'root');
     if (!sites.length) throw new Error('No se encontraron sitios');
     fbCurrentItems = sites;
-    listEl.innerHTML = sites.map((s,i) => `
+    listEl.innerHTML = fbSharedWithMeRow() + sites.map((s,i) => `
       <div class="fb-item" onclick="fbSelectSite(${i})">
         <span class="fb-item-icon">🏢</span>
         <span class="fb-item-name">${esc(s.displayName)}<br><span style="font-size:11px;color:var(--text3)">${esc(s.name)}</span></span>
@@ -1999,13 +1999,83 @@ async function fbLoadSites() {
       {id: null, displayName: 'Compras/COMEX (cyc)', name: 'cyc', _host: 'aerationargentina.sharepoint.com', _site: 'cyc'},
     ];
     fbCurrentItems = knownSites;
-    listEl.innerHTML = knownSites.map((s,i) => `
+    listEl.innerHTML = fbSharedWithMeRow() + knownSites.map((s,i) => `
       <div class="fb-item" onclick="fbSelectSite(${i})">
         <span class="fb-item-icon">🏢</span>
         <span class="fb-item-name">${esc(s.displayName)}</span>
         <span class="fb-item-arrow">›</span>
       </div>`).join('');
     listEl.innerHTML += `<div style="padding:10px 16px;font-size:12px;color:var(--text3)">No se pudieron cargar todos los sitios automáticamente.</div>`;
+  }
+}
+
+function fbSharedWithMeRow() {
+  return `<div class="fb-item" onclick="fbOpenSharedWithMe()">
+    <span class="fb-item-icon">🔗</span>
+    <span class="fb-item-name">Compartido conmigo</span>
+    <span class="fb-item-arrow">›</span>
+  </div>`;
+}
+
+// Permite saltar directo a una carpeta/archivo compartido aunque no tengas acceso a sus carpetas padre
+async function fbOpenSharedWithMe() {
+  const listEl = document.getElementById('fb-list');
+  listEl.innerHTML = '<div class="fb-loading">⏳ Cargando compartidos...</div>';
+  document.getElementById('fb-breadcrumb').textContent = 'Compartido conmigo';
+  document.getElementById('fb-select-btn').style.display = 'none';
+  try {
+    const token = await getMsToken();
+    const resp = await fetch(
+      'https://graph.microsoft.com/v1.0/me/drive/sharedWithMe?allowexternal=true',
+      {headers:{Authorization:'Bearer '+token}}
+    );
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    let items = (data.value||[]).filter(it => it.remoteItem);
+    if (fbMode === 'folder') items = items.filter(it => it.remoteItem.folder);
+    else if (fbMode === 'file') items = items.filter(it => it.remoteItem.folder || /\.xlsx?$/i.test(it.name||''));
+    if (!items.length) { listEl.innerHTML = '<div class="fb-loading">No hay elementos compartidos que coincidan.</div>'; return; }
+    fbCurrentItems = items;
+    fbLevel = 'shared';
+    fbStack = [{type:'sites', label:'Sitios'}];
+    listEl.innerHTML = items.map((it,i) => {
+      const isF = !!it.remoteItem.folder;
+      return `<div class="fb-item" onclick="fbSharedItemClick(${i})">
+        <span class="fb-item-icon">${isF?'📁':'📊'}</span>
+        <span class="fb-item-name">${esc(it.name)}</span>
+        <span class="fb-item-arrow">${isF?'›':(fbMode==='file'?'✓':'')}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    listEl.innerHTML = `<div class="fb-loading">❌ Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function fbSharedItemClick(idx) {
+  const item = fbCurrentItems[idx];
+  if (!item || !item.remoteItem) return;
+  const remote = item.remoteItem;
+  const listEl = document.getElementById('fb-list');
+  listEl.innerHTML = '<div class="fb-loading">⏳ Abriendo...</div>';
+  try {
+    const token = await getMsToken();
+    const driveId = remote.parentReference?.driveId;
+    if (!driveId) throw new Error('No se pudo resolver la ubicación compartida.');
+    const driveResp = await fetch(`https://graph.microsoft.com/v1.0/drives/${driveId}?$select=sharepointIds`, {headers:{Authorization:'Bearer '+token}});
+    if (!driveResp.ok) throw new Error('No se pudo resolver el sitio de esa carpeta compartida.');
+    const sp = (await driveResp.json()).sharepointIds;
+    if (!sp?.siteId || !sp?.webId || !sp?.siteUrl) throw new Error('No se pudo resolver el sitio de esa carpeta compartida.');
+    fbCurrentSiteId = `${new URL(sp.siteUrl).hostname},${sp.siteId},${sp.webId}`;
+    fbCurrentSiteName = item.name;
+    fbLevel = 'files';
+    fbStack = [{type:'sites', label:'Sitios'}];
+    if (remote.folder) {
+      await fbLoadFolder(remote.id, item.name, item.name);
+    } else {
+      await fbSelectFile({ id: remote.id, name: item.name }, item.name);
+    }
+  } catch(e) {
+    listEl.innerHTML = `<div class="fb-loading">❌ ${esc(e.message)}</div>`;
   }
 }
 
