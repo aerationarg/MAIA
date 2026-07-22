@@ -1677,12 +1677,28 @@ function spYearMonth() {
 }
 function spRendicionFileName() {
   const d = new Date();
-  return `Rendicion_${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}.xlsx`;
+  return `Rendicion_${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}_${String(d.getDate()).padStart(2,'0')}.xlsx`;
 }
 function spMetodoPagoValue() {
   const f = getRendManualFields().find(mf => ['método de pago','metodo de pago'].includes(mf.name.trim().toLowerCase()));
   if (!f) return null;
   return (rendManualValueFor(f, {}) || '').trim() || null;
+}
+
+// Ubica la fila del rótulo "Total" (1-indexado) para no pisarla al insertar datos
+function spFindTotalRow(sheetRows) {
+  for (let i = 0; i < (sheetRows||[]).length; i++) {
+    const row = sheetRows[i] || [];
+    if (row.some(c => String(c==null?'':c).trim().toLowerCase() === 'total')) return i + 1;
+  }
+  return null;
+}
+// Inserta una fila en blanco en rowNum, empujando hacia abajo todo lo que está debajo (incl. el Total)
+async function spInsertRowAt(token, excelBase, rowNum, lastColLetter) {
+  await fetch(
+    excelBase + `range(address='A${rowNum}:${lastColLetter}${rowNum}')/insert`,
+    { method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({shift:'Down'}) }
+  );
 }
 async function spGetParentOfItem(token, siteId, itemId) {
   const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}?$select=parentReference`, {headers:{Authorization:'Bearer '+token}});
@@ -1781,6 +1797,8 @@ async function spConfirm() {
         }
         firstEmptyRendRow = i + 2;
       }
+      let totalRowNum = spFindTotalRow(rows);
+      const totalRowWidth = String.fromCharCode(64 + Math.max(headers.length, 1));
 
       // Build rows to write
       const newRows = [];
@@ -1808,6 +1826,10 @@ async function spConfirm() {
       const rendExcelBase = `https://graph.microsoft.com/v1.0/sites/${excelSite}/drive/items/${rendExcelId}/workbook/worksheets('Hoja1')/`;
       for (let ri=0; ri<newRows.length; ri++) {
         const rowNum = firstEmptyRendRow + ri;
+        if (totalRowNum && rowNum >= totalRowNum) {
+          await spInsertRowAt(token, rendExcelBase, totalRowNum, totalRowWidth);
+          totalRowNum++;
+        }
         const lastColRend = String.fromCharCode(64 + Math.max(newRows[ri].length, 1));
         await fetch(
           rendExcelBase + `range(address='A${rowNum}:${lastColRend}${rowNum}')`,
@@ -1873,6 +1895,8 @@ async function spConfirm() {
       const usedResp = await fetch(excelBaseRendTmpl + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
       const usedData = await usedResp.json();
       const tmplHeaders = (usedData.values?.[0] || []).map(h => String(h||''));
+      let totalRowNumTmpl = spFindTotalRow(usedData.values);
+      const totalRowWidthTmpl = String.fromCharCode(64 + Math.max(tmplHeaders.length, 1));
 
       const manualFieldsTmpl = getRendManualFields().filter(f=>f.name.trim());
       const savedMappingTmpl = getMapping(REND_MAPPING_KEY());
@@ -1898,6 +1922,10 @@ async function spConfirm() {
           });
         }
         const rowNum = 2 + ri;
+        if (totalRowNumTmpl && rowNum >= totalRowNumTmpl) {
+          await spInsertRowAt(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl);
+          totalRowNumTmpl++;
+        }
         const lastCol = String.fromCharCode(64 + Math.max(newRow.length, 1));
         await fetch(
           excelBaseRendTmpl + `range(address='A${rowNum}:${lastCol}${rowNum}')`,
