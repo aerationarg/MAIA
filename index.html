@@ -1700,6 +1700,26 @@ async function spInsertRowAt(token, excelBase, rowNum, lastColLetter) {
     { method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({shift:'Down'}) }
   );
 }
+// Insertar una fila justo arriba del Total no extiende su rango de SUM automáticamente
+// (Excel solo lo hace si la fila se inserta dentro del rango ya sumado). Estas funciones
+// leen la fórmula original del Total y la reescriben con el rango extendido a mano.
+async function spGetRowFormulas(token, excelBase, rowNum, lastColLetter) {
+  const resp = await fetch(excelBase + `range(address='A${rowNum}:${lastColLetter}${rowNum}')?$select=formulas`, {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  return data.formulas?.[0] || null;
+}
+function spExtendFormulaRange(formula, newEndRow) {
+  if (typeof formula !== 'string' || !formula.startsWith('=')) return formula;
+  return formula.replace(/([A-Za-z]{1,3})(\d+):([A-Za-z]{1,3})(\d+)/g, (m,c1,r1,c2) => `${c1}${r1}:${c2}${newEndRow}`);
+}
+async function spUpdateTotalFormulas(token, excelBase, totalRowNum, lastColLetter, originalFormulas, newEndRow) {
+  if (!originalFormulas) return;
+  const updated = originalFormulas.map(f => spExtendFormulaRange(f, newEndRow));
+  await fetch(excelBase + `range(address='A${totalRowNum}:${lastColLetter}${totalRowNum}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({formulas:[updated]})
+  });
+}
 async function spGetParentOfItem(token, siteId, itemId) {
   const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}?$select=parentReference`, {headers:{Authorization:'Bearer '+token}});
   if (!resp.ok) throw new Error('No se pudo obtener la carpeta del Excel destino.');
@@ -1824,6 +1844,7 @@ async function spConfirm() {
       // Write via Graph Excel API — preserves all formatting
       const rendExcelId = spDefaults.excelId;
       const rendExcelBase = `https://graph.microsoft.com/v1.0/sites/${excelSite}/drive/items/${rendExcelId}/workbook/worksheets('Hoja1')/`;
+      const totalOrigFormulas = totalRowNum ? await spGetRowFormulas(token, rendExcelBase, totalRowNum, totalRowWidth) : null;
       for (let ri=0; ri<newRows.length; ri++) {
         let rowNum;
         if (totalRowNum) {
@@ -1841,6 +1862,9 @@ async function spConfirm() {
             headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
             body: JSON.stringify({values:[newRows[ri]]}) }
         );
+        if (totalRowNum && totalOrigFormulas) {
+          await spUpdateTotalFormulas(token, rendExcelBase, totalRowNum, totalRowWidth, totalOrigFormulas, rowNum);
+        }
       }
 
       // Comprobantes: misma carpeta donde ya está el Excel (sin subcarpetas — esa carpeta ya está organizada)
@@ -1901,6 +1925,7 @@ async function spConfirm() {
       const tmplHeaders = (usedData.values?.[0] || []).map(h => String(h||''));
       let totalRowNumTmpl = spFindTotalRow(usedData.values);
       const totalRowWidthTmpl = String.fromCharCode(64 + Math.max(tmplHeaders.length, 1));
+      const totalOrigFormulasTmpl = totalRowNumTmpl ? await spGetRowFormulas(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl) : null;
 
       const manualFieldsTmpl = getRendManualFields().filter(f=>f.name.trim());
       const savedMappingTmpl = getMapping(REND_MAPPING_KEY());
@@ -1938,6 +1963,9 @@ async function spConfirm() {
           excelBaseRendTmpl + `range(address='A${rowNum}:${lastCol}${rowNum}')`,
           { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]}) }
         );
+        if (totalRowNumTmpl && totalOrigFormulasTmpl) {
+          await spUpdateTotalFormulas(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl, totalOrigFormulasTmpl, rowNum);
+        }
       }
 
       // Comprobantes: misma subcarpeta donde quedó la plantilla copiada
