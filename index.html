@@ -63,9 +63,13 @@
     .sidebar-section { padding: 10px 0; }
     .sidebar-section-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 16px; white-space: nowrap; overflow: hidden; }
     .sidebar.collapsed .sidebar-section-label { display: none; }
-    .sidebar-area-label { font-size: 10px; font-weight: 600; color: var(--text3); opacity: 0.75; text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 16px 3px 22px; white-space: nowrap; overflow: hidden; }
+    .sidebar-area-label { display: flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 600; color: var(--text3); opacity: 0.8; text-transform: uppercase; letter-spacing: 0.04em; padding: 7px 16px 5px 18px; white-space: nowrap; overflow: hidden; cursor: pointer; user-select: none; }
+    .sidebar-area-label:hover { color: var(--text2); opacity: 1; }
     .sidebar-area-label:first-child { padding-top: 0; }
     .sidebar.collapsed .sidebar-area-label { display: none; }
+    .area-chevron { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; transition: transform 0.15s; }
+    .area-chevron.open { transform: rotate(90deg); }
+    .sidebar.collapsed .nav-area-items { display: block !important; }
     .sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
 
     .nav-btn { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 16px; border: none; background: transparent; color: var(--text2); font-size: 13.5px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 0.12s, color 0.12s; white-space: nowrap; text-align: left; }
@@ -3998,18 +4002,47 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-np-int',  label:'Cfg NP Internacional', area:'Compras/COMEX', icon:NAV_GEAR_ICON },
 ];
 
-function renderNavGroup(containerId, items, allowedIds) {
+function navAreaSlug(area) { return area.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
+function navAreaKey(groupId, area) { return 'nav_area_open_' + groupId + '_' + navAreaSlug(area); }
+function navIsAreaOpen(groupId, area) { return localStorage.getItem(navAreaKey(groupId, area)) === '1'; }
+function navSetAreaOpen(groupId, area, open) { localStorage.setItem(navAreaKey(groupId, area), open ? '1' : '0'); }
+
+function navToggleArea(groupId, area) {
+  const open = !navIsAreaOpen(groupId, area);
+  navSetAreaOpen(groupId, area, open);
+  const slug = navAreaSlug(area);
+  const wrap = document.getElementById('area-items-' + groupId + '-' + slug);
+  const chevron = document.getElementById('area-chevron-' + groupId + '-' + slug);
+  if (wrap) wrap.style.display = open ? '' : 'none';
+  if (chevron) chevron.classList.toggle('open', open);
+}
+
+// Si el panel activo/inicial queda dentro de un área colapsada, se abre para que no quede escondido
+function navEnsureAreaOpenForItem(groupId, items, itemId) {
+  const item = items.find(it => it.id === itemId);
+  if (item && !navIsAreaOpen(groupId, item.area)) navSetAreaOpen(groupId, item.area, true);
+}
+
+function renderNavGroup(containerId, groupId, items, allowedIds) {
   const container = document.getElementById(containerId);
   if (!container) return false;
   const visible = items.filter(it => allowedIds.includes(it.id));
   const areas = NAV_AREA_ORDER.filter(a => visible.some(it => it.area === a));
   visible.forEach(it => { if (!areas.includes(it.area)) areas.push(it.area); }); // áreas nuevas sin ordenar todavía
-  container.innerHTML = areas.map(area => `
-    <div class="sidebar-area-label">${esc(area)}</div>
-    ${visible.filter(it => it.area === area).map(it => `
-      <button class="nav-btn" id="nav-${it.id}" data-label="${esc(it.label)}" onclick="navSelect('${it.id}')">${it.icon}<span>${esc(it.label)}</span></button>
-    `).join('')}
-  `).join('');
+  container.innerHTML = areas.map(area => {
+    const slug = navAreaSlug(area);
+    const open = navIsAreaOpen(groupId, area);
+    return `
+    <div class="sidebar-area-label" onclick="navToggleArea('${groupId}','${area.replace(/'/g,"\\'")}')">
+      <svg class="area-chevron${open?' open':''}" id="area-chevron-${groupId}-${slug}" viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>
+      <span>${esc(area)}</span>
+    </div>
+    <div class="nav-area-items" id="area-items-${groupId}-${slug}" style="display:${open?'':'none'}">
+      ${visible.filter(it => it.area === area).map(it => `
+        <button class="nav-btn" id="nav-${it.id}" data-label="${esc(it.label)}" onclick="navSelect('${it.id}')">${it.icon}<span>${esc(it.label)}</span></button>
+      `).join('')}
+    </div>`;
+  }).join('');
   return visible.length > 0;
 }
 
@@ -4308,8 +4341,12 @@ function refreshAllForEmpresa() {
 
 function applyTabAccess() {
   const allowed = SECTOR_TABS[currentSector] || ['rend','cfg-rend'];
-  const hasSections = renderNavGroup('nav-sections-group', NAV_SECTIONS, allowed);
-  const hasConfig = renderNavGroup('nav-config-group', NAV_CONFIG_SECTIONS, allowed);
+  const first = allowed[0] || 'rend';
+  // Abre de entrada el área donde cae el panel inicial, para que no arranque escondido
+  navEnsureAreaOpenForItem('sec', NAV_SECTIONS, first);
+  navEnsureAreaOpenForItem('cfg', NAV_CONFIG_SECTIONS, first);
+  const hasSections = renderNavGroup('nav-sections-group', 'sec', NAV_SECTIONS, allowed);
+  const hasConfig = renderNavGroup('nav-config-group', 'cfg', NAV_CONFIG_SECTIONS, allowed);
   // Hide section dividers/labels if nothing in that group is visible
   const sectionsSection = document.getElementById('nav-sections-section');
   const configSection = document.getElementById('nav-config-section');
@@ -4322,7 +4359,6 @@ function applyTabAccess() {
   const adminSection = document.getElementById('nav-admin-section');
   if (adminDivider) adminDivider.style.display = hasAdmin ? '' : 'none';
   if (adminSection) adminSection.style.display = hasAdmin ? '' : 'none';
-  const first = allowed[0] || 'rend';
   navSelect(first);
 }
 
@@ -4415,6 +4451,7 @@ async function adminLoadUsers() {
       headers:{Authorization:'Bearer '+session.token}
     });
     const users = await res.json();
+    if (!res.ok) throw new Error(users.message || users.error_description || ('HTTP '+res.status));
     if (!users.length) { el.innerHTML='<p style="font-size:13px;color:var(--text2)">No hay usuarios.</p>'; return; }
     el.innerHTML = users.map(u=>{
       const emp = (u.empresas||'AA,AS').split(',').map(s=>s.trim()).filter(Boolean);
@@ -4443,7 +4480,7 @@ async function adminLoadUsers() {
         </div>
       </div>`;
     }).join('');
-  } catch(e) { el.innerHTML='<p style="font-size:13px;color:#dc2626">Error al cargar usuarios.</p>'; }
+  } catch(e) { el.innerHTML=`<p style="font-size:13px;color:#dc2626">Error al cargar usuarios: ${esc(e.message)}</p>`; }
 }
 
 async function adminToggleEmpresa(userId, empresa, checked) {
