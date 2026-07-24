@@ -2163,9 +2163,64 @@ function hallazgosRenderRevisionItem(h) {
       <textarea id="hr-accion-correctiva-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.accion_correctiva||'')}</textarea>
       <label>Fecha probable de ejecución</label>
       <input type="date" id="hr-fecha-${h.id}" value="${esc(h.fecha_estimada||'')}" style="margin-bottom:10px" />
+
+      <label>¿Cómo insertarlo en el Excel?</label>
+      <select id="hr-modo-${h.id}" onchange="hallazgosToggleModoInsert('${h.id}')" style="margin-bottom:8px">
+        <option value="nuevo">Generar número nuevo automático</option>
+        <option value="existente">Insertar en un hallazgo ya creado</option>
+      </select>
+      <div id="hr-existente-wrap-${h.id}" style="display:none;margin-bottom:10px">
+        <label>Buscar por número de hallazgo</label>
+        <input list="hr-dl-${h.id}" id="hr-existente-input-${h.id}" placeholder="Ej: HA-778" />
+        <datalist id="hr-dl-${h.id}"></datalist>
+      </div>
+
       <button class="btn btn-primary" onclick="hallazgosConfirmarInsertar('${h.id}')">✓ Confirmar e insertar en Excel</button>
       <div id="hr-status-${h.id}"></div>
     </div>`;
+}
+
+async function hallazgosToggleModoInsert(id) {
+  const modo = document.getElementById('hr-modo-'+id).value;
+  const wrap = document.getElementById('hr-existente-wrap-'+id);
+  wrap.style.display = modo === 'existente' ? 'block' : 'none';
+  if (modo !== 'existente') return;
+  const dl = document.getElementById('hr-dl-'+id);
+  dl.innerHTML = '';
+  try {
+    const list = await hallazgosLoadExistingList();
+    dl.innerHTML = list.slice().reverse().map(x => `<option value="${esc(x.id)}"></option>`).join('');
+  } catch(e) {
+    alert('No se pudo cargar la lista de hallazgos existentes: ' + e.message);
+  }
+}
+
+let _hallazgosExistingCache = null; // [{id:'HA-778', row: 42}, ...] en orden natural de la hoja
+
+async function hallazgosLoadExistingList(forceRefresh) {
+  if (_hallazgosExistingCache && !forceRefresh) return _hallazgosExistingCache;
+  const cfg = getHallazgosCfg();
+  if (!cfg.excelId) throw new Error('No hay Excel configurado en Cfg Hallazgos.');
+  const token = await getMsToken();
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+  const resp = await fetch(excelBase + `range(address='B6:B500')?$select=values`, {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) throw new Error('No se pudo leer el Excel.');
+  const data = await resp.json();
+  const list = [];
+  (data.values||[]).forEach((r,i) => {
+    const s = String(r[0]||'').trim();
+    if (s) list.push({ id: s, row: 6+i });
+  });
+  _hallazgosExistingCache = list;
+  return list;
+}
+
+async function hallazgosPatchCell(token, excelBase, cellAddress, value) {
+  const resp = await fetch(excelBase + `range(address='${cellAddress}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({values:[[value]]})
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en '+cellAddress); }
 }
 
 async function hallazgosConfirmarInsertar(id) {
@@ -2178,43 +2233,49 @@ async function hallazgosConfirmarInsertar(id) {
   const porQue = document.getElementById('hr-por-que-'+id).value.trim();
   const accionCorrectiva = document.getElementById('hr-accion-correctiva-'+id).value.trim();
   const fechaEstimada = document.getElementById('hr-fecha-'+id).value;
+  const modo = document.getElementById('hr-modo-'+id)?.value || 'nuevo';
 
   showMsg(statusId,'loading','Conectando...');
   try {
     const token = await getMsToken();
     const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+    let targetRow, newId;
 
-    showMsg(statusId,'loading','Buscando próxima fila...');
-    const colBResp = await fetch(excelBase + `range(address='B6:B500')?$select=values`, {headers:{Authorization:'Bearer '+token}});
-    if (!colBResp.ok) throw new Error('No se pudo leer el Excel.');
-    const colBData = await colBResp.json();
-    const idValues = (colBData.values || []).map(r => r[0]);
-    let maxNum = 0, targetRow = 6;
-    idValues.forEach((v, i) => {
-      const s = String(v||'').trim();
-      if (s) {
-        targetRow = 6 + i + 1;
-        const m = s.match(/(\d+)\s*$/);
+    if (modo === 'existente') {
+      const inputVal = (document.getElementById('hr-existente-input-'+id).value||'').trim();
+      if (!inputVal) throw new Error('Elegí un número de hallazgo de la lista.');
+      showMsg(statusId,'loading','Buscando hallazgo...');
+      const list = await hallazgosLoadExistingList();
+      const match = list.find(x => x.id.toLowerCase() === inputVal.toLowerCase());
+      if (!match) throw new Error('No encontré ese número de hallazgo. Elegilo de la lista desplegable.');
+      targetRow = match.row;
+      newId = match.id;
+    } else {
+      showMsg(statusId,'loading','Buscando próxima fila...');
+      const list = await hallazgosLoadExistingList(true);
+      let maxNum = 0;
+      targetRow = 6;
+      list.forEach(x => {
+        targetRow = x.row + 1;
+        const m = x.id.match(/(\d+)\s*$/);
         if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
-      }
-    });
-    const newId = 'HA-' + (maxNum + 1);
+      });
+      newId = 'HA-' + (maxNum + 1);
+    }
 
-    const row = new Array(21).fill(''); // columnas A..U
-    row[1] = newId;              // B  — ID
-    row[2] = today();            // C  — Fecha de Registro
-    row[7] = descripcion;        // H  — Descripcion del Hallazgo
-    row[9] = accionInmediata;    // J  — Describir la Accion Inmediata
-    row[12] = porQue;            // M  — Por qué surgió
-    row[13] = accionCorrectiva;  // N  — Accion Correctiva
-    row[15] = fechaEstimada;     // P  — Fecha Estimada de Ejecucion
-
-    showMsg(statusId,'loading','Insertando en el Excel...');
-    const putResp = await fetch(
-      excelBase + `range(address='A${targetRow}:U${targetRow}')`,
-      { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[row]}) }
-    );
-    if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en el Excel.'); }
+    // Se escribe celda por celda (no la fila entera) para no pisar otras columnas
+    // que ya puedan tener datos cargados a mano, sobre todo en modo "existente".
+    showMsg(statusId,'loading', modo==='existente' ? 'Actualizando fila...' : 'Insertando en el Excel...');
+    if (modo !== 'existente') {
+      await hallazgosPatchCell(token, excelBase, `B${targetRow}`, newId);
+      await hallazgosPatchCell(token, excelBase, `C${targetRow}`, today());
+    }
+    await hallazgosPatchCell(token, excelBase, `H${targetRow}`, descripcion);
+    await hallazgosPatchCell(token, excelBase, `J${targetRow}`, accionInmediata);
+    await hallazgosPatchCell(token, excelBase, `M${targetRow}`, porQue);
+    await hallazgosPatchCell(token, excelBase, `N${targetRow}`, accionCorrectiva);
+    await hallazgosPatchCell(token, excelBase, `P${targetRow}`, fechaEstimada);
+    _hallazgosExistingCache = null; // invalidar cache: el excel cambió
 
     // El Excel ya se escribió (lo importante). Esto es solo para sacarlo de la cola de revisión —
     // si falla, avisamos explícitamente para no arriesgar una inserción duplicada.
