@@ -379,6 +379,19 @@
         </div>
         <button id="msLoginBtn" onclick="toggleMsLogin()">Iniciar sesión</button>
         <div style="position:relative">
+          <button id="notif-bell-btn" onclick="notifToggleDropdown()" style="background:transparent;border:none;color:var(--text2);border-radius:50%;width:34px;height:34px;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;position:relative" title="Notificaciones">
+            <svg viewBox="0 0 24 24" style="width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span id="notif-badge" style="display:none;position:absolute;top:3px;right:3px;background:var(--red);color:#fff;font-size:10px;font-weight:700;border-radius:10px;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px"></span>
+          </button>
+          <div id="notif-dropdown" style="display:none;position:absolute;right:0;top:40px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 4px 16px rgba(0,0,0,0.15);width:320px;max-height:400px;overflow-y:auto;z-index:1000">
+            <div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+              <span style="font-weight:600;font-size:13px">Notificaciones</span>
+              <button onclick="notifMarkAllRead()" style="background:none;border:none;color:var(--blue);font-size:12px;cursor:pointer;font-family:inherit">Marcar todas leídas</button>
+            </div>
+            <div id="notif-list"></div>
+          </div>
+        </div>
+        <div style="position:relative">
           <button id="account-btn" onclick="toggleAccountMenu()" style="background:var(--blue);color:#fff;border:none;border-radius:50%;width:34px;height:34px;font-size:15px;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;font-weight:600" title="Mi cuenta">
             <span id="user-initial">?</span>
           </button>
@@ -1926,7 +1939,7 @@ async function hallazgosSendMail(subject, html, toEmail) {
 
 async function hallazgosFindCoordinadorHyS() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const res = await supaFetch(`/rest/v1/profiles?select=email,nombre&sector=eq.HyS&coordinador=eq.true&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
+  const res = await supaFetch(`/rest/v1/profiles?select=id,email,nombre&sector=eq.HyS&coordinador=eq.true&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
   const data = await res.json();
   return data[0] || null;
 }
@@ -1943,6 +1956,7 @@ async function hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInme
     <p><b>Fecha probable de ejecución:</b> ${esc(fechaEstimada||'—')}</p>
     <p>Entrá a la sección Hallazgos de MAIA para revisar y confirmar.</p>`;
   await hallazgosSendMail(`Hallazgo completado — revisar en MAIA (${nombreCreador})`, html, coord.email);
+  if (coord.id) notifCreate(coord.id, 'Hallazgo completado', `${nombreCreador}: ${descripcion||''}`, 'hallazgos');
 }
 
 let _hallazgosUsersCache = null;
@@ -2016,11 +2030,17 @@ async function hallazgosSubmitNuevo() {
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
       btn.textContent = '⏳ Enviando notificación...';
-      await hallazgosSendMail(
-        `Te asignaron un hallazgo — ${nombreCreador}`,
-        `<p><b>${esc(nombreCreador)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
-        asignadoEmail
-      );
+      // El hallazgo ya se creó; si la notificación falla no hay que mostrar error de creación
+      try {
+        await hallazgosSendMail(
+          `Te asignaron un hallazgo — ${nombreCreador}`,
+          `<p><b>${esc(nombreCreador)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
+          asignadoEmail
+        );
+        notifCreate(sel.value, 'Te asignaron un hallazgo', descripcion, 'hallazgos');
+      } catch(notifyErr) {
+        console.warn('No se pudo notificar al asignado:', notifyErr.message);
+      }
       showMsg(statusId,'success','✓ Hallazgo asignado a '+asignadoNombre+'.');
     } else {
       const accionInmediata = document.getElementById('hallazgos-new-accion-inmediata').value.trim();
@@ -2039,7 +2059,11 @@ async function hallazgosSubmitNuevo() {
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
       btn.textContent = '⏳ Notificando a HyS...';
-      await hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+      try {
+        await hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+      } catch(notifyErr) {
+        console.warn('No se pudo notificar a HyS:', notifyErr.message);
+      }
       showMsg(statusId,'success','✓ Hallazgo cargado y enviado a revisión.');
     }
     document.getElementById('hallazgos-new-descripcion').value = '';
@@ -2089,19 +2113,23 @@ async function hallazgosCompletar(id) {
   const statusId = 'hc-status-'+id;
   if (!accionInmediata || !porQue || !accionCorrectiva) { showMsg(statusId,'error','Completá los tres campos de texto.'); return; }
   try {
-    showMsg(statusId,'loading','Enviando...');
+    showMsg(statusId,'loading','Guardando...');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
-      method: 'PATCH', headers: { Authorization:'Bearer '+session.token },
+      method: 'PATCH', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
       body: JSON.stringify({ estado:'completado', accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null, completado_at: new Date().toISOString() })
     });
-    if (!res.ok) throw new Error('No se pudo guardar.');
-    const getRes = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}&select=descripcion`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await getRes.json();
-    const descripcion = rows[0]?.descripcion || '';
-    const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
-    showMsg(statusId,'loading','Notificando a HyS...');
-    await hallazgosNotifyCoordinador(nombre, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+    const rows = await res.json().catch(()=>null);
+    if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
+
+    // La notificación es best-effort: si falla (por ej. no está logueado con Microsoft),
+    // el hallazgo ya quedó completado igual y no debe volver a aparecer como pendiente.
+    try {
+      const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
+      await hallazgosNotifyCoordinador(nombre, rows[0].descripcion||'', accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+    } catch(notifyErr) {
+      console.warn('No se pudo notificar a HyS:', notifyErr.message);
+    }
     renderHallazgos();
   } catch(e) {
     showMsg(statusId,'error','✕ ' + e.message);
@@ -2188,14 +2216,21 @@ async function hallazgosConfirmarInsertar(id) {
     );
     if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en el Excel.'); }
 
+    // El Excel ya se escribió (lo importante). Esto es solo para sacarlo de la cola de revisión —
+    // si falla, avisamos explícitamente para no arriesgar una inserción duplicada.
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
-      method: 'PATCH', headers: { Authorization:'Bearer '+session.token },
+    const markRes = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
+      method: 'PATCH', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
       body: JSON.stringify({
         estado:'insertado', ha_id:newId, insertado_at:new Date().toISOString(),
         descripcion, accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null
       })
     });
+    const markData = await markRes.json().catch(()=>null);
+    if (!markRes.ok || !markData || !markData.length) {
+      showMsg(statusId,'error','✓ Se insertó como '+newId+' en el Excel, pero no se pudo sacar de la cola de revisión acá — no vuelvas a confirmarlo (se duplicaría en el Excel). Avisá para revisarlo.');
+      return;
+    }
 
     showMsg(statusId,'success','✓ Insertado como '+newId);
     renderHallazgos();
@@ -4742,6 +4777,7 @@ async function doLogout() {
     const s = JSON.parse(localStorage.getItem('daia_session')||'null');
     if (s?.token) await supaFetch('/auth/v1/logout', { method:'POST', headers:{ Authorization:'Bearer '+s.token } });
   } catch(e) {}
+  if (_notifPollInterval) { clearInterval(_notifPollInterval); _notifPollInterval = null; }
   localStorage.removeItem('daia_session');
   currentUser = null; currentSector = null; msAccount = null;
   currentEmpresas = ['AA','AS']; currentEmpresa = 'AA';
@@ -4881,6 +4917,7 @@ function continueLoginAfterEmpresa() {
   refreshAllForEmpresa();
   applyTabAccess();
   initApp();
+  notifStartPolling();
 }
 
 // ── Sidebar navigation ────────────────────────────────
@@ -5022,6 +5059,100 @@ document.addEventListener('click', e => {
   }
 });
 
+// ── Notificaciones (dentro de la app) ──────────────────
+// Best-effort: nunca debe interrumpir el flujo principal que la dispara.
+async function notifCreate(userId, titulo, cuerpo, seccion) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (!session?.token) return;
+    await supaFetch('/rest/v1/notificaciones', {
+      method: 'POST', headers: { Authorization:'Bearer '+session.token },
+      body: JSON.stringify({ user_id: userId, titulo, cuerpo: cuerpo||'', seccion: seccion||'' })
+    });
+  } catch(e) { console.warn('No se pudo crear la notificación:', e.message); }
+}
+
+async function notifLoad() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token || !currentUser?.id) return;
+  try {
+    const res = await supaFetch(`/rest/v1/notificaciones?select=*&user_id=eq.${currentUser.id}&order=created_at.desc&limit=30`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok) return;
+    _notifCache = rows;
+    notifRenderBadge();
+    notifRenderList();
+  } catch(e) {}
+}
+
+function notifRenderBadge() {
+  const badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  const unread = (_notifCache||[]).filter(n => !n.leida).length;
+  badge.style.display = unread ? 'block' : 'none';
+  badge.textContent = unread > 9 ? '9+' : String(unread);
+}
+
+function notifRenderList() {
+  const el = document.getElementById('notif-list');
+  if (!el) return;
+  const rows = _notifCache || [];
+  if (!rows.length) { el.innerHTML = '<div class="empty" style="padding:20px">No tenés notificaciones.</div>'; return; }
+  el.innerHTML = rows.map(n => `
+    <div onclick="notifClickItem('${n.id}','${n.seccion||''}')" style="padding:10px 16px;border-bottom:1px solid var(--border);cursor:pointer;background:${n.leida?'transparent':'var(--blue-bg)'}">
+      <div style="font-size:12.5px;font-weight:600">${esc(n.titulo||'')}</div>
+      ${n.cuerpo ? `<div style="font-size:12px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n.cuerpo)}</div>` : ''}
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">${new Date(n.created_at).toLocaleString('es-AR')}</div>
+    </div>`).join('');
+}
+
+function notifToggleDropdown() {
+  const d = document.getElementById('notif-dropdown');
+  const opening = d.style.display === 'none';
+  d.style.display = opening ? 'block' : 'none';
+  if (opening) notifLoad();
+}
+document.addEventListener('click', e => {
+  const btn = document.getElementById('notif-bell-btn');
+  const menu = document.getElementById('notif-dropdown');
+  if (btn && menu && !btn.contains(e.target) && !menu.contains(e.target)) {
+    menu.style.display = 'none';
+  }
+});
+
+async function notifMarkRead(id) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/notificaciones?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ leida: true })
+  });
+}
+
+async function notifMarkAllRead() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!currentUser?.id) return;
+  await supaFetch(`/rest/v1/notificaciones?user_id=eq.${currentUser.id}&leida=eq.false`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ leida: true })
+  });
+  notifLoad();
+}
+
+function notifClickItem(id, seccion) {
+  notifMarkRead(id);
+  document.getElementById('notif-dropdown').style.display = 'none';
+  if (seccion) navSelect(seccion);
+  notifLoad();
+}
+
+let _notifCache = [];
+let _notifPollInterval = null;
+function notifStartPolling() {
+  notifLoad();
+  if (_notifPollInterval) clearInterval(_notifPollInterval);
+  _notifPollInterval = setInterval(notifLoad, 60000);
+}
+
 function showChangePassword() {
   document.getElementById('account-menu').style.display = 'none';
   // Show change password modal
@@ -5146,10 +5277,15 @@ async function adminToggleEmpresa(userId, empresa, checked) {
 
 async function adminUpdateSector(userId, sector) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
-    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+  const res = await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
     body: JSON.stringify({sector})
   });
+  const data = await res.json().catch(()=>null);
+  if (!res.ok || !data || !data.length) {
+    alert('No se pudo guardar el sector "'+sector+'": ' + (data?.message || 'la fila no se actualizó. Puede ser una restricción (check constraint) en la columna sector de la tabla profiles que todavía no incluye este valor — revisalo en Supabase.'));
+    adminLoadUsers();
+  }
 }
 
 async function adminUpdateNombre(userId, nombre) {
