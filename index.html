@@ -1956,7 +1956,6 @@ async function hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInme
     <p><b>Fecha probable de ejecución:</b> ${esc(fechaEstimada||'—')}</p>
     <p>Entrá a la sección Hallazgos de MAIA para revisar y confirmar.</p>`;
   await hallazgosSendMail(`Hallazgo completado — revisar en MAIA (${nombreCreador})`, html, coord.email);
-  if (coord.id) notifCreate(coord.id, 'Hallazgo completado', `${nombreCreador}: ${descripcion||''}`, 'hallazgos');
 }
 
 let _hallazgosUsersCache = null;
@@ -2037,7 +2036,6 @@ async function hallazgosSubmitNuevo() {
           `<p><b>${esc(nombreCreador)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
           asignadoEmail
         );
-        notifCreate(sel.value, 'Te asignaron un hallazgo', descripcion, 'hallazgos');
       } catch(notifyErr) {
         console.warn('No se pudo notificar al asignado:', notifyErr.message);
       }
@@ -2304,6 +2302,7 @@ async function renderHallazgos() {
   const newStatusEl = document.getElementById('hallazgos-new-status');
   if (newStatusEl) newStatusEl.innerHTML = '';
   renderHallazgosNewModo();
+  if (typeof notifLoad === 'function') notifLoad();
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token || !currentUser?.id) return;
 
@@ -5133,23 +5132,54 @@ async function notifCreate(userId, titulo, cuerpo, seccion) {
   } catch(e) { console.warn('No se pudo crear la notificación:', e.message); }
 }
 
+// Las notificaciones de Hallazgos se calculan en vivo a partir del estado actual
+// (nunca se guardan como filas fijas), así siempre reflejan la realidad: quedan
+// mientras el hallazgo siga pendiente/sin revisar, y desaparecen apenas se cierra.
+async function notifLoadHallazgosLive() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token || !currentUser?.id) return [];
+  const items = [];
+  try {
+    const res = await supaFetch(`/rest/v1/hallazgos?select=id,descripcion,creado_por_nombre,created_at&asignado_a=eq.${currentUser.id}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    (rows||[]).forEach(h => items.push({
+      id: 'h-asig-'+h.id, live: true, leida: false, seccion: 'hallazgos', created_at: h.created_at,
+      titulo: 'Te asignaron un hallazgo', cuerpo: `${h.creado_por_nombre||''}: ${h.descripcion||''}`
+    }));
+  } catch(e) {}
+  const isCoordHyS = currentSector === 'HyS' && !!currentUser?.coordinador;
+  if (isCoordHyS) {
+    try {
+      const res = await supaFetch(`/rest/v1/hallazgos?select=id,descripcion,creado_por_nombre,completado_at&estado=eq.completado&order=completado_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+      const rows = await res.json();
+      (rows||[]).forEach(h => items.push({
+        id: 'h-rev-'+h.id, live: true, leida: false, seccion: 'hallazgos', created_at: h.completado_at,
+        titulo: 'Hallazgo completado — revisar', cuerpo: `${h.creado_por_nombre||''}: ${h.descripcion||''}`
+      }));
+    } catch(e) {}
+  }
+  return items;
+}
+
 async function notifLoad() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token || !currentUser?.id) return;
+  let generic = [];
   try {
     const res = await supaFetch(`/rest/v1/notificaciones?select=*&user_id=eq.${currentUser.id}&order=created_at.desc&limit=30`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await res.json();
-    if (!res.ok) return;
-    _notifCache = rows;
-    notifRenderBadge();
-    notifRenderList();
+    generic = await res.json();
+    if (!res.ok) generic = [];
   } catch(e) {}
+  const live = await notifLoadHallazgosLive();
+  _notifCache = [...live, ...generic].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+  notifRenderBadge();
+  notifRenderList();
 }
 
 function notifRenderBadge() {
   const badge = document.getElementById('notif-badge');
   if (!badge) return;
-  const unread = (_notifCache||[]).filter(n => !n.leida).length;
+  const unread = (_notifCache||[]).filter(n => n.live || !n.leida).length;
   badge.style.display = unread ? 'block' : 'none';
   badge.textContent = unread > 9 ? '9+' : String(unread);
 }
@@ -5160,7 +5190,7 @@ function notifRenderList() {
   const rows = _notifCache || [];
   if (!rows.length) { el.innerHTML = '<div class="empty" style="padding:20px">No tenés notificaciones.</div>'; return; }
   el.innerHTML = rows.map(n => `
-    <div onclick="notifClickItem('${n.id}','${n.seccion||''}')" style="padding:10px 16px;border-bottom:1px solid var(--border);cursor:pointer;background:${n.leida?'transparent':'var(--blue-bg)'}">
+    <div onclick="notifClickItem('${n.id}','${n.seccion||''}')" style="padding:10px 16px;border-bottom:1px solid var(--border);cursor:pointer;background:${(n.live||!n.leida)?'var(--blue-bg)':'transparent'}">
       <div style="font-size:12.5px;font-weight:600">${esc(n.titulo||'')}</div>
       ${n.cuerpo ? `<div style="font-size:12px;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n.cuerpo)}</div>` : ''}
       <div style="font-size:11px;color:var(--text3);margin-top:2px">${new Date(n.created_at).toLocaleString('es-AR')}</div>
@@ -5200,7 +5230,9 @@ async function notifMarkAllRead() {
 }
 
 function notifClickItem(id, seccion) {
-  notifMarkRead(id);
+  // Los ítems "en vivo" (id empieza con "h-") no son filas reales: no hay nada que
+  // marcar leído, se resuelven solos cuando cambia el estado del hallazgo.
+  if (!id.startsWith('h-')) notifMarkRead(id);
   document.getElementById('notif-dropdown').style.display = 'none';
   if (seccion) navSelect(seccion);
   notifLoad();
