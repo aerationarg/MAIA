@@ -5105,9 +5105,9 @@ async function adminLoadUsers() {
       return `
       <div style="padding:10px 0;border-bottom:1px solid var(--border)">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-          <div>
-            <div style="font-size:13px;font-weight:600">${esc(u.nombre||'Sin nombre')}</div>
-            <div style="font-size:12px;color:var(--text2)">${esc(u.email||'')}</div>
+          <div style="flex:1;min-width:160px">
+            <input value="${esc(u.nombre||'')}" placeholder="Sin nombre" onblur="adminUpdateNombre('${u.id}',this.value)" onkeydown="if(event.key==='Enter')this.blur()" style="font-size:13px;font-weight:600;padding:4px 6px;margin-bottom:2px;background:transparent;border:1px solid transparent" onfocus="this.style.background='var(--surface2)';this.style.borderColor='var(--border)'" />
+            <div style="font-size:12px;color:var(--text2);padding:0 6px">${esc(u.email||'')}</div>
           </div>
           <select onchange="adminUpdateSector('${u.id}',this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);font-family:inherit;font-size:12px;flex-shrink:0">
             ${['Administración','RRHH','Coordinación','Ingeniería','Procesos','Compras','COMEX','Comercial','Servicios','HyS','Admin'].map(s=>`<option value="${s}" ${s===u.sector?'selected':''}>${s}</option>`).join('')}
@@ -5152,6 +5152,19 @@ async function adminUpdateSector(userId, sector) {
   });
 }
 
+async function adminUpdateNombre(userId, nombre) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({nombre})
+  });
+  const data = await res.json().catch(()=>null);
+  if (!res.ok || !data || !data.length) {
+    alert('No se pudo guardar el nombre: ' + (data?.message || 'la fila no se actualizó (revisá el id del usuario).'));
+    adminLoadUsers();
+  }
+}
+
 async function adminToggleCoordinador(userId, checked) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
@@ -5181,11 +5194,17 @@ async function adminCreateUser() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.message||data.error_description||'Error al crear usuario');
     // Update profile
+    const newUserId = data.user?.id || data.id;
+    if (!newUserId) throw new Error('El usuario se creó pero no se pudo identificar su ID para completar el perfil (nombre/sector/empresas). Buscalo en la lista y completalo a mano.');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    await supaFetch(`/rest/v1/profiles?id=eq.${data.user?.id||data.id}`, {
-      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    const patchRes = await supaFetch(`/rest/v1/profiles?id=eq.${newUserId}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
       body: JSON.stringify({nombre, sector, empresas, coordinador})
     });
+    const patchData = await patchRes.json().catch(()=>null);
+    if (!patchRes.ok || !patchData || !patchData.length) {
+      throw new Error('El usuario se creó, pero no se pudo guardar nombre/sector/empresas en su perfil. Buscalo en la lista y completalo a mano.');
+    }
     showMsg('admin-create-status','success','✓ Usuario creado: '+email);
     document.getElementById('admin-new-email').value='';
     document.getElementById('admin-new-user-pass').value='';
@@ -5195,7 +5214,7 @@ async function adminCreateUser() {
     document.getElementById('admin-new-empresa-as').checked=true;
     document.getElementById('admin-new-coordinador').checked=false;
     adminLoadUsers();
-  } catch(e) { showMsg('admin-create-status','error','✕ '+e.message); }
+  } catch(e) { showMsg('admin-create-status','error','✕ '+e.message); adminLoadUsers(); }
 }
 
 function renderAdmin() {
