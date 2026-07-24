@@ -481,6 +481,47 @@
       <div id="viajes-status"></div>
     </div>
 
+    <!-- ═══ PANEL: Hallazgos ═══ -->
+    <div class="panel" id="panel-hallazgos">
+      <div class="card">
+        <div class="card-label">Cargar un hallazgo</div>
+        <label>Descripción de lo ocurrido</label>
+        <textarea id="hallazgos-new-descripcion" rows="3" placeholder="¿Qué pasó?" style="margin-bottom:12px"></textarea>
+
+        <label>¿Quién completa el resto (acción inmediata, por qué surgió, acción correctiva, fecha)?</label>
+        <select id="hallazgos-new-modo" onchange="renderHallazgosNewModo()" style="margin-bottom:10px">
+          <option value="yo">Yo mismo, ahora</option>
+          <option value="otro">Asignárselo a otra persona</option>
+        </select>
+
+        <div id="hallazgos-new-asignado-wrap" style="display:none;margin-bottom:10px">
+          <label>Asignar a</label>
+          <select id="hallazgos-new-asignado"><option value="">Cargando usuarios...</option></select>
+        </div>
+
+        <div id="hallazgos-new-campos-wrap"></div>
+
+        <button class="btn btn-primary" onclick="hallazgosSubmitNuevo()" id="hallazgos-new-btn" style="margin-top:4px">Crear hallazgo</button>
+        <div id="hallazgos-new-status"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Asignados a mí</div>
+        <div id="hallazgos-asignados-list" class="empty">Cargando...</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Cargados por mí</div>
+        <div id="hallazgos-mios-list" class="empty">Cargando...</div>
+      </div>
+
+      <div class="card" id="hallazgos-revision-card" style="display:none">
+        <div class="card-label">Revisión (HyS)</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Hallazgos completados, pendientes de revisar y confirmar para insertar en el Excel.</p>
+        <div id="hallazgos-revision-list" class="empty">Cargando...</div>
+      </div>
+    </div>
+
     <!-- ═══ PANEL: NP Locales ═══ -->
     <div class="panel" id="panel-np-loc">
       <!-- Paso 0 -->
@@ -628,6 +669,18 @@
         <div class="card-label">Destinatarios del mail de Viajes</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Cada vez que alguien envía el formulario de Viajes, se manda un mail (vía Microsoft) con toda la info a estas direcciones. Una por línea o separadas por coma.</p>
         <textarea id="cfg-viajes-recipients" rows="4" placeholder="admin@aeration.com.ar&#10;compras@aeration.com.ar" oninput="cfgViajesSaveRecipients(this.value)"></textarea>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Config Hallazgos ═══ -->
+    <div class="panel" id="panel-cfg-hallazgos">
+      <div class="card">
+        <div class="card-label">Excel — Registro de Hallazgos</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Archivo donde se insertan los hallazgos confirmados. Debe tener la misma estructura de columnas que la hoja "Hallazgos" (fila 5 = encabezados).</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-hallazgos-excel-label">Sin seleccionar</span>
+          <button class="sp-browse-btn" onclick="fbOpen('file','hallazgos-excel')">Seleccionar</button>
+        </div>
       </div>
     </div>
 
@@ -1303,6 +1356,8 @@ function switchPanel(name) {
   if (name === 'np-loc' || name === 'np-int') npStep0InitAndCalc(name);
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
+  if (name === 'hallazgos') renderHallazgos();
+  if (name === 'cfg-hallazgos') renderCfgHallazgos();
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -1844,6 +1899,345 @@ async function viajesSubmit() {
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+}
+
+// ── Hallazgos (SGI) ───────────────────────────────────────
+function HALLAZGOS_CFG_KEY() { return 'hallazgos_cfg_' + currentEmpresa; }
+function getHallazgosCfg() { return JSON.parse(localStorage.getItem(HALLAZGOS_CFG_KEY()) || 'null') || {}; }
+function saveHallazgosCfg(cfg) { localStorage.setItem(HALLAZGOS_CFG_KEY(), JSON.stringify(cfg)); }
+function renderCfgHallazgos() {
+  const el = document.getElementById('cfg-hallazgos-excel-label');
+  if (el) el.textContent = getHallazgosCfg().excelLabel || 'Sin seleccionar';
+}
+
+async function hallazgosSendMail(subject, html, toEmail) {
+  const token = await getMsToken();
+  const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer '+token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: toEmail } }] },
+      saveToSentItems: true
+    })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'No se pudo enviar la notificación por mail.'); }
+}
+
+async function hallazgosFindCoordinadorHyS() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/profiles?select=email,nombre&sector=eq.HyS&coordinador=eq.true&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
+  const data = await res.json();
+  return data[0] || null;
+}
+
+async function hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada) {
+  const coord = await hallazgosFindCoordinadorHyS();
+  if (!coord || !coord.email) return; // sin coordinadora de HyS configurada, no hay a quién avisar
+  const html = `
+    <p><b>${esc(nombreCreador)}</b> completó un hallazgo en MAIA, listo para tu revisión.</p>
+    <p><b>Descripción:</b> ${esc(descripcion||'').replace(/\n/g,'<br>')}</p>
+    <p><b>Acción correctiva inmediata:</b> ${esc(accionInmediata||'').replace(/\n/g,'<br>')}</p>
+    <p><b>¿Por qué surgió?:</b> ${esc(porQue||'').replace(/\n/g,'<br>')}</p>
+    <p><b>Acción correctiva:</b> ${esc(accionCorrectiva||'').replace(/\n/g,'<br>')}</p>
+    <p><b>Fecha probable de ejecución:</b> ${esc(fechaEstimada||'—')}</p>
+    <p>Entrá a la sección Hallazgos de MAIA para revisar y confirmar.</p>`;
+  await hallazgosSendMail(`Hallazgo completado — revisar en MAIA (${nombreCreador})`, html, coord.email);
+}
+
+let _hallazgosUsersCache = null;
+async function hallazgosLoadAssigneeOptions() {
+  const sel = document.getElementById('hallazgos-new-asignado');
+  if (!sel) return;
+  try {
+    if (!_hallazgosUsersCache) {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      const res = await supaFetch('/rest/v1/profiles?select=id,nombre,email&order=nombre', {headers:{Authorization:'Bearer '+session.token}});
+      _hallazgosUsersCache = await res.json();
+    }
+    sel.innerHTML = '<option value="">— Elegir —</option>' + _hallazgosUsersCache.map(u=>
+      `<option value="${u.id}" data-email="${esc(u.email||'')}" data-nombre="${esc(u.nombre||u.email||'')}">${esc(u.nombre||u.email||'')}</option>`
+    ).join('');
+  } catch(e) {
+    sel.innerHTML = '<option value="">Error al cargar usuarios</option>';
+  }
+}
+
+function renderHallazgosNewModo() {
+  const modo = document.getElementById('hallazgos-new-modo').value;
+  document.getElementById('hallazgos-new-asignado-wrap').style.display = modo === 'otro' ? 'block' : 'none';
+  const camposEl = document.getElementById('hallazgos-new-campos-wrap');
+  if (modo === 'yo') {
+    camposEl.innerHTML = `
+      <label>Acción correctiva inmediata</label>
+      <textarea id="hallazgos-new-accion-inmediata" rows="2" style="margin-bottom:10px"></textarea>
+      <label>¿Por qué surgió?</label>
+      <textarea id="hallazgos-new-por-que" rows="2" style="margin-bottom:10px"></textarea>
+      <label>Acción correctiva</label>
+      <textarea id="hallazgos-new-accion-correctiva" rows="2" style="margin-bottom:10px"></textarea>
+      <label>Fecha probable de ejecución</label>
+      <input type="date" id="hallazgos-new-fecha-estimada" />`;
+  } else {
+    camposEl.innerHTML = '';
+    hallazgosLoadAssigneeOptions();
+  }
+  const btn = document.getElementById('hallazgos-new-btn');
+  if (btn) btn.textContent = modo === 'yo' ? 'Crear hallazgo' : 'Asignar hallazgo';
+}
+
+async function hallazgosSubmitNuevo() {
+  const descripcion = document.getElementById('hallazgos-new-descripcion').value.trim();
+  const modo = document.getElementById('hallazgos-new-modo').value;
+  const statusId = 'hallazgos-new-status';
+  if (!descripcion) { showMsg(statusId,'error','Completá la descripción de lo ocurrido.'); return; }
+
+  const btn = document.getElementById('hallazgos-new-btn');
+  btn.disabled = true;
+  const original = btn.textContent;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const nombreCreador = currentUser?.nombre || currentUser?.email || 'Colaborador';
+
+  try {
+    if (modo === 'otro') {
+      const sel = document.getElementById('hallazgos-new-asignado');
+      if (!sel.value) throw new Error('Elegí a quién se lo asignás.');
+      const opt = sel.options[sel.selectedIndex];
+      const asignadoNombre = opt.dataset.nombre;
+      const asignadoEmail = opt.dataset.email;
+      if (!asignadoEmail) throw new Error('Ese usuario no tiene email cargado.');
+      btn.textContent = '⏳ Creando...';
+      const res = await supaFetch('/rest/v1/hallazgos', {
+        method: 'POST', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
+        body: JSON.stringify({
+          empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreCreador,
+          asignado_a: sel.value, asignado_a_nombre: asignadoNombre, asignado_a_email: asignadoEmail,
+          estado: 'pendiente', descripcion
+        })
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
+      btn.textContent = '⏳ Enviando notificación...';
+      await hallazgosSendMail(
+        `Te asignaron un hallazgo — ${nombreCreador}`,
+        `<p><b>${esc(nombreCreador)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
+        asignadoEmail
+      );
+      showMsg(statusId,'success','✓ Hallazgo asignado a '+asignadoNombre+'.');
+    } else {
+      const accionInmediata = document.getElementById('hallazgos-new-accion-inmediata').value.trim();
+      const porQue = document.getElementById('hallazgos-new-por-que').value.trim();
+      const accionCorrectiva = document.getElementById('hallazgos-new-accion-correctiva').value.trim();
+      const fechaEstimada = document.getElementById('hallazgos-new-fecha-estimada').value;
+      btn.textContent = '⏳ Creando...';
+      const res = await supaFetch('/rest/v1/hallazgos', {
+        method: 'POST', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
+        body: JSON.stringify({
+          empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreCreador,
+          estado: 'completado', descripcion,
+          accion_inmediata: accionInmediata, por_que_surgio: porQue, accion_correctiva: accionCorrectiva,
+          fecha_estimada: fechaEstimada || null, completado_at: new Date().toISOString()
+        })
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
+      btn.textContent = '⏳ Notificando a HyS...';
+      await hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+      showMsg(statusId,'success','✓ Hallazgo cargado y enviado a revisión.');
+    }
+    document.getElementById('hallazgos-new-descripcion').value = '';
+    renderHallazgosNewModo();
+    renderHallazgos();
+  } catch(e) {
+    showMsg(statusId,'error','✕ ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+function hallazgosRenderAsignadoItem(h) {
+  return `
+    <div class="result-card" id="hallazgo-item-${h.id}">
+      <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')} · ${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
+      <p style="font-size:14px;margin-bottom:10px">${esc(h.descripcion||'').replace(/\n/g,'<br>')}</p>
+      <button class="btn btn-secondary btn-sm" onclick="hallazgosShowCompletarForm('${h.id}')">Completar</button>
+      <div id="hallazgo-completar-${h.id}"></div>
+    </div>`;
+}
+
+function hallazgosShowCompletarForm(id) {
+  const el = document.getElementById('hallazgo-completar-'+id);
+  if (!el) return;
+  el.innerHTML = `
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+      <label>Acción correctiva inmediata</label>
+      <textarea id="hc-accion-inmediata-${id}" rows="2" style="margin-bottom:10px"></textarea>
+      <label>¿Por qué surgió?</label>
+      <textarea id="hc-por-que-${id}" rows="2" style="margin-bottom:10px"></textarea>
+      <label>Acción correctiva</label>
+      <textarea id="hc-accion-correctiva-${id}" rows="2" style="margin-bottom:10px"></textarea>
+      <label>Fecha probable de ejecución</label>
+      <input type="date" id="hc-fecha-${id}" style="margin-bottom:10px" />
+      <button class="btn btn-primary" onclick="hallazgosCompletar('${id}')">Enviar</button>
+      <div id="hc-status-${id}"></div>
+    </div>`;
+}
+
+async function hallazgosCompletar(id) {
+  const accionInmediata = document.getElementById('hc-accion-inmediata-'+id).value.trim();
+  const porQue = document.getElementById('hc-por-que-'+id).value.trim();
+  const accionCorrectiva = document.getElementById('hc-accion-correctiva-'+id).value.trim();
+  const fechaEstimada = document.getElementById('hc-fecha-'+id).value;
+  const statusId = 'hc-status-'+id;
+  if (!accionInmediata || !porQue || !accionCorrectiva) { showMsg(statusId,'error','Completá los tres campos de texto.'); return; }
+  try {
+    showMsg(statusId,'loading','Enviando...');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
+      method: 'PATCH', headers: { Authorization:'Bearer '+session.token },
+      body: JSON.stringify({ estado:'completado', accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null, completado_at: new Date().toISOString() })
+    });
+    if (!res.ok) throw new Error('No se pudo guardar.');
+    const getRes = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}&select=descripcion`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await getRes.json();
+    const descripcion = rows[0]?.descripcion || '';
+    const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
+    showMsg(statusId,'loading','Notificando a HyS...');
+    await hallazgosNotifyCoordinador(nombre, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
+    renderHallazgos();
+  } catch(e) {
+    showMsg(statusId,'error','✕ ' + e.message);
+  }
+}
+
+function hallazgosRenderMioItem(h) {
+  const estadoLabel = { pendiente: h.asignado_a ? 'Asignado a '+(h.asignado_a_nombre||'—') : 'Pendiente', completado: 'Completado, en revisión', insertado: 'Insertado ('+(h.ha_id||'')+')' }[h.estado] || h.estado;
+  const badgeCls = { pendiente:'badge-pending', completado:'badge-processing', insertado:'badge-done' }[h.estado] || 'badge-pending';
+  return `
+    <div class="file-item">
+      <div class="file-info">
+        <div class="file-name">${esc((h.descripcion||'').slice(0,80))}</div>
+        <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
+      </div>
+      <span class="badge ${badgeCls}">${esc(estadoLabel)}</span>
+    </div>`;
+}
+
+function hallazgosRenderRevisionItem(h) {
+  return `
+    <div class="result-card" id="hallazgo-rev-${h.id}">
+      <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
+      <label>Descripción</label>
+      <textarea id="hr-descripcion-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.descripcion||'')}</textarea>
+      <label>Acción correctiva inmediata</label>
+      <textarea id="hr-accion-inmediata-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.accion_inmediata||'')}</textarea>
+      <label>¿Por qué surgió?</label>
+      <textarea id="hr-por-que-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.por_que_surgio||'')}</textarea>
+      <label>Acción correctiva</label>
+      <textarea id="hr-accion-correctiva-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.accion_correctiva||'')}</textarea>
+      <label>Fecha probable de ejecución</label>
+      <input type="date" id="hr-fecha-${h.id}" value="${esc(h.fecha_estimada||'')}" style="margin-bottom:10px" />
+      <button class="btn btn-primary" onclick="hallazgosConfirmarInsertar('${h.id}')">✓ Confirmar e insertar en Excel</button>
+      <div id="hr-status-${h.id}"></div>
+    </div>`;
+}
+
+async function hallazgosConfirmarInsertar(id) {
+  const cfg = getHallazgosCfg();
+  const statusId = 'hr-status-'+id;
+  if (!cfg.excelId) { showMsg(statusId,'error','No hay Excel configurado. Pedile a un Admin que lo seleccione en Cfg Hallazgos.'); return; }
+
+  const descripcion = document.getElementById('hr-descripcion-'+id).value.trim();
+  const accionInmediata = document.getElementById('hr-accion-inmediata-'+id).value.trim();
+  const porQue = document.getElementById('hr-por-que-'+id).value.trim();
+  const accionCorrectiva = document.getElementById('hr-accion-correctiva-'+id).value.trim();
+  const fechaEstimada = document.getElementById('hr-fecha-'+id).value;
+
+  showMsg(statusId,'loading','Conectando...');
+  try {
+    const token = await getMsToken();
+    const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+
+    showMsg(statusId,'loading','Buscando próxima fila...');
+    const colBResp = await fetch(excelBase + `range(address='B6:B500')?$select=values`, {headers:{Authorization:'Bearer '+token}});
+    if (!colBResp.ok) throw new Error('No se pudo leer el Excel.');
+    const colBData = await colBResp.json();
+    const idValues = (colBData.values || []).map(r => r[0]);
+    let maxNum = 0, targetRow = 6;
+    idValues.forEach((v, i) => {
+      const s = String(v||'').trim();
+      if (s) {
+        targetRow = 6 + i + 1;
+        const m = s.match(/(\d+)\s*$/);
+        if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+      }
+    });
+    const newId = 'HA-' + (maxNum + 1);
+
+    const row = new Array(21).fill(''); // columnas A..U
+    row[1] = newId;              // B  — ID
+    row[2] = today();            // C  — Fecha de Registro
+    row[7] = descripcion;        // H  — Descripcion del Hallazgo
+    row[9] = accionInmediata;    // J  — Describir la Accion Inmediata
+    row[12] = porQue;            // M  — Por qué surgió
+    row[13] = accionCorrectiva;  // N  — Accion Correctiva
+    row[15] = fechaEstimada;     // P  — Fecha Estimada de Ejecucion
+
+    showMsg(statusId,'loading','Insertando en el Excel...');
+    const putResp = await fetch(
+      excelBase + `range(address='A${targetRow}:U${targetRow}')`,
+      { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[row]}) }
+    );
+    if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en el Excel.'); }
+
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
+      method: 'PATCH', headers: { Authorization:'Bearer '+session.token },
+      body: JSON.stringify({
+        estado:'insertado', ha_id:newId, insertado_at:new Date().toISOString(),
+        descripcion, accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null
+      })
+    });
+
+    showMsg(statusId,'success','✓ Insertado como '+newId);
+    renderHallazgos();
+  } catch(e) {
+    showMsg(statusId,'error','✕ ' + e.message);
+  }
+}
+
+async function renderHallazgos() {
+  const newStatusEl = document.getElementById('hallazgos-new-status');
+  if (newStatusEl) newStatusEl.innerHTML = '';
+  renderHallazgosNewModo();
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token || !currentUser?.id) return;
+
+  const asigEl = document.getElementById('hallazgos-asignados-list');
+  try {
+    const res = await supaFetch(`/rest/v1/hallazgos?select=*&asignado_a=eq.${currentUser.id}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    asigEl.className = rows.length ? '' : 'empty';
+    asigEl.innerHTML = rows.length ? rows.map(hallazgosRenderAsignadoItem).join('') : 'No tenés hallazgos asignados pendientes.';
+  } catch(e) { asigEl.innerHTML = 'Error al cargar.'; }
+
+  const miosEl = document.getElementById('hallazgos-mios-list');
+  try {
+    const res = await supaFetch(`/rest/v1/hallazgos?select=*&creado_por=eq.${currentUser.id}&order=created_at.desc&limit=20`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    miosEl.className = rows.length ? '' : 'empty';
+    miosEl.innerHTML = rows.length ? rows.map(hallazgosRenderMioItem).join('') : 'Todavía no cargaste ningún hallazgo.';
+  } catch(e) { miosEl.innerHTML = 'Error al cargar.'; }
+
+  const isCoordHyS = currentSector === 'HyS' && !!currentUser?.coordinador;
+  const revCard = document.getElementById('hallazgos-revision-card');
+  if (revCard) revCard.style.display = isCoordHyS ? 'block' : 'none';
+  if (isCoordHyS) {
+    const revEl = document.getElementById('hallazgos-revision-list');
+    try {
+      const res = await supaFetch(`/rest/v1/hallazgos?select=*&estado=eq.completado&order=completado_at.asc`, {headers:{Authorization:'Bearer '+session.token}});
+      const rows = await res.json();
+      revEl.className = rows.length ? '' : 'empty';
+      revEl.innerHTML = rows.length ? rows.map(hallazgosRenderRevisionItem).join('') : 'No hay hallazgos pendientes de revisión.';
+    } catch(e) { revEl.innerHTML = 'Error al cargar.'; }
   }
 }
 
@@ -2593,6 +2987,12 @@ async function fbSelectFile(item, relativePath) {
     fbClose();
     // Load headers from template and show mapping modal (reuses REND_MAPPING_KEY)
     await loadExcelHeadersAndShowMapping('rend', item.id, fbCurrentSiteId);
+  } else if (fbTarget === 'hallazgos-excel') {
+    const cfg = getHallazgosCfg();
+    cfg.excelPath = relativePath; cfg.excelId = item.id; cfg.excelS = fbCurrentSiteId; cfg.excelLabel = item.name;
+    saveHallazgosCfg(cfg);
+    document.getElementById('cfg-hallazgos-excel-label').textContent = item.name;
+    fbClose();
   } else {
     saveSpDefaults(spDefaults);
     fbClose();
@@ -4227,16 +4627,18 @@ function tmplRenderCellMap(pfx) {
 const NAV_AREA_ORDER = ['General', 'Compras/COMEX'];
 const NAV_GEAR_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 const NAV_SECTIONS = [
-  { id:'rend',   label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
-  { id:'viajes', label:'Viajes',           area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>' },
-  { id:'np-loc', label:'NP Local',         area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
-  { id:'np-int', label:'NP Internacional', area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
+  { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
+  { id:'viajes',    label:'Viajes',           area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>' },
+  { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
+  { id:'np-loc',    label:'NP Local',         area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
+  { id:'np-int',    label:'NP Internacional', area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
-  { id:'cfg-rend',    label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
-  { id:'cfg-viajes',  label:'Cfg Viajes',           area:'General',       icon:NAV_GEAR_ICON },
-  { id:'cfg-np-loc',  label:'Cfg NP Local',         area:'Compras/COMEX', icon:NAV_GEAR_ICON },
-  { id:'cfg-np-int',  label:'Cfg NP Internacional', area:'Compras/COMEX', icon:NAV_GEAR_ICON },
+  { id:'cfg-rend',      label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-viajes',    label:'Cfg Viajes',           area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras/COMEX', icon:NAV_GEAR_ICON },
+  { id:'cfg-np-int',    label:'Cfg NP Internacional', area:'Compras/COMEX', icon:NAV_GEAR_ICON },
 ];
 
 function navAreaSlug(area) { return area.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
@@ -4286,16 +4688,17 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // ── Supabase Auth ─────────────────────────────────────
 
 const SECTOR_TABS = {
-  'Admin':          ['rend','np-loc','np-int','viajes','cfg-rend','cfg-np-loc','cfg-np-int','cfg-viajes','admin'],
-  'Compras':        ['rend','np-loc','np-int','viajes','cfg-np-loc','cfg-np-int'],
-  'COMEX':          ['rend','np-loc','np-int','viajes','cfg-np-loc','cfg-np-int'],
-  'Administración': ['rend','viajes','cfg-rend','cfg-viajes'],
-  'RRHH':           ['rend','viajes'],
-  'Coordinación':   ['rend','viajes'],
-  'Ingeniería':     ['rend','viajes'],
-  'Procesos':       ['rend','viajes'],
-  'Comercial':      ['rend','viajes'],
-  'Servicios':      ['rend','viajes'],
+  'Admin':          ['rend','np-loc','np-int','viajes','hallazgos','cfg-rend','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','admin'],
+  'Compras':        ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
+  'COMEX':          ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
+  'Administración': ['rend','viajes','hallazgos','cfg-rend','cfg-viajes'],
+  'RRHH':           ['rend','viajes','hallazgos'],
+  'Coordinación':   ['rend','viajes','hallazgos'],
+  'Ingeniería':     ['rend','viajes','hallazgos'],
+  'Procesos':       ['rend','viajes','hallazgos'],
+  'Comercial':      ['rend','viajes','hallazgos'],
+  'Servicios':      ['rend','viajes','hallazgos'],
+  'HyS':            ['rend','viajes','hallazgos','cfg-hallazgos'],
 };
 
 // supaFetch defined at top of script
@@ -4484,10 +4887,12 @@ function continueLoginAfterEmpresa() {
 const PANEL_TITLES = {
   'rend': 'Rendiciones',
   'viajes': 'Viajes',
+  'hallazgos': 'Hallazgos',
   'np-loc': 'NP Local',
   'np-int': 'NP Internacional',
   'cfg-rend': 'Configuración — Rendiciones',
   'cfg-viajes': 'Configuración — Viajes',
+  'cfg-hallazgos': 'Configuración — Hallazgos',
   'cfg-np-loc': 'Configuración — NP Local',
   'cfg-np-int': 'Configuración — NP Internacional',
   'admin': 'Administración',
@@ -4578,6 +4983,7 @@ function refreshAllForEmpresa() {
   if (typeof npCfgRender === 'function') { npCfgRender('np-loc'); npCfgRender('np-int'); }
   if (typeof renderViajesForm === 'function') renderViajesForm();
   if (typeof renderCfgViajes === 'function') renderCfgViajes();
+  if (typeof renderCfgHallazgos === 'function') renderCfgHallazgos();
 }
 
 function applyTabAccess() {
@@ -4704,7 +5110,7 @@ async function adminLoadUsers() {
             <div style="font-size:12px;color:var(--text2)">${esc(u.email||'')}</div>
           </div>
           <select onchange="adminUpdateSector('${u.id}',this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);font-family:inherit;font-size:12px;flex-shrink:0">
-            ${['Administración','RRHH','Coordinación','Ingeniería','Procesos','Compras','COMEX','Comercial','Servicios','Admin'].map(s=>`<option value="${s}" ${s===u.sector?'selected':''}>${s}</option>`).join('')}
+            ${['Administración','RRHH','Coordinación','Ingeniería','Procesos','Compras','COMEX','Comercial','Servicios','HyS','Admin'].map(s=>`<option value="${s}" ${s===u.sector?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
         <div style="display:flex;align-items:center;gap:14px;margin-top:8px;flex-wrap:wrap">
@@ -4813,7 +5219,7 @@ function renderAdmin() {
           <option value="">— Elegir sector —</option>
           <option>Administración</option><option>RRHH</option><option>Coordinación</option>
           <option>Ingeniería</option><option>Procesos</option><option>Compras</option>
-          <option>COMEX</option><option>Comercial</option><option>Servicios</option><option>Admin</option>
+          <option>COMEX</option><option>Comercial</option><option>Servicios</option><option>HyS</option><option>Admin</option>
         </select>
         <div style="margin-bottom:12px">
           <div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;margin-bottom:6px">Empresas</div>
