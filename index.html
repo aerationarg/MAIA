@@ -543,6 +543,10 @@
         <div class="card-label">Aprobaciones pendientes</div>
         <div id="np-loc-aprob-pend-list"></div>
       </div>
+      <div class="card" id="np-loc-aprob-rech-card" style="display:none">
+        <div class="card-label">NP rechazadas — corregir y reenviar</div>
+        <div id="np-loc-aprob-rech-list"></div>
+      </div>
       <!-- Paso 0 -->
       <div class="card" id="np-loc-step0-card">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
@@ -609,6 +613,10 @@
       <div class="card" id="np-int-aprob-pend-card" style="display:none">
         <div class="card-label">Aprobaciones pendientes</div>
         <div id="np-int-aprob-pend-list"></div>
+      </div>
+      <div class="card" id="np-int-aprob-rech-card" style="display:none">
+        <div class="card-label">NP rechazadas — corregir y reenviar</div>
+        <div id="np-int-aprob-rech-list"></div>
       </div>
       <!-- Paso 0 -->
       <div class="card" id="np-int-step0-card">
@@ -1423,7 +1431,7 @@ function switchPanel(name) {
   if (name === 'cfg-np-loc') { npCfgRender('np-loc'); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npCfgRender('np-int'); renderAutoFields('np-int'); }
   if (name === 'rend') renderRendResults();
-  if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); }
+  if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
@@ -3962,6 +3970,9 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
       descripcion: st.descripcion||'', links: linksList.join('\n'),
       excel_url: excelUrl, excel_name: fileName,
       excel_item_id: copiedItemId, excel_site_id: destSiteId,
+      extracted_data: d, manual_values: npState[pfx].manualValues || {},
+      registro_row: d.__registroRow || null, registro_excel_id: d.__registroExcelId || null,
+      registro_site_id: d.__registroSiteId || null, registro_sheet: d.__registroSheet || null,
       solicitado_por: currentUser.id, solicitado_por_nombre: nombre,
       destinatarios: st.destinatarios, estado:'pendiente'
     })
@@ -4060,6 +4071,209 @@ async function npAprobResolver(pfx, id, aprobado) {
       }
     } catch(notifyErr) { console.warn('No se pudo notificar la resolución:', notifyErr.message); }
     npRenderAprobacionesPendientes(pfx);
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+// ── NP rechazadas: corregir y reenviar ───────────────
+async function npReescribirFilaRegistro(token, pfx, row, d, manualValues) {
+  if (!row.registro_row || !row.registro_excel_id || !row.registro_site_id) return;
+  const sheetName = row.registro_sheet || 'Hoja1';
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${row.registro_site_id}/drive/items/${row.registro_excel_id}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
+  const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
+  if (!usedResp.ok) throw new Error('No se pudo leer el Registro NP.');
+  const usedData = await usedResp.json();
+  const headers = usedData.values?.[0] || [];
+  const manualFields = npGetManual(pfx);
+  const iaFields = npGetIA(pfx).filter(f=>f.name.trim());
+  const savedMap = getMapping(NP_KEYS(pfx).map);
+  const useMap = Object.keys(savedMap).length>0 && headers.length>0;
+  let newRow;
+  if (useMap) {
+    newRow = buildRowFromMapping(savedMap, headers, d, manualValues, manualFields, iaFields);
+  } else {
+    newRow = new Array(Math.max(headers.length, 20)).fill('');
+    headers.forEach((h,i)=>{
+      if(!h) return;
+      const mf=manualFields.find(f=>strSimilarity(f.name,String(h))>0.5);
+      if(mf){newRow[i]=manualValues[mf.name]||'';return;}
+      const ia=iaFields.find(f=>strSimilarity(f.name,String(h))>0.5);
+      if(ia) newRow[i]=d[ia.name]!=null?d[ia.name]:'';
+    });
+  }
+  const colCount = headers.length || 18;
+  const rowToWrite = newRow.slice(0, colCount);
+  while (rowToWrite.length < colCount) rowToWrite.push('');
+  const colNum = colCount;
+  const lastCol = colNum <= 26
+    ? String.fromCharCode(64 + colNum)
+    : String.fromCharCode(64 + Math.floor((colNum-1)/26)) + String.fromCharCode(65 + ((colNum-1)%26));
+  const writeResp = await fetch(excelBase + `range(address='A${row.registro_row}:${lastCol}${row.registro_row}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[rowToWrite]})
+  });
+  if (!writeResp.ok) throw new Error('No se pudo actualizar la fila del Registro NP.');
+}
+
+async function npReescribirArchivoNP(token, pfx, siteId, itemId, d, manualValues) {
+  const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
+  if (!sheetsResp.ok) throw new Error('No se pudo leer la NP generada.');
+  const sheetsData = await sheetsResp.json();
+  const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
+  const setCellVal = async (addr, val) => {
+    if (!addr || val === '' || val === null || val === undefined) return;
+    await fetch(excelBase + `range(address='${addr}')`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[[val]]})
+    });
+  };
+  const manualFields = npGetManual(pfx);
+  const iaFields = npGetIA(pfx).filter(f=>f.name.trim());
+  const fieldValues = {};
+  Object.entries(manualValues||{}).forEach(([k,v]) => { fieldValues[k]=v; fieldValues[k.toLowerCase()]=v; });
+  iaFields.forEach(f => { if (d[f.name]!=null) { fieldValues[f.name]=d[f.name]; fieldValues[f.name.toLowerCase()]=d[f.name]; } });
+  Object.entries(d).forEach(([k,v]) => { if (k!=='__archivo__' && !k.startsWith('__registro') && v!=null) { fieldValues[k]=v; fieldValues[k.toLowerCase()]=v; } });
+  fieldValues['Fecha'] = fieldValues['Fecha'] || today();
+  const cellMap = tmplGetCellMap(pfx);
+  for (const entry of cellMap) {
+    if (!entry.field || !entry.cell) continue;
+    const val = fieldValues[entry.field] ?? fieldValues[entry.field.toLowerCase()];
+    if (val !== undefined && val !== null && val !== '') await setCellVal(entry.cell, val);
+  }
+  const ir = tmplGetItemRows(pfx);
+  const items = d.items||[];
+  for (let r=0; r<items.length && ir.start+r<=ir.end; r++) {
+    const row = ir.start + r;
+    await setCellVal(ir.itemCol+row, Number(items[r].item)||r+1);
+    await setCellVal(ir.cantCol+row, Number(items[r].cant)||1);
+    await setCellVal(ir.descCol+row, items[r].descripcion||'');
+    await setCellVal(ir.unitCol+row, Number(items[r].p_unitario)||0);
+    if (items[r].p_total) await setCellVal(ir.totalCol+row, Number(items[r].p_total)||0);
+  }
+}
+
+let _npRechCache = {};
+async function npRenderRechazadas(pfx) {
+  const card = document.getElementById(pfx+'-aprob-rech-card');
+  const list = document.getElementById(pfx+'-aprob-rech-list');
+  if (!card || !list || !currentUser?.id) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  try {
+    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=*&pfx=eq.${pfx}&estado=eq.rechazado&solicitado_por=eq.${currentUser.id}&order=resuelto_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { card.style.display='none'; return; }
+    _npRechCache[pfx] = rows;
+    card.style.display = '';
+    npRenderRechazadasFromCache(pfx);
+  } catch(e) { card.style.display='none'; }
+}
+
+function npRenderRechazadasFromCache(pfx) {
+  const list = document.getElementById(pfx+'-aprob-rech-list');
+  if (!list) return;
+  const rows = _npRechCache[pfx] || [];
+  list.innerHTML = rows.map(a => npRenderRechazadaItem(pfx, a)).join('');
+}
+
+function npRenderRechazadaItem(pfx, a) {
+  const d = a.extracted_data || {};
+  const items = d.items || [];
+  const itemRows = items.map((it,ii) => `
+    <div class="np-item-row">
+      <span>${it.item}</span>
+      <input type="number" value="${esc(it.cant)}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npRechUpdateItemField('${pfx}','${a.id}',${ii},'cant',this.value)" />
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.descripcion||'')}</span>
+      <input type="number" step="0.01" value="${esc(it.p_unitario)}" style="width:100%;text-align:right;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npRechUpdateItemField('${pfx}','${a.id}',${ii},'p_unitario',this.value)" />
+      <span id="np-rech-total-${a.id}-${ii}" style="text-align:right">${Number(it.p_total||0).toFixed(2)}</span>
+      <button class="np-item-remove" onclick="npRechRemoveItem('${pfx}','${a.id}',${ii})" title="Eliminar ítem">&#x2715;</button>
+    </div>`).join('');
+  return `
+    <div class="result-card" id="np-rech-${a.id}">
+      <div class="result-filename">Rechazada por ${esc(a.resuelto_por_nombre||'—')} · ${a.resuelto_at?new Date(a.resuelto_at).toLocaleDateString('es-AR'):''}</div>
+      <div style="font-size:13px;margin-bottom:6px"><b>${esc(d.proveedor||a.proveedor||'—')}</b> — NP ${esc(a.np_num||'—')}</div>
+      ${a.comentario_resolucion ? `<div class="status-msg status-error" style="margin-bottom:8px;display:block">Motivo: ${esc(a.comentario_resolucion)}</div>` : ''}
+      <div class="np-items-header"><span>#</span><span>Cant</span><span>Descripción</span><span style="text-align:right">P.Unit</span><span style="text-align:right">P.Total</span><span></span></div>
+      ${itemRows}
+      <button class="btn btn-primary btn-sm" onclick="npAprobReenviar('${pfx}','${a.id}')" style="margin-top:10px">↻ Corregir y reenviar a aprobación</button>
+      <div id="np-rech-status-${a.id}"></div>
+    </div>`;
+}
+
+function npRechUpdateItemField(pfx, aprobId, ii, key, val) {
+  const row = (_npRechCache[pfx]||[]).find(r=>r.id===aprobId);
+  if (!row) return;
+  const item = row.extracted_data.items[ii];
+  item[key] = val;
+  if (key === 'cant' || key === 'p_unitario') {
+    const cant = Number(item.cant)||0, pu = Number(item.p_unitario)||0;
+    item.p_total = +(cant*pu).toFixed(2);
+    const totalEl = document.getElementById(`np-rech-total-${aprobId}-${ii}`);
+    if (totalEl) totalEl.textContent = item.p_total.toFixed(2);
+  }
+}
+
+function npRechRemoveItem(pfx, aprobId, ii) {
+  const row = (_npRechCache[pfx]||[]).find(r=>r.id===aprobId);
+  if (!row) return;
+  row.extracted_data.items.splice(ii,1);
+  npRenderRechazadasFromCache(pfx);
+}
+
+async function npAprobReenviar(pfx, aprobId) {
+  const statusId = 'np-rech-status-'+aprobId;
+  const row = (_npRechCache[pfx]||[]).find(r=>r.id===aprobId);
+  if (!row) return;
+  showMsg(statusId,'loading','Guardando correcciones...');
+  try {
+    const token = await getMsToken();
+    const d = row.extracted_data;
+    const manualValues = row.manual_values || {};
+
+    if (row.registro_row) {
+      showMsg(statusId,'loading','Actualizando fila del Registro NP...');
+      await npReescribirFilaRegistro(token, pfx, row, d, manualValues);
+    }
+    if (row.excel_item_id && row.excel_site_id) {
+      showMsg(statusId,'loading','Actualizando NP generada...');
+      await npReescribirArchivoNP(token, pfx, row.excel_site_id, row.excel_item_id, d, manualValues);
+    }
+
+    showMsg(statusId,'loading','Reenviando a aprobación...');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const patchRes = await supaFetch(`/rest/v1/np_aprobaciones?id=eq.${aprobId}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+      body: JSON.stringify({
+        estado:'pendiente', extracted_data:d, manual_values:manualValues,
+        comentario_resolucion:null, resuelto_por:null, resuelto_por_nombre:null, resuelto_at:null,
+        proveedor: d.proveedor||row.proveedor
+      })
+    });
+    const patchData = await patchRes.json().catch(()=>null);
+    if (!patchRes.ok || !patchData || !patchData.length) throw new Error('No se pudo reenviar.');
+
+    // Aviso a los coordinadores — best-effort, no bloquea el reenvío si falla
+    try {
+      const coords = await npGetCoordinadores();
+      const destinatariosInfo = coords.filter(c => (row.destinatarios||[]).includes(c.id));
+      const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
+      if (destinatariosInfo.length) {
+        const html = `
+          <p>Hola! <b>${esc(nombre)}</b> corrigió la NP rechazada de <b>${esc(d.proveedor||'')}</b> (Nº ${esc(row.np_num||'')}) y la reenvía para tu aprobación.</p>
+          ${row.excel_url ? `<p><b>NP (Excel):</b> <a href="${esc(row.excel_url)}">${esc(row.excel_name||'')}</a></p>` : ''}
+          <p>Entrá a la sección ${pfx==='np-loc'?'NP Local':'NP Internacional'} de MAIA para aprobar o rechazar.</p>`;
+        await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+          body: JSON.stringify({ message: {
+            subject: `Reenvío de NP ${row.np_num||''} — ${d.proveedor||''}`,
+            body: { contentType:'HTML', content: html },
+            toRecipients: destinatariosInfo.map(c => ({ emailAddress:{ address:c.email } })),
+          }, saveToSentItems: true })
+        });
+      }
+    } catch(notifyErr) { console.warn('No se pudo notificar el reenvío:', notifyErr.message); }
+
+    showMsg(statusId,'success','✓ Corregida y reenviada a aprobación.');
+    npRenderRechazadas(pfx);
   } catch(e) {
     showMsg(statusId,'error','✕ '+e.message);
   }
@@ -4294,6 +4508,12 @@ async function npConfirmSave(pfx) {
           throw new Error(`Error al escribir fila ${firstEmptyRow}: HTTP ${writeResp.status} - ${errData?.error?.message||''}`);
         }
         console.log(`Row ${firstEmptyRow} written OK`);
+        // Se guarda en el propio objeto extraído para poder corregir esta misma fila
+        // más adelante (p.ej. si la NP se rechaza en la aprobación y hay que reenviarla).
+        d.__registroRow = firstEmptyRow;
+        d.__registroExcelId = excelItemId;
+        d.__registroSiteId = exSite;
+        d.__registroSheet = sheetName;
         firstEmptyRow++;
       }
 
@@ -5513,6 +5733,21 @@ async function notifLoadNpAprobLive() {
   } catch(e) { return []; }
 }
 
+// Igual que las pendientes: NP rechazadas dirigidas a mí (como solicitante), en vivo.
+// Desaparece sola cuando se reenvía (vuelve a estado 'pendiente').
+async function notifLoadNpRechazadasLive() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token || !currentUser?.id) return [];
+  try {
+    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=id,pfx,proveedor,np_num,resuelto_por_nombre,comentario_resolucion,resuelto_at&estado=eq.rechazado&solicitado_por=eq.${currentUser.id}&order=resuelto_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    return (rows||[]).map(a => ({
+      id: 'np-rech-'+a.id, live: true, leida: false, seccion: a.pfx, created_at: a.resuelto_at,
+      titulo: 'NP rechazada', cuerpo: `${a.proveedor||''} — NP ${a.np_num||''}${a.comentario_resolucion?': '+a.comentario_resolucion:''} (por ${a.resuelto_por_nombre||'—'})`
+    }));
+  } catch(e) { return []; }
+}
+
 async function notifLoad() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token || !currentUser?.id) return;
@@ -5522,8 +5757,8 @@ async function notifLoad() {
     generic = await res.json();
     if (!res.ok) generic = [];
   } catch(e) {}
-  const [liveHallazgos, liveNpAprob] = await Promise.all([notifLoadHallazgosLive(), notifLoadNpAprobLive()]);
-  _notifCache = [...liveHallazgos, ...liveNpAprob, ...generic].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+  const [liveHallazgos, liveNpAprob, liveNpRech] = await Promise.all([notifLoadHallazgosLive(), notifLoadNpAprobLive(), notifLoadNpRechazadasLive()]);
+  _notifCache = [...liveHallazgos, ...liveNpAprob, ...liveNpRech, ...generic].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
   notifRenderBadge();
   notifRenderList();
 }
