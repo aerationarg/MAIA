@@ -1206,12 +1206,51 @@ let currentEmpresa = localStorage.getItem('daia_empresa_activa') || 'AA';
 // ── Supabase ───────────────────────────────────────────
 const SUPA_URL = 'https://pamrmkiadojnypmaqzfm.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhbXJta2lhZG9qbnlwbWFxemZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1ODYzNzgsImV4cCI6MjA5NzE2MjM3OH0.LDFWO_oGKkVgnPRJfpzsYX8CwzpLI0tobL-eIFgJO_M';
-async function supaFetch(path, opts) {
+async function supaFetch(path, opts, _isRetry) {
   opts = opts || {};
   const res = await fetch(SUPA_URL + path, Object.assign({}, opts, {
     headers: Object.assign({ 'apikey': SUPA_KEY, 'Content-Type': 'application/json' }, opts.headers || {})
   }));
+  // Si el JWT venció (típico tras dejar la pestaña abierta más de una hora), se refresca solo y se reintenta una vez.
+  if (res.status === 401 && !_isRetry && !path.startsWith('/auth/v1/token')) {
+    const newToken = await supaTryRefreshToken();
+    if (newToken) {
+      const headers = Object.assign({}, opts.headers || {});
+      if (headers.Authorization) headers.Authorization = 'Bearer ' + newToken;
+      return supaFetch(path, Object.assign({}, opts, { headers }), true);
+    }
+    supaForceLogout();
+  }
   return res;
+}
+
+async function supaTryRefreshToken() {
+  const saved = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!saved?.refresh) return null;
+  try {
+    const r = await fetch(SUPA_URL + '/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      headers: { 'apikey': SUPA_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: saved.refresh })
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    localStorage.setItem('daia_session', JSON.stringify(Object.assign({}, saved, { token: d.access_token, refresh: d.refresh_token })));
+    return d.access_token;
+  } catch(e) { return null; }
+}
+
+function supaForceLogout() {
+  localStorage.removeItem('daia_session');
+  currentUser = null; currentSector = null;
+  const appEl = document.getElementById('app');
+  if (appEl) appEl.style.display = 'none';
+  const empresaEl = document.getElementById('empresaSelectScreen');
+  if (empresaEl) empresaEl.style.display = 'none';
+  const loginEl = document.getElementById('loginScreen');
+  if (loginEl) loginEl.style.display = 'flex';
+  const errEl = document.getElementById('login-error');
+  if (errEl) { errEl.textContent = 'Tu sesión expiró. Volvé a iniciar sesión.'; errEl.style.display = 'block'; }
 }
 
 // ── Constants ──────────────────────────────────────────
@@ -3129,6 +3168,7 @@ var DEFAULT_NP_INT_IA = [
   { name: 'fecha',             desc: 'Fecha en formato DD/MM/YYYY' },
   { name: 'moneda',            desc: 'USD u otra moneda' },
   { name: 'monto_total',       desc: 'Total como número sin símbolo' },
+  { name: 'bonificacion',      desc: 'Porcentaje de bonificación o descuento si aplica (ej: 0.05)' },
   { name: 'plazo_pago',        desc: 'Payment terms completos' },
   { name: 'plazo_entrega',     desc: 'Plazo o tiempo de entrega' },
   { name: 'incoterm',          desc: 'Incoterm completo con lugar' },
@@ -3342,7 +3382,7 @@ async function npExtractAll(pfx) {
   state.extracted = [];
   const iaFields = npGetIA(pfx).filter(f=>f.name.trim());
   const fieldDefs = iaFields.map(f=>`  "${f.name}": "${f.desc}"`).join(',\n');
-  const prompt = `Analiz\u00e1 esta Proforma y extra\u00e9 los datos en JSON. Solo JSON, sin backticks ni texto extra.\n{\n${fieldDefs},\n  "items": [{"item": n\u00famero, "cant": cantidad, "descripcion": "descripci\u00f3n", "p_unitario": precio, "p_total": total}]\n}`;
+  const prompt = `Analiz\u00e1 esta Proforma y extra\u00e9 los datos en JSON. Solo JSON, sin backticks ni texto extra.\n{\n${fieldDefs},\n  "items": [{"item": n\u00famero, "cant": cantidad, "descripcion": "descripci\u00f3n", "p_unitario": precio, "p_total": total}]\n}\nImportante: si la proforma tiene un descuento o bonificaci\u00f3n global sobre el total, el precio unitario y el total de cada \u00edtem tienen que ser el precio de LISTA (sin aplicar ese descuento) \u2014 el descuento va aparte en su propio campo, no lo repartas entre los \u00edtems.`;
 
   for (let i=0; i<state.files.length; i++) {
     const item = state.files[i];
@@ -3387,6 +3427,18 @@ async function npExtractAll(pfx) {
   btn.textContent='\u2736 Extraer datos con IA'; btn.disabled=false;
 }
 
+function npUpdateItemField(pfx, di, ii, key, val) {
+  const item = npState[pfx].extracted[di].items[ii];
+  item[key] = val;
+  if (key === 'cant' || key === 'p_unitario') {
+    const cant = Number(item.cant) || 0;
+    const pu = Number(item.p_unitario) || 0;
+    item.p_total = +(cant * pu).toFixed(2);
+    const totalEl = document.getElementById(`np-item-total-${pfx}-${di}-${ii}`);
+    if (totalEl) totalEl.textContent = item.p_total.toFixed(2);
+  }
+}
+
 function npRenderPreviewList(pfx) {
   const iaFields = npGetIA(pfx).filter(f=>f.name.trim()&&f.name!=='items');
   const state = npState[pfx];
@@ -3400,12 +3452,13 @@ function npRenderPreviewList(pfx) {
           onfocus="this.style.background='var(--blue-bg)'" onblur="this.style.background='transparent'"
           oninput="npState['${pfx}'].extracted[${di}]['${f.name.replace(/'/g,"\\\\'")}'] = this.value" />
       </div>`).join('');
-    const itemRows = (d.items||[]).map(it=>`
+    const itemRows = (d.items||[]).map((it,ii)=>`
       <div class="np-item-row">
-        <span>${it.item}</span><span>${it.cant}</span>
+        <span>${it.item}</span>
+        <input type="number" value="${esc(it.cant)}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npUpdateItemField('${pfx}',${di},${ii},'cant',this.value)" />
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.descripcion||'')}</span>
-        <span style="text-align:right">${Number(it.p_unitario||0).toFixed(2)}</span>
-        <span style="text-align:right">${Number(it.p_total||0).toFixed(2)}</span>
+        <input type="number" step="0.01" value="${esc(it.p_unitario)}" style="width:100%;text-align:right;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npUpdateItemField('${pfx}',${di},${ii},'p_unitario',this.value)" />
+        <span id="np-item-total-${pfx}-${di}-${ii}" style="text-align:right">${Number(it.p_total||0).toFixed(2)}</span>
       </div>`).join('');
     return `<div class="np-preview" style="margin-bottom:12px">
       <div style="font-size:12px;color:var(--text2);margin-bottom:8px;font-weight:600">\uD83D\uDCC4 ${esc(d.__archivo__||'')}</div>
@@ -3494,8 +3547,8 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
       const superv = supervField ? (state.manualValues[supervField.name]||'') : '';
       const lugar  = lugarField  ? (state.manualValues[lugarField.name]||'')  : '';
 
-      const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-      const fileName = `NP_${npNum||idx+1}_${(d.proveedor||'prov').split(' ')[0].replace(/[^a-zA-Z0-9]/g,'')}_${ts}.xlsx`;
+      const proveedorClean = (d.proveedor||'PROVEEDOR').replace(/[\\\/:*?"<>|]/g,'').trim().toUpperCase();
+      const fileName = `NP ${npNum||idx+1} ${proveedorClean}.xlsx`;
       btn.textContent = `⏳ Copiando plantilla (${idx+1}/${state.extracted.length})...`;
       showMsg(pfx+'-gen-status','loading',`Copiando plantilla para ${d.proveedor||''}...`);
 
