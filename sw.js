@@ -1,4 +1,4 @@
-const CACHE = 'maia-v2';
+const CACHE = 'maia-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -20,8 +20,12 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Network first para la API de Anthropic
-  if (e.request.url.includes('anthropic.com')) return;
+  // Solo intervenir en pedidos al propio origen (los assets estáticos de la app:
+  // index.html, íconos, manifest). Cualquier llamada a una API externa (Supabase,
+  // Microsoft Graph, Anthropic, MSAL, etc.) va siempre directo a la red — nunca se
+  // debe cachear ni devolver una respuesta vieja para datos que cambian en vivo
+  // (notificaciones, hallazgos, aprobaciones de NP, etc.).
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   if (e.request.method !== 'GET') return;
 
   // HTML/navegación: siempre pedir a la red primero para no quedar pegado
