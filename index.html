@@ -3777,7 +3777,8 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
         btn.textContent = '⏳ Enviando a aprobación...';
         showMsg(pfx+'-gen-status','loading','Enviando pedido de aprobación...');
         try {
-          await npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, copiedItemId, npNum);
+          const origFile = state.files.find(f => f.file.name === d.__archivo__);
+          await npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, copiedItemId, npNum, origFile);
           showMsg(pfx+'-gen-status','success','✓ NP generada en Excel y enviada a aprobación.');
         } catch(apErr) {
           showMsg(pfx+'-gen-status','error','✓ Excel generado, pero falló el envío de aprobación: '+apErr.message);
@@ -3904,7 +3905,7 @@ function npAprobRemoveArchivo(pfx, i) {
   npAprobRenderArchivosList(pfx);
 }
 
-async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, copiedItemId, npNum) {
+async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, copiedItemId, npNum, origFile) {
   const st = npAprobState[pfx];
   if (!st.destinatarios.length) throw new Error('Elegí al menos un coordinador para enviar la aprobación.');
 
@@ -3926,12 +3927,19 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
     ${st.descripcion ? `<p><b>Descripción:</b> ${esc(st.descripcion).replace(/\n/g,'<br>')}</p>` : ''}
     ${excelUrl ? `<p><b>NP (Excel):</b> <a href="${excelUrl}">${esc(fileName)}</a></p>` : ''}
     ${linksList.length ? `<p><b>Links adicionales:</b><br>${linksList.map(l=>`<a href="${esc(l)}">${esc(l)}</a>`).join('<br>')}</p>` : ''}
+    <p>Se adjunta la proforma original${st.archivos.length ? ' y los archivos adicionales' : ''}.</p>
     <p>Entrá a la sección ${pfx==='np-loc'?'NP Local':'NP Internacional'} de MAIA para aprobar o rechazar.</p>`;
 
   const attachments = st.archivos.map(a => ({
     '@odata.type': '#microsoft.graph.fileAttachment',
     name: a.name, contentType: a.type, contentBytes: a.b64
   }));
+  if (origFile?.b64) {
+    attachments.unshift({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: origFile.file.name, contentType: origFile.file.type || 'application/octet-stream', contentBytes: origFile.b64
+    });
+  }
 
   const mailBody = { message: {
     subject: `Aprobación de NP ${npNum||''} — ${d.proveedor||''}`,
@@ -3953,6 +3961,7 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
       pfx, empresa: currentEmpresa, np_num: npNum||'', proveedor: d.proveedor||'',
       descripcion: st.descripcion||'', links: linksList.join('\n'),
       excel_url: excelUrl, excel_name: fileName,
+      excel_item_id: copiedItemId, excel_site_id: destSiteId,
       solicitado_por: currentUser.id, solicitado_por_nombre: nombre,
       destinatarios: st.destinatarios, estado:'pendiente'
     })
@@ -3991,6 +4000,21 @@ async function npRenderAprobacionesPendientes(pfx) {
   } catch(e) { card.style.display='none'; }
 }
 
+async function npGenerarPdfAlAprobar(token, siteId, excelItemId, excelName) {
+  const pdfResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}/content?format=pdf`, {headers:{Authorization:'Bearer '+token}});
+  if (!pdfResp.ok) throw new Error('No se pudo convertir a PDF.');
+  const pdfBytes = await pdfResp.arrayBuffer();
+  const parentResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}?$select=parentReference`, {headers:{Authorization:'Bearer '+token}});
+  if (!parentResp.ok) throw new Error('No se pudo ubicar la carpeta del Excel.');
+  const parentData = await parentResp.json();
+  const parentId = parentData.parentReference?.id;
+  if (!parentId) throw new Error('No se pudo ubicar la carpeta del Excel.');
+  const pdfName = excelName.replace(/\.xlsx$/i,'.pdf');
+  const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${parentId}:/${encodeURIComponent(pdfName)}:/content`;
+  const uploadResp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token,'Content-Type':'application/pdf'}, body: pdfBytes });
+  if (!uploadResp.ok) throw new Error('No se pudo subir el PDF a SharePoint.');
+}
+
 async function npAprobResolver(pfx, id, aprobado) {
   const statusId = 'np-aprob-status-'+id;
   const comentario = aprobado ? '' : (prompt('Motivo del rechazo (opcional):')||'');
@@ -4008,9 +4032,19 @@ async function npAprobResolver(pfx, id, aprobado) {
     });
     const data = await res.json().catch(()=>null);
     if (!res.ok || !data || !data.length) throw new Error('No se pudo guardar.');
+    const row = data[0];
+
+    // Al aprobar, se completa la NP generando y subiendo el PDF (best-effort)
+    if (aprobado && row.excel_item_id && row.excel_site_id) {
+      try {
+        showMsg(statusId,'loading','Generando PDF...');
+        const token = await getMsToken();
+        await npGenerarPdfAlAprobar(token, row.excel_site_id, row.excel_item_id, row.excel_name || 'NP.xlsx');
+      } catch(pdfErr) { console.warn('No se pudo generar el PDF al aprobar:', pdfErr.message); }
+    }
+
     // Notificar al solicitante — best-effort, no bloquea la resolución si falla
     try {
-      const row = data[0];
       const profResp = await supaFetch(`/rest/v1/profiles?id=eq.${row.solicitado_por}&select=email`, {headers:{Authorization:'Bearer '+session.token}});
       const prof = (await profResp.json())[0];
       if (prof?.email) {
