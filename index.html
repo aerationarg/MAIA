@@ -762,6 +762,18 @@
     <!-- ═══ PANEL: Config Procesos IA ═══ -->
     <div class="panel" id="panel-cfg-procesos">
       <div class="card">
+        <div class="card-label">Campos IA — Análisis de cliente (Paso 1)</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Qué campos extrae la IA al analizar la info de un cliente nuevo. La descripción de cada campo es la instrucción que recibe la IA — por ejemplo, para "Normativa aplicable" podés pedirle explícitamente que la infiera según ubicación y tipo de vuelco.</p>
+        <div id="procesos-ia-field-list"></div>
+        <button class="btn btn-secondary" onclick="procesosIAAddField()" style="margin-top:4px">+ Agregar campo</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Documentos de referencia</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Normativas, planillas de cálculo e información general de la empresa, vinculadas desde SharePoint. Los de "Normativa" e "Información general" se adjuntan solos en el Paso 1; los de "Planilla de cálculo" e "Información general" se adjuntan solos en el Paso 2.</p>
+        <div id="procesos-documentos-list"></div>
+        <button class="btn btn-secondary" onclick="procesosDocAdd()" style="margin-top:4px">+ Agregar documento</button>
+      </div>
+      <div class="card">
         <div class="card-label">Base de proyectos anteriores</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usa para que la IA detecte automáticamente proyectos parecidos al analizar un cliente nuevo. Cargá acá los proyectos ya hechos por la empresa: nombre, rubro/tags y una breve descripción alcanzan para que la IA los compare.</p>
         <div id="procesos-catalogo-list"></div>
@@ -1342,6 +1354,19 @@ function FIELDS_KEY()     { return 'rend_fields_' + currentEmpresa; }
 function NP_FIELDS_KEY()  { return 'np_fields_' + currentEmpresa; }
 const API_KEY_KEY    = 'rend_api_key';
 
+const DEFAULT_PROCESOS_IA_FIELDS = [
+  { name: 'Ubicación',            desc: 'Ubicación geográfica del proyecto/cliente (provincia, localidad, país si aplica).' },
+  { name: 'Tipo de vuelco',       desc: 'Tipo de vuelco o descarga mencionado (cloacal, industrial, pluvial, etc.), si aplica.' },
+  { name: 'Normativa aplicable',  desc: 'Normativa ambiental/de vertido aplicable según la ubicación y el tipo de vuelco. Si no está explícita en los documentos, inferila con tu conocimiento según la jurisdicción y el tipo de vuelco detectados.' },
+  { name: 'Tecnología solicitada',desc: 'Tecnología particular que pide o prefiere el cliente, si menciona alguna.' },
+  { name: 'Alcance del proyecto', desc: 'Qué se pide específicamente: equipos, servicios, obra, etc.' },
+  { name: 'Contexto y necesidad', desc: 'Por qué necesita el proyecto, problema a resolver.' },
+  { name: 'Restricciones',        desc: 'Condicionantes, plazos, presupuesto u otras restricciones mencionadas.' },
+];
+function PROCESOS_IA_KEY() { return 'procesos_ia_fields_' + currentEmpresa; }
+function getProcesosIAFields()  { return JSON.parse(localStorage.getItem(PROCESOS_IA_KEY()) || 'null') || DEFAULT_PROCESOS_IA_FIELDS; }
+function saveProcesosIAFields(f){ localStorage.setItem(PROCESOS_IA_KEY(), JSON.stringify(f)); }
+
 const DEFAULT_REND_FIELDS = [
   { name: 'Fecha',               desc: 'Fecha del comprobante (DD/MM/AAAA)' },
   { name: 'Proveedor',           desc: 'Razón social o nombre del emisor' },
@@ -1494,7 +1519,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') renderProcesosCatalogo();
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); }
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -1573,6 +1598,7 @@ var fieldListGetters = {
   'np-loc-manual': [()=>npGetManual('np-loc'),  f=>npSaveManual('np-loc',f),()=>npCfgRenderManual('np-loc')],
   'np-int-ia':     [()=>npGetIA('np-int'),      f=>npSaveIA('np-int',f),    ()=>npCfgRenderIA('np-int')],
   'np-int-manual': [()=>npGetManual('np-int'),  f=>npSaveManual('np-int',f),()=>npCfgRenderManual('np-int')],
+  'procesos-ia':   [()=>getProcesosIAFields(),  f=>saveProcesosIAFields(f), ()=>renderProcesosIAFields()],
 };
 
 function reorderField(listKey, idx, dir) {
@@ -2546,6 +2572,133 @@ let _procesosSaveTimeout = null;
 const PROCESOS_STEP_FIELD = { 2:'diseno', 3:'etapas_equipos', 4:'propuesta_texto' };
 const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:'Definir etapas y equipos', 4:'Generar la propuesta' };
 
+// ── Campos IA — qué extrae el análisis del cliente (Cfg Procesos IA) ──
+function renderProcesosIAFields() {
+  const fields = getProcesosIAFields();
+  const el = document.getElementById('procesos-ia-field-list');
+  if (!el) return;
+  el.innerHTML = fields.map((f, i) => `
+    <div class="field-row">
+      <div class="field-row-top">
+        <div class="reorder-btns">
+          <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},-1)" ${i===0?'disabled':''}>&#9650;</button>
+          <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},1)" ${i===fields.length-1?'disabled':''}>&#9660;</button>
+        </div>
+        <input value="${esc(f.name)}" placeholder="Nombre del campo" oninput="procesosIAUpdateField(${i},'name',this.value)" />
+        <button class="remove-btn" onclick="procesosIARemoveField(${i})">&#x2715;</button>
+      </div>
+      <input class="desc-input" value="${esc(f.desc)}" placeholder="Descripción / instrucción para la IA" oninput="procesosIAUpdateField(${i},'desc',this.value)" />
+    </div>`).join('');
+}
+function procesosIAUpdateField(i, key, val) { const f=getProcesosIAFields(); f[i][key]=val; saveProcesosIAFields(f); }
+function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1); saveProcesosIAFields(f); renderProcesosIAFields(); }
+function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:''}); saveProcesosIAFields(f); renderProcesosIAFields(); }
+
+// ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
+const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', otro:'Otro' };
+let _procesosDocTarget = null;
+
+async function renderProcesosDocumentos() {
+  const el = document.getElementById('procesos-documentos-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_documentos?select=*&empresa=eq.${currentEmpresa}&order=categoria,nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay documentos de referencia cargados.</p>'; return; }
+    el.innerHTML = rows.map(d => `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(d.nombre)}" placeholder="Nombre" oninput="procesosDocUpdate('${d.id}','nombre',this.value)" />
+          <button class="remove-btn" onclick="procesosDocEliminar('${d.id}')">&#x2715;</button>
+        </div>
+        <div class="field-row-type-wrap">
+          <select class="type-select" onchange="procesosDocUpdate('${d.id}','categoria',this.value)">
+            ${Object.entries(PROCESOS_DOC_CATEGORIAS).map(([val,label])=>`<option value="${val}" ${d.categoria===val?'selected':''}>${esc(label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="sp-selected" style="margin-top:6px">
+          <span style="font-size:12px">${esc(d.path || 'Sin vincular')}</span>
+          <button class="sp-browse-btn" onclick="procesosDocSelectFile('${d.id}')">Vincular archivo</button>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; }
+}
+
+async function procesosDocAdd() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_documentos', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, nombre: 'Nuevo documento', categoria: 'otro' })
+  });
+  if (!res.ok) { alert('No se pudo agregar.'); return; }
+  renderProcesosDocumentos();
+}
+async function procesosDocUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function procesosDocEliminar(id) {
+  if (!confirm('¿Eliminar este documento de referencia?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosDocumentos();
+}
+function procesosDocSelectFile(id) {
+  _procesosDocTarget = id;
+  fbOpen('file', 'procesos-doc-file');
+}
+async function procesosDocSaveFile(id, path, itemId, siteId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ path, item_id: itemId, site_id: siteId })
+  });
+  renderProcesosDocumentos();
+}
+
+async function procesosGetDocumentosPorCategoria(categorias) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_documentos?select=*&empresa=eq.${currentEmpresa}&categoria=in.(${categorias.join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
+  const rows = await res.json();
+  return (res.ok && Array.isArray(rows)) ? rows.filter(d=>d.item_id && d.site_id) : [];
+}
+
+// Descarga un documento de SharePoint (convirtiendo a PDF si no es ya PDF/imagen) y lo arma como content block para Claude
+async function procesosDocAsContentBlock(token, doc) {
+  const isPdf = /\.pdf$/i.test(doc.nombre||'') || /\.pdf$/i.test(doc.path||'');
+  const isImg = /\.(jpg|jpeg|png)$/i.test(doc.nombre||'') || /\.(jpg|jpeg|png)$/i.test(doc.path||'');
+  const needsConvert = !isPdf && !isImg;
+  const dlUrl = needsConvert
+    ? `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}/content?format=pdf`
+    : `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}/content`;
+  const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+  if (!dlResp.ok) return null;
+  const buf = await dlResp.arrayBuffer();
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const b64 = btoa(binary);
+  if (needsConvert || isPdf) return {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}};
+  const mt = /\.png$/i.test(doc.nombre||doc.path||'') ? 'image/png' : 'image/jpeg';
+  return {type:'image', source:{type:'base64', media_type:mt, data:b64}};
+}
+
+// Extiende el selector de archivos compartido para vincular documentos de referencia
+var _origFbSFProcesos = fbSelectFile;
+fbSelectFile = async function(item, relativePath) {
+  if (fbTarget === 'procesos-doc-file' && _procesosDocTarget) {
+    await procesosDocSaveFile(_procesosDocTarget, relativePath, item.id, fbCurrentSiteId);
+    fbClose();
+    return;
+  }
+  await _origFbSFProcesos(item, relativePath);
+};
+
 // ── Catálogo de proyectos anteriores (Cfg Procesos IA) ──
 async function renderProcesosCatalogo() {
   const el = document.getElementById('procesos-catalogo-list');
@@ -2761,7 +2914,10 @@ function procesosStep1RemoveFile(i) { procesosStep1Files.splice(i,1); renderProc
 
 function procesosStep1Html(p) {
   const info = p.info_cliente || {};
+  const campos = info.campos || {};
+  const tieneAnalisis = Object.keys(campos).length > 0;
   const refs = p.proyectos_referencia || [];
+  const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
   return `
     <div class="card-label">Paso 1 — Analizar cliente</div>
     <label>Nombre del cliente</label>
@@ -2779,14 +2935,19 @@ function procesosStep1Html(p) {
       <span style="font-size:13px">${procesosStep1SpFolder ? esc(procesosStep1SpFolder.label) : 'O elegí una carpeta de SharePoint con los archivos del cliente'}</span>
       <button class="sp-browse-btn" onclick="procesosStep1SelectFolder()">Seleccionar carpeta</button>
     </div>
+    <p class="hint" style="margin-bottom:10px">También se suman solos los documentos de "Normativa" e "Información general" cargados en Cfg Procesos IA.</p>
 
-    <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ Analizar con IA</button>
+    <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ ${tieneAnalisis?'Volver a analizar':'Analizar'} con IA</button>
     <div id="procesos-step1-status"></div>
 
-    ${info.resumen ? `
+    ${tieneAnalisis ? `
       <div class="gap"></div>
-      <label>Resumen del cliente (editable)</label>
-      <textarea id="procesos-step1-resumen" rows="10" oninput="procesosSaveProyectoDebounced({info_cliente: Object.assign({}, procesosCurrentProyecto.info_cliente, {resumen:this.value})})">${esc(info.resumen)}</textarea>
+      <label>Información extraída (editable)</label>
+      ${iaFields.map(f => `
+        <div class="result-field">
+          <span class="result-key">${esc(f.name)}</span>
+          <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${f.name.replace(/'/g,"\\'")}',this.value)" />
+        </div>`).join('')}
       <div class="gap"></div>
       <div class="card-label">Proyectos anteriores parecidos (detectados por IA)</div>
       <div id="procesos-step1-similares-status"></div>
@@ -2802,6 +2963,13 @@ function procesosStep1Html(p) {
   `;
 }
 
+function procesosUpdateCampoCliente(fieldName, val) {
+  const p = procesosCurrentProyecto;
+  const info = Object.assign({}, p.info_cliente);
+  info.campos = Object.assign({}, info.campos, { [fieldName]: val });
+  procesosSaveProyectoDebounced({ info_cliente: info });
+}
+
 async function procesosStep1Analizar() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-status';
@@ -2809,6 +2977,9 @@ async function procesosStep1Analizar() {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible. Recargá la página.');
+    const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
+    if (!iaFields.length) throw new Error('Configurá al menos un campo en Cfg Procesos IA.');
+
     const contentBlocks = [];
     for (const item of procesosStep1Files) {
       const b64 = await fileToBase64(item.file);
@@ -2817,9 +2988,11 @@ async function procesosStep1Analizar() {
         ? {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}
         : {type:'image', source:{type:'base64', media_type:item.file.type, data:b64}});
     }
+
+    let token = null;
     if (procesosStep1SpFolder) {
       showMsg(statusId,'loading','Leyendo carpeta de SharePoint...');
-      const token = await getMsToken();
+      token = token || await getMsToken();
       const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${procesosStep1SpFolder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
       if (childrenResp.ok) {
         const children = (await childrenResp.json()).value || [];
@@ -2850,17 +3023,31 @@ async function procesosStep1Analizar() {
     }
     if (!contentBlocks.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
+    // Documentos de referencia que se adjuntan solos en este paso: Normativa + Información general
+    showMsg(statusId,'loading','Buscando documentos de referencia...');
+    const docsRef = await procesosGetDocumentosPorCategoria(['normativa','informacion_general']);
+    if (docsRef.length) {
+      token = token || await getMsToken();
+      for (const doc of docsRef) {
+        showMsg(statusId,'loading',`Adjuntando ${doc.nombre}...`);
+        const block = await procesosDocAsContentBlock(token, doc);
+        if (block) contentBlocks.push(block);
+      }
+    }
+
     showMsg(statusId,'loading','Analizando con IA...');
-    const prompt = 'Analizá toda la información adjunta sobre este cliente/proyecto y armá un resumen estructurado en español, en texto plano con títulos simples (sin tablas markdown), cubriendo: datos del cliente, contexto y necesidad del proyecto, alcance solicitado, restricciones o condicionantes, y cualquier dato técnico relevante para diseñar una propuesta. Sé concreto y organizado.';
+    const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n');
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible (por ejemplo la normativa aplicable a partir de la ubicación y el tipo de vuelco), hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null.\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     const data = await resp.json();
-    const resumen = data.content?.find(c=>c.type==='text')?.text || '';
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const campos = JSON.parse(text.replace(/```json|```/g,'').trim());
 
-    await procesosSaveProyecto({ info_cliente: Object.assign({}, p.info_cliente, { resumen }) });
+    await procesosSaveProyecto({ info_cliente: { campos } });
     showMsg(statusId,'success','✓ Análisis completo.');
     renderProcesosStepContent();
     procesosDetectarSimilares();
@@ -2883,7 +3070,7 @@ async function procesosDetectarSimilares() {
     if (!res.ok || !Array.isArray(catalogo) || !catalogo.length) { if(hasEl) showMsg(statusId,'error','No hay proyectos cargados en el catálogo (Cfg Procesos IA).'); return; }
 
     const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion||''}`).join('\n');
-    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${p.info_cliente?.resumen||''}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
+    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -2937,10 +3124,17 @@ function procesosStepGenericHtml(p, step) {
   `;
 }
 
+function procesosResumenCampos(p) {
+  const campos = p.info_cliente?.campos || {};
+  const entries = Object.entries(campos).filter(([,v]) => v != null && v !== '');
+  if (!entries.length) return '(sin analizar todavía)';
+  return entries.map(([k,v]) => `${k}: ${v}`).join('\n');
+}
+
 function procesosBuildContexto(hastaStep) {
   const p = procesosCurrentProyecto;
   let ctx = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n\n`;
-  if (p.info_cliente?.resumen) ctx += `Resumen del cliente/proyecto:\n${p.info_cliente.resumen}\n\n`;
+  if (p.info_cliente?.campos) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
   const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
   if (hastaStep > 2 && p.diseno) ctx += `Diseño del proyecto definido:\n${p.diseno}\n\n`;
@@ -2959,14 +3153,30 @@ async function procesosGenerarPaso(step) {
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(step);
     const instrucciones = {
-      2: 'Diseñá el proyecto: enfoque técnico, componentes principales, criterios de dimensionamiento, y cualquier definición necesaria antes de armar etapas y equipos. Si hay una planilla de cálculo de referencia, indicá qué valores/parámetros usarías y por qué (todavía no tenemos integración directa con esa planilla, así que dejalo en forma de recomendación de valores).',
+      2: 'Diseñá el proyecto: enfoque técnico, componentes principales, criterios de dimensionamiento, y cualquier definición necesaria antes de armar etapas y equipos. Si hay planillas de cálculo o información general adjuntas, usalas como referencia concreta para proponer valores/parámetros reales, no solo genéricos.',
       3: 'Definí las etapas del proyecto (con una breve descripción de cada una) y el equipo/roles necesarios para ejecutarlo.',
       4: 'Redactá la propuesta final para el cliente (oferta técnica y comercial), en el tono y formato habitual de una propuesta profesional de ingeniería/servicios, integrando todo lo definido en los pasos anteriores.'
     }[step];
     const prompt = `${contexto}\n${instrucciones}${userPrompt ? '\n\nIndicaciones adicionales del usuario: '+userPrompt : ''}`;
+
+    const contentBlocks = [];
+    if (step === 2) {
+      showMsg(statusId,'loading','Buscando documentos de referencia...');
+      const docsRef = await procesosGetDocumentosPorCategoria(['planilla_calculo','informacion_general']);
+      if (docsRef.length) {
+        const token = await getMsToken();
+        for (const doc of docsRef) {
+          showMsg(statusId,'loading',`Adjuntando ${doc.nombre}...`);
+          const block = await procesosDocAsContentBlock(token, doc);
+          if (block) contentBlocks.push(block);
+        }
+      }
+      showMsg(statusId,'loading','Generando con IA...');
+    }
+
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     const data = await resp.json();
