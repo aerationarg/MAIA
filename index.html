@@ -4110,18 +4110,35 @@ async function npAprobResolver(pfx, id, aprobado) {
 }
 
 // ── NP rechazadas: corregir y reenviar ───────────────
-async function npReescribirFilaRegistro(token, pfx, row, d, manualValues) {
-  if (!row.registro_row || !row.registro_excel_id || !row.registro_site_id) return;
+// "Corregir y reenviar" = borrar lo generado antes y rehacerlo de cero (más robusto
+// que editar celdas de un archivo/fila ya existente).
+async function npEliminarFilaRegistro(token, row) {
   const sheetName = row.registro_sheet || 'Hoja1';
   const excelBase = `https://graph.microsoft.com/v1.0/sites/${row.registro_site_id}/drive/items/${row.registro_excel_id}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
+  await fetch(excelBase + `range(address='A${row.registro_row}:Z${row.registro_row}')/delete`, {
+    method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({shift:'Up'})
+  });
+}
+
+async function npInsertarFilaRegistro(token, pfx, siteId, excelItemId, sheetName, d, manualValues) {
+  sheetName = sheetName || 'Hoja1';
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
   const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
   if (!usedResp.ok) throw new Error('No se pudo leer el Registro NP.');
   const usedData = await usedResp.json();
-  const headers = usedData.values?.[0] || [];
+  const allRows = usedData.values || [];
+  const headers = allRows[0] || [];
   const manualFields = npGetManual(pfx);
   const iaFields = npGetIA(pfx).filter(f=>f.name.trim());
   const savedMap = getMapping(NP_KEYS(pfx).map);
   const useMap = Object.keys(savedMap).length>0 && headers.length>0;
+
+  let firstEmptyRow = 2;
+  for (let i=1; i<allRows.length; i++) {
+    if (allRows[i].every(c => c===null || c==='' || c===undefined)) { firstEmptyRow = i + 1; break; }
+    firstEmptyRow = i + 2;
+  }
+
   let newRow;
   if (useMap) {
     newRow = buildRowFromMapping(savedMap, headers, d, manualValues, manualFields, iaFields);
@@ -4133,6 +4150,7 @@ async function npReescribirFilaRegistro(token, pfx, row, d, manualValues) {
       if(mf){newRow[i]=manualValues[mf.name]||'';return;}
       const ia=iaFields.find(f=>strSimilarity(f.name,String(h))>0.5);
       if(ia) newRow[i]=d[ia.name]!=null?d[ia.name]:'';
+      if(String(h).toLowerCase().includes('fecha')&&!String(h).toLowerCase().includes('entrega')) newRow[i]=today();
     });
   }
   const colCount = headers.length || 18;
@@ -4142,10 +4160,68 @@ async function npReescribirFilaRegistro(token, pfx, row, d, manualValues) {
   const lastCol = colNum <= 26
     ? String.fromCharCode(64 + colNum)
     : String.fromCharCode(64 + Math.floor((colNum-1)/26)) + String.fromCharCode(65 + ((colNum-1)%26));
-  const writeResp = await fetch(excelBase + `range(address='A${row.registro_row}:${lastCol}${row.registro_row}')`, {
+  const writeResp = await fetch(excelBase + `range(address='A${firstEmptyRow}:${lastCol}${firstEmptyRow}')`, {
     method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[rowToWrite]})
   });
-  if (!writeResp.ok) throw new Error('No se pudo actualizar la fila del Registro NP.');
+  if (!writeResp.ok) throw new Error('No se pudo escribir la fila en el Registro NP.');
+  return { row: firstEmptyRow, sheetName };
+}
+
+async function npCopiarYEscribirPlantilla(token, pfx, tmpl, destSiteId, destFolderId, d, manualValues, npNum) {
+  const tmplSiteId = tmpl.siteId || destSiteId;
+  const proveedorClean = (d.proveedor||'PROVEEDOR').replace(/[\\\/:*?"<>|]/g,'').trim().toUpperCase();
+  const fileName = `NP ${npNum||''} ${proveedorClean}.xlsx`;
+
+  const copyUrl = tmpl.id
+    ? `https://graph.microsoft.com/v1.0/sites/${tmplSiteId}/drive/items/${tmpl.id}/copy`
+    : `https://graph.microsoft.com/v1.0/sites/${tmplSiteId}/drive/root:/${tmpl.path.split('/').map(encodeURIComponent).join('/')}:/copy`;
+
+  const driveResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive`, {headers:{Authorization:'Bearer '+token}});
+  if (!driveResp.ok) throw new Error('No se pudo obtener el drive destino.');
+  const destDriveId = (await driveResp.json()).id;
+
+  const copyBody = { name: fileName, parentReference: { driveId: destDriveId, id: destFolderId } };
+  const copyResp = await fetch(copyUrl, {
+    method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json', Prefer:'respond-async'},
+    body: JSON.stringify(copyBody)
+  });
+  if (!copyResp.ok) {
+    if (copyResp.status === 409) throw new Error('Ya existe un archivo con ese nombre en esa carpeta.');
+    throw new Error('Error al copiar plantilla: HTTP '+copyResp.status);
+  }
+
+  let copiedItemId = null;
+  const monitorUrl = copyResp.headers.get('Location');
+  if (monitorUrl) {
+    for (let attempt=0; attempt<30; attempt++) {
+      await new Promise(r=>setTimeout(r,1500));
+      const pollResp = await fetch(monitorUrl);
+      if (!pollResp.ok) break;
+      const pollData = await pollResp.json();
+      if (pollData.status === 'completed') { copiedItemId = pollData.resourceId; break; }
+      if (pollData.status === 'failed') throw new Error('Falló la copia de la plantilla.');
+    }
+  }
+  if (!copiedItemId) {
+    await new Promise(r=>setTimeout(r,2000));
+    const searchResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${destFolderId}/children?$filter=name eq '${encodeURIComponent(fileName)}'`, {headers:{Authorization:'Bearer '+token}});
+    if (searchResp.ok) {
+      const searchData = await searchResp.json();
+      const found = (searchData.value||[]).find(f=>f.name===fileName);
+      if (found) copiedItemId = found.id;
+    }
+  }
+  if (!copiedItemId) throw new Error('No se pudo encontrar el archivo copiado en SharePoint.');
+
+  await npReescribirArchivoNP(token, pfx, destSiteId, copiedItemId, d, manualValues);
+
+  let webUrl = '';
+  try {
+    const infoResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${copiedItemId}?$select=webUrl`, {headers:{Authorization:'Bearer '+token}});
+    if (infoResp.ok) webUrl = (await infoResp.json()).webUrl || '';
+  } catch(e) {}
+
+  return { newExcelItemId: copiedItemId, newFileName: fileName, newExcelUrl: webUrl };
 }
 
 async function npReescribirArchivoNP(token, pfx, siteId, itemId, d, manualValues) {
@@ -4310,19 +4386,51 @@ async function npAprobReenviar(pfx, aprobId) {
   const statusId = 'np-rech-status-'+aprobId;
   const row = (_npRechCache[pfx]||[]).find(r=>r.id===aprobId);
   if (!row) return;
-  showMsg(statusId,'loading','Guardando correcciones...');
+  showMsg(statusId,'loading','Preparando...');
   try {
     const token = await getMsToken();
     const d = row.extracted_data;
     const manualValues = row.manual_values || {};
+    const tmpl = npGetTmpl(pfx);
+    if (!tmpl.id && !tmpl.path) throw new Error('No hay plantilla NP configurada en Cfg NP.');
 
-    if (row.registro_row) {
-      showMsg(statusId,'loading','Actualizando fila del Registro NP...');
-      await npReescribirFilaRegistro(token, pfx, row, d, manualValues);
+    // Ubicar la carpeta donde estaba la NP anterior, antes de borrarla
+    let destSiteId = row.excel_site_id, destFolderId = null;
+    if (row.excel_item_id) {
+      showMsg(statusId,'loading','Ubicando carpeta destino...');
+      try {
+        const parentResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${row.excel_item_id}?$select=parentReference`, {headers:{Authorization:'Bearer '+token}});
+        if (parentResp.ok) destFolderId = (await parentResp.json()).parentReference?.id || null;
+      } catch(e) {}
     }
-    if (row.excel_item_id && row.excel_site_id) {
-      showMsg(statusId,'loading','Actualizando NP generada...');
-      await npReescribirArchivoNP(token, pfx, row.excel_site_id, row.excel_item_id, d, manualValues);
+    if (!destFolderId) throw new Error('No se pudo ubicar la carpeta de la NP anterior (¿se movió o borró el archivo en SharePoint?).');
+
+    if (row.excel_item_id) {
+      showMsg(statusId,'loading','Eliminando NP anterior...');
+      try {
+        await fetch(`https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/items/${row.excel_item_id}`, { method:'DELETE', headers:{Authorization:'Bearer '+token} });
+      } catch(e) { throw new Error('Al eliminar la NP anterior: ' + e.message); }
+    }
+
+    if (row.registro_row && row.registro_excel_id && row.registro_site_id) {
+      showMsg(statusId,'loading','Eliminando fila anterior del Registro NP...');
+      try {
+        await npEliminarFilaRegistro(token, row);
+      } catch(e) { throw new Error('Al eliminar la fila anterior del Registro NP: ' + e.message); }
+    }
+
+    showMsg(statusId,'loading','Generando NP nueva...');
+    let gen;
+    try {
+      gen = await npCopiarYEscribirPlantilla(token, pfx, tmpl, destSiteId, destFolderId, d, manualValues, row.np_num);
+    } catch(e) { throw new Error('Al generar la NP: ' + e.message); }
+
+    let newRegistroInfo = null;
+    if (row.registro_excel_id && row.registro_site_id) {
+      showMsg(statusId,'loading','Reinsertando en el Registro NP...');
+      try {
+        newRegistroInfo = await npInsertarFilaRegistro(token, pfx, row.registro_site_id, row.registro_excel_id, row.registro_sheet, d, manualValues);
+      } catch(e) { throw new Error('Al reinsertar en el Registro NP: ' + e.message); }
     }
 
     showMsg(statusId,'loading','Reenviando a aprobación...');
@@ -4332,7 +4440,9 @@ async function npAprobReenviar(pfx, aprobId) {
       body: JSON.stringify({
         estado:'pendiente', extracted_data:d, manual_values:manualValues,
         comentario_resolucion:null, resuelto_por:null, resuelto_por_nombre:null, resuelto_at:null,
-        proveedor: d.proveedor||row.proveedor
+        proveedor: d.proveedor||row.proveedor,
+        excel_item_id: gen.newExcelItemId, excel_name: gen.newFileName, excel_url: gen.newExcelUrl || row.excel_url,
+        registro_row: newRegistroInfo ? newRegistroInfo.row : row.registro_row
       })
     });
     const patchData = await patchRes.json().catch(()=>null);
@@ -4346,7 +4456,7 @@ async function npAprobReenviar(pfx, aprobId) {
       if (destinatariosInfo.length) {
         const html = `
           <p>Hola! <b>${esc(nombre)}</b> corrigió la NP rechazada de <b>${esc(d.proveedor||'')}</b> (Nº ${esc(row.np_num||'')}) y la reenvía para tu aprobación.</p>
-          ${row.excel_url ? `<p><b>NP (Excel):</b> <a href="${esc(row.excel_url)}">${esc(row.excel_name||'')}</a></p>` : ''}
+          ${gen.newExcelUrl ? `<p><b>NP (Excel):</b> <a href="${esc(gen.newExcelUrl)}">${esc(gen.newFileName||'')}</a></p>` : ''}
           <p>Entrá a la sección ${pfx==='np-loc'?'NP Local':'NP Internacional'} de MAIA para aprobar o rechazar.</p>`;
         await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
           method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
