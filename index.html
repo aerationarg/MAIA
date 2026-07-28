@@ -1100,6 +1100,17 @@
   </div><!-- end .main-area -->
 </div><!-- end .app -->
 
+  <!-- ═══ Historial Modal ═══ -->
+  <div class="modal-overlay hidden" id="historialModal" onclick="if(event.target===this)historialModalClose()">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Historial</h2>
+        <button class="modal-close" onclick="historialModalClose()">✕</button>
+      </div>
+      <div class="modal-body" id="historial-modal-body"></div>
+    </div>
+  </div>
+
   <!-- ═══ SharePoint Upload Modal ═══ -->
   <div class="modal-overlay hidden" id="spModal" onclick="if(event.target===this)spModalClose()">
     <div class="modal">
@@ -1831,6 +1842,50 @@ async function uploadToSharePoint(token, siteId, folderPath, fileName, content, 
   return await resp.json();
 }
 
+// ── Historial de eventos (auditoría) — Hallazgos y NP ────
+const HISTORIAL_EVENTO_LABELS = {
+  creado: 'Creado', asignado: 'Asignado', completado: 'Completado',
+  insertado: 'Insertado en Excel', enviado_aprobacion: 'Enviado a aprobación',
+  aprobado: 'Aprobado', rechazado: 'Rechazado', reenviado: 'Corregido y reenviado',
+  eliminado: 'Eliminado'
+};
+
+// Best-effort: si falla el registro de historial, nunca bloquea la acción principal.
+async function logEvento(tabla, registroId, evento, detalle) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (!session?.token) return;
+    await supaFetch('/rest/v1/historial_eventos', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({
+        tabla, registro_id: registroId, evento,
+        actor_id: currentUser?.id || null, actor_nombre: currentUser?.nombre || currentUser?.email || null,
+        detalle: detalle || null
+      })
+    });
+  } catch(e) { console.warn('No se pudo registrar el evento de historial:', e.message); }
+}
+
+async function verHistorial(tabla, registroId) {
+  const modal = document.getElementById('historialModal');
+  const body = document.getElementById('historial-modal-body');
+  body.innerHTML = '<div class="empty">Cargando...</div>';
+  modal.classList.remove('hidden');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/historial_eventos?select=*&tabla=eq.${tabla}&registro_id=eq.${registroId}&order=created_at.asc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { body.innerHTML = '<div class="empty">Sin historial registrado todavía.</div>'; return; }
+    body.innerHTML = rows.map(ev => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;font-weight:600">${esc(HISTORIAL_EVENTO_LABELS[ev.evento]||ev.evento)}</div>
+        <div style="font-size:12px;color:var(--text2)">${esc(ev.actor_nombre||'—')} · ${new Date(ev.created_at).toLocaleString('es-AR')}</div>
+        ${ev.detalle ? `<div style="font-size:12.5px;margin-top:4px">${esc(ev.detalle)}</div>` : ''}
+      </div>`).join('');
+  } catch(e) { body.innerHTML = '<div class="empty">Error al cargar historial.</div>'; }
+}
+function historialModalClose() { document.getElementById('historialModal').classList.add('hidden'); }
+
 // ── Viajes ──────────────────────────────────────────────
 function VIAJES_CFG_KEY() { return 'viajes_cfg_' + currentEmpresa; }
 function getViajesCfg() { return JSON.parse(localStorage.getItem(VIAJES_CFG_KEY()) || 'null') || { recipients: '' }; }
@@ -2100,7 +2155,11 @@ async function hallazgosSubmitNuevo() {
           estado: 'pendiente', descripcion
         })
       });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
+      const created = await res.json();
+      if (!res.ok) throw new Error(created.message || 'Error al crear el hallazgo.');
+      const newId = created[0]?.id;
+      logEvento('hallazgo', newId, 'creado', descripcion.slice(0,150));
+      logEvento('hallazgo', newId, 'asignado', 'Asignado a ' + asignadoNombre);
       btn.textContent = '⏳ Enviando notificación...';
       // El hallazgo ya se creó; si la notificación falla no hay que mostrar error de creación
       try {
@@ -2128,7 +2187,11 @@ async function hallazgosSubmitNuevo() {
           fecha_estimada: fechaEstimada || null, completado_at: new Date().toISOString()
         })
       });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.message || 'Error al crear el hallazgo.'); }
+      const created2 = await res.json();
+      if (!res.ok) throw new Error(created2.message || 'Error al crear el hallazgo.');
+      const newId2 = created2[0]?.id;
+      logEvento('hallazgo', newId2, 'creado', descripcion.slice(0,150));
+      logEvento('hallazgo', newId2, 'completado', 'Completado por el mismo creador al cargarlo.');
       btn.textContent = '⏳ Notificando a HyS...';
       try {
         await hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
@@ -2153,7 +2216,10 @@ function hallazgosRenderAsignadoItem(h) {
     <div class="result-card" id="hallazgo-item-${h.id}">
       <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')} · ${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
       <p style="font-size:14px;margin-bottom:10px">${esc(h.descripcion||'').replace(/\n/g,'<br>')}</p>
-      <button class="btn btn-secondary btn-sm" onclick="hallazgosShowCompletarForm('${h.id}')">Completar</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="hallazgosShowCompletarForm('${h.id}')">Completar</button>
+        <button class="btn btn-secondary btn-sm" onclick="verHistorial('hallazgo','${h.id}')">🕘 Historial</button>
+      </div>
       <div id="hallazgo-completar-${h.id}"></div>
     </div>`;
 }
@@ -2192,6 +2258,7 @@ async function hallazgosCompletar(id) {
     });
     const rows = await res.json().catch(()=>null);
     if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
+    logEvento('hallazgo', id, 'completado', accionCorrectiva.slice(0,150));
 
     // La notificación es best-effort: si falla (por ej. no está logueado con Microsoft),
     // el hallazgo ya quedó completado igual y no debe volver a aparecer como pendiente.
@@ -2217,7 +2284,8 @@ function hallazgosRenderMioItem(h) {
         <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
       </div>
       <span class="badge ${badgeCls}">${esc(estadoLabel)}</span>
-      <button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar del historial" style="margin-left:6px">&#x2715;</button>
+      <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:6px">🕘</button>
+      <button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar del historial" style="margin-left:2px">&#x2715;</button>
     </div>`;
 }
 
@@ -2241,7 +2309,7 @@ async function hallazgosEliminarConfirmado(id) {
 function hallazgosRenderRevisionItem(h) {
   return `
     <div class="result-card" id="hallazgo-rev-${h.id}">
-      <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
+      <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')} <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:4px">🕘</button></div>
       <label>Descripción</label>
       <textarea id="hr-descripcion-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.descripcion||'')}</textarea>
       <label>Acción correctiva inmediata</label>
@@ -2382,6 +2450,7 @@ async function hallazgosConfirmarInsertar(id) {
       return;
     }
 
+    logEvento('hallazgo', id, 'insertado', 'Insertado en el Excel como '+newId);
     showMsg(statusId,'success','✓ Insertado como '+newId);
     renderHallazgos();
   } catch(e) {
@@ -4003,10 +4072,14 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
       destinatarios: st.destinatarios, estado:'pendiente'
     })
   });
+  const insertData = await insertRes.json().catch(()=>({}));
   if (!insertRes.ok) {
-    const errData = await insertRes.json().catch(()=>({}));
-    console.warn('No se pudo registrar la solicitud de aprobación en Supabase:', errData);
-    alert('⚠️ El mail de aprobación se mandó, pero no se pudo guardar el registro en MAIA — no la vas a ver en "pendientes" hasta que se resuelva esto.\n\nError: ' + (errData.message || errData.hint || errData.details || JSON.stringify(errData)));
+    console.warn('No se pudo registrar la solicitud de aprobación en Supabase:', insertData);
+    alert('⚠️ El mail de aprobación se mandó, pero no se pudo guardar el registro en MAIA — no la vas a ver en "pendientes" hasta que se resuelva esto.\n\nError: ' + (insertData.message || insertData.hint || insertData.details || JSON.stringify(insertData)));
+  } else {
+    const coordsInfo = await npGetCoordinadores();
+    const nombresDestinatarios = coordsInfo.filter(c => (st.destinatarios||[]).includes(c.id)).map(c=>c.nombre).join(', ');
+    logEvento('np_aprobacion', insertData[0]?.id, 'enviado_aprobacion', 'Destinatarios: ' + (nombresDestinatarios||'—'));
   }
 
   npAprobState[pfx] = { requiere:false, destinatarios:[], descripcion:'', links:'', archivos:[] };
@@ -4038,6 +4111,7 @@ async function npRenderAprobacionesPendientes(pfx) {
         <div style="display:flex;gap:8px;margin-top:8px">
           <button class="btn btn-green btn-sm" onclick="npAprobResolver('${pfx}','${a.id}',true)">✓ Aprobar</button>
           <button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="npAprobResolver('${pfx}','${a.id}',false)">✕ Rechazar</button>
+          <button class="btn btn-secondary btn-sm" onclick="verHistorial('np_aprobacion','${a.id}')">🕘 Historial</button>
         </div>
         <div id="np-aprob-status-${a.id}"></div>
       </div>`).join('');
@@ -4077,6 +4151,7 @@ async function npAprobResolver(pfx, id, aprobado) {
     const data = await res.json().catch(()=>null);
     if (!res.ok || !data || !data.length) throw new Error('No se pudo guardar.');
     const row = data[0];
+    logEvento('np_aprobacion', id, aprobado ? 'aprobado' : 'rechazado', comentario || null);
 
     // Al aprobar, se completa la NP generando y subiendo el PDF (best-effort)
     if (aprobado && row.excel_item_id && row.excel_site_id) {
@@ -4298,6 +4373,7 @@ async function npRenderMisAprobaciones(pfx) {
           <div class="file-size">Enviada ${new Date(a.created_at).toLocaleDateString('es-AR')} · esperando aprobación de ${esc(nombres)}</div>
         </div>
         <span class="badge badge-pending">Pendiente</span>
+        <button class="np-item-remove" onclick="verHistorial('np_aprobacion','${a.id}')" title="Ver historial" style="margin-left:6px">🕘</button>
       </div>`;
     }).join('');
   } catch(e) { card.style.display='none'; }
@@ -4332,6 +4408,7 @@ function npRenderRechazadaItem(pfx, a) {
       <div style="display:flex;gap:8px;margin-top:10px">
         <button class="btn btn-primary btn-sm" onclick="npAprobReenviar('${pfx}','${a.id}')">↻ Corregir y reenviar a aprobación</button>
         <button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="npRechEliminar('${pfx}','${a.id}')">🗑 Eliminar</button>
+        <button class="btn btn-secondary btn-sm" onclick="verHistorial('np_aprobacion','${a.id}')">🕘 Historial</button>
       </div>
       <div id="np-rech-status-${a.id}"></div>
     </div>`;
@@ -4447,6 +4524,7 @@ async function npAprobReenviar(pfx, aprobId) {
     });
     const patchData = await patchRes.json().catch(()=>null);
     if (!patchRes.ok || !patchData || !patchData.length) throw new Error('No se pudo reenviar.');
+    logEvento('np_aprobacion', aprobId, 'reenviado', 'Corregida y reenviada tras el rechazo.');
 
     // Aviso a los coordinadores — best-effort, no bloquea el reenvío si falla
     try {
