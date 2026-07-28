@@ -1187,6 +1187,29 @@
     </div>
   </div>
 
+  <!-- ═══ NP Mail Modal ═══ -->
+  <div class="modal-overlay hidden" id="npMailModal" onclick="if(event.target===this)npMailModalClose()">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>✉ Enviar NP por mail</h2>
+        <button class="modal-close" onclick="npMailModalClose()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="card-label">Para</div>
+        <input type="email" id="np-mail-to" placeholder="proveedor@email.com" style="margin-bottom:12px" />
+        <div class="card-label">Asunto</div>
+        <input type="text" id="np-mail-subject" style="margin-bottom:12px" />
+        <div class="card-label">Mensaje</div>
+        <textarea id="np-mail-body" rows="6"></textarea>
+        <div id="np-mail-status" class="status-msg" style="display:none;margin-top:10px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="npMailModalClose()">Cancelar</button>
+        <button class="btn btn-primary" id="np-mail-send-btn" onclick="npMailModalSend()">Enviar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══ SharePoint Upload Modal ═══ -->
   <div class="modal-overlay hidden" id="spModal" onclick="if(event.target===this)spModalClose()">
     <div class="modal">
@@ -4494,6 +4517,68 @@ function npVistaPreviaPdfGenerado(pfx) {
   window.open(URL.createObjectURL(info.blob), '_blank');
 }
 
+let _npMailPfx = null;
+function npMailModalOpen(pfx) {
+  const info = _npLastPdf[pfx];
+  if (!info) return;
+  _npMailPfx = pfx;
+  document.getElementById('np-mail-to').value = info.to || '';
+  document.getElementById('np-mail-subject').value = `Nota de Pedido ${info.npNum||''} — ${info.proveedor||''}`.trim();
+  document.getElementById('np-mail-body').value = `Estimados,\n\nAdjuntamos la Nota de Pedido ${info.npNum||''}${info.proveedor?' para '+info.proveedor:''}.\n\nSaludos.`;
+  document.getElementById('np-mail-status').style.display = 'none';
+  document.getElementById('npMailModal').classList.remove('hidden');
+}
+function npMailModalClose() { document.getElementById('npMailModal').classList.add('hidden'); }
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function npMailModalSend() {
+  const pfx = _npMailPfx;
+  const info = _npLastPdf[pfx];
+  if (!info) return;
+  const to = document.getElementById('np-mail-to').value.trim();
+  const subject = document.getElementById('np-mail-subject').value.trim();
+  const body = document.getElementById('np-mail-body').value;
+  if (!to) { showMsg('np-mail-status','error','Ingresá un email de destino.'); return; }
+  const btn = document.getElementById('np-mail-send-btn');
+  btn.disabled = true;
+  showMsg('np-mail-status','loading','Enviando...');
+  try {
+    const token = await getMsToken();
+    const contentBytes = await blobToBase64(info.blob);
+    const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer '+token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: {
+          subject,
+          body: { contentType: 'Text', content: body },
+          toRecipients: [{ emailAddress: { address: to } }],
+          attachments: [{
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: info.name, contentType: 'application/pdf', contentBytes
+          }]
+        },
+        saveToSentItems: true
+      })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'No se pudo enviar el mail.'); }
+    npMailModalClose();
+    showMsg(pfx+'-gen-status','success','✓ PDF generado, subido a SharePoint y enviado por mail.');
+  } catch(e) {
+    showMsg('np-mail-status','error','✕ '+e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
   const btn = document.getElementById(pfx+'-btn-np');
   const origText = btn.textContent;
@@ -4765,12 +4850,16 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
           body: pdfBytes
         });
 
-        _npLastPdf[pfx] = { blob: new Blob([pdfBytes], {type:'application/pdf'}), name: pdfName };
+        _npLastPdf[pfx] = {
+          blob: new Blob([pdfBytes], {type:'application/pdf'}), name: pdfName,
+          to: d.email||'', proveedor: d.proveedor||'', npNum: npNum||''
+        };
         document.getElementById(pfx+'-gen-status').innerHTML = `
           <div class="status-msg status-success">✓ PDF generado y subido a SharePoint.</div>
-          <div style="display:flex;gap:8px;margin-top:8px">
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
             <button class="btn btn-secondary btn-sm" onclick="npDescargarPdfGenerado('${pfx}')">⬇ Descargar PDF</button>
             <button class="btn btn-secondary btn-sm" onclick="npVistaPreviaPdfGenerado('${pfx}')">👁 Vista previa</button>
+            <button class="btn btn-secondary btn-sm" onclick="npMailModalOpen('${pfx}')">✉ Enviar por mail</button>
           </div>`;
       }
     }
