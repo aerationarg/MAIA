@@ -547,6 +547,10 @@
         <div class="card-label">NP rechazadas — corregir y reenviar</div>
         <div id="np-loc-aprob-rech-list"></div>
       </div>
+      <div class="card" id="np-loc-aprob-mias-card" style="display:none">
+        <div class="card-label">Mis NP enviadas a aprobación</div>
+        <div id="np-loc-aprob-mias-list"></div>
+      </div>
       <!-- Paso 0 -->
       <div class="card" id="np-loc-step0-card">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
@@ -617,6 +621,10 @@
       <div class="card" id="np-int-aprob-rech-card" style="display:none">
         <div class="card-label">NP rechazadas — corregir y reenviar</div>
         <div id="np-int-aprob-rech-list"></div>
+      </div>
+      <div class="card" id="np-int-aprob-mias-card" style="display:none">
+        <div class="card-label">Mis NP enviadas a aprobación</div>
+        <div id="np-int-aprob-mias-list"></div>
       </div>
       <!-- Paso 0 -->
       <div class="card" id="np-int-step0-card">
@@ -1431,7 +1439,7 @@ function switchPanel(name) {
   if (name === 'cfg-np-loc') { npCfgRender('np-loc'); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npCfgRender('np-int'); renderAutoFields('np-int'); }
   if (name === 'rend') renderRendResults();
-  if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); }
+  if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
@@ -4009,9 +4017,12 @@ async function npRenderAprobacionesPendientes(pfx) {
   if (!card || !list || !currentUser?.id) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   try {
-    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=*&pfx=eq.${pfx}&estado=eq.pendiente&destinatarios=cs.{${currentUser.id}}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await res.json();
-    if (!res.ok || !Array.isArray(rows) || !rows.length) { card.style.display='none'; return; }
+    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=*&pfx=eq.${pfx}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const allRows = await res.json();
+    // Filtramos acá (no en la query) para que funcione sin importar si "destinatarios"
+    // quedó como array nativo o jsonb en Supabase.
+    const rows = (res.ok && Array.isArray(allRows)) ? allRows.filter(a => (a.destinatarios||[]).includes(currentUser.id)) : [];
+    if (!rows.length) { card.style.display='none'; return; }
     card.style.display = '';
     list.innerHTML = rows.map(a => `
       <div class="result-card" id="np-aprob-${a.id}">
@@ -4183,6 +4194,32 @@ async function npRenderRechazadas(pfx) {
     _npRechCache[pfx] = rows;
     card.style.display = '';
     npRenderRechazadasFromCache(pfx);
+  } catch(e) { card.style.display='none'; }
+}
+
+// Vista de solo lectura para el solicitante: NP que mandó a aprobar y siguen pendientes.
+async function npRenderMisAprobaciones(pfx) {
+  const card = document.getElementById(pfx+'-aprob-mias-card');
+  const list = document.getElementById(pfx+'-aprob-mias-list');
+  if (!card || !list || !currentUser?.id) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  try {
+    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=*&pfx=eq.${pfx}&estado=eq.pendiente&solicitado_por=eq.${currentUser.id}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { card.style.display='none'; return; }
+    const coords = await npGetCoordinadores();
+    card.style.display = '';
+    list.innerHTML = rows.map(a => {
+      const nombres = (a.destinatarios||[]).map(id => coords.find(c=>c.id===id)?.nombre).filter(Boolean).join(', ') || 'coordinador';
+      return `
+      <div class="file-item">
+        <div class="file-info">
+          <div class="file-name">${esc(a.proveedor||'—')} — NP ${esc(a.np_num||'—')}</div>
+          <div class="file-size">Enviada ${new Date(a.created_at).toLocaleDateString('es-AR')} · esperando aprobación de ${esc(nombres)}</div>
+        </div>
+        <span class="badge badge-pending">Pendiente</span>
+      </div>`;
+    }).join('');
   } catch(e) { card.style.display='none'; }
 }
 
@@ -5770,9 +5807,12 @@ async function notifLoadNpAprobLive() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token || !currentUser?.id) return [];
   try {
-    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=id,pfx,proveedor,np_num,solicitado_por_nombre,created_at&estado=eq.pendiente&destinatarios=cs.{${currentUser.id}}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await res.json();
-    return (rows||[]).map(a => ({
+    const res = await supaFetch(`/rest/v1/np_aprobaciones?select=id,pfx,proveedor,np_num,solicitado_por_nombre,created_at,destinatarios&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const allRows = await res.json();
+    // Filtramos acá (no en la query) para que funcione sin importar si "destinatarios"
+    // quedó como array nativo o jsonb en Supabase.
+    const rows = (res.ok && Array.isArray(allRows)) ? allRows.filter(a => (a.destinatarios||[]).includes(currentUser.id)) : [];
+    return rows.map(a => ({
       id: 'np-aprob-'+a.id, live: true, leida: false, seccion: a.pfx, created_at: a.created_at,
       titulo: 'NP pendiente de aprobación', cuerpo: `${a.solicitado_por_nombre||''}: ${a.proveedor||''} — NP ${a.np_num||''}`
     }));
