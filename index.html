@@ -537,6 +537,34 @@
       </div>
     </div>
 
+    <!-- ═══ PANEL: Procesos IA ═══ -->
+    <div class="panel" id="panel-procesos">
+      <div id="procesos-list-view">
+        <div class="card">
+          <div class="card-label">Proyectos</div>
+          <button class="btn btn-primary" onclick="procesosNuevoProyecto()" style="margin-bottom:12px">+ Nuevo proyecto</button>
+          <div id="procesos-list" class="empty">Cargando...</div>
+        </div>
+      </div>
+      <div id="procesos-proyecto-view" style="display:none">
+        <button class="btn btn-secondary btn-sm" onclick="procesosVolverALista()" style="margin-bottom:12px">← Volver a proyectos</button>
+        <div class="card">
+          <div id="procesos-steps-nav" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap"></div>
+          <div id="procesos-step-content"></div>
+        </div>
+        <div class="card">
+          <div class="card-label">💬 Chat con la IA</div>
+          <p class="hint" style="margin-top:-6px;margin-bottom:10px">Preguntale sobre este proyecto, pedile que piense algo o que te ayude a decidir — tiene el contexto de todos los pasos completados hasta ahora.</p>
+          <div id="procesos-chat-messages" style="max-height:320px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:8px"></div>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="procesos-chat-input" placeholder="Escribí tu mensaje..." onkeydown="if(event.key==='Enter')procesosChatSend()" style="flex:1" />
+            <button class="btn btn-primary" style="width:auto;padding:12px 18px" onclick="procesosChatSend()">Enviar</button>
+          </div>
+          <div id="procesos-chat-status"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ PANEL: NP Locales ═══ -->
     <div class="panel" id="panel-np-loc">
       <div class="card" id="np-loc-aprob-pend-card" style="display:none">
@@ -728,6 +756,16 @@
           <span id="cfg-hallazgos-excel-label">Sin seleccionar</span>
           <button class="sp-browse-btn" onclick="fbOpen('file','hallazgos-excel')">Seleccionar</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Config Procesos IA ═══ -->
+    <div class="panel" id="panel-cfg-procesos">
+      <div class="card">
+        <div class="card-label">Base de proyectos anteriores</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usa para que la IA detecte automáticamente proyectos parecidos al analizar un cliente nuevo. Cargá acá los proyectos ya hechos por la empresa: nombre, rubro/tags y una breve descripción alcanzan para que la IA los compare.</p>
+        <div id="procesos-catalogo-list"></div>
+        <button class="btn btn-secondary" onclick="procesosCatalogoAdd()" style="margin-top:4px">+ Agregar proyecto al catálogo</button>
       </div>
     </div>
 
@@ -1455,6 +1493,8 @@ function switchPanel(name) {
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
+  if (name === 'procesos') renderProcesosList();
+  if (name === 'cfg-procesos') renderProcesosCatalogo();
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -2493,6 +2533,508 @@ async function renderHallazgos() {
       revEl.className = rows.length ? '' : 'empty';
       revEl.innerHTML = rows.length ? rows.map(hallazgosRenderRevisionItem).join('') : 'No hay hallazgos pendientes de revisión.';
     } catch(e) { revEl.innerHTML = 'Error al cargar.'; }
+  }
+}
+
+// ── Procesos IA ───────────────────────────────────────
+let procesosCurrentProyecto = null;
+let procesosStep1Files = [];
+let procesosStep1SpFolder = null;
+let _procesosCatalogoFolderTarget = null;
+let _procesosSaveTimeout = null;
+
+const PROCESOS_STEP_FIELD = { 2:'diseno', 3:'etapas_equipos', 4:'propuesta_texto' };
+const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:'Definir etapas y equipos', 4:'Generar la propuesta' };
+
+// ── Catálogo de proyectos anteriores (Cfg Procesos IA) ──
+async function renderProcesosCatalogo() {
+  const el = document.getElementById('procesos-catalogo-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=*&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay proyectos cargados en el catálogo.</p>'; return; }
+    el.innerHTML = rows.map(p => `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(p.nombre)}" placeholder="Nombre del proyecto" oninput="procesosCatalogoUpdate('${p.id}','nombre',this.value)" />
+          <button class="remove-btn" onclick="procesosCatalogoEliminar('${p.id}')">&#x2715;</button>
+        </div>
+        <input class="desc-input" value="${esc(p.cliente||'')}" placeholder="Cliente" oninput="procesosCatalogoUpdate('${p.id}','cliente',this.value)" style="margin-bottom:6px" />
+        <input class="desc-input" value="${esc(p.rubro||'')}" placeholder="Rubro/industria" oninput="procesosCatalogoUpdate('${p.id}','rubro',this.value)" style="margin-bottom:6px" />
+        <input class="desc-input" value="${esc(p.tags||'')}" placeholder="Tags (separados por coma)" oninput="procesosCatalogoUpdate('${p.id}','tags',this.value)" style="margin-bottom:6px" />
+        <textarea rows="2" placeholder="Descripción breve del proyecto" oninput="procesosCatalogoUpdate('${p.id}','descripcion',this.value)" style="margin-bottom:6px">${esc(p.descripcion||'')}</textarea>
+        <div class="sp-selected">
+          <span style="font-size:12px">${esc(p.carpeta_path || 'Sin carpeta vinculada')}</span>
+          <button class="sp-browse-btn" onclick="procesosCatalogoSelectFolder('${p.id}')">Vincular carpeta</button>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
+}
+
+async function procesosCatalogoAdd() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_catalogo', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, nombre: 'Nuevo proyecto' })
+  });
+  if (!res.ok) { alert('No se pudo agregar el proyecto.'); return; }
+  renderProcesosCatalogo();
+}
+
+async function procesosCatalogoUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+
+async function procesosCatalogoEliminar(id) {
+  if (!confirm('¿Eliminar este proyecto del catálogo?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosCatalogo();
+}
+
+function procesosCatalogoSelectFolder(id) {
+  _procesosCatalogoFolderTarget = id;
+  fbOpen('folder', 'procesos-catalogo-folder');
+}
+
+async function procesosCatalogoSaveFolder(id, path, itemId, siteId, label) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ carpeta_path: path, carpeta_item_id: itemId, carpeta_site_id: siteId })
+  });
+  renderProcesosCatalogo();
+}
+
+function procesosStep1SelectFolder() {
+  fbOpen('folder', 'procesos-step1-folder');
+}
+
+// Extiende el selector de carpetas compartido para los targets propios de Procesos IA
+var _origFbSCProcesos = fbSelectCurrent;
+fbSelectCurrent = function() {
+  const btn = document.getElementById('fb-select-btn');
+  const path = btn?.dataset.path;
+  const itemId = btn?.dataset.id;
+  const label = (fbCurrentSiteName||'') + (path ? ' › ' + path.replace(/\//g,' › ') : '');
+  if (fbTarget === 'procesos-catalogo-folder' && _procesosCatalogoFolderTarget) {
+    procesosCatalogoSaveFolder(_procesosCatalogoFolderTarget, path, itemId, fbCurrentSiteId, label);
+    fbClose();
+    return;
+  }
+  if (fbTarget === 'procesos-step1-folder') {
+    procesosStep1SpFolder = { path, itemId, siteId: fbCurrentSiteId, label };
+    fbClose();
+    renderProcesosStepContent();
+    return;
+  }
+  _origFbSCProcesos();
+};
+
+// ── Lista y CRUD de proyectos ────────────────────────────
+async function renderProcesosList() {
+  const el = document.getElementById('procesos-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_proyectos?select=id,nombre,cliente,paso_actual,creado_por_nombre,created_at&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<div class="empty">No hay proyectos todavía.</div>'; return; }
+    el.innerHTML = rows.map(p => `
+      <div class="file-item" style="cursor:pointer" onclick="procesosAbrirProyecto('${p.id}')">
+        <div class="file-icon">📁</div>
+        <div class="file-info">
+          <div class="file-name">${esc(p.nombre)}${p.cliente?' — '+esc(p.cliente):''}</div>
+          <div class="file-size">Paso ${p.paso_actual}/4 — ${esc(PROCESOS_STEP_LABEL[p.paso_actual]||'')} · ${esc(p.creado_por_nombre||'')} · ${new Date(p.created_at).toLocaleDateString('es-AR')}</div>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<div class="empty">Error al cargar proyectos.</div>'; }
+}
+
+async function procesosNuevoProyecto() {
+  const nombre = prompt('Nombre del proyecto o cliente:');
+  if (!nombre) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_proyectos', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({
+      empresa: currentEmpresa, nombre, creado_por: currentUser.id, creado_por_nombre: currentUser.nombre||currentUser.email,
+      paso_actual: 1, info_cliente:{}, proyectos_referencia:[], chat_historial:[]
+    })
+  });
+  const data = await res.json().catch(()=>null);
+  if (!res.ok || !data || !data.length) { alert('No se pudo crear el proyecto.'); return; }
+  procesosAbrirProyecto(data[0].id);
+}
+
+async function procesosAbrirProyecto(id) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+  const rows = await res.json();
+  if (!res.ok || !rows.length) { alert('No se pudo abrir el proyecto.'); return; }
+  procesosCurrentProyecto = rows[0];
+  procesosStep1Files = [];
+  procesosStep1SpFolder = null;
+  document.getElementById('procesos-list-view').style.display = 'none';
+  document.getElementById('procesos-proyecto-view').style.display = '';
+  renderProcesosStepsNav();
+  renderProcesosStepContent();
+  renderProcesosChat();
+}
+
+function procesosVolverALista() {
+  procesosCurrentProyecto = null;
+  document.getElementById('procesos-proyecto-view').style.display = 'none';
+  document.getElementById('procesos-list-view').style.display = '';
+  renderProcesosList();
+}
+
+async function procesosSaveProyecto(fields) {
+  Object.assign(procesosCurrentProyecto, fields);
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${procesosCurrentProyecto.id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
+  });
+}
+
+function procesosSaveProyectoDebounced(fields) {
+  Object.assign(procesosCurrentProyecto, fields);
+  clearTimeout(_procesosSaveTimeout);
+  _procesosSaveTimeout = setTimeout(() => {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    supaFetch(`/rest/v1/procesos_proyectos?id=eq.${procesosCurrentProyecto.id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
+    });
+  }, 800);
+}
+
+// ── Navegación de pasos ────────────────────────────────
+function renderProcesosStepsNav() {
+  const el = document.getElementById('procesos-steps-nav');
+  const p = procesosCurrentProyecto;
+  const viendo = p._viewingStep || p.paso_actual;
+  el.innerHTML = [1,2,3,4].map(s => `
+    <button class="btn ${s===viendo?'btn-primary':'btn-secondary'} btn-sm" ${s>p.paso_actual?'disabled':''} onclick="procesosVerPaso(${s})">${s}. ${esc(PROCESOS_STEP_LABEL[s])}</button>
+  `).join('');
+}
+function procesosVerPaso(step) {
+  procesosCurrentProyecto._viewingStep = step;
+  renderProcesosStepsNav();
+  renderProcesosStepContent();
+}
+
+function renderProcesosStepContent() {
+  const p = procesosCurrentProyecto;
+  const step = p._viewingStep || p.paso_actual;
+  const el = document.getElementById('procesos-step-content');
+  el.innerHTML = step === 1 ? procesosStep1Html(p) : procesosStepGenericHtml(p, step);
+}
+
+// ── Paso 1: analizar cliente ───────────────────────────
+function procesosStep1HandleFiles(fileList) {
+  Array.from(fileList).forEach(f => {
+    if (!procesosStep1Files.find(x=>x.file.name===f.name && x.file.size===f.size)) procesosStep1Files.push({file:f});
+  });
+  renderProcesosStep1FileList();
+}
+function renderProcesosStep1FileList() {
+  const el = document.getElementById('procesos-step1-filelist');
+  if (!el) return;
+  el.innerHTML = procesosStep1Files.map((it,i) => `
+    <div class="file-item">
+      <div class="file-icon">📎</div>
+      <div class="file-info"><div class="file-name">${esc(it.file.name)}</div><div class="file-size">${formatSize(it.file.size)}</div></div>
+      <button class="np-item-remove" onclick="procesosStep1RemoveFile(${i})">&#x2715;</button>
+    </div>`).join('');
+}
+function procesosStep1RemoveFile(i) { procesosStep1Files.splice(i,1); renderProcesosStep1FileList(); }
+
+function procesosStep1Html(p) {
+  const info = p.info_cliente || {};
+  const refs = p.proyectos_referencia || [];
+  return `
+    <div class="card-label">Paso 1 — Analizar cliente</div>
+    <label>Nombre del cliente</label>
+    <input value="${esc(p.cliente||'')}" oninput="procesosSaveProyectoDebounced({cliente:this.value})" style="margin-bottom:12px" />
+
+    <div class="drop-zone" id="procesos-dropzone" onclick="document.getElementById('procesos-file-input').click()">
+      <div class="drop-icon">📎</div>
+      <p>Tocá para subir archivos del cliente</p>
+      <span>PDF, JPG, JPEG, PNG</span>
+    </div>
+    <input type="file" id="procesos-file-input" multiple accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="procesosStep1HandleFiles(this.files)" />
+    <div id="procesos-step1-filelist"></div>
+
+    <div class="sp-selected" style="margin:10px 0">
+      <span style="font-size:13px">${procesosStep1SpFolder ? esc(procesosStep1SpFolder.label) : 'O elegí una carpeta de SharePoint con los archivos del cliente'}</span>
+      <button class="sp-browse-btn" onclick="procesosStep1SelectFolder()">Seleccionar carpeta</button>
+    </div>
+
+    <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ Analizar con IA</button>
+    <div id="procesos-step1-status"></div>
+
+    ${info.resumen ? `
+      <div class="gap"></div>
+      <label>Resumen del cliente (editable)</label>
+      <textarea id="procesos-step1-resumen" rows="10" oninput="procesosSaveProyectoDebounced({info_cliente: Object.assign({}, procesosCurrentProyecto.info_cliente, {resumen:this.value})})">${esc(info.resumen)}</textarea>
+      <div class="gap"></div>
+      <div class="card-label">Proyectos anteriores parecidos (detectados por IA)</div>
+      <div id="procesos-step1-similares-status"></div>
+      ${refs.length ? refs.map((r,i) => `
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:var(--text)">
+          <input type="checkbox" ${r.incluido?'checked':''} onchange="procesosToggleReferencia(${i})" />
+          <span><b>${esc(r.nombre)}</b>${r.motivo?' — '+esc(r.motivo):''}</span>
+        </label>`).join('') : '<p class="hint">Todavía no se detectaron proyectos parecidos.</p>'}
+      <button class="btn btn-secondary btn-sm" onclick="procesosDetectarSimilares()" style="margin-top:6px">↻ Volver a detectar</button>
+      <div class="gap"></div>
+      <button class="btn btn-primary" onclick="procesosAvanzarPaso(2)">Continuar al Paso 2 →</button>
+    ` : ''}
+  `;
+}
+
+async function procesosStep1Analizar() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step1-status';
+  showMsg(statusId,'loading','Preparando archivos...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible. Recargá la página.');
+    const contentBlocks = [];
+    for (const item of procesosStep1Files) {
+      const b64 = await fileToBase64(item.file);
+      const isPdf = item.file.type === 'application/pdf';
+      contentBlocks.push(isPdf
+        ? {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}
+        : {type:'image', source:{type:'base64', media_type:item.file.type, data:b64}});
+    }
+    if (procesosStep1SpFolder) {
+      showMsg(statusId,'loading','Leyendo carpeta de SharePoint...');
+      const token = await getMsToken();
+      const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${procesosStep1SpFolder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
+      if (childrenResp.ok) {
+        const children = (await childrenResp.json()).value || [];
+        const usable = children.filter(f => f.file).slice(0, 10);
+        for (const f of usable) {
+          const isPdf = /\.pdf$/i.test(f.name);
+          const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
+          const needsConvert = !isPdf && !isImg;
+          showMsg(statusId,'loading',`Descargando ${f.name}...`);
+          const dlUrl = needsConvert
+            ? `https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${f.id}/content?format=pdf`
+            : `https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${f.id}/content`;
+          const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+          if (!dlResp.ok) continue;
+          const buf = await dlResp.arrayBuffer();
+          let binary = '';
+          const bytes = new Uint8Array(buf);
+          for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          const b64 = btoa(binary);
+          if (needsConvert || isPdf) {
+            contentBlocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
+          } else {
+            const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg';
+            contentBlocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}});
+          }
+        }
+      }
+    }
+    if (!contentBlocks.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
+
+    showMsg(statusId,'loading','Analizando con IA...');
+    const prompt = 'Analizá toda la información adjunta sobre este cliente/proyecto y armá un resumen estructurado en español, en texto plano con títulos simples (sin tablas markdown), cubriendo: datos del cliente, contexto y necesidad del proyecto, alcance solicitado, restricciones o condicionantes, y cualquier dato técnico relevante para diseñar una propuesta. Sé concreto y organizado.';
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
+    const data = await resp.json();
+    const resumen = data.content?.find(c=>c.type==='text')?.text || '';
+
+    await procesosSaveProyecto({ info_cliente: Object.assign({}, p.info_cliente, { resumen }) });
+    showMsg(statusId,'success','✓ Análisis completo.');
+    renderProcesosStepContent();
+    procesosDetectarSimilares();
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+async function procesosDetectarSimilares() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step1-similares-status';
+  const hasEl = document.getElementById(statusId);
+  if (hasEl) showMsg(statusId,'loading','Buscando proyectos parecidos...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    const catalogo = await res.json();
+    if (!res.ok || !Array.isArray(catalogo) || !catalogo.length) { if(hasEl) showMsg(statusId,'error','No hay proyectos cargados en el catálogo (Cfg Procesos IA).'); return; }
+
+    const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion||''}`).join('\n');
+    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${p.info_cliente?.resumen||''}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) throw new Error('Error al detectar similares.');
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const sugeridos = (parsed.similares||[]).map(s => {
+      const proj = catalogo[s.numero-1];
+      return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, incluido: true } : null;
+    }).filter(Boolean);
+
+    await procesosSaveProyecto({ proyectos_referencia: sugeridos });
+    renderProcesosStepContent();
+  } catch(e) {
+    console.warn('No se pudo detectar proyectos similares:', e.message);
+    if (hasEl) showMsg(statusId,'error','No se pudo detectar automáticamente: '+e.message);
+  }
+}
+
+function procesosToggleReferencia(idx) {
+  const p = procesosCurrentProyecto;
+  p.proyectos_referencia[idx].incluido = !p.proyectos_referencia[idx].incluido;
+  procesosSaveProyecto({ proyectos_referencia: p.proyectos_referencia });
+}
+
+async function procesosAvanzarPaso(step) {
+  await procesosSaveProyecto({ paso_actual: Math.max(procesosCurrentProyecto.paso_actual, step) });
+  procesosCurrentProyecto._viewingStep = step;
+  renderProcesosStepsNav();
+  renderProcesosStepContent();
+}
+
+// ── Pasos 2-4: diseño, etapas y equipos, propuesta (patrón genérico) ──
+function procesosStepGenericHtml(p, step) {
+  const field = PROCESOS_STEP_FIELD[step];
+  const value = p[field] || '';
+  return `
+    <div class="card-label">Paso ${step} — ${esc(PROCESOS_STEP_LABEL[step])}</div>
+    <label>Instrucciones para la IA (opcional)</label>
+    <textarea id="procesos-step${step}-prompt" rows="2" placeholder="Ej: priorizá tal enfoque, considerá tal restricción..." style="margin-bottom:10px"></textarea>
+    <button class="btn btn-primary" onclick="procesosGenerarPaso(${step})">✦ ${value ? 'Regenerar' : 'Generar'} con IA</button>
+    <div id="procesos-step${step}-status"></div>
+    <div class="gap"></div>
+    <label>Contenido (editable)</label>
+    <textarea id="procesos-step${step}-content" rows="14" oninput="procesosSaveProyectoDebounced({${JSON.stringify(field)}: this.value})">${esc(value)}</textarea>
+    ${step < 4
+      ? `<button class="btn btn-secondary" style="margin-top:10px" onclick="procesosAvanzarPaso(${step+1})">Continuar al Paso ${step+1} →</button>`
+      : `<button class="btn btn-green" style="margin-top:10px" onclick="procesosDescargarPropuesta()">⬇ Descargar propuesta (Word)</button>`}
+  `;
+}
+
+function procesosBuildContexto(hastaStep) {
+  const p = procesosCurrentProyecto;
+  let ctx = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n\n`;
+  if (p.info_cliente?.resumen) ctx += `Resumen del cliente/proyecto:\n${p.info_cliente.resumen}\n\n`;
+  const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
+  if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
+  if (hastaStep > 2 && p.diseno) ctx += `Diseño del proyecto definido:\n${p.diseno}\n\n`;
+  if (hastaStep > 3 && p.etapas_equipos) ctx += `Etapas y equipos definidos:\n${p.etapas_equipos}\n\n`;
+  return ctx;
+}
+
+async function procesosGenerarPaso(step) {
+  const p = procesosCurrentProyecto;
+  const field = PROCESOS_STEP_FIELD[step];
+  const statusId = 'procesos-step'+step+'-status';
+  const userPrompt = document.getElementById('procesos-step'+step+'-prompt')?.value || '';
+  showMsg(statusId,'loading','Generando con IA...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const contexto = procesosBuildContexto(step);
+    const instrucciones = {
+      2: 'Diseñá el proyecto: enfoque técnico, componentes principales, criterios de dimensionamiento, y cualquier definición necesaria antes de armar etapas y equipos. Si hay una planilla de cálculo de referencia, indicá qué valores/parámetros usarías y por qué (todavía no tenemos integración directa con esa planilla, así que dejalo en forma de recomendación de valores).',
+      3: 'Definí las etapas del proyecto (con una breve descripción de cada una) y el equipo/roles necesarios para ejecutarlo.',
+      4: 'Redactá la propuesta final para el cliente (oferta técnica y comercial), en el tono y formato habitual de una propuesta profesional de ingeniería/servicios, integrando todo lo definido en los pasos anteriores.'
+    }[step];
+    const prompt = `${contexto}\n${instrucciones}${userPrompt ? '\n\nIndicaciones adicionales del usuario: '+userPrompt : ''}`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
+    const data = await resp.json();
+    const texto = data.content?.find(c=>c.type==='text')?.text || '';
+    await procesosSaveProyecto({ [field]: texto });
+    showMsg(statusId,'success','✓ Generado.');
+    renderProcesosStepContent();
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+function procesosDescargarPropuesta() {
+  const p = procesosCurrentProyecto;
+  const html = `<html><head><meta charset="utf-8"></head><body><h1>${esc(p.nombre)}</h1><pre style="font-family:Calibri,Arial,sans-serif;white-space:pre-wrap;font-size:11pt">${esc(p.propuesta_texto||'')}</pre></body></html>`;
+  const blob = new Blob(['﻿', html], {type:'application/msword'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `Propuesta - ${p.nombre}.doc`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Chat del proyecto ───────────────────────────────────
+function renderProcesosChat() {
+  const el = document.getElementById('procesos-chat-messages');
+  const p = procesosCurrentProyecto;
+  const hist = p.chat_historial || [];
+  if (!hist.length) { el.innerHTML = '<div class="empty">Todavía no chateaste sobre este proyecto.</div>'; return; }
+  el.innerHTML = hist.map(m => `
+    <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:80%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>
+  `).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function procesosChatSend() {
+  const input = document.getElementById('procesos-chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-chat-status';
+  p.chat_historial = p.chat_historial || [];
+  p.chat_historial.push({ role:'user', content: msg });
+  input.value = '';
+  renderProcesosChat();
+  showMsg(statusId,'loading','Pensando...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const contexto = procesosBuildContexto(4);
+    const messages = [
+      { role:'user', content: `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.` },
+      { role:'assistant', content: 'Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?' },
+      ...p.chat_historial.map(m => ({ role: m.role, content: m.content }))
+    ];
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
+    const data = await resp.json();
+    const respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+    p.chat_historial.push({ role:'assistant', content: respuesta });
+    await procesosSaveProyecto({ chat_historial: p.chat_historial });
+    renderProcesosChat();
+    document.getElementById(statusId).innerHTML = '';
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
   }
 }
 
@@ -5556,7 +6098,7 @@ function tmplRenderCellMap(pfx) {
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
-const NAV_AREA_ORDER = ['General', 'Compras/COMEX'];
+const NAV_AREA_ORDER = ['General', 'Compras/COMEX', 'Procesos'];
 const NAV_GEAR_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 const NAV_SECTIONS = [
   { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
@@ -5564,6 +6106,7 @@ const NAV_SECTIONS = [
   { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
   { id:'np-loc',    label:'NP Local',         area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
   { id:'np-int',    label:'NP Internacional', area:'Compras/COMEX',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
+  { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
   { id:'cfg-rend',      label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
@@ -5571,6 +6114,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras/COMEX', icon:NAV_GEAR_ICON },
   { id:'cfg-np-int',    label:'Cfg NP Internacional', area:'Compras/COMEX', icon:NAV_GEAR_ICON },
+  { id:'cfg-procesos',  label:'Cfg Procesos IA',      area:'Procesos',      icon:NAV_GEAR_ICON },
 ];
 
 function navAreaSlug(area) { return area.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
@@ -5620,14 +6164,14 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // ── Supabase Auth ─────────────────────────────────────
 
 const SECTOR_TABS = {
-  'Admin':          ['rend','np-loc','np-int','viajes','hallazgos','cfg-rend','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','admin'],
+  'Admin':          ['rend','np-loc','np-int','viajes','hallazgos','procesos','cfg-rend','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-procesos','admin'],
   'Compras':        ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
   'COMEX':          ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
   'Administración': ['rend','viajes','hallazgos','cfg-rend','cfg-viajes'],
   'RRHH':           ['rend','viajes','hallazgos'],
   'Coordinación':   ['rend','viajes','hallazgos'],
   'Ingeniería':     ['rend','viajes','hallazgos'],
-  'Procesos':       ['rend','viajes','hallazgos'],
+  'Procesos':       ['rend','viajes','hallazgos','procesos','cfg-procesos'],
   'Comercial':      ['rend','viajes','hallazgos'],
   'Servicios':      ['rend','viajes','hallazgos'],
   'HyS':            ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -5829,6 +6373,8 @@ const PANEL_TITLES = {
   'cfg-hallazgos': 'Configuración — Hallazgos',
   'cfg-np-loc': 'Configuración — NP Local',
   'cfg-np-int': 'Configuración — NP Internacional',
+  'procesos': 'Procesos IA',
+  'cfg-procesos': 'Configuración — Procesos IA',
   'admin': 'Administración',
 };
 
@@ -5918,6 +6464,9 @@ function refreshAllForEmpresa() {
   if (typeof renderViajesForm === 'function') renderViajesForm();
   if (typeof renderCfgViajes === 'function') renderCfgViajes();
   if (typeof renderCfgHallazgos === 'function') renderCfgHallazgos();
+  // Un proyecto abierto puede ser de otra empresa; volver a la lista evita confusiones
+  if (typeof procesosVolverALista === 'function') procesosVolverALista();
+  if (typeof renderProcesosCatalogo === 'function') renderProcesosCatalogo();
 }
 
 function applyTabAccess() {
