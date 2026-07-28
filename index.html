@@ -4712,6 +4712,13 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
       };
 
       // Build field→value lookup from all sources (case-insensitive keys)
+      // Completar hoy/empresa/fijo si no se habían calculado antes (ej. si el campo se
+      // creó después del Paso 0). El "ultimo+1" (NP Nº/IMPO Nº) no se toca acá para no
+      // pisar el valor ya usado en el nombre del archivo generado más arriba.
+      Object.entries(await calcAutoFields(pfx, null, null, {})).forEach(([k,v]) => {
+        if (v !== '' && !state.manualValues[k]) state.manualValues[k] = v;
+      });
+
       const fieldValues = {};
       // Auto + manual values from state
       Object.entries(state.manualValues).forEach(([k,v]) => {
@@ -5152,6 +5159,13 @@ async function npInsertarFilaRegistro(token, pfx, siteId, excelItemId, sheetName
   const savedMap = getMapping(NP_KEYS(pfx).map);
   const useMap = Object.keys(savedMap).length>0 && headers.length>0;
 
+  // Completar hoy/empresa/fijo si faltan en el snapshot guardado (manual_values de
+  // np_aprobaciones, tomado al momento del envío original). El "ultimo+1" (NP Nº/IMPO Nº)
+  // NO se toca: en un reenvío debe conservarse el número ya asignado, no recalcularse.
+  Object.entries(await calcAutoFields(pfx, null, null, {})).forEach(([k,v]) => {
+    if (v !== '' && !manualValues[k]) manualValues[k] = v;
+  });
+
   let firstEmptyRow = 2;
   for (let i=1; i<allRows.length; i++) {
     if (allRows[i].every(c => c===null || c==='' || c===undefined)) { firstEmptyRow = i + 1; break; }
@@ -5257,6 +5271,11 @@ async function npReescribirArchivoNP(token, pfx, siteId, itemId, d, manualValues
   };
   const manualFields = npGetManual(pfx);
   const iaFields = npGetIA(pfx).filter(f=>f.name.trim());
+  // Completar hoy/empresa/fijo si faltan en el snapshot guardado (no se toca "ultimo+1"
+  // para no pisar el NP Nº/IMPO Nº ya asignado).
+  Object.entries(await calcAutoFields(pfx, null, null, {})).forEach(([k,v]) => {
+    if (v !== '' && !manualValues[k]) manualValues[k] = v;
+  });
   const fieldValues = {};
   Object.entries(manualValues||{}).forEach(([k,v]) => { fieldValues[k]=v; fieldValues[k.toLowerCase()]=v; });
   iaFields.forEach(f => { if (d[f.name]!=null) { fieldValues[f.name]=d[f.name]; fieldValues[f.name.toLowerCase()]=d[f.name]; } });
@@ -5676,6 +5695,11 @@ async function npConfirmSave(pfx) {
       const savedMap = getMapping(NP_KEYS(pfx).map);
       const useMap = Object.keys(savedMap).length>0 && npHeaders.length>0;
 
+      // Recalcular los campos automáticos (hoy/empresa/fijo/ultimo+1) justo antes de
+      // escribir, en vez de confiar en que ya se hayan calculado en un paso anterior
+      // (Paso 0 solo los recalcula si ya había un Registro guardado de antes).
+      Object.assign(state.manualValues, await calcAutoFields(pfx, allRows, npHeaders, savedMap));
+
       // Find first completely empty row after headers
       let firstEmptyRow = 2; // default: row 2 (1-indexed, row 1 = headers)
       for (let i=1; i<allRows.length; i++) {
@@ -5806,6 +5830,13 @@ async function npConfirmSave(pfx) {
 
       const savedMapT = getMapping(NP_KEYS(pfx).map);
       const useMapT = Object.keys(savedMapT).length > 0 && tmplHeadersT.length > 0;
+
+      // Completar hoy/empresa/fijo por si no se calcularon antes. El "ultimo+1" (NP Nº)
+      // NO se recalcula acá: esta plantilla recién copiada no tiene el historial del
+      // Registro NP, así que se respeta el valor ya calculado en el Paso 0.
+      Object.entries(await calcAutoFields(pfx, null, null, {})).forEach(([k,v]) => {
+        if (v !== '') state.manualValues[k] = v;
+      });
 
       for (let ri=0; ri<state.extracted.length; ri++) {
         const d = state.extracted[ri];
