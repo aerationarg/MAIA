@@ -451,6 +451,20 @@
       </div>
 
       <div class="card">
+        <div class="card-label">Pasajes (opcional)</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Info de pasajes ya reservados o a reservar (aerolínea, vuelo, horario, etc.). Agregá uno por cada tramo.</p>
+        <div id="viajes-pasajes-list"></div>
+        <button class="btn btn-secondary" onclick="viajesListAdd('pasajes')" style="margin-top:4px">+ Agregar pasaje</button>
+      </div>
+
+      <div class="card">
+        <div class="card-label">Hoteles (opcional)</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Info de hospedaje ya reservado o a reservar. Agregá uno por cada estadía.</p>
+        <div id="viajes-hoteles-list"></div>
+        <button class="btn btn-secondary" onclick="viajesListAdd('hoteles')" style="margin-top:4px">+ Agregar hotel</button>
+      </div>
+
+      <div class="card">
         <div class="card-label">Imputación del viaje</div>
         <p class="hint" style="margin-top:-6px;margin-bottom:10px">¿A qué cliente/s se imputa el costo del viaje? Si no corresponde a un cliente puntual, indicá "Viaje Comercial" u otro motivo.</p>
         <textarea id="viajes-imputacion" rows="2" oninput="viajesSaveField('imputacion',this.value)" placeholder="Ej: Cliente XYZ, o Viaje Comercial"></textarea>
@@ -496,8 +510,16 @@
         <textarea id="viajes-pasaporte" rows="2" oninput="viajesSaveField('pasaporte',this.value)" placeholder="Ej: Pasaporte vigente hasta 03/2028, no requiere visa"></textarea>
       </div>
 
+      <div id="viajes-editing-banner" class="hint" style="display:none;background:var(--blue-bg);color:var(--blue);padding:8px 12px;border-radius:8px;margin-bottom:10px">
+        ✎ Editando una solicitud ya enviada. <a href="#" onclick="viajesCancelarEdicion();return false;" style="color:inherit;text-decoration:underline">Cancelar edición</a>
+      </div>
       <button class="btn btn-primary" onclick="viajesSubmit()" id="viajes-submit-btn">✈ Enviar solicitud de viaje</button>
       <div id="viajes-status"></div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="card-label">Mis solicitudes enviadas</div>
+        <div id="viajes-historial-list">Cargando...</div>
+      </div>
     </div>
 
     <!-- ═══ PANEL: Hallazgos ═══ -->
@@ -2412,11 +2434,14 @@ function viajesRecipientList() {
 
 function VIAJES_DRAFT_KEY() { return 'viajes_draft_' + currentEmpresa; }
 function getViajesDraft() {
-  return JSON.parse(localStorage.getItem(VIAJES_DRAFT_KEY()) || 'null') || {
+  const d = JSON.parse(localStorage.getItem(VIAJES_DRAFT_KEY()) || 'null') || {
     fechaInicio:'', fechaFin:'', destinos:[{pais:'',desde:'',hasta:''}],
     imputacion:'', tarjeta:'', anticipo:'', anticipoMedio:'', anticipoMoneda:'', anticipoImporte:'',
-    seguro:'', pasaporte:''
+    seguro:'', pasaporte:'', pasajes:[], hoteles:[]
   };
+  if (!d.pasajes) d.pasajes = [];
+  if (!d.hoteles) d.hoteles = [];
+  return d;
 }
 function saveViajesDraft(d) { localStorage.setItem(VIAJES_DRAFT_KEY(), JSON.stringify(d)); }
 function viajesSaveField(key, val) { const d = getViajesDraft(); d[key] = val; saveViajesDraft(d); }
@@ -2456,6 +2481,37 @@ function renderViajesDestinos() {
     </div>`).join('');
 }
 
+// ── Pasajes / Hoteles: listas de texto libre, opcionales ──
+function viajesListAdd(key) {
+  const d = getViajesDraft();
+  d[key].push('');
+  saveViajesDraft(d);
+  renderViajesListField(key);
+}
+function viajesListRemove(key, i) {
+  const d = getViajesDraft();
+  d[key].splice(i,1);
+  saveViajesDraft(d);
+  renderViajesListField(key);
+}
+function viajesListUpdate(key, i, val) {
+  const d = getViajesDraft();
+  d[key][i] = val;
+  saveViajesDraft(d);
+}
+function renderViajesListField(key) {
+  const el = document.getElementById('viajes-'+key+'-list');
+  if (!el) return;
+  const d = getViajesDraft();
+  const items = d[key] || [];
+  const placeholder = key === 'pasajes' ? 'Ej: Aerolíneas Argentinas AR1234, 12/08 08:00hs' : 'Ej: Hotel XYZ, check-in 12/08, check-out 15/08';
+  el.innerHTML = items.length ? items.map((val,i) => `
+    <div class="field-row-top" style="margin-bottom:8px;align-items:flex-start">
+      <textarea rows="2" style="flex:1" placeholder="${esc(placeholder)}" oninput="viajesListUpdate('${key}',${i},this.value)">${esc(val)}</textarea>
+      <button class="remove-btn" onclick="viajesListRemove('${key}',${i})">&#x2715;</button>
+    </div>`).join('') : '<p class="hint">Ninguno agregado (opcional).</p>';
+}
+
 function renderViajesAnticipoDetalle() {
   const d = getViajesDraft();
   const el = document.getElementById('viajes-anticipo-detalle');
@@ -2487,8 +2543,11 @@ function renderViajesForm() {
   set('viajes-seguro', d.seguro);
   set('viajes-pasaporte', d.pasaporte);
   renderViajesDestinos();
+  renderViajesListField('pasajes');
+  renderViajesListField('hoteles');
   renderViajesAnticipoDetalle();
   document.getElementById('viajes-status').innerHTML = '';
+  viajesLoadHistorial();
 }
 
 function viajesBuildEmailHtml(d, nombre, sector) {
@@ -2499,6 +2558,9 @@ function viajesBuildEmailHtml(d, nombre, sector) {
     : (d.anticipo==='no' ? 'No' : '—');
   const seguroTxt = d.seguro==='si' ? 'Sí, tiene voucher vigente' : d.seguro==='no' ? 'No' : d.seguro==='desconozco' ? 'Desconoce' : '—';
   const row = (label,val) => `<tr><td style="padding:6px 14px 6px 0;color:#666;white-space:nowrap;vertical-align:top">${esc(label)}</td><td style="padding:6px 0">${val}</td></tr>`;
+  const listRows = (items) => (items||[]).filter(x=>x&&x.trim()).map(x=>esc(x).replace(/\n/g,'<br>')).join('<hr style="border:none;border-top:1px solid #eee;margin:6px 0">');
+  const pasajesTxt = listRows(d.pasajes) || '—';
+  const hotelesTxt = listRows(d.hoteles) || '—';
   return `
     <h2 style="margin:0 0 4px">Solicitud de viaje — ${esc(nombre)}</h2>
     <p style="margin:0 0 16px;color:#666">${esc(sector||'')}</p>
@@ -2506,6 +2568,8 @@ function viajesBuildEmailHtml(d, nombre, sector) {
       ${row('Fecha de inicio', esc(d.fechaInicio||'—'))}
       ${row('Fecha de finalización', esc(d.fechaFin||'—'))}
       ${row('Destinos', `<table style="border-collapse:collapse">${destinosRows}</table>`)}
+      ${row('Pasajes', pasajesTxt)}
+      ${row('Hoteles', hotelesTxt)}
       ${row('Imputación del viaje', esc(d.imputacion||'—').replace(/\n/g,'<br>'))}
       ${row('Tarjeta corporativa', tarjetaTxt)}
       ${row('Anticipo', anticipoTxt)}
@@ -2543,8 +2607,31 @@ async function viajesSubmit() {
       })
     });
     if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+
+    let saveWarning = '';
+    try {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      if (_viajesEditingId) {
+        const res = await supaFetch(`/rest/v1/viajes_solicitudes?id=eq.${_viajesEditingId}`, {
+          method:'PATCH', headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},
+          body: JSON.stringify({ data: d, updated_at: new Date().toISOString() })
+        });
+        if (!res.ok) throw new Error('HTTP '+res.status);
+      } else {
+        const res = await supaFetch('/rest/v1/viajes_solicitudes', {
+          method:'POST', headers:{Authorization:'Bearer '+session.token,'Content-Type':'application/json'},
+          body: JSON.stringify({ empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombre, data: d })
+        });
+        if (!res.ok) throw new Error('HTTP '+res.status);
+      }
+    } catch(e) {
+      saveWarning = ' (el mail se envió, pero no se pudo guardar en el historial: ' + e.message + ')';
+    }
+
+    _viajesEditingId = null;
     localStorage.removeItem(VIAJES_DRAFT_KEY());
-    showMsg('viajes-status','success','✓ Solicitud enviada por mail.');
+    document.getElementById('viajes-editing-banner').style.display = 'none';
+    showMsg('viajes-status', saveWarning?'error':'success', '✓ Solicitud enviada por mail.' + saveWarning);
     renderViajesForm();
   } catch(e) {
     showMsg('viajes-status','error','✕ ' + e.message);
@@ -2552,6 +2639,68 @@ async function viajesSubmit() {
     btn.disabled = false;
     btn.textContent = original;
   }
+}
+
+// ── Historial de solicitudes de viaje: editar/reenviar o eliminar ──
+let _viajesEditingId = null;
+async function viajesLoadHistorial() {
+  const el = document.getElementById('viajes-historial-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/viajes_solicitudes?select=id,data,created_at,updated_at&creado_por=eq.${currentUser.id}&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) throw new Error('HTTP '+res.status);
+    if (!rows.length) { el.innerHTML = '<div class="empty">No enviaste solicitudes todavía.</div>'; return; }
+    el.innerHTML = rows.map(row => {
+      const d = row.data || {};
+      const destinosTxt = (d.destinos||[]).map(x=>x.pais).filter(Boolean).join(', ') || '—';
+      const editada = row.updated_at && row.updated_at !== row.created_at
+        ? ' · Editada: ' + new Date(row.updated_at).toLocaleDateString('es-AR') : '';
+      return `
+      <div class="result-card">
+        <div class="result-filename">✈ ${esc(d.fechaInicio||'—')} a ${esc(d.fechaFin||'—')} — ${esc(destinosTxt)}</div>
+        <div class="hint">Enviada: ${new Date(row.created_at).toLocaleDateString('es-AR')}${editada}</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="viajesEditar('${row.id}')">✎ Editar y reenviar</button>
+          <button class="btn btn-secondary btn-sm" onclick="viajesEliminar('${row.id}')">🗑 Eliminar</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="empty">Error al cargar el historial: '+esc(e.message)+'</div>';
+  }
+}
+async function viajesEditar(id) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/viajes_solicitudes?select=id,data&id=eq.${id}`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !rows.length) throw new Error('No se pudo cargar la solicitud.');
+    _viajesEditingId = id;
+    saveViajesDraft(rows[0].data);
+    renderViajesForm();
+    document.getElementById('viajes-submit-btn').textContent = '✈ Guardar cambios y reenviar';
+    document.getElementById('viajes-editing-banner').style.display = 'block';
+  } catch(e) { alert('Error: ' + e.message); }
+}
+function viajesCancelarEdicion() {
+  _viajesEditingId = null;
+  localStorage.removeItem(VIAJES_DRAFT_KEY());
+  renderViajesForm();
+  document.getElementById('viajes-submit-btn').textContent = '✈ Enviar solicitud de viaje';
+  document.getElementById('viajes-editing-banner').style.display = 'none';
+}
+async function viajesEliminar(id) {
+  if (!confirm('¿Eliminar esta solicitud de viaje?')) return;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/viajes_solicitudes?id=eq.${id}`, {method:'DELETE', headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) throw new Error('HTTP '+res.status);
+    if (_viajesEditingId === id) viajesCancelarEdicion();
+    viajesLoadHistorial();
+  } catch(e) { alert('No se pudo eliminar: ' + e.message); }
 }
 
 // ── Hallazgos (SGI) ───────────────────────────────────────
