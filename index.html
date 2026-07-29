@@ -1684,11 +1684,15 @@ function renderRendManualFields() {
           <option value="custom" ${rendIsCustomScope(f)?'selected':''}>Personalizar (elegís en Rendiciones)</option>
         </select>
       </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:4px;cursor:pointer">
+        <input type="checkbox" ${f.required?'checked':''} onchange="rendUpdateManualField(${i},'required',this.checked)" />
+        Obligatorio (no deja guardar la rendición si falta)
+      </label>
     </div>`).join('');
 }
 function rendUpdateManualField(i, key, val) { const f=getRendManualFields(); f[i][key]=val; saveRendManualFields(f); }
 function rendRemoveManualField(i) { const f=getRendManualFields(); f.splice(i,1); saveRendManualFields(f); renderRendManualFields(); }
-function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',desc:'',type:'text',options:'',scope:'global'}); saveRendManualFields(f); renderRendManualFields(); }
+function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',desc:'',type:'text',options:'',scope:'global',required:false}); saveRendManualFields(f); renderRendManualFields(); }
 
 // ── Cfg Rendiciones: carpeta base, plantilla y tipos de cambio (globales, en Supabase) ──
 let _rendFxRates = [];
@@ -1735,8 +1739,20 @@ function cfgRendRenderFx() {
         oninput="cfgRendFxUpdate(${i},'tc',this.value)" onblur="cfgRendFxSave()" />
       <span style="color:var(--text2);font-size:13px">ARS</span>
       <button class="remove-btn" onclick="cfgRendFxRemove(${i})">&#x2715;</button>
+      ${modo==='auto' ? `<span id="cfg-rend-fx-live-${i}" class="hint" style="width:100%;margin:2px 0 0">Consultando cotización...</span>` : ''}
     </div>`;
   }).join('');
+  _rendFxRates.forEach(async (r,i) => {
+    if (String(r.moneda||'').trim().toUpperCase() !== 'USD' || r.modo !== 'auto') return;
+    const liveEl = document.getElementById(`cfg-rend-fx-live-${i}`);
+    if (!liveEl) return;
+    try {
+      const v = await rendFetchDolarOficial();
+      liveEl.textContent = `Cotización actual (oficial venta): $${v.toLocaleString('es-AR')} ARS`;
+    } catch(e) {
+      liveEl.textContent = `No se pudo consultar dolarapi.com — se usará el valor de respaldo (${r.tc || 'sin definir'})`;
+    }
+  });
 }
 function cfgRendFxUpdate(i,key,val) { _rendFxRates[i][key] = val; }
 function cfgRendFxAdd() { _rendFxRates.push({moneda:'',modo:'manual',tc:''}); cfgRendRenderFx(); }
@@ -1937,7 +1953,7 @@ function renderRendResults() {
       ${allManualFields.map((f,i)=>{
         const fieldNameEsc = f.name.replace(/'/g,"\\'");
         const isMetodoPago = ['método de pago','metodo de pago'].includes(f.name.trim().toLowerCase());
-        const reqMark = isMetodoPago ? ' <span style="color:#e05;font-size:12px" title="Obligatorio">*</span>' : '';
+        const reqMark = (f.required || isMetodoPago) ? ' <span style="color:#e05;font-size:12px" title="Obligatorio">*</span>' : '';
         const modeSelector = rendIsCustomScope(f) ? `
           <select style="font-size:13px;margin-bottom:6px" onchange="rendSetFieldMode('${fieldNameEsc}',this.value);renderRendResults()">
             <option value="global" ${rendFieldMode(f)==='global'?'selected':''}>Igual para todos los archivos</option>
@@ -1946,11 +1962,12 @@ function renderRendResults() {
         if (rendFieldMode(f) !== 'global') {
           return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<div class="hint">Se completa por separado en cada comprobante, más abajo.</div></div>`;
         }
+        const curVal = rendManualValues[f.name] || '';
         if (f.type === 'select') {
           const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
-          return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="">${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
+          return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="" ${!curVal?'selected':''}>${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}" ${curVal===o?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;
         }
-        return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
+        return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" value="${esc(curVal)}" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
       }).join('')}
     </div>` : '';
   const fields = getRendFields().filter(f => f.name.trim());
@@ -2004,6 +2021,24 @@ function renderRendResults() {
 
 function rendManualValueFor(f, record) {
   return rendFieldMode(f) === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
+}
+
+// Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
+// campos manuales lo son solo si se marcó "Obligatorio" en Cfg Rendiciones.
+function rendValidateRequiredFields() {
+  const allManualFields = getRendManualFields().filter(f => f.name.trim());
+  for (const f of allManualFields) {
+    const isMetodoPago = ['método de pago','metodo de pago'].includes(f.name.trim().toLowerCase());
+    if (!f.required && !isMetodoPago) continue;
+    if (rendFieldMode(f) === 'perfile') {
+      const key = rendManualKey(f.name);
+      const missing = results.some(r => !String(r[key]||'').trim());
+      if (missing) return `Falta completar "${f.name}" en uno o más comprobantes.`;
+    } else if (!String(rendManualValues[f.name]||'').trim()) {
+      return `Falta completar "${f.name}".`;
+    }
+  }
+  return null;
 }
 
 // ── Conversión automática de moneda extranjera a pesos ──
@@ -2103,6 +2138,10 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   let totalRowNum = spFindTotalRow(rows);
   const totalRowWidth = String.fromCharCode(64 + Math.max(hdrs.length, 1));
   const totalOrigFormulas = totalRowNum ? await spGetRowFormulas(token, excelBase, totalRowNum, totalRowWidth) : null;
+  // Si ya hay una fila en blanco disponible antes del Total (plantilla recién copiada,
+  // o rendición con filas de sobra sin usar todavía), se llena esa directamente en vez
+  // de insertar una nueva arriba del Total y dejarla vacía para siempre.
+  let nextBlankRow = (totalRowNum && firstEmptyRow < totalRowNum) ? firstEmptyRow : null;
 
   for (let ri=0; ri<results.length; ri++) {
     const r = results[ri];
@@ -2122,11 +2161,15 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
         if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
       });
     }
-    let rowNum;
-    if (totalRowNum) {
+    let rowNum, usedInsert = false;
+    if (nextBlankRow) {
+      rowNum = nextBlankRow;
+      nextBlankRow = (nextBlankRow + 1 < totalRowNum) ? nextBlankRow + 1 : null;
+    } else if (totalRowNum) {
       await spInsertRowAt(token, excelBase, totalRowNum, totalRowWidth);
       rowNum = totalRowNum;
       totalRowNum++;
+      usedInsert = true;
     } else {
       rowNum = firstEmptyRow + ri;
     }
@@ -2134,7 +2177,7 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
     await fetch(excelBase + `range(address='A${rowNum}:${lastCol}${rowNum}')`, {
       method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]})
     });
-    if (totalRowNum && totalOrigFormulas) {
+    if (usedInsert && totalOrigFormulas) {
       await spUpdateTotalFormulas(token, excelBase, totalRowNum, totalRowWidth, totalOrigFormulas, rowNum);
     }
   }
@@ -2142,7 +2185,8 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
 
 async function rendInsertarUltima() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
-  if (!spMetodoPagoValue()) { alert('Seleccioná el Método de pago antes de guardar.'); return; }
+  const missingMsg = rendValidateRequiredFields();
+  if (missingMsg) { alert(missingMsg); return; }
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
@@ -2172,6 +2216,8 @@ async function rendInsertarUltima() {
     showMsg(statusId,'loading','Subiendo comprobantes...');
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
 
+    rendManualValues = {};
+    renderRendResults();
     showMsg(statusId,'success',`✓ ${doneFiles.length} comprobante(s) guardados en "${excelItem.name}".`);
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
@@ -2180,7 +2226,8 @@ async function rendInsertarUltima() {
 
 async function rendGenerarNueva() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
-  if (!spMetodoPagoValue()) { alert('Seleccioná el Método de pago antes de guardar.'); return; }
+  const missingMsg = rendValidateRequiredFields();
+  if (missingMsg) { alert(missingMsg); return; }
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
@@ -2218,6 +2265,8 @@ async function rendGenerarNueva() {
     showMsg(statusId,'loading','Subiendo comprobantes...');
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
 
+    rendManualValues = {};
+    renderRendResults();
     showMsg(statusId,'success',`✓ Rendición "${newFileName}" generada con ${doneFiles.length} comprobante(s).`);
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
@@ -2238,7 +2287,7 @@ function exportExcel() {
 
 function clearResults() {
   if (!confirm('¿Borrar todos los resultados?')) return;
-  results = []; files = []; saveResults(); renderFileList(); renderRendResults();
+  results = []; files = []; rendManualValues = {}; saveResults(); renderFileList(); renderRendResults();
 }
 
 // ── Microsoft Auth ─────────────────────────────────────
