@@ -758,9 +758,14 @@
       </div>
       <div class="card">
         <div class="card-label">Tipos de cambio</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Si un comprobante viene en una de estas monedas (según el campo IA "Moneda"), el Total se convierte a pesos automáticamente y se aclara en la vista previa.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Si un comprobante viene en una de estas monedas (según el campo IA "Moneda"), los campos monetarios marcados abajo se convierten a pesos automáticamente y se aclara en la vista previa. Para USD podés elegir que el tipo de cambio se traiga solo (dólar oficial, dolarapi.com) o ponerlo manual.</p>
         <div id="cfg-rend-fx-list"></div>
         <button class="btn btn-secondary" onclick="cfgRendFxAdd()" style="margin-top:4px">+ Agregar moneda</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Campos monetarios a convertir</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Marcá cuáles de tus campos IA son montos en dinero. Cuando la moneda no es ARS, todos estos se multiplican por el tipo de cambio.</p>
+        <div id="cfg-rend-fx-fields-list"></div>
       </div>
     </div>
 
@@ -1687,18 +1692,20 @@ function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',d
 
 // ── Cfg Rendiciones: carpeta base, plantilla y tipos de cambio (globales, en Supabase) ──
 let _rendFxRates = [];
+let _rendFxFields = [];
 async function cfgRendLoadAll() {
   const baseLbl = document.getElementById('cfg-rend-base-label');
   const tmplLbl = document.getElementById('cfg-rend-tmpl-label');
   if (baseLbl) baseLbl.textContent = 'Cargando...';
   if (tmplLbl) tmplLbl.textContent = 'Cargando...';
   try {
-    const [baseRaw, tmplRaw, fxRaw] = await Promise.all([
-      supaConfigGet('rend_base_folder'), supaConfigGet('rend_template'), supaConfigGet('rend_exchange_rates')
+    const [baseRaw, tmplRaw, fxRaw, fxFieldsRaw] = await Promise.all([
+      supaConfigGet('rend_base_folder'), supaConfigGet('rend_template'), supaConfigGet('rend_exchange_rates'), supaConfigGet('rend_fx_fields')
     ]);
     const base = baseRaw ? JSON.parse(baseRaw) : null;
     const tmpl = tmplRaw ? JSON.parse(tmplRaw) : null;
     _rendFxRates = fxRaw ? JSON.parse(fxRaw) : [];
+    _rendFxFields = fxFieldsRaw ? JSON.parse(fxFieldsRaw) : [];
     if (baseLbl) baseLbl.textContent = base?.label || 'Sin seleccionar';
     if (tmplLbl) tmplLbl.textContent = tmpl?.label || 'Sin seleccionar';
   } catch(e) {
@@ -1706,27 +1713,52 @@ async function cfgRendLoadAll() {
     if (tmplLbl) tmplLbl.textContent = 'Error al cargar';
   }
   cfgRendRenderFx();
+  cfgRendRenderFxFields();
 }
 function cfgRendRenderFx() {
   const el = document.getElementById('cfg-rend-fx-list');
   if (!el) return;
-  el.innerHTML = _rendFxRates.map((r,i) => `
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+  el.innerHTML = _rendFxRates.map((r,i) => {
+    const isUsd = String(r.moneda||'').trim().toUpperCase() === 'USD';
+    const modo = isUsd ? (r.modo || 'manual') : 'manual';
+    return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
       <input type="text" value="${esc(r.moneda||'')}" placeholder="Moneda (ej: USD)" style="width:90px;padding:7px 10px;font-size:13px;text-transform:uppercase"
-        oninput="cfgRendFxUpdate(${i},'moneda',this.value.toUpperCase())" onblur="cfgRendFxSave()" />
+        oninput="cfgRendFxUpdate(${i},'moneda',this.value.toUpperCase());cfgRendRenderFx()" onblur="cfgRendFxSave()" />
       <span style="color:var(--text2);font-size:13px">=</span>
-      <input type="number" step="0.01" value="${r.tc!=null?r.tc:''}" placeholder="Tipo de cambio (ej: 1050)" style="width:140px;padding:7px 10px;font-size:13px"
+      ${isUsd ? `
+      <select style="font-size:13px;padding:7px 10px" onchange="cfgRendFxUpdate(${i},'modo',this.value);cfgRendRenderFx();cfgRendFxSave()">
+        <option value="auto" ${modo==='auto'?'selected':''}>Automático (dólar oficial, dolarapi.com)</option>
+        <option value="manual" ${modo!=='auto'?'selected':''}>Manual</option>
+      </select>` : ''}
+      <input type="number" step="0.01" value="${r.tc!=null?r.tc:''}" placeholder="${modo==='auto'?'Valor de respaldo si falla la consulta':'Tipo de cambio (ej: 1050)'}" style="width:${modo==='auto'?'220px':'140px'};padding:7px 10px;font-size:13px"
         oninput="cfgRendFxUpdate(${i},'tc',this.value)" onblur="cfgRendFxSave()" />
       <span style="color:var(--text2);font-size:13px">ARS</span>
       <button class="remove-btn" onclick="cfgRendFxRemove(${i})">&#x2715;</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 function cfgRendFxUpdate(i,key,val) { _rendFxRates[i][key] = val; }
-function cfgRendFxAdd() { _rendFxRates.push({moneda:'',tc:''}); cfgRendRenderFx(); }
+function cfgRendFxAdd() { _rendFxRates.push({moneda:'',modo:'manual',tc:''}); cfgRendRenderFx(); }
 function cfgRendFxRemove(i) { _rendFxRates.splice(i,1); cfgRendRenderFx(); cfgRendFxSave(); }
 async function cfgRendFxSave() {
   try { await supaConfigSet('rend_exchange_rates', JSON.stringify(_rendFxRates)); }
   catch(e) { alert('No se pudo guardar el tipo de cambio: ' + e.message); }
+}
+function cfgRendRenderFxFields() {
+  const el = document.getElementById('cfg-rend-fx-fields-list');
+  if (!el) return;
+  const fields = getRendFields().filter(f => f.name.trim() && f.name.toLowerCase().replace(/[^a-z]/g,'') !== 'moneda');
+  el.innerHTML = fields.length ? fields.map(f => `
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;cursor:pointer">
+      <input type="checkbox" ${_rendFxFields.includes(f.name)?'checked':''} onchange="cfgRendFxFieldToggle('${f.name.replace(/'/g,"\\'")}',this.checked)" />
+      ${esc(f.name)}
+    </label>`).join('') : '<p class="hint">Configurá primero los campos IA de Rendiciones, arriba.</p>';
+}
+function cfgRendFxFieldToggle(name, checked) {
+  if (checked && !_rendFxFields.includes(name)) _rendFxFields.push(name);
+  else if (!checked) _rendFxFields = _rendFxFields.filter(n=>n!==name);
+  supaConfigSet('rend_fx_fields', JSON.stringify(_rendFxFields)).catch(e=>alert('No se pudo guardar: '+e.message));
 }
 
 var fieldListGetters = {
@@ -1830,6 +1862,7 @@ async function analyzeAll() {
   document.getElementById('progressWrap').style.display = 'block';
   let done = 0;
   const fxRates = await rendGetFxRatesMap();
+  const fxFieldNames = await rendGetFxFieldNames();
 
   for (let i = 0; i < files.length; i++) {
     if (cancelled) break;
@@ -1863,7 +1896,7 @@ async function analyzeAll() {
       const extracted = JSON.parse(text.replace(/```json|```/g,'').trim());
       extracted['__archivo__'] = item.file.name;
       extracted['__fecha_analisis__'] = new Date().toLocaleString('es-AR');
-      rendApplyCurrencyConversion(extracted, activeFields, fxRates);
+      rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNames);
       item.status = 'done';
       item.error = null;
       const idx = results.findIndex(r=>r['__archivo__']===item.file.name);
@@ -1903,19 +1936,21 @@ function renderRendResults() {
       <div class="card-label">Campos manuales</div>
       ${allManualFields.map((f,i)=>{
         const fieldNameEsc = f.name.replace(/'/g,"\\'");
+        const isMetodoPago = ['método de pago','metodo de pago'].includes(f.name.trim().toLowerCase());
+        const reqMark = isMetodoPago ? ' <span style="color:#e05;font-size:12px" title="Obligatorio">*</span>' : '';
         const modeSelector = rendIsCustomScope(f) ? `
           <select style="font-size:13px;margin-bottom:6px" onchange="rendSetFieldMode('${fieldNameEsc}',this.value);renderRendResults()">
             <option value="global" ${rendFieldMode(f)==='global'?'selected':''}>Igual para todos los archivos</option>
             <option value="perfile" ${rendFieldMode(f)==='perfile'?'selected':''}>Distinto para cada archivo</option>
           </select>` : '';
         if (rendFieldMode(f) !== 'global') {
-          return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<div class="hint">Se completa por separado en cada comprobante, más abajo.</div></div>`;
+          return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<div class="hint">Se completa por separado en cada comprobante, más abajo.</div></div>`;
         }
         if (f.type === 'select') {
           const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
-          return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="">${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
+          return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="rendManualValues['${fieldNameEsc}'] = this.value"><option value="">${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></div>`;
         }
-        return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
+        return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
       }).join('')}
     </div>` : '';
   const fields = getRendFields().filter(f => f.name.trim());
@@ -1972,16 +2007,42 @@ function rendManualValueFor(f, record) {
 }
 
 // ── Conversión automática de moneda extranjera a pesos ──
+async function rendFetchDolarOficial() {
+  const resp = await fetch('https://dolarapi.com/v1/dolares/oficial');
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const data = await resp.json();
+  const venta = Number(data.venta);
+  if (!venta) throw new Error('Respuesta inesperada de dolarapi.com');
+  return venta;
+}
 async function rendGetFxRatesMap() {
   const map = {};
   try {
     const raw = await supaConfigGet('rend_exchange_rates');
     const list = raw ? JSON.parse(raw) : [];
-    list.forEach(r => { if (r.moneda && r.tc) map[String(r.moneda).trim().toUpperCase()] = Number(r.tc); });
+    for (const r of list) {
+      if (!r.moneda) continue;
+      const code = String(r.moneda).trim().toUpperCase();
+      if (code === 'USD' && r.modo === 'auto') {
+        try { map[code] = await rendFetchDolarOficial(); }
+        catch(e) {
+          console.log('No se pudo obtener la cotización automática, uso el valor de respaldo:', e.message);
+          if (r.tc) map[code] = Number(r.tc);
+        }
+      } else if (r.tc) {
+        map[code] = Number(r.tc);
+      }
+    }
   } catch(e) { console.log('No se pudo cargar el tipo de cambio:', e.message); }
   return map;
 }
-function rendApplyCurrencyConversion(extracted, activeFields, fxRates) {
+async function rendGetFxFieldNames() {
+  try {
+    const raw = await supaConfigGet('rend_fx_fields');
+    return raw ? JSON.parse(raw) : [];
+  } catch(e) { return []; }
+}
+function rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNames) {
   const norm = n => String(n).toLowerCase().replace(/[^a-z]/g,'');
   const monedaField = activeFields.find(f => norm(f.name) === 'moneda');
   if (!monedaField) return;
@@ -1989,13 +2050,18 @@ function rendApplyCurrencyConversion(extracted, activeFields, fxRates) {
   if (!moneda || moneda === 'ARS' || moneda === 'PESOS' || moneda === '$') return;
   const rate = fxRates[moneda];
   if (!rate) return;
-  const totalField = activeFields.find(f => ['total','montototal','monto'].includes(norm(f.name)));
-  if (!totalField) return;
-  const original = Number(extracted[totalField.name]);
-  if (!original || isNaN(original)) return;
-  const converted = +(original * rate).toFixed(2);
-  extracted[totalField.name] = converted;
-  extracted['__conv_note__'] = `Convertido de ${moneda} ${original} (TC ${rate}) → $${converted.toLocaleString('es-AR')} ARS`;
+  const converted = [];
+  (fxFieldNames||[]).forEach(fieldName => {
+    if (extracted[fieldName] == null || extracted[fieldName] === '') return;
+    const original = Number(extracted[fieldName]);
+    if (isNaN(original)) return;
+    const conv = +(original * rate).toFixed(2);
+    extracted[fieldName] = conv;
+    converted.push(`${fieldName}: ${original} → ${conv}`);
+  });
+  if (converted.length) {
+    extracted['__conv_note__'] = `Convertido de ${moneda} (TC ${rate}): ` + converted.join(' · ');
+  }
 }
 
 // ── Rendiciones: guardar en SharePoint — carpeta y plantilla fijas (Cfg Rendiciones) ──
@@ -2076,6 +2142,7 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
 
 async function rendInsertarUltima() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  if (!spMetodoPagoValue()) { alert('Seleccioná el Método de pago antes de guardar.'); return; }
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
@@ -2113,6 +2180,7 @@ async function rendInsertarUltima() {
 
 async function rendGenerarNueva() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  if (!spMetodoPagoValue()) { alert('Seleccioná el Método de pago antes de guardar.'); return; }
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
