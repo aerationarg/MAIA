@@ -740,6 +740,28 @@
         <button class="btn btn-secondary" onclick="autoAddField('rend')" style="margin-top:4px">+ Agregar campo automático</button>
         <p class="hint" style="margin-top:8px">Fórmulas: <code>hoy</code> · <code>ultimo+1</code> (lee Excel) · <code>=texto</code> (valor fijo)</p>
       </div>
+      <div class="card">
+        <div class="card-label">Carpeta base — Rendiciones y facturas</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Adentro se crean solas las subcarpetas: Empresa (Aeration Argentina / Servicios) → Persona → Método de pago → Mes. Esta configuración es la misma para todos los usuarios.</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-rend-base-label">Cargando...</span>
+          <button class="sp-browse-btn" onclick="fbOpen('folder','rend-base-folder')">Seleccionar</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label">Plantilla de Rendición</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Archivo .xlsx que se copia al generar una nueva rendición. Misma configuración para todos.</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-rend-tmpl-label">Cargando...</span>
+          <button class="sp-browse-btn" onclick="fbOpen('file','rend-base-tmpl')">Seleccionar</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label">Tipos de cambio</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Si un comprobante viene en una de estas monedas (según el campo IA "Moneda"), el Total se convierte a pesos automáticamente y se aclara en la vista previa.</p>
+        <div id="cfg-rend-fx-list"></div>
+        <button class="btn btn-secondary" onclick="cfgRendFxAdd()" style="margin-top:4px">+ Agregar moneda</button>
+      </div>
     </div>
 
     <!-- ═══ PANEL: Config Viajes ═══ -->
@@ -1542,6 +1564,29 @@ async function loadApiKeyFromSupabase() {
     }
   } catch(e) { console.log('Could not load API key:', e.message); }
 }
+
+// ── Config global (app_config en Supabase) — igual para todos los usuarios, no local ──
+async function supaConfigGet(key) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token) return null;
+  const res = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${encodeURIComponent(key)}`, {
+    headers: { Authorization: 'Bearer ' + session.token }
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data[0]?.value != null ? data[0].value : null;
+}
+async function supaConfigSet(key, value) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token) throw new Error('No autenticado.');
+  const res = await supaFetch('/rest/v1/app_config', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + session.token, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+    body: JSON.stringify({ key, value })
+  });
+  if (!res.ok) throw new Error('No se pudo guardar en app_config (HTTP ' + res.status + '). Verificá que la tabla tenga una restricción UNIQUE en "key" y permisos de escritura.');
+}
+
 function getPin()               { return localStorage.getItem(ADMIN_PIN_KEY) || ''; }
 function savePin(p)             { localStorage.setItem(ADMIN_PIN_KEY, p); }
 function getRendManualFields()  { return JSON.parse(localStorage.getItem('rend_manual_fields_' + currentEmpresa) || 'null') || []; }
@@ -1558,7 +1603,7 @@ function switchPanel(name) {
   const panel = document.getElementById('panel-' + name);
   if (panel) panel.classList.add('active');
   if (name === 'admin') renderAdmin();
-  if (name === 'cfg-rend') { renderRendFields(); renderRendManualFields(); renderAutoFields('rend'); }
+  if (name === 'cfg-rend') { renderRendFields(); renderRendManualFields(); renderAutoFields('rend'); cfgRendLoadAll(); }
   if (name === 'cfg-np-loc') { npCfgRender('np-loc'); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npCfgRender('np-int'); renderAutoFields('np-int'); }
   if (name === 'rend') renderRendResults();
@@ -1639,6 +1684,50 @@ function renderRendManualFields() {
 function rendUpdateManualField(i, key, val) { const f=getRendManualFields(); f[i][key]=val; saveRendManualFields(f); }
 function rendRemoveManualField(i) { const f=getRendManualFields(); f.splice(i,1); saveRendManualFields(f); renderRendManualFields(); }
 function rendAddManualField() { const f=getRendManualFields(); f.push({name:'',desc:'',type:'text',options:'',scope:'global'}); saveRendManualFields(f); renderRendManualFields(); }
+
+// ── Cfg Rendiciones: carpeta base, plantilla y tipos de cambio (globales, en Supabase) ──
+let _rendFxRates = [];
+async function cfgRendLoadAll() {
+  const baseLbl = document.getElementById('cfg-rend-base-label');
+  const tmplLbl = document.getElementById('cfg-rend-tmpl-label');
+  if (baseLbl) baseLbl.textContent = 'Cargando...';
+  if (tmplLbl) tmplLbl.textContent = 'Cargando...';
+  try {
+    const [baseRaw, tmplRaw, fxRaw] = await Promise.all([
+      supaConfigGet('rend_base_folder'), supaConfigGet('rend_template'), supaConfigGet('rend_exchange_rates')
+    ]);
+    const base = baseRaw ? JSON.parse(baseRaw) : null;
+    const tmpl = tmplRaw ? JSON.parse(tmplRaw) : null;
+    _rendFxRates = fxRaw ? JSON.parse(fxRaw) : [];
+    if (baseLbl) baseLbl.textContent = base?.label || 'Sin seleccionar';
+    if (tmplLbl) tmplLbl.textContent = tmpl?.label || 'Sin seleccionar';
+  } catch(e) {
+    if (baseLbl) baseLbl.textContent = 'Error al cargar';
+    if (tmplLbl) tmplLbl.textContent = 'Error al cargar';
+  }
+  cfgRendRenderFx();
+}
+function cfgRendRenderFx() {
+  const el = document.getElementById('cfg-rend-fx-list');
+  if (!el) return;
+  el.innerHTML = _rendFxRates.map((r,i) => `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <input type="text" value="${esc(r.moneda||'')}" placeholder="Moneda (ej: USD)" style="width:90px;padding:7px 10px;font-size:13px;text-transform:uppercase"
+        oninput="cfgRendFxUpdate(${i},'moneda',this.value.toUpperCase())" onblur="cfgRendFxSave()" />
+      <span style="color:var(--text2);font-size:13px">=</span>
+      <input type="number" step="0.01" value="${r.tc!=null?r.tc:''}" placeholder="Tipo de cambio (ej: 1050)" style="width:140px;padding:7px 10px;font-size:13px"
+        oninput="cfgRendFxUpdate(${i},'tc',this.value)" onblur="cfgRendFxSave()" />
+      <span style="color:var(--text2);font-size:13px">ARS</span>
+      <button class="remove-btn" onclick="cfgRendFxRemove(${i})">&#x2715;</button>
+    </div>`).join('');
+}
+function cfgRendFxUpdate(i,key,val) { _rendFxRates[i][key] = val; }
+function cfgRendFxAdd() { _rendFxRates.push({moneda:'',tc:''}); cfgRendRenderFx(); }
+function cfgRendFxRemove(i) { _rendFxRates.splice(i,1); cfgRendRenderFx(); cfgRendFxSave(); }
+async function cfgRendFxSave() {
+  try { await supaConfigSet('rend_exchange_rates', JSON.stringify(_rendFxRates)); }
+  catch(e) { alert('No se pudo guardar el tipo de cambio: ' + e.message); }
+}
 
 var fieldListGetters = {
   'rend-ia':       [()=>getRendFields(),       f=>saveRendFields(f),       ()=>renderRendFields()],
@@ -1740,6 +1829,7 @@ async function analyzeAll() {
 
   document.getElementById('progressWrap').style.display = 'block';
   let done = 0;
+  const fxRates = await rendGetFxRatesMap();
 
   for (let i = 0; i < files.length; i++) {
     if (cancelled) break;
@@ -1773,6 +1863,7 @@ async function analyzeAll() {
       const extracted = JSON.parse(text.replace(/```json|```/g,'').trim());
       extracted['__archivo__'] = item.file.name;
       extracted['__fecha_analisis__'] = new Date().toLocaleString('es-AR');
+      rendApplyCurrencyConversion(extracted, activeFields, fxRates);
       item.status = 'done';
       item.error = null;
       const idx = results.findIndex(r=>r['__archivo__']===item.file.name);
@@ -1855,9 +1946,11 @@ function renderRendResults() {
         <input class="result-val" placeholder="${esc(f.desc||f.name)}" value="${esc(val)}" oninput="results[${ri}]['${key}'] = this.value; saveResults()" />
       </div>`;
     }).join('');
+    const convNote = r.__conv_note__ ? `<div class="hint" style="color:var(--blue);margin-bottom:8px">🔁 ${esc(r.__conv_note__)}</div>` : '';
     return `
       <div class="result-card">
         <div class="result-filename">📄 ${esc(r['__archivo__']||'')} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
+        ${convNote}
         ${manualRows}
         ${fieldRows}
       </div>`;
@@ -1865,16 +1958,202 @@ function renderRendResults() {
 
   area.innerHTML = `
     ${manualSection}
-    <div style="display:flex;gap:8px;margin-bottom:12px">
-      <button class="btn btn-green btn-sm" onclick="exportExcel()">⬇ Excel local</button>
-      <button class="btn btn-primary btn-sm" onclick="sendToSharePoint()">☁️ SharePoint</button>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="rendInsertarUltima()">📥 Insertar en última rendición</button>
+      <button class="btn btn-primary btn-sm" onclick="rendGenerarNueva()">✨ Generar nueva rendición</button>
       <button class="btn btn-secondary btn-sm" onclick="clearResults()">🗑</button>
     </div>
+    <div id="rend-save-status" class="status-msg" style="display:none;margin-bottom:12px"></div>
     ${cards}`;
 }
 
 function rendManualValueFor(f, record) {
   return rendFieldMode(f) === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
+}
+
+// ── Conversión automática de moneda extranjera a pesos ──
+async function rendGetFxRatesMap() {
+  const map = {};
+  try {
+    const raw = await supaConfigGet('rend_exchange_rates');
+    const list = raw ? JSON.parse(raw) : [];
+    list.forEach(r => { if (r.moneda && r.tc) map[String(r.moneda).trim().toUpperCase()] = Number(r.tc); });
+  } catch(e) { console.log('No se pudo cargar el tipo de cambio:', e.message); }
+  return map;
+}
+function rendApplyCurrencyConversion(extracted, activeFields, fxRates) {
+  const norm = n => String(n).toLowerCase().replace(/[^a-z]/g,'');
+  const monedaField = activeFields.find(f => norm(f.name) === 'moneda');
+  if (!monedaField) return;
+  const moneda = String(extracted[monedaField.name]||'').trim().toUpperCase();
+  if (!moneda || moneda === 'ARS' || moneda === 'PESOS' || moneda === '$') return;
+  const rate = fxRates[moneda];
+  if (!rate) return;
+  const totalField = activeFields.find(f => ['total','montototal','monto'].includes(norm(f.name)));
+  if (!totalField) return;
+  const original = Number(extracted[totalField.name]);
+  if (!original || isNaN(original)) return;
+  const converted = +(original * rate).toFixed(2);
+  extracted[totalField.name] = converted;
+  extracted['__conv_note__'] = `Convertido de ${moneda} ${original} (TC ${rate}) → $${converted.toLocaleString('es-AR')} ARS`;
+}
+
+// ── Rendiciones: guardar en SharePoint — carpeta y plantilla fijas (Cfg Rendiciones) ──
+// Carpeta final = base (Cfg) / Empresa / Persona / Método de pago / Año-Mes
+async function rendResolveDestFolder(token) {
+  const baseRaw = await supaConfigGet('rend_base_folder');
+  if (!baseRaw) throw new Error('No hay carpeta base configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
+  const base = JSON.parse(baseRaw);
+  const siteId = base.siteId;
+  let folderId = base.id || await spGetFolderIdByPath(token, siteId, base.path||'');
+  const empresaName = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
+  folderId = await spEnsureFolder(token, siteId, folderId, empresaName);
+  const personName = (currentUser.nombre || currentUser.email.split('@')[0]).trim();
+  folderId = await spEnsureFolder(token, siteId, folderId, personName);
+  const metodoPago = spMetodoPagoValue();
+  if (metodoPago) folderId = await spEnsureFolder(token, siteId, folderId, metodoPago);
+  folderId = await spEnsureFolder(token, siteId, folderId, spYearMonth());
+  return { siteId, folderId };
+}
+
+// Escribe results[] en el Excel indicado, respetando la fila "Total" (inserta arriba y extiende el SUM)
+async function rendWriteRows(token, siteId, excelItemId, sheetName) {
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
+  const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
+  if (!usedResp.ok) throw new Error('No se pudo leer el Excel.');
+  const usedData = await usedResp.json();
+  const rows = usedData.values || [];
+  const hdrs = rows[0] || [];
+  const fields = getRendFields().filter(f => f.name.trim());
+  const manualFields = getRendManualFields().filter(f=>f.name.trim());
+  const savedMapping = getMapping(REND_MAPPING_KEY());
+  const useMapping = Object.keys(savedMapping).length > 0 && hdrs.length > 0;
+
+  let firstEmptyRow = 2;
+  for (let i=1; i<rows.length; i++) {
+    if (rows[i].every(c => c===null || c==='' || c===undefined)) { firstEmptyRow = i + 1; break; }
+    firstEmptyRow = i + 2;
+  }
+  let totalRowNum = spFindTotalRow(rows);
+  const totalRowWidth = String.fromCharCode(64 + Math.max(hdrs.length, 1));
+  const totalOrigFormulas = totalRowNum ? await spGetRowFormulas(token, excelBase, totalRowNum, totalRowWidth) : null;
+
+  for (let ri=0; ri<results.length; ri++) {
+    const r = results[ri];
+    let newRow;
+    if (useMapping) {
+      newRow = buildRowFromMapping(savedMapping, hdrs, r, rendManualValues, manualFields, fields);
+    } else {
+      newRow = new Array(Math.max(hdrs.length, fields.length + 2 + manualFields.length)).fill('');
+      hdrs.forEach((h, i) => {
+        if (!h) return;
+        const hl = String(h).toLowerCase();
+        if (hl.includes('archivo')) { newRow[i] = r['__archivo__'] || ''; return; }
+        if (hl.includes('fecha anal')) { newRow[i] = r['__fecha_analisis__'] || ''; return; }
+        const mf = manualFields.find(f=>strSimilarity(f.name,String(h))>0.5);
+        if (mf) { newRow[i] = rendManualValueFor(mf, r); return; }
+        const ia = fields.find(f=>strSimilarity(f.name,String(h))>0.5);
+        if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
+      });
+    }
+    let rowNum;
+    if (totalRowNum) {
+      await spInsertRowAt(token, excelBase, totalRowNum, totalRowWidth);
+      rowNum = totalRowNum;
+      totalRowNum++;
+    } else {
+      rowNum = firstEmptyRow + ri;
+    }
+    const lastCol = String.fromCharCode(64 + Math.max(newRow.length, 1));
+    await fetch(excelBase + `range(address='A${rowNum}:${lastCol}${rowNum}')`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]})
+    });
+    if (totalRowNum && totalOrigFormulas) {
+      await spUpdateTotalFormulas(token, excelBase, totalRowNum, totalRowWidth, totalOrigFormulas, rowNum);
+    }
+  }
+}
+
+async function rendInsertarUltima() {
+  if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  const doneFiles = files.filter(f => f.status === 'done');
+  const statusId = 'rend-save-status';
+  showMsg(statusId,'loading','Conectando...');
+  try {
+    const token = await getMsToken();
+    const { siteId, folderId } = await rendResolveDestFolder(token);
+    showMsg(statusId,'loading','Buscando la última rendición...');
+    const listResp = await fetch(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=id,name,file,createdDateTime`,
+      {headers:{Authorization:'Bearer '+token}}
+    );
+    if (!listResp.ok) throw new Error('No se pudo leer la carpeta destino.');
+    const listData = await listResp.json();
+    const excelFiles = (listData.value||[]).filter(f => f.file && /\.xlsx$/i.test(f.name))
+      .sort((a,b) => new Date(b.createdDateTime) - new Date(a.createdDateTime));
+    if (!excelFiles.length) throw new Error('No hay ninguna rendición generada todavía en esa carpeta. Usá "Generar nueva rendición" primero.');
+    const excelItem = excelFiles[0];
+
+    showMsg(statusId,'loading','Leyendo el Excel...');
+    const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
+    const sheetsData = await sheetsResp.json();
+    const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
+
+    showMsg(statusId,'loading','Insertando filas...');
+    await rendWriteRows(token, siteId, excelItem.id, sheetName);
+
+    showMsg(statusId,'loading','Subiendo comprobantes...');
+    await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
+
+    showMsg(statusId,'success',`✓ ${doneFiles.length} comprobante(s) guardados en "${excelItem.name}".`);
+  } catch(e) {
+    showMsg(statusId,'error','✕ Error: ' + e.message);
+  }
+}
+
+async function rendGenerarNueva() {
+  if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  const doneFiles = files.filter(f => f.status === 'done');
+  const statusId = 'rend-save-status';
+  showMsg(statusId,'loading','Conectando...');
+  try {
+    const token = await getMsToken();
+    const tmplRaw = await supaConfigGet('rend_template');
+    if (!tmplRaw) throw new Error('No hay plantilla configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
+    const tmpl = JSON.parse(tmplRaw);
+    const { siteId, folderId } = await rendResolveDestFolder(token);
+
+    showMsg(statusId,'loading','Copiando plantilla...');
+    const newFileName = spRendicionFileName();
+    const copyResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/copy`, {
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body: JSON.stringify({ parentReference: { id: folderId }, name: newFileName })
+    });
+    if (copyResp.status !== 202 && !copyResp.ok) {
+      if (copyResp.status === 409) throw new Error(`Ya existe "${newFileName}" en esa carpeta (rendición de hoy ya generada). Usá "Insertar en última rendición".`);
+      throw new Error('Error al copiar la plantilla: HTTP '+copyResp.status);
+    }
+    await new Promise(r=>setTimeout(r,2500));
+
+    showMsg(statusId,'loading','Buscando el archivo copiado...');
+    const listResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=id,name`, {headers:{Authorization:'Bearer '+token}});
+    const listData = await listResp.json();
+    const copiedItem = (listData.value||[]).find(f => f.name === newFileName);
+    if (!copiedItem) throw new Error('No se encontró el archivo copiado. Intentá de nuevo.');
+
+    showMsg(statusId,'loading','Insertando datos...');
+    const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiedItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
+    const sheetsData = await sheetsResp.json();
+    const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
+    await rendWriteRows(token, siteId, copiedItem.id, sheetName);
+
+    showMsg(statusId,'loading','Subiendo comprobantes...');
+    await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
+
+    showMsg(statusId,'success',`✓ Rendición "${newFileName}" generada con ${doneFiles.length} comprobante(s).`);
+  } catch(e) {
+    showMsg(statusId,'error','✕ Error: ' + e.message);
+  }
 }
 
 function exportExcel() {
@@ -4017,6 +4296,12 @@ function fbSelectCurrent() {
     spDefaults.tmplDestId = itemId;
     spDefaults.tmplDestS = fbCurrentSiteId;
     document.getElementById('sp-tmpl-destfolder-label').textContent = label;
+  } else if (fbTarget === 'rend-base-folder') {
+    document.getElementById('cfg-rend-base-label').textContent = label;
+    fbClose();
+    supaConfigSet('rend_base_folder', JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label }))
+      .catch(e => alert('No se pudo guardar la carpeta base: ' + e.message));
+    return;
   }
   saveSpDefaults(spDefaults);
   fbClose();
@@ -4049,6 +4334,14 @@ async function fbSelectFile(item, relativePath) {
     saveHallazgosCfg(cfg);
     document.getElementById('cfg-hallazgos-excel-label').textContent = item.name;
     fbClose();
+  } else if (fbTarget === 'rend-base-tmpl') {
+    document.getElementById('cfg-rend-tmpl-label').textContent = item.name;
+    fbClose();
+    try {
+      await supaConfigSet('rend_template', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+    } catch(e) { alert('No se pudo guardar la plantilla: ' + e.message); }
+    // Reutiliza el mismo mapeo de columnas que ya usaban existing/template
+    await loadExcelHeadersAndShowMapping('rend', item.id, fbCurrentSiteId);
   } else {
     saveSpDefaults(spDefaults);
     fbClose();
