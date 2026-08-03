@@ -1634,8 +1634,31 @@ async function supaConfigSet(key, value) {
 
 function getPin()               { return localStorage.getItem(ADMIN_PIN_KEY) || ''; }
 function savePin(p)             { localStorage.setItem(ADMIN_PIN_KEY, p); }
-function getRendManualFields()  { return JSON.parse(localStorage.getItem('rend_manual_fields_' + currentEmpresa) || 'null') || []; }
-function saveRendManualFields(f){ localStorage.setItem('rend_manual_fields_' + currentEmpresa, JSON.stringify(f)); }
+// Campos manuales de Rendiciones (Método de pago, Imputación, etc.) — config global en Supabase,
+// igual que el resto de Cfg Rendiciones, para que sea la misma en todos los dispositivos/usuarios.
+function REND_MANUAL_FIELDS_KEY() { return 'rend_manual_fields_' + currentEmpresa; }
+let _rendManualFieldsCache = [];
+function getRendManualFields()  { return _rendManualFieldsCache; }
+function saveRendManualFields(f){
+  _rendManualFieldsCache = f;
+  supaConfigSet(REND_MANUAL_FIELDS_KEY(), JSON.stringify(f)).catch(e=>console.log('No se pudo guardar campos manuales:', e.message));
+}
+// Precarga la caché para que esté lista al entrar a Rendiciones o Cfg Rendiciones.
+async function rendLoadManualFields() {
+  try {
+    const raw = await supaConfigGet(REND_MANUAL_FIELDS_KEY());
+    if (raw) { _rendManualFieldsCache = JSON.parse(raw); return; }
+    // Migración: si todavía no hay nada guardado en Supabase, usar lo que haya en localStorage
+    // de este dispositivo (config vieja, previa a que esto pasara a ser global) y subirlo.
+    const legacy = JSON.parse(localStorage.getItem('rend_manual_fields_' + currentEmpresa) || 'null');
+    if (legacy && legacy.length) {
+      _rendManualFieldsCache = legacy;
+      await supaConfigSet(REND_MANUAL_FIELDS_KEY(), JSON.stringify(legacy));
+    } else {
+      _rendManualFieldsCache = [];
+    }
+  } catch(e) { console.log('No se pudo cargar campos manuales:', e.message); }
+}
 function saveResults()          { try { localStorage.setItem('rend_results_' + currentEmpresa, JSON.stringify(results)); } catch(e){} }
 // Aliases for NP manual fields (used in fieldListGetters)
 function getNpManualFields(pfx)  { return npGetManual ? npGetManual(pfx||'np-loc') : []; }
@@ -1648,11 +1671,11 @@ function switchPanel(name) {
   const panel = document.getElementById('panel-' + name);
   if (panel) panel.classList.add('active');
   if (name === 'admin') renderAdmin();
-  if (name === 'cfg-rend') { renderRendFields(); renderRendManualFields(); renderAutoFields('rend'); cfgRendLoadAll(); }
+  if (name === 'cfg-rend') { renderRendFields(); rendLoadManualFields().then(renderRendManualFields); renderAutoFields('rend'); cfgRendLoadAll(); }
   if (name === 'cfg-clientes') cfgClientesLoad();
   if (name === 'cfg-np-loc') { npCfgRender('np-loc'); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npCfgRender('np-int'); renderAutoFields('np-int'); }
-  if (name === 'rend') { rendLoadClientesProveedores().then(renderRendResults); renderRendResults(); }
+  if (name === 'rend') { Promise.all([rendLoadClientesProveedores(), rendLoadManualFields()]).then(renderRendResults); renderRendResults(); }
   if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
