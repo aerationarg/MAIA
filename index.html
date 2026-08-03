@@ -1673,10 +1673,10 @@ function switchPanel(name) {
   if (name === 'admin') renderAdmin();
   if (name === 'cfg-rend') { renderRendFields(); rendLoadManualFields().then(renderRendManualFields); renderAutoFields('rend'); cfgRendLoadAll(); }
   if (name === 'cfg-clientes') cfgClientesLoad();
-  if (name === 'cfg-np-loc') { npCfgRender('np-loc'); renderAutoFields('np-loc'); }
-  if (name === 'cfg-np-int') { npCfgRender('np-int'); renderAutoFields('np-int'); }
+  if (name === 'cfg-np-loc') { npLoadFieldsConfig('np-loc').then(()=>npCfgRender('np-loc')); renderAutoFields('np-loc'); }
+  if (name === 'cfg-np-int') { npLoadFieldsConfig('np-int').then(()=>npCfgRender('np-int')); renderAutoFields('np-int'); }
   if (name === 'rend') { Promise.all([rendLoadClientesProveedores(), rendLoadManualFields()]).then(renderRendResults); renderRendResults(); }
-  if (name === 'np-loc' || name === 'np-int') { npStep0InitAndCalc(name); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); }
+  if (name === 'np-loc' || name === 'np-int') { npLoadFieldsConfig(name).then(()=>npStep0InitAndCalc(name)); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
@@ -4787,10 +4787,38 @@ var DEFAULT_NP_INT_MANUAL = [
   { name: 'Responsable',       desc: 'Iniciales o nombre del responsable' },
 ];
 
-function npGetIA(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).ia)    || 'null') || getNpDefaults(pfx).ia; }
-function npSaveIA(pfx,f)  { localStorage.setItem(NP_KEYS(pfx).ia, JSON.stringify(f)); }
-function npGetManual(pfx) { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).manual)|| 'null') || getNpDefaults(pfx).manual; }
-function npSaveManual(pfx,f){ localStorage.setItem(NP_KEYS(pfx).manual, JSON.stringify(f)); }
+// Campos IA/manuales de NP — config global en Supabase (mismo esquema que rend-manual),
+// para que sean los mismos en todos los dispositivos/usuarios.
+let _npIaCache = {};
+let _npManualCache = {};
+function npGetIA(pfx)     { return _npIaCache[pfx] || getNpDefaults(pfx).ia; }
+function npSaveIA(pfx,f)  {
+  _npIaCache[pfx] = f;
+  supaConfigSet(NP_KEYS(pfx).ia, JSON.stringify(f)).catch(e=>console.log('No se pudo guardar campos IA de NP:', e.message));
+}
+function npGetManual(pfx) { return _npManualCache[pfx] || getNpDefaults(pfx).manual; }
+function npSaveManual(pfx,f){
+  _npManualCache[pfx] = f;
+  supaConfigSet(NP_KEYS(pfx).manual, JSON.stringify(f)).catch(e=>console.log('No se pudo guardar campos manuales de NP:', e.message));
+}
+// Precarga las cachés (con migración desde localStorage viejo la primera vez) para que estén
+// listas al entrar a NP Local/Internacional o a su Cfg.
+async function npLoadFieldsConfig(pfx) {
+  const keys = NP_KEYS(pfx);
+  async function loadOne(cache, key, defaults) {
+    try {
+      const raw = await supaConfigGet(key);
+      if (raw) { cache[pfx] = JSON.parse(raw); return; }
+      const legacy = JSON.parse(localStorage.getItem(key) || 'null');
+      cache[pfx] = legacy || defaults;
+      if (legacy) await supaConfigSet(key, JSON.stringify(legacy));
+    } catch(e) { console.log('No se pudo cargar config de NP:', e.message); }
+  }
+  await Promise.all([
+    loadOne(_npIaCache, keys.ia, getNpDefaults(pfx).ia),
+    loadOne(_npManualCache, keys.manual, getNpDefaults(pfx).manual),
+  ]);
+}
 function npGetSp(pfx)     { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).sp)   || 'null') || {mode:'existing'}; }
 function npSaveSp(pfx,d)  { localStorage.setItem(NP_KEYS(pfx).sp, JSON.stringify(d)); }
 function npGetTmpl(pfx)   { return JSON.parse(localStorage.getItem(NP_KEYS(pfx).tmpl) || 'null') || {}; }
