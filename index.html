@@ -806,6 +806,11 @@
         <div class="card-label">Proveedores</div>
         <textarea id="cfg-proveedores-list" rows="8" placeholder="Proveedor 1&#10;Proveedor 2&#10;Proveedor 3" onblur="cfgClientesSave()"></textarea>
       </div>
+      <div class="card" id="cfg-personas-card" style="display:none">
+        <div class="card-label">Personas (Aeration Servicios)</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Un nombre por línea. En Rendiciones, con la opción "Cargar como otra persona" tildada, la carpeta de SharePoint se crea a nombre de la persona elegida acá en vez del usuario logueado.</p>
+        <textarea id="cfg-personas-list" rows="6" placeholder="Nombre Apellido 1&#10;Nombre Apellido 2" onblur="cfgClientesSave()"></textarea>
+      </div>
       <p class="hint" id="cfg-clientes-status"></p>
     </div>
 
@@ -1570,6 +1575,9 @@ let npPdfB64 = null;
 let npExtractedData = null;
 let rendManualValues = {};
 let rendManualMode = {}; // per-session choice for 'custom'-scope manual fields: 'global' | 'perfile'
+let rendPersonaOverrideEnabled = false; // "Cargar como otra persona" (solo AS)
+let rendPersonaOverrideValue = '';
+function isImputacionFieldName(n) { return ['imputación','imputacion'].includes(String(n||'').trim().toLowerCase()); }
 
 function rendIsCustomScope(f) { return f.scope === 'custom' || f.scope === 'perfile'; }
 function rendFieldMode(f) {
@@ -1854,30 +1862,41 @@ function cfgRendFxFieldToggle(name, checked) {
 // ── Clientes / Proveedores (por empresa, en Supabase) — precargan el campo Imputación ──
 function CLIENTES_KEY() { return 'rend_clientes_' + currentEmpresa; }
 function PROVEEDORES_KEY() { return 'rend_proveedores_' + currentEmpresa; }
+// Personas (solo AS) — para cargar una rendición a nombre de otra persona.
+function PERSONAS_KEY() { return 'rend_personas_' + currentEmpresa; }
 let _rendClientesCache = [];
 let _rendProveedoresCache = [];
+let _rendPersonasCache = [];
 async function cfgClientesLoad() {
   const lbl = document.getElementById('cfg-clientes-empresa-label');
   if (lbl) lbl.textContent = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
   try {
-    const [clientesRaw, proveedoresRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY())]);
+    const [clientesRaw, proveedoresRaw, personasRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY()), supaConfigGet(PERSONAS_KEY())]);
     _rendClientesCache = clientesRaw ? JSON.parse(clientesRaw) : [];
     _rendProveedoresCache = proveedoresRaw ? JSON.parse(proveedoresRaw) : [];
-  } catch(e) { console.log('No se pudo cargar clientes/proveedores:', e.message); }
+    _rendPersonasCache = personasRaw ? JSON.parse(personasRaw) : [];
+  } catch(e) { console.log('No se pudo cargar clientes/proveedores/personas:', e.message); }
   const clEl = document.getElementById('cfg-clientes-list');
   const prEl = document.getElementById('cfg-proveedores-list');
+  const peEl = document.getElementById('cfg-personas-list');
+  const peCard = document.getElementById('cfg-personas-card');
   if (clEl) clEl.value = _rendClientesCache.join('\n');
   if (prEl) prEl.value = _rendProveedoresCache.join('\n');
+  if (peEl) peEl.value = _rendPersonasCache.join('\n');
+  if (peCard) peCard.style.display = currentEmpresa === 'AS' ? '' : 'none';
 }
 async function cfgClientesSave() {
   const clEl = document.getElementById('cfg-clientes-list');
   const prEl = document.getElementById('cfg-proveedores-list');
+  const peEl = document.getElementById('cfg-personas-list');
   _rendClientesCache = (clEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
   _rendProveedoresCache = (prEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  _rendPersonasCache = (peEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
   try {
     await Promise.all([
       supaConfigSet(CLIENTES_KEY(), JSON.stringify(_rendClientesCache)),
-      supaConfigSet(PROVEEDORES_KEY(), JSON.stringify(_rendProveedoresCache))
+      supaConfigSet(PROVEEDORES_KEY(), JSON.stringify(_rendProveedoresCache)),
+      supaConfigSet(PERSONAS_KEY(), JSON.stringify(_rendPersonasCache))
     ]);
     showMsg('cfg-clientes-status','success','✓ Guardado.');
   } catch(e) { showMsg('cfg-clientes-status','error','✕ No se pudo guardar: ' + e.message); }
@@ -1885,10 +1904,11 @@ async function cfgClientesSave() {
 // Precarga la caché para que esté lista cuando se abre Rendiciones (sin tener que pasar por Cfg antes)
 async function rendLoadClientesProveedores() {
   try {
-    const [clientesRaw, proveedoresRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY())]);
+    const [clientesRaw, proveedoresRaw, personasRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY()), supaConfigGet(PERSONAS_KEY())]);
     _rendClientesCache = clientesRaw ? JSON.parse(clientesRaw) : [];
     _rendProveedoresCache = proveedoresRaw ? JSON.parse(proveedoresRaw) : [];
-  } catch(e) { console.log('No se pudo cargar clientes/proveedores:', e.message); }
+    _rendPersonasCache = personasRaw ? JSON.parse(personasRaw) : [];
+  } catch(e) { console.log('No se pudo cargar clientes/proveedores/personas:', e.message); }
 }
 
 var fieldListGetters = {
@@ -2059,22 +2079,31 @@ function renderRendResults() {
   if (!results.length) { area.innerHTML = ''; return; }
   // Render manual fields section — split by effective mode (fixed 'global', or session choice for 'custom' fields)
   const allManualFields = getRendManualFields();
-  const isImputacionName = n => ['imputación','imputacion'].includes(String(n||'').trim().toLowerCase());
-  // Con Método de pago = "Rendiciones de IVA", Imputación se completa sola con el nombre
-  // del usuario logueado (algunas rendiciones de IVA son a nombre de una persona, no de un cliente/proveedor).
+  // Con Método de pago = "Rendiciones de IVA", Imputación no aplica: no se pide y queda vacía en el Excel.
   const isRendicionIVA = String(spMetodoPagoValue()||'').trim().toLowerCase() === 'rendiciones de iva';
   const globalManualFields = allManualFields.filter(f=>rendFieldMode(f)==='global');
-  const perFileManualFields = allManualFields.filter(f=>rendFieldMode(f)==='perfile' && !(isRendicionIVA && isImputacionName(f.name)));
+  const perFileManualFields = allManualFields.filter(f=>rendFieldMode(f)==='perfile' && !(isRendicionIVA && isImputacionFieldName(f.name)));
+  const personaSection = (currentEmpresa === 'AS' && _rendPersonasCache.length) ? `
+    <div class="card" style="margin-bottom:12px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" ${rendPersonaOverrideEnabled?'checked':''} onchange="rendPersonaOverrideEnabled=this.checked; if(!this.checked) rendPersonaOverrideValue=''; renderRendResults()" />
+        Cargar como otra persona
+      </label>
+      ${rendPersonaOverrideEnabled ? `
+      <select style="margin-top:8px;font-size:14px" onchange="rendPersonaOverrideValue=this.value">
+        <option value="" ${!rendPersonaOverrideValue?'selected':''}>Seleccionar persona...</option>
+        ${_rendPersonasCache.map(p=>`<option value="${esc(p)}" ${rendPersonaOverrideValue===p?'selected':''}>${esc(p)}</option>`).join('')}
+      </select>` : ''}
+    </div>` : '';
   const manualSection = allManualFields.length ? `
     <div class="card" style="margin-bottom:12px">
       <div class="card-label">Campos manuales</div>
       ${allManualFields.map((f,i)=>{
         const fieldNameEsc = f.name.replace(/'/g,"\\'");
         const isMetodoPago = ['método de pago','metodo de pago'].includes(f.name.trim().toLowerCase());
-        if (isRendicionIVA && isImputacionName(f.name)) {
-          const autoNombre = (currentUser?.nombre || (currentUser?.email||'').split('@')[0] || '').trim();
-          if (rendManualValues[f.name] !== autoNombre) rendManualValues[f.name] = autoNombre;
-          return `<div style="margin-bottom:12px"><label>${esc(f.name)}</label><input type="text" class="login-input" value="${esc(autoNombre)}" disabled style="opacity:0.65" /><div class="hint">Se completa automáticamente con tu nombre (Método de pago: Rendiciones de IVA).</div></div>`;
+        if (isRendicionIVA && isImputacionFieldName(f.name)) {
+          if (rendManualValues[f.name] !== '') rendManualValues[f.name] = '';
+          return `<div style="margin-bottom:12px"><label style="color:var(--text3)">${esc(f.name)}</label><div class="hint">No aplica con Método de pago "Rendiciones de IVA" — queda vacío.</div></div>`;
         }
         const reqMark = (f.required || isMetodoPago) ? ' <span style="color:#e05;font-size:12px" title="Obligatorio">*</span>' : '';
         const modeSelector = rendIsCustomScope(f) ? `
@@ -2143,6 +2172,7 @@ function renderRendResults() {
   }).join('');
 
   area.innerHTML = `
+    ${personaSection}
     ${manualSection}
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <button class="btn btn-primary btn-sm" onclick="rendInsertarUltima()">📥 Insertar en última rendición</button>
@@ -2168,9 +2198,14 @@ function rendFieldOpts(f) {
 // Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
 // campos manuales lo son solo si se marcó "Obligatorio" en Cfg Rendiciones.
 function rendValidateRequiredFields() {
+  if (currentEmpresa === 'AS' && rendPersonaOverrideEnabled && !rendPersonaOverrideValue) {
+    return 'Falta elegir la persona.';
+  }
   const allManualFields = getRendManualFields().filter(f => f.name.trim());
+  const isRendicionIVA = String(spMetodoPagoValue()||'').trim().toLowerCase() === 'rendiciones de iva';
   for (const f of allManualFields) {
     const isMetodoPago = ['método de pago','metodo de pago'].includes(f.name.trim().toLowerCase());
+    if (isRendicionIVA && isImputacionFieldName(f.name)) continue;
     if (!f.required && !isMetodoPago) continue;
     if (rendFieldMode(f) === 'perfile') {
       const key = rendManualKey(f.name);
@@ -2254,7 +2289,9 @@ async function rendResolveDestFolder(token) {
   let folderId = base.id || await spGetFolderIdByPath(token, siteId, base.path||'');
   const empresaName = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
   folderId = await spEnsureFolder(token, siteId, folderId, empresaName);
-  const personName = (currentUser.nombre || currentUser.email.split('@')[0]).trim();
+  const personName = (currentEmpresa === 'AS' && rendPersonaOverrideEnabled && rendPersonaOverrideValue)
+    ? rendPersonaOverrideValue.trim()
+    : (currentUser.nombre || currentUser.email.split('@')[0]).trim();
   folderId = await spEnsureFolder(token, siteId, folderId, personName);
   const metodoPago = spMetodoPagoValue();
   if (metodoPago) folderId = await spEnsureFolder(token, siteId, folderId, metodoPago);
@@ -2365,6 +2402,8 @@ async function rendInsertarUltima() {
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
 
     rendManualValues = {};
+    rendPersonaOverrideEnabled = false;
+    rendPersonaOverrideValue = '';
     renderRendResults();
     showMsg(statusId,'success',`✓ ${doneFiles.length} comprobante(s) guardados en "${excelItem.name}".`);
   } catch(e) {
@@ -2414,6 +2453,8 @@ async function rendGenerarNueva() {
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
 
     rendManualValues = {};
+    rendPersonaOverrideEnabled = false;
+    rendPersonaOverrideValue = '';
     renderRendResults();
     showMsg(statusId,'success',`✓ Rendición "${newFileName}" generada con ${doneFiles.length} comprobante(s).`);
   } catch(e) {
