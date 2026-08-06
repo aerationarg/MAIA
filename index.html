@@ -792,19 +792,27 @@
       </div>
     </div>
 
-    <!-- ═══ PANEL: Clientes / Proveedores ═══ -->
+    <!-- ═══ PANEL: Imputación (Clientes / Q / Personas) ═══ -->
     <div class="panel" id="panel-cfg-clientes">
       <div class="card">
-        <div class="card-label">Clientes y Proveedores — <span id="cfg-clientes-empresa-label"></span></div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Esta lista es propia de cada empresa (Aeration Argentina / Servicios) y se usa para precargar el campo "Imputación" (u otro que configures) en Rendiciones. Un nombre por línea.</p>
+        <div class="card-label">Fuentes de Imputación</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usan para precargar el campo "Imputación" (u otro que configures) en Rendiciones. Misma configuración para todas las empresas.</p>
       </div>
       <div class="card">
-        <div class="card-label">Clientes</div>
-        <textarea id="cfg-clientes-list" rows="8" placeholder="Cliente 1&#10;Cliente 2&#10;Cliente 3" onblur="cfgClientesSave()"></textarea>
+        <div class="card-label">Excel de Clientes</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Se toma la columna C de la hoja "Hoja1".</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-rend-clientes-excel-label">Cargando...</span>
+          <button class="sp-browse-btn" onclick="fbOpen('file','rend-clientes-excel')">Seleccionar</button>
+        </div>
       </div>
       <div class="card">
-        <div class="card-label">Proveedores</div>
-        <textarea id="cfg-proveedores-list" rows="8" placeholder="Proveedor 1&#10;Proveedor 2&#10;Proveedor 3" onblur="cfgClientesSave()"></textarea>
+        <div class="card-label">Excel de Q</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Hoja "Q-": columna E = número de Q, columna D = referencia. En Imputación se muestran ambos para elegir, pero solo se inserta el número.</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-rend-q-excel-label">Cargando...</span>
+          <button class="sp-browse-btn" onclick="fbOpen('file','rend-q-excel')">Seleccionar</button>
+        </div>
       </div>
       <div class="card" id="cfg-personas-card" style="display:none">
         <div class="card-label">Personas (Aeration Servicios)</div>
@@ -1764,11 +1772,11 @@ function renderRendManualFields() {
       ${f.type==='select' ? `
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:4px;cursor:pointer">
         <input type="checkbox" ${f.precargarClientes?'checked':''} onchange="rendUpdateManualField(${i},'precargarClientes',this.checked)" />
-        Precargar Clientes (ver solapa "Clientes/Proveedores")
+        Precargar Clientes (Excel, ver solapa "Imputación")
       </label>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:4px;cursor:pointer">
-        <input type="checkbox" ${f.precargarProveedores?'checked':''} onchange="rendUpdateManualField(${i},'precargarProveedores',this.checked)" />
-        Precargar Proveedores (ver solapa "Clientes/Proveedores")
+        <input type="checkbox" ${f.precargarQ?'checked':''} onchange="rendUpdateManualField(${i},'precargarQ',this.checked)" />
+        Precargar Q (Excel, ver solapa "Imputación") — con buscador y texto libre
       </label>` : ''}
     </div>`).join('');
 }
@@ -1859,56 +1867,79 @@ function cfgRendFxFieldToggle(name, checked) {
   supaConfigSet('rend_fx_fields', JSON.stringify(_rendFxFields)).catch(e=>alert('No se pudo guardar: '+e.message));
 }
 
-// ── Clientes / Proveedores (por empresa, en Supabase) — precargan el campo Imputación ──
-function CLIENTES_KEY() { return 'rend_clientes_' + currentEmpresa; }
-function PROVEEDORES_KEY() { return 'rend_proveedores_' + currentEmpresa; }
-// Personas (solo AS) — para cargar una rendición a nombre de otra persona.
+// ── Imputación: Clientes (Excel, global) / Q (Excel, global) / Personas (Supabase, solo AS) ──
+// Personas — para cargar una rendición a nombre de otra persona.
 function PERSONAS_KEY() { return 'rend_personas_' + currentEmpresa; }
-let _rendClientesCache = [];
-let _rendProveedoresCache = [];
+let _rendClientesExcelCache = []; // strings (columna C)
+let _rendQCache = [];             // [{num, ref}] (columnas E/D de la hoja "Q-")
 let _rendPersonasCache = [];
+let _rendClientesQLoaded = false; // si ya se intentó leer los Excel esta sesión
+
 async function cfgClientesLoad() {
-  const lbl = document.getElementById('cfg-clientes-empresa-label');
-  if (lbl) lbl.textContent = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
+  const clLbl = document.getElementById('cfg-rend-clientes-excel-label');
+  const qLbl = document.getElementById('cfg-rend-q-excel-label');
+  if (clLbl) clLbl.textContent = 'Cargando...';
+  if (qLbl) qLbl.textContent = 'Cargando...';
   try {
-    const [clientesRaw, proveedoresRaw, personasRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY()), supaConfigGet(PERSONAS_KEY())]);
-    _rendClientesCache = clientesRaw ? JSON.parse(clientesRaw) : [];
-    _rendProveedoresCache = proveedoresRaw ? JSON.parse(proveedoresRaw) : [];
+    const [clRaw, qRaw, personasRaw] = await Promise.all([supaConfigGet('rend_clientes_excel'), supaConfigGet('rend_q_excel'), supaConfigGet(PERSONAS_KEY())]);
+    const cl = clRaw ? JSON.parse(clRaw) : null;
+    const q = qRaw ? JSON.parse(qRaw) : null;
     _rendPersonasCache = personasRaw ? JSON.parse(personasRaw) : [];
-  } catch(e) { console.log('No se pudo cargar clientes/proveedores/personas:', e.message); }
-  const clEl = document.getElementById('cfg-clientes-list');
-  const prEl = document.getElementById('cfg-proveedores-list');
+    if (clLbl) clLbl.textContent = cl?.label || 'Sin seleccionar';
+    if (qLbl) qLbl.textContent = q?.label || 'Sin seleccionar';
+  } catch(e) {
+    if (clLbl) clLbl.textContent = 'Error al cargar';
+    if (qLbl) qLbl.textContent = 'Error al cargar';
+  }
   const peEl = document.getElementById('cfg-personas-list');
   const peCard = document.getElementById('cfg-personas-card');
-  if (clEl) clEl.value = _rendClientesCache.join('\n');
-  if (prEl) prEl.value = _rendProveedoresCache.join('\n');
   if (peEl) peEl.value = _rendPersonasCache.join('\n');
   if (peCard) peCard.style.display = currentEmpresa === 'AS' ? '' : 'none';
 }
 async function cfgClientesSave() {
-  const clEl = document.getElementById('cfg-clientes-list');
-  const prEl = document.getElementById('cfg-proveedores-list');
   const peEl = document.getElementById('cfg-personas-list');
-  _rendClientesCache = (clEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
-  _rendProveedoresCache = (prEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
   _rendPersonasCache = (peEl?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
   try {
-    await Promise.all([
-      supaConfigSet(CLIENTES_KEY(), JSON.stringify(_rendClientesCache)),
-      supaConfigSet(PROVEEDORES_KEY(), JSON.stringify(_rendProveedoresCache)),
-      supaConfigSet(PERSONAS_KEY(), JSON.stringify(_rendPersonasCache))
-    ]);
+    await supaConfigSet(PERSONAS_KEY(), JSON.stringify(_rendPersonasCache));
     showMsg('cfg-clientes-status','success','✓ Guardado.');
   } catch(e) { showMsg('cfg-clientes-status','error','✕ No se pudo guardar: ' + e.message); }
 }
-// Precarga la caché para que esté lista cuando se abre Rendiciones (sin tener que pasar por Cfg antes)
+async function rendFetchExcelUsedRange(token, siteId, itemId, sheetName) {
+  const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/usedRange?$select=values`;
+  const resp = await fetch(url, {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) throw new Error('No se pudo leer la hoja "' + sheetName + '".');
+  const data = await resp.json();
+  return data.values || [];
+}
+// Lee Clientes (col. C, hoja "Hoja1") y Q (col. D/E, hoja "Q-") desde los Excel configurados.
+// Requiere sesión de Microsoft — si ya hay una activa se hace en silencio; si no, quien la
+// llame debe estar preparado para que pida login (ver rendComboFilter).
+async function rendLoadClientesYQ() {
+  const [clRaw, qRaw] = await Promise.all([supaConfigGet('rend_clientes_excel'), supaConfigGet('rend_q_excel')]);
+  const token = await getMsToken();
+  if (clRaw) {
+    const ref = JSON.parse(clRaw);
+    const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Hoja1');
+    _rendClientesExcelCache = rows.slice(1).map(r => String(r[2] ?? '').trim()).filter(Boolean);
+  } else { _rendClientesExcelCache = []; }
+  if (qRaw) {
+    const ref = JSON.parse(qRaw);
+    const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
+    _rendQCache = rows.slice(1).map(r => ({ num: String(r[4] ?? '').trim(), ref: String(r[3] ?? '').trim() })).filter(x => x.num);
+  } else { _rendQCache = []; }
+}
+// Precarga lo que se puede precargar sin pedir login (Personas). Clientes/Q desde Excel se
+// intentan también, pero solo si ya hay sesión de Microsoft activa (para no interrumpir con
+// un popup de login apenas se entra a Rendiciones); si no, se cargan al enfocar el buscador.
 async function rendLoadClientesProveedores() {
   try {
-    const [clientesRaw, proveedoresRaw, personasRaw] = await Promise.all([supaConfigGet(CLIENTES_KEY()), supaConfigGet(PROVEEDORES_KEY()), supaConfigGet(PERSONAS_KEY())]);
-    _rendClientesCache = clientesRaw ? JSON.parse(clientesRaw) : [];
-    _rendProveedoresCache = proveedoresRaw ? JSON.parse(proveedoresRaw) : [];
+    const personasRaw = await supaConfigGet(PERSONAS_KEY());
     _rendPersonasCache = personasRaw ? JSON.parse(personasRaw) : [];
-  } catch(e) { console.log('No se pudo cargar clientes/proveedores/personas:', e.message); }
+  } catch(e) { console.log('No se pudo cargar personas:', e.message); }
+  if (msAccount && !_rendClientesQLoaded) {
+    try { await rendLoadClientesYQ(); _rendClientesQLoaded = true; }
+    catch(e) { console.log('No se pudo precargar Clientes/Q:', e.message); }
+  }
 }
 
 var fieldListGetters = {
@@ -2115,6 +2146,17 @@ function renderRendResults() {
           return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<div class="hint">Se completa por separado en cada comprobante, más abajo.</div></div>`;
         }
         const curVal = rendManualValues[f.name] || '';
+        if (f.type === 'select' && (f.precargarClientes || f.precargarQ)) {
+          _rendComboFieldMap[i] = f;
+          return `<div style="margin-bottom:12px;position:relative">
+            <label>${esc(f.name)}${reqMark}</label>${modeSelector}
+            <input type="text" id="rend-manual-${i}" autocomplete="off" placeholder="${esc(f.desc||'Buscar o escribir libre...')}" style="font-size:14px" value="${esc(curVal)}"
+              oninput="rendManualValues['${fieldNameEsc}'] = this.value; rendComboFilter(${i}, this.value)"
+              onfocus="rendComboFilter(${i}, this.value)"
+              onblur="setTimeout(()=>{const b=document.getElementById('rend-combo-list-${i}'); if(b) b.style.display='none';}, 200)" />
+            <div id="rend-combo-list-${i}" style="display:none;position:absolute;z-index:20;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:220px;overflow-y:auto;width:100%;margin-top:2px;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
+          </div>`;
+        }
         if (f.type === 'select') {
           const opts = rendFieldOpts(f);
           const onChangeJs = isMetodoPago
@@ -2187,12 +2229,50 @@ function rendManualValueFor(f, record) {
   return rendFieldMode(f) === 'perfile' ? (record[rendManualKey(f.name)] || '') : (rendManualValues[f.name] || '');
 }
 
-// Opciones de un campo manual tipo lista: las escritas a mano + Clientes/Proveedores precargados si se tildó.
+// Opciones de un campo manual tipo lista (select simple, sin Clientes/Q): las escritas a mano.
 function rendFieldOpts(f) {
-  const opts = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean);
-  if (f.precargarClientes) opts.push(..._rendClientesCache);
-  if (f.precargarProveedores) opts.push(..._rendProveedoresCache);
-  return [...new Set(opts)];
+  return [...new Set((f.options||'').split(',').map(o=>o.trim()).filter(Boolean))];
+}
+// Opciones "ricas" {value,label} de un campo con precarga de Clientes y/o Q. Para Q, el label
+// muestra "número — referencia" pero el value es solo el número (lo único que se inserta).
+function rendFieldOptsRich(f) {
+  const manual = (f.options||'').split(',').map(o=>o.trim()).filter(Boolean).map(o=>({value:o,label:o}));
+  const clientes = f.precargarClientes ? _rendClientesExcelCache.map(c=>({value:c,label:c})) : [];
+  const qs = f.precargarQ ? _rendQCache.map(q=>({value:q.num, label: q.num + (q.ref ? (' — ' + q.ref) : '')})) : [];
+  const seen = new Set(); const out = [];
+  for (const o of [...manual, ...clientes, ...qs]) { if (o.value && !seen.has(o.value)) { seen.add(o.value); out.push(o); } }
+  return out;
+}
+// Estado del buscador de Imputación (Clientes/Q): qué campo corresponde a cada índice renderizado.
+let _rendComboFieldMap = {};
+async function rendComboFilter(i, query) {
+  const f = _rendComboFieldMap[i];
+  const box = document.getElementById('rend-combo-list-' + i);
+  if (!f || !box) return;
+  if (!_rendClientesQLoaded) {
+    box.style.display = 'block';
+    box.innerHTML = '<div style="padding:8px 10px;color:var(--text3);font-size:13px">Cargando...</div>';
+    try { await rendLoadClientesYQ(); _rendClientesQLoaded = true; }
+    catch(e) { box.innerHTML = '<div style="padding:8px 10px;color:var(--text3);font-size:13px">No se pudo cargar la lista (' + esc(e.message) + '). Podés seguir escribiendo texto libre.</div>'; return; }
+  }
+  const opts = rendFieldOptsRich(f);
+  const q = String(query||'').trim().toLowerCase();
+  const matches = (q ? opts.filter(o=>o.label.toLowerCase().includes(q)) : opts).slice(0, 30);
+  if (!matches.length) {
+    box.innerHTML = '<div style="padding:8px 10px;color:var(--text3);font-size:13px">Sin resultados — se usará el texto escrito.</div>';
+    box.style.display = 'block';
+    return;
+  }
+  const fieldNameEsc = f.name.replace(/'/g,"\\'");
+  box.innerHTML = matches.map(o => `<div onmousedown="rendComboPick(${i},'${fieldNameEsc}','${String(o.value).replace(/'/g,"\\'")}')" style="padding:8px 10px;cursor:pointer;font-size:13px" onmouseover="this.style.background='var(--surface3)'" onmouseout="this.style.background=''">${esc(o.label)}</div>`).join('');
+  box.style.display = 'block';
+}
+function rendComboPick(i, fieldName, value) {
+  rendManualValues[fieldName] = value;
+  const input = document.getElementById('rend-manual-' + i);
+  if (input) input.value = value;
+  const box = document.getElementById('rend-combo-list-' + i);
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
 }
 
 // Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
@@ -4783,6 +4863,20 @@ async function fbSelectFile(item, relativePath) {
     } catch(e) { alert('No se pudo guardar la plantilla: ' + e.message); }
     // Reutiliza el mismo mapeo de columnas que ya usaban existing/template
     await loadExcelHeadersAndShowMapping('rend', item.id, fbCurrentSiteId);
+  } else if (fbTarget === 'rend-clientes-excel') {
+    document.getElementById('cfg-rend-clientes-excel-label').textContent = item.name;
+    fbClose();
+    _rendClientesQLoaded = false; // fuerza releer del Excel nuevo la próxima vez que haga falta
+    try {
+      await supaConfigSet('rend_clientes_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+    } catch(e) { alert('No se pudo guardar el Excel de Clientes: ' + e.message); }
+  } else if (fbTarget === 'rend-q-excel') {
+    document.getElementById('cfg-rend-q-excel-label').textContent = item.name;
+    fbClose();
+    _rendClientesQLoaded = false;
+    try {
+      await supaConfigSet('rend_q_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+    } catch(e) { alert('No se pudo guardar el Excel de Q: ' + e.message); }
   } else {
     saveSpDefaults(spDefaults);
     fbClose();
@@ -7328,7 +7422,7 @@ const NAV_SECTIONS = [
 ];
 const NAV_CONFIG_SECTIONS = [
   { id:'cfg-rend',      label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
-  { id:'cfg-clientes',  label:'Clientes/Proveedores', area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-clientes',  label:'Imputación',           area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-viajes',    label:'Cfg Viajes',           area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras/COMEX', icon:NAV_GEAR_ICON },
