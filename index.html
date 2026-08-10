@@ -2158,14 +2158,15 @@ function renderRendResults() {
         }
         const curVal = rendManualValues[f.name] || '';
         if (f.type === 'select' && (f.precargarClientes || f.precargarQ)) {
-          _rendComboFieldMap[i] = f;
+          const comboId = 'g' + i;
+          _rendComboRegistry[comboId] = { field: f, setValue: v => { rendManualValues[f.name] = v; } };
           return `<div style="margin-bottom:12px;position:relative">
             <label>${esc(f.name)}${reqMark}</label>${modeSelector}
-            <input type="text" id="rend-manual-${i}" autocomplete="off" placeholder="${esc(f.desc||'Buscar o escribir libre...')}" style="font-size:14px" value="${esc(curVal)}"
-              oninput="rendManualValues['${fieldNameEsc}'] = this.value; rendComboFilter(${i}, this.value)"
-              onfocus="rendComboFilter(${i}, this.value)"
-              onblur="setTimeout(()=>{const b=document.getElementById('rend-combo-list-${i}'); if(b) b.style.display='none';}, 200)" />
-            <div id="rend-combo-list-${i}" style="display:none;position:absolute;z-index:20;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:220px;overflow-y:auto;width:100%;margin-top:2px;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
+            <input type="text" id="rend-manual-${comboId}" autocomplete="off" placeholder="${esc(f.desc||'Buscar o escribir libre...')}" style="font-size:14px" value="${esc(curVal)}"
+              oninput="rendManualValues['${fieldNameEsc}'] = this.value; rendComboFilter('${comboId}', this.value)"
+              onfocus="rendComboFilter('${comboId}', this.value)"
+              onblur="setTimeout(()=>{const b=document.getElementById('rend-combo-list-${comboId}'); if(b) b.style.display='none';}, 200)" />
+            <div id="rend-combo-list-${comboId}" style="display:none;position:absolute;z-index:20;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:220px;overflow-y:auto;width:100%;margin-top:2px;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
           </div>`;
         }
         if (f.type === 'select') {
@@ -2194,9 +2195,22 @@ function renderRendResults() {
         <span class="result-key">${esc(f.name)}</span>
         <input class="result-val" value="${esc(r[f.name]!=null?String(r[f.name]):'')}" oninput="results[${ri}]['${f.name.replace(/'/g,"\\'")}'] = this.value; saveResults()" />
       </div>`).join('');
-    const manualRows = perFileManualFields.map(f => {
+    const manualRows = perFileManualFields.map((f, fi) => {
       const key = rendManualKey(f.name);
       const val = r[key]!=null ? String(r[key]) : '';
+      if (f.type === 'select' && (f.precargarClientes || f.precargarQ)) {
+        const comboId = 'pf' + ri + '_' + fi;
+        _rendComboRegistry[comboId] = { field: f, setValue: v => { results[ri][key] = v; saveResults(); } };
+        return `
+      <div class="result-field" style="position:relative">
+        <span class="result-key">${esc(f.name)}</span>
+        <input class="result-val" id="rend-manual-${comboId}" autocomplete="off" placeholder="${esc(f.desc||'Buscar o escribir libre...')}" value="${esc(val)}"
+          oninput="results[${ri}]['${key}'] = this.value; saveResults(); rendComboFilter('${comboId}', this.value)"
+          onfocus="rendComboFilter('${comboId}', this.value)"
+          onblur="setTimeout(()=>{const b=document.getElementById('rend-combo-list-${comboId}'); if(b) b.style.display='none';}, 200)" />
+        <div id="rend-combo-list-${comboId}" style="display:none;position:absolute;z-index:20;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:220px;overflow-y:auto;width:100%;margin-top:2px;box-shadow:0 4px 12px rgba(0,0,0,.15)"></div>
+      </div>`;
+      }
       if (f.type === 'select') {
         const opts = rendFieldOpts(f);
         return `
@@ -2254,19 +2268,21 @@ function rendFieldOptsRich(f) {
   for (const o of [...manual, ...clientes, ...qs]) { if (o.value && !seen.has(o.value)) { seen.add(o.value); out.push(o); } }
   return out;
 }
-// Estado del buscador de Imputación (Clientes/Q): qué campo corresponde a cada índice renderizado.
-let _rendComboFieldMap = {};
-async function rendComboFilter(i, query) {
-  const f = _rendComboFieldMap[i];
-  const box = document.getElementById('rend-combo-list-' + i);
-  if (!f || !box) return;
+// Estado del buscador de Imputación (Clientes/Q): un registro por combo renderizado (tanto el
+// modo "igual para todos" como cada input "distinto por archivo" tienen su propia entrada),
+// con el campo al que corresponde y cómo guardar el valor elegido.
+let _rendComboRegistry = {};
+async function rendComboFilter(comboId, query) {
+  const entry = _rendComboRegistry[comboId];
+  const box = document.getElementById('rend-combo-list-' + comboId);
+  if (!entry || !box) return;
   if (!_rendClientesQLoaded) {
     box.style.display = 'block';
     box.innerHTML = '<div style="padding:8px 10px;color:var(--text3);font-size:13px">Cargando...</div>';
     try { await rendLoadClientesYQ(); _rendClientesQLoaded = true; }
     catch(e) { box.innerHTML = '<div style="padding:8px 10px;color:var(--text3);font-size:13px">No se pudo cargar la lista (' + esc(e.message) + '). Podés seguir escribiendo texto libre.</div>'; return; }
   }
-  const opts = rendFieldOptsRich(f);
+  const opts = rendFieldOptsRich(entry.field);
   const q = String(query||'').trim().toLowerCase();
   const matches = (q ? opts.filter(o=>o.label.toLowerCase().includes(q)) : opts).slice(0, 30);
   if (!matches.length) {
@@ -2274,15 +2290,16 @@ async function rendComboFilter(i, query) {
     box.style.display = 'block';
     return;
   }
-  const fieldNameEsc = f.name.replace(/'/g,"\\'");
-  box.innerHTML = matches.map(o => `<div onmousedown="rendComboPick(${i},'${fieldNameEsc}','${String(o.value).replace(/'/g,"\\'")}')" style="padding:8px 10px;cursor:pointer;font-size:13px" onmouseover="this.style.background='var(--surface3)'" onmouseout="this.style.background=''">${esc(o.label)}</div>`).join('');
+  box.innerHTML = matches.map(o => `<div onmousedown="rendComboPick('${comboId}','${String(o.value).replace(/'/g,"\\'")}')" style="padding:8px 10px;cursor:pointer;font-size:13px" onmouseover="this.style.background='var(--surface3)'" onmouseout="this.style.background=''">${esc(o.label)}</div>`).join('');
   box.style.display = 'block';
 }
-function rendComboPick(i, fieldName, value) {
-  rendManualValues[fieldName] = value;
-  const input = document.getElementById('rend-manual-' + i);
+function rendComboPick(comboId, value) {
+  const entry = _rendComboRegistry[comboId];
+  if (!entry) return;
+  entry.setValue(value);
+  const input = document.getElementById('rend-manual-' + comboId);
   if (input) input.value = value;
-  const box = document.getElementById('rend-combo-list-' + i);
+  const box = document.getElementById('rend-combo-list-' + comboId);
   if (box) { box.style.display = 'none'; box.innerHTML = ''; }
 }
 
