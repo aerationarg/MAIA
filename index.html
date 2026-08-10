@@ -552,6 +552,12 @@
         <p class="hint" style="margin-top:-6px;margin-bottom:10px">Hallazgos enviados a revisión — al guardar acá se confirma e inserta en el Excel.</p>
         <div id="hallazgos-revision-list" class="empty">Cargando...</div>
       </div>
+
+      <div class="card" id="hallazgos-todos-card" style="display:none">
+        <div class="card-label">Todos los hallazgos (HyS)</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Cualquier integrante de HyS puede ver y editar todos los hallazgos, sean o no propios.</p>
+        <div id="hallazgos-todos-list" class="empty">Cargando...</div>
+      </div>
     </div>
 
     <!-- ═══ PANEL: Procesos IA ═══ -->
@@ -3080,6 +3086,9 @@ async function hallazgosFindCoordinadorHyS() {
 }
 
 function hallazgosIsCoordHyS() { return currentSector === 'HyS' && !!currentUser?.coordinador; }
+// Cualquiera de HyS puede ver y editar todos los hallazgos; solo el coordinador recibe
+// notificaciones/aprobaciones (ver hallazgosIsCoordHyS, usado en hallazgosGuardar).
+function hallazgosIsHySMember() { return currentSector === 'HyS'; }
 
 async function hallazgosNotifyCoordinador(nombreActor, fields) {
   const coord = await hallazgosFindCoordinadorHyS();
@@ -3268,18 +3277,20 @@ function hallazgosEstadoBadge(h) {
 // Fila compacta (listas "Asignados a mí" / "Cargados por mí") con botón para expandir el
 // formulario completo de edición inline. Se puede editar en cualquier estado, incluso ya
 // insertado, para cargar más adelante Fecha Verificada/Eficacia de las Acciones, etc.
-function hallazgosRenderCompactItem(h) {
+function hallazgosRenderCompactItem(h, opts) {
+  opts = opts || {};
   _hallazgosRowCache[h.id] = h;
+  const deleteBtn = opts.showDelete === false ? '' : `<button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar" style="margin-left:2px">&#x2715;</button>`;
   return `
     <div class="file-item">
       <div class="file-info">
         <div class="file-name">${esc((h.descripcion||'').slice(0,80))}</div>
-        <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
+        <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}${h.creado_por_nombre?' · '+esc(h.creado_por_nombre):''}</div>
       </div>
       ${hallazgosEstadoBadge(h)}
       <button class="np-item-remove" onclick="hallazgosToggleEdit('${h.id}')" title="Editar" style="margin-left:6px">✏️</button>
       <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:2px">🕘</button>
-      <button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar" style="margin-left:2px">&#x2715;</button>
+      ${deleteBtn}
     </div>
     <div id="hallazgo-edit-${h.id}"></div>`;
 }
@@ -3372,6 +3383,19 @@ async function renderHallazgos() {
       revEl.className = rows.length ? '' : 'empty';
       revEl.innerHTML = rows.length ? rows.map(hallazgosRenderRevisionItem).join('') : 'No hay hallazgos pendientes de revisión.';
     } catch(e) { revEl.innerHTML = 'Error al cargar.'; }
+  }
+
+  const isHySMember = hallazgosIsHySMember();
+  const todosCard = document.getElementById('hallazgos-todos-card');
+  if (todosCard) todosCard.style.display = isHySMember ? 'block' : 'none';
+  if (isHySMember) {
+    const todosEl = document.getElementById('hallazgos-todos-list');
+    try {
+      const res = await supaFetch(`/rest/v1/hallazgos?select=*&order=created_at.desc&limit=50`, {headers:{Authorization:'Bearer '+session.token}});
+      const rows = await res.json();
+      todosEl.className = rows.length ? '' : 'empty';
+      todosEl.innerHTML = rows.length ? rows.map(h=>hallazgosRenderCompactItem(h,{showDelete:false})).join('') : 'Todavía no hay hallazgos cargados.';
+    } catch(e) { todosEl.innerHTML = 'Error al cargar.'; }
   }
 }
 
