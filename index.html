@@ -531,8 +531,7 @@
         <label>Asignar a (opcional — para que otra persona complete el resto)</label>
         <select id="hallazgos-new-asignado" style="margin-bottom:12px"><option value="">— Nadie, lo completo yo —</option></select>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-secondary" onclick="hallazgosGuardar(null,false)">💾 Guardar</button>
-          <button class="btn btn-primary" onclick="hallazgosGuardar(null,true)">✓ Guardar y enviar a revisión de HyS</button>
+          <button class="btn btn-primary" id="hallazgos-new-submit-btn" onclick="hallazgosGuardar(null)">✓ Guardar y enviar a revisión de HyS</button>
         </div>
         <div id="hallazgos-new-status"></div>
       </div>
@@ -3062,6 +3061,8 @@ function hallazgosCollectFieldsForm(idPrefix) {
 function hallazgosRenderNewForm() {
   const el = document.getElementById('hallazgos-new-campos-wrap');
   if (el) el.innerHTML = hallazgosRenderFieldsForm('hnew', {});
+  const btn = document.getElementById('hallazgos-new-submit-btn');
+  if (btn) btn.textContent = hallazgosSubmitBtnLabel();
   hallazgosLoadAssigneeOptions();
 }
 
@@ -3122,10 +3123,14 @@ async function hallazgosLoadAssigneeOptions() {
 // edición inline sin tener que volver a pedirlas.
 let _hallazgosRowCache = {};
 
-// Guarda un hallazgo — crea uno nuevo si id es null, o edita el existente. En ambos casos,
-// si enviarRevision es true: si quien guarda es coordinador de HyS se inserta directo en el
-// Excel (no necesita aprobarse a sí mismo); si no, queda en la cola de revisión de HyS.
-async function hallazgosGuardar(id, enviarRevision) {
+// Etiqueta del botón de guardar: si quien lo ve es coordinador de HyS, deja claro que
+// inserta directo en el Excel (no necesita aprobarse a sí mismo); si no, que va a revisión.
+function hallazgosSubmitBtnLabel() { return hallazgosIsCoordHyS() ? '✓ Guardar e insertar en Excel' : '✓ Guardar y enviar a revisión de HyS'; }
+
+// Guarda un hallazgo — crea uno nuevo si id es null, o edita el existente. Siempre queda listo
+// para revisión: si quien guarda es coordinador de HyS se inserta directo en el Excel; si no,
+// queda en la cola de revisión de HyS.
+async function hallazgosGuardar(id) {
   const idPrefix = id ? ('hedit-'+id) : 'hnew';
   const statusId = id ? ('hedit-status-'+id) : 'hallazgos-new-status';
   const fields = hallazgosCollectFieldsForm(idPrefix);
@@ -3149,9 +3154,8 @@ async function hallazgosGuardar(id, enviarRevision) {
       const payload = Object.assign({}, fields, {
         empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreActor,
         asignado_a: asignadoId, asignado_a_nombre: asignadoNombre, asignado_a_email: asignadoEmail,
-        estado: enviarRevision ? 'completado' : 'pendiente'
+        estado: 'completado', completado_at: new Date().toISOString()
       });
-      if (enviarRevision) payload.completado_at = new Date().toISOString();
       const res = await supaFetch('/rest/v1/hallazgos', { method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
       const created = await res.json();
       if (!res.ok) throw new Error(created.message || 'Error al crear el hallazgo.');
@@ -3169,8 +3173,7 @@ async function hallazgosGuardar(id, enviarRevision) {
         } catch(notifyErr) { console.warn('No se pudo notificar al asignado:', notifyErr.message); }
       }
     } else {
-      const payload = Object.assign({}, fields);
-      if (enviarRevision) { payload.estado = 'completado'; payload.completado_at = new Date().toISOString(); }
+      const payload = Object.assign({}, fields, { estado:'completado', completado_at: new Date().toISOString() });
       const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
       const rows = await res.json().catch(()=>null);
       if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
@@ -3178,18 +3181,14 @@ async function hallazgosGuardar(id, enviarRevision) {
       logEvento('hallazgo', id, 'editado', fields.descripcion.slice(0,150));
     }
 
-    if (enviarRevision) {
-      if (isHyS) {
-        showMsg(statusId,'loading','Insertando en el Excel...');
-        await hallazgosInsertarEnExcel(hallazgoId, hRow, fields);
-        showMsg(statusId,'success','✓ Guardado e insertado en el Excel.');
-      } else {
-        try { await hallazgosNotifyCoordinador(nombreActor, fields); }
-        catch(notifyErr) { console.warn('No se pudo notificar a HyS:', notifyErr.message); }
-        showMsg(statusId,'success','✓ Guardado y enviado a revisión de HyS.');
-      }
+    if (isHyS) {
+      showMsg(statusId,'loading','Insertando en el Excel...');
+      await hallazgosInsertarEnExcel(hallazgoId, hRow, fields);
+      showMsg(statusId,'success','✓ Guardado e insertado en el Excel.');
     } else {
-      showMsg(statusId,'success','✓ Guardado.');
+      try { await hallazgosNotifyCoordinador(nombreActor, fields); }
+      catch(notifyErr) { console.warn('No se pudo notificar a HyS:', notifyErr.message); }
+      showMsg(statusId,'success','✓ Guardado y enviado a revisión de HyS.');
     }
 
     if (!id) hallazgosRenderNewForm();
@@ -3301,8 +3300,7 @@ function hallazgosRenderEditForm(h) {
     <div class="result-card" style="margin-top:8px">
       ${hallazgosRenderFieldsForm(idPrefix, h)}
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-secondary btn-sm" onclick="hallazgosGuardar('${h.id}', false)">💾 Guardar</button>
-        <button class="btn btn-primary btn-sm" onclick="hallazgosGuardar('${h.id}', true)">✓ Guardar y enviar a revisión de HyS</button>
+        <button class="btn btn-primary btn-sm" onclick="hallazgosGuardar('${h.id}')">${hallazgosSubmitBtnLabel()}</button>
       </div>
       <div id="hedit-status-${h.id}"></div>
     </div>`;
@@ -3342,7 +3340,7 @@ function hallazgosRenderRevisionItem(h) {
     <div class="result-card" id="hallazgo-rev-${h.id}">
       <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')} <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:4px">🕘</button></div>
       ${hallazgosRenderFieldsForm('hedit-'+h.id, h)}
-      <button class="btn btn-primary" onclick="hallazgosGuardar('${h.id}', true)">✓ Confirmar e insertar en Excel</button>
+      <button class="btn btn-primary" onclick="hallazgosGuardar('${h.id}')">✓ Confirmar e insertar en Excel</button>
       <div id="hedit-status-${h.id}"></div>
     </div>`;
 }
