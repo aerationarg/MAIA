@@ -527,23 +527,13 @@
     <div class="panel" id="panel-hallazgos">
       <div class="card">
         <div class="card-label">Cargar un hallazgo</div>
-        <label>Descripción de lo ocurrido</label>
-        <textarea id="hallazgos-new-descripcion" rows="3" placeholder="¿Qué pasó?" style="margin-bottom:12px"></textarea>
-
-        <label>¿Quién completa el resto (acción inmediata, por qué surgió, acción correctiva, fecha)?</label>
-        <select id="hallazgos-new-modo" onchange="renderHallazgosNewModo()" style="margin-bottom:10px">
-          <option value="yo">Yo mismo, ahora</option>
-          <option value="otro">Asignárselo a otra persona</option>
-        </select>
-
-        <div id="hallazgos-new-asignado-wrap" style="display:none;margin-bottom:10px">
-          <label>Asignar a</label>
-          <select id="hallazgos-new-asignado"><option value="">Cargando usuarios...</option></select>
-        </div>
-
         <div id="hallazgos-new-campos-wrap"></div>
-
-        <button class="btn btn-primary" onclick="hallazgosSubmitNuevo()" id="hallazgos-new-btn" style="margin-top:4px">Crear hallazgo</button>
+        <label>Asignar a (opcional — para que otra persona complete el resto)</label>
+        <select id="hallazgos-new-asignado" style="margin-bottom:12px"><option value="">— Nadie, lo completo yo —</option></select>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary" onclick="hallazgosGuardar(null,false)">💾 Guardar</button>
+          <button class="btn btn-primary" onclick="hallazgosGuardar(null,true)">✓ Guardar y enviar a revisión de HyS</button>
+        </div>
         <div id="hallazgos-new-status"></div>
       </div>
 
@@ -559,7 +549,7 @@
 
       <div class="card" id="hallazgos-revision-card" style="display:none">
         <div class="card-label">Revisión (HyS)</div>
-        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Hallazgos completados, pendientes de revisar y confirmar para insertar en el Excel.</p>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Hallazgos enviados a revisión — al guardar acá se confirma e inserta en el Excel.</p>
         <div id="hallazgos-revision-list" class="empty">Cargando...</div>
       </div>
     </div>
@@ -2995,6 +2985,78 @@ function renderCfgHallazgos() {
   if (el) el.textContent = getHallazgosCfg().excelLabel || 'Sin seleccionar';
 }
 
+// Definición única de los campos del hallazgo (misma para crear/editar/revisar), con la
+// columna del Excel "Hallazgos" (hoja, fila 5 = encabezados, fila 6 en adelante = datos)
+// donde se escribe cada uno al confirmar.
+const HALLAZGOS_ESTADO_OPTIONS = ['En Análisis','En Tratamiento','En Verificación de Eficacia','Cerrada','Desestimada'];
+const HALLAZGOS_TIPO_OPTIONS = ['NC Mayor','Observación','OM','NC Menor'];
+const HALLAZGOS_ORIGEN_OPTIONS = ['Auditoría Interna','Auditoría Externa','Reclamo de Cliente','Encuesta Clientes','Salida No Conforme','Encuesta Colaboradores','Revisión de Objetivos','Evaluación de Colaboradores','Evaluación de Proveedores','Revisión por la Dirección','Identificación Interna'];
+const HALLAZGOS_EFICACIA_OPTIONS = ['Acciones Eficaces','Acciones No Eficaces','Acciones Pendientes de Verificar'];
+function hallazgosAreaOptions() { return Object.keys(SECTOR_TABS); } // sectores creados en MAIA
+
+const HALLAZGOS_FIELDS = [
+  { key:'descripcion',                  label:'Descripción del Hallazgo',                                  type:'textarea',    required:true, col:'H' },
+  { key:'estado_hallazgo',              label:'Estado del Hallazgo',                                        type:'select',       opts:()=>HALLAZGOS_ESTADO_OPTIONS, col:'D' },
+  { key:'tipo_hallazgo',                label:'Tipo de Hallazgo',                                           type:'select',       opts:()=>HALLAZGOS_TIPO_OPTIONS, col:'E' },
+  { key:'origen_hallazgo',              label:'Origen del Hallazgo',                                        type:'select',       opts:()=>HALLAZGOS_ORIGEN_OPTIONS, col:'F' },
+  { key:'area_asociada',                label:'Área Asociada al Hallazgo',                                  type:'multiselect',  opts:hallazgosAreaOptions, col:'G' },
+  { key:'accion_inmediata',             label:'Describir la Acción Inmediata',                              type:'textarea',    col:'I' },
+  { key:'area_responsable',             label:'Área Responsable (Acción Inmediata)',                        type:'multiselect',  opts:hallazgosAreaOptions, col:'J' },
+  { key:'fecha_ejecutada',              label:'Fecha Ejecutada (Acción Inmediata)',                         type:'date',         col:'K' },
+  { key:'por_que_surgio',               label:'NC: ¿Por qué surgió? (5P) / OM: ¿Para qué implementar?',     type:'textarea',    col:'L' },
+  { key:'accion_correctiva',            label:'NC: Acción Correctiva / OM: Acción de Mejora',               type:'textarea',    col:'M' },
+  { key:'area_responsable2',            label:'Área Responsable (Acción Correctiva)',                       type:'multiselect',  opts:hallazgosAreaOptions, col:'N' },
+  { key:'fecha_estimada',               label:'Fecha Estimada de Ejecución',                                type:'date',         col:'O' },
+  { key:'fecha_ejecutada2',             label:'Fecha Ejecutada (Acción Correctiva)',                        type:'date',         col:'P' },
+  { key:'fecha_estimada_verificacion',  label:'Fecha Estimada de Verificación',                             type:'date',         col:'Q' },
+  { key:'fecha_verificada',             label:'Fecha Verificada',                                           type:'date',         col:'R' },
+  { key:'eficacia_acciones',            label:'Eficacia de las Acciones',                                   type:'select',       opts:()=>HALLAZGOS_EFICACIA_OPTIONS, col:'S' },
+  { key:'evidencia_comentarios',        label:'Evidencia / Comentarios',                                    type:'textarea',    col:'T' },
+];
+
+function hallazgosFieldInputHtml(f, idPrefix, curVal) {
+  const id = idPrefix + '-' + f.key;
+  if (f.type === 'select') {
+    const opts = f.opts();
+    return `<div style="margin-bottom:10px"><label>${esc(f.label)}</label><select id="${id}"><option value="" ${!curVal?'selected':''}>Seleccionar...</option>${opts.map(o=>`<option value="${esc(o)}" ${curVal===o?'selected':''}>${esc(o)}</option>`).join('')}</select></div>`;
+  }
+  if (f.type === 'multiselect') {
+    const opts = f.opts();
+    const sel = new Set(String(curVal||'').split(',').map(s=>s.trim()).filter(Boolean));
+    return `<div style="margin-bottom:10px"><label>${esc(f.label)}</label><div style="display:flex;flex-wrap:wrap;gap:8px;padding:8px;border:1px solid var(--border);border-radius:var(--radius-sm)">
+      ${opts.map(o=>`<label style="display:flex;align-items:center;gap:4px;font-size:13px;font-weight:400;cursor:pointer"><input type="checkbox" id="${id}-${esc(o)}" ${sel.has(o)?'checked':''} /> ${esc(o)}</label>`).join('')}
+    </div></div>`;
+  }
+  if (f.type === 'date') {
+    return `<div style="margin-bottom:10px"><label>${esc(f.label)}</label><input type="date" id="${id}" value="${esc(curVal||'')}" /></div>`;
+  }
+  const reqMark = f.required ? ' <span style="color:#e05" title="Obligatorio">*</span>' : '';
+  return `<div style="margin-bottom:10px"><label>${esc(f.label)}${reqMark}</label><textarea id="${id}" rows="2">${esc(curVal||'')}</textarea></div>`;
+}
+function hallazgosRenderFieldsForm(idPrefix, h) {
+  h = h || {};
+  return HALLAZGOS_FIELDS.map(f => hallazgosFieldInputHtml(f, idPrefix, h[f.key])).join('');
+}
+function hallazgosCollectFieldsForm(idPrefix) {
+  const out = {};
+  HALLAZGOS_FIELDS.forEach(f => {
+    const id = idPrefix + '-' + f.key;
+    if (f.type === 'multiselect') {
+      out[f.key] = f.opts().filter(o => document.getElementById(id+'-'+o)?.checked).join(', ');
+    } else if (f.type === 'select' || f.type === 'date') {
+      out[f.key] = document.getElementById(id)?.value || '';
+    } else {
+      out[f.key] = (document.getElementById(id)?.value || '').trim();
+    }
+  });
+  return out;
+}
+function hallazgosRenderNewForm() {
+  const el = document.getElementById('hallazgos-new-campos-wrap');
+  if (el) el.innerHTML = hallazgosRenderFieldsForm('hnew', {});
+  hallazgosLoadAssigneeOptions();
+}
+
 async function hallazgosSendMail(subject, html, toEmail) {
   const token = await getMsToken();
   const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
@@ -3015,18 +3077,16 @@ async function hallazgosFindCoordinadorHyS() {
   return data[0] || null;
 }
 
-async function hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada) {
+function hallazgosIsCoordHyS() { return currentSector === 'HyS' && !!currentUser?.coordinador; }
+
+async function hallazgosNotifyCoordinador(nombreActor, fields) {
   const coord = await hallazgosFindCoordinadorHyS();
-  if (!coord || !coord.email) return; // sin coordinadora de HyS configurada, no hay a quién avisar
+  if (!coord || !coord.email) return; // sin coordinador de HyS configurado, no hay a quién avisar
   const html = `
-    <p><b>${esc(nombreCreador)}</b> completó un hallazgo en MAIA, listo para tu revisión.</p>
-    <p><b>Descripción:</b> ${esc(descripcion||'').replace(/\n/g,'<br>')}</p>
-    <p><b>Acción correctiva inmediata:</b> ${esc(accionInmediata||'').replace(/\n/g,'<br>')}</p>
-    <p><b>¿Por qué surgió?:</b> ${esc(porQue||'').replace(/\n/g,'<br>')}</p>
-    <p><b>Acción correctiva:</b> ${esc(accionCorrectiva||'').replace(/\n/g,'<br>')}</p>
-    <p><b>Fecha probable de ejecución:</b> ${esc(fechaEstimada||'—')}</p>
-    <p>Entrá a la sección Hallazgos de MAIA para revisar y confirmar.</p>`;
-  await hallazgosSendMail(`Hallazgo completado — revisar en MAIA (${nombreCreador})`, html, coord.email);
+    <p><b>${esc(nombreActor)}</b> envió un hallazgo a revisión en MAIA.</p>
+    <p><b>Descripción:</b> ${esc(fields.descripcion||'').replace(/\n/g,'<br>')}</p>
+    <p>Entrá a la sección Hallazgos de MAIA para revisar todos los campos y confirmar.</p>`;
+  await hallazgosSendMail(`Hallazgo listo para revisar — ${nombreActor}`, html, coord.email);
 }
 
 let _hallazgosUsersCache = null;
@@ -3039,7 +3099,7 @@ async function hallazgosLoadAssigneeOptions() {
       const res = await supaFetch('/rest/v1/profiles?select=id,nombre,email&order=nombre', {headers:{Authorization:'Bearer '+session.token}});
       _hallazgosUsersCache = await res.json();
     }
-    sel.innerHTML = '<option value="">— Elegir —</option>' + _hallazgosUsersCache.map(u=>
+    sel.innerHTML = '<option value="">— Nadie, lo completo yo —</option>' + _hallazgosUsersCache.map(u=>
       `<option value="${u.id}" data-email="${esc(u.email||'')}" data-nombre="${esc(u.nombre||u.email||'')}">${esc(u.nombre||u.email||'')}</option>`
     ).join('');
   } catch(e) {
@@ -3047,189 +3107,202 @@ async function hallazgosLoadAssigneeOptions() {
   }
 }
 
-function renderHallazgosNewModo() {
-  const modo = document.getElementById('hallazgos-new-modo').value;
-  document.getElementById('hallazgos-new-asignado-wrap').style.display = modo === 'otro' ? 'block' : 'none';
-  const camposEl = document.getElementById('hallazgos-new-campos-wrap');
-  if (modo === 'yo') {
-    camposEl.innerHTML = `
-      <label>Acción correctiva inmediata</label>
-      <textarea id="hallazgos-new-accion-inmediata" rows="2" style="margin-bottom:10px"></textarea>
-      <label>¿Por qué surgió?</label>
-      <textarea id="hallazgos-new-por-que" rows="2" style="margin-bottom:10px"></textarea>
-      <label>Acción correctiva</label>
-      <textarea id="hallazgos-new-accion-correctiva" rows="2" style="margin-bottom:10px"></textarea>
-      <label>Fecha probable de ejecución</label>
-      <input type="date" id="hallazgos-new-fecha-estimada" />`;
-  } else {
-    camposEl.innerHTML = '';
-    hallazgosLoadAssigneeOptions();
-  }
-  const btn = document.getElementById('hallazgos-new-btn');
-  if (btn) btn.textContent = modo === 'yo' ? 'Crear hallazgo' : 'Asignar hallazgo';
-}
+// Cachea las filas ya cargadas (mías/asignadas/revisión) para poder abrir el formulario de
+// edición inline sin tener que volver a pedirlas.
+let _hallazgosRowCache = {};
 
-async function hallazgosSubmitNuevo() {
-  const descripcion = document.getElementById('hallazgos-new-descripcion').value.trim();
-  const modo = document.getElementById('hallazgos-new-modo').value;
-  const statusId = 'hallazgos-new-status';
-  if (!descripcion) { showMsg(statusId,'error','Completá la descripción de lo ocurrido.'); return; }
+// Guarda un hallazgo — crea uno nuevo si id es null, o edita el existente. En ambos casos,
+// si enviarRevision es true: si quien guarda es coordinador de HyS se inserta directo en el
+// Excel (no necesita aprobarse a sí mismo); si no, queda en la cola de revisión de HyS.
+async function hallazgosGuardar(id, enviarRevision) {
+  const idPrefix = id ? ('hedit-'+id) : 'hnew';
+  const statusId = id ? ('hedit-status-'+id) : 'hallazgos-new-status';
+  const fields = hallazgosCollectFieldsForm(idPrefix);
+  if (!fields.descripcion) { showMsg(statusId,'error','Completá la descripción de lo ocurrido.'); return; }
 
-  const btn = document.getElementById('hallazgos-new-btn');
-  btn.disabled = true;
-  const original = btn.textContent;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const nombreCreador = currentUser?.nombre || currentUser?.email || 'Colaborador';
+  const nombreActor = currentUser?.nombre || currentUser?.email || 'Colaborador';
+  const isHyS = hallazgosIsCoordHyS();
 
-  try {
-    if (modo === 'otro') {
-      const sel = document.getElementById('hallazgos-new-asignado');
-      if (!sel.value) throw new Error('Elegí a quién se lo asignás.');
-      const opt = sel.options[sel.selectedIndex];
-      const asignadoNombre = opt.dataset.nombre;
-      const asignadoEmail = opt.dataset.email;
-      if (!asignadoEmail) throw new Error('Ese usuario no tiene email cargado.');
-      btn.textContent = '⏳ Creando...';
-      const res = await supaFetch('/rest/v1/hallazgos', {
-        method: 'POST', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
-        body: JSON.stringify({
-          empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreCreador,
-          asignado_a: sel.value, asignado_a_nombre: asignadoNombre, asignado_a_email: asignadoEmail,
-          estado: 'pendiente', descripcion
-        })
-      });
-      const created = await res.json();
-      if (!res.ok) throw new Error(created.message || 'Error al crear el hallazgo.');
-      const newId = created[0]?.id;
-      logEvento('hallazgo', newId, 'creado', descripcion.slice(0,150));
-      logEvento('hallazgo', newId, 'asignado', 'Asignado a ' + asignadoNombre);
-      btn.textContent = '⏳ Enviando notificación...';
-      // El hallazgo ya se creó; si la notificación falla no hay que mostrar error de creación
-      try {
-        await hallazgosSendMail(
-          `Te asignaron un hallazgo — ${nombreCreador}`,
-          `<p><b>${esc(nombreCreador)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
-          asignadoEmail
-        );
-      } catch(notifyErr) {
-        console.warn('No se pudo notificar al asignado:', notifyErr.message);
-      }
-      showMsg(statusId,'success','✓ Hallazgo asignado a '+asignadoNombre+'.');
-    } else {
-      const accionInmediata = document.getElementById('hallazgos-new-accion-inmediata').value.trim();
-      const porQue = document.getElementById('hallazgos-new-por-que').value.trim();
-      const accionCorrectiva = document.getElementById('hallazgos-new-accion-correctiva').value.trim();
-      const fechaEstimada = document.getElementById('hallazgos-new-fecha-estimada').value;
-      btn.textContent = '⏳ Creando...';
-      const res = await supaFetch('/rest/v1/hallazgos', {
-        method: 'POST', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
-        body: JSON.stringify({
-          empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreCreador,
-          estado: 'completado', descripcion,
-          accion_inmediata: accionInmediata, por_que_surgio: porQue, accion_correctiva: accionCorrectiva,
-          fecha_estimada: fechaEstimada || null, completado_at: new Date().toISOString()
-        })
-      });
-      const created2 = await res.json();
-      if (!res.ok) throw new Error(created2.message || 'Error al crear el hallazgo.');
-      const newId2 = created2[0]?.id;
-      logEvento('hallazgo', newId2, 'creado', descripcion.slice(0,150));
-      logEvento('hallazgo', newId2, 'completado', 'Completado por el mismo creador al cargarlo.');
-      btn.textContent = '⏳ Notificando a HyS...';
-      try {
-        await hallazgosNotifyCoordinador(nombreCreador, descripcion, accionInmediata, porQue, accionCorrectiva, fechaEstimada);
-      } catch(notifyErr) {
-        console.warn('No se pudo notificar a HyS:', notifyErr.message);
-      }
-      showMsg(statusId,'success','✓ Hallazgo cargado y enviado a revisión.');
-    }
-    document.getElementById('hallazgos-new-descripcion').value = '';
-    renderHallazgosNewModo();
-    renderHallazgos();
-  } catch(e) {
-    showMsg(statusId,'error','✕ ' + e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = original;
-  }
-}
-
-function hallazgosRenderAsignadoItem(h) {
-  return `
-    <div class="result-card" id="hallazgo-item-${h.id}">
-      <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')} · ${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
-      <p style="font-size:14px;margin-bottom:10px">${esc(h.descripcion||'').replace(/\n/g,'<br>')}</p>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-secondary btn-sm" onclick="hallazgosShowCompletarForm('${h.id}')">Completar</button>
-        <button class="btn btn-secondary btn-sm" onclick="verHistorial('hallazgo','${h.id}')">🕘 Historial</button>
-      </div>
-      <div id="hallazgo-completar-${h.id}"></div>
-    </div>`;
-}
-
-function hallazgosShowCompletarForm(id) {
-  const el = document.getElementById('hallazgo-completar-'+id);
-  if (!el) return;
-  el.innerHTML = `
-    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-      <label>Acción correctiva inmediata</label>
-      <textarea id="hc-accion-inmediata-${id}" rows="2" style="margin-bottom:10px"></textarea>
-      <label>¿Por qué surgió?</label>
-      <textarea id="hc-por-que-${id}" rows="2" style="margin-bottom:10px"></textarea>
-      <label>Acción correctiva</label>
-      <textarea id="hc-accion-correctiva-${id}" rows="2" style="margin-bottom:10px"></textarea>
-      <label>Fecha probable de ejecución</label>
-      <input type="date" id="hc-fecha-${id}" style="margin-bottom:10px" />
-      <button class="btn btn-primary" onclick="hallazgosCompletar('${id}')">Enviar</button>
-      <div id="hc-status-${id}"></div>
-    </div>`;
-}
-
-async function hallazgosCompletar(id) {
-  const accionInmediata = document.getElementById('hc-accion-inmediata-'+id).value.trim();
-  const porQue = document.getElementById('hc-por-que-'+id).value.trim();
-  const accionCorrectiva = document.getElementById('hc-accion-correctiva-'+id).value.trim();
-  const fechaEstimada = document.getElementById('hc-fecha-'+id).value;
-  const statusId = 'hc-status-'+id;
-  if (!accionInmediata || !porQue || !accionCorrectiva) { showMsg(statusId,'error','Completá los tres campos de texto.'); return; }
   try {
     showMsg(statusId,'loading','Guardando...');
-    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
-      method: 'PATCH', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
-      body: JSON.stringify({ estado:'completado', accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null, completado_at: new Date().toISOString() })
-    });
-    const rows = await res.json().catch(()=>null);
-    if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
-    logEvento('hallazgo', id, 'completado', accionCorrectiva.slice(0,150));
+    let hallazgoId = id, hRow;
 
-    // La notificación es best-effort: si falla (por ej. no está logueado con Microsoft),
-    // el hallazgo ya quedó completado igual y no debe volver a aparecer como pendiente.
-    try {
-      const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
-      await hallazgosNotifyCoordinador(nombre, rows[0].descripcion||'', accionInmediata, porQue, accionCorrectiva, fechaEstimada);
-    } catch(notifyErr) {
-      console.warn('No se pudo notificar a HyS:', notifyErr.message);
+    if (!id) {
+      const asigSel = document.getElementById('hallazgos-new-asignado');
+      const asignadoId = asigSel?.value || null;
+      let asignadoNombre = null, asignadoEmail = null;
+      if (asignadoId) {
+        const opt = asigSel.options[asigSel.selectedIndex];
+        asignadoNombre = opt.dataset.nombre; asignadoEmail = opt.dataset.email;
+      }
+      const payload = Object.assign({}, fields, {
+        empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreActor,
+        asignado_a: asignadoId, asignado_a_nombre: asignadoNombre, asignado_a_email: asignadoEmail,
+        estado: enviarRevision ? 'completado' : 'pendiente'
+      });
+      if (enviarRevision) payload.completado_at = new Date().toISOString();
+      const res = await supaFetch('/rest/v1/hallazgos', { method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
+      const created = await res.json();
+      if (!res.ok) throw new Error(created.message || 'Error al crear el hallazgo.');
+      hRow = created[0];
+      hallazgoId = hRow.id;
+      logEvento('hallazgo', hallazgoId, 'creado', fields.descripcion.slice(0,150));
+      if (asignadoId) {
+        logEvento('hallazgo', hallazgoId, 'asignado', 'Asignado a '+asignadoNombre);
+        try {
+          await hallazgosSendMail(
+            `Te asignaron un hallazgo — ${nombreActor}`,
+            `<p><b>${esc(nombreActor)}</b> te asignó un hallazgo para completar en MAIA.</p><p><b>Descripción:</b> ${esc(fields.descripcion).replace(/\n/g,'<br>')}</p><p>Entrá a la sección Hallazgos de MAIA para completarlo.</p>`,
+            asignadoEmail
+          );
+        } catch(notifyErr) { console.warn('No se pudo notificar al asignado:', notifyErr.message); }
+      }
+    } else {
+      const payload = Object.assign({}, fields);
+      if (enviarRevision) { payload.estado = 'completado'; payload.completado_at = new Date().toISOString(); }
+      const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
+      const rows = await res.json().catch(()=>null);
+      if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
+      hRow = rows[0];
+      logEvento('hallazgo', id, 'editado', fields.descripcion.slice(0,150));
     }
+
+    if (enviarRevision) {
+      if (isHyS) {
+        showMsg(statusId,'loading','Insertando en el Excel...');
+        await hallazgosInsertarEnExcel(hallazgoId, hRow, fields);
+        showMsg(statusId,'success','✓ Guardado e insertado en el Excel.');
+      } else {
+        try { await hallazgosNotifyCoordinador(nombreActor, fields); }
+        catch(notifyErr) { console.warn('No se pudo notificar a HyS:', notifyErr.message); }
+        showMsg(statusId,'success','✓ Guardado y enviado a revisión de HyS.');
+      }
+    } else {
+      showMsg(statusId,'success','✓ Guardado.');
+    }
+
+    if (!id) hallazgosRenderNewForm();
     renderHallazgos();
   } catch(e) {
     showMsg(statusId,'error','✕ ' + e.message);
   }
 }
 
-function hallazgosRenderMioItem(h) {
-  const estadoLabel = { pendiente: h.asignado_a ? 'Asignado a '+(h.asignado_a_nombre||'—') : 'Pendiente', completado: 'Completado, en revisión', insertado: 'Insertado ('+(h.ha_id||'')+')' }[h.estado] || h.estado;
-  const badgeCls = { pendiente:'badge-pending', completado:'badge-processing', insertado:'badge-done' }[h.estado] || 'badge-pending';
+async function hallazgosPatchCell(token, excelBase, cellAddress, value) {
+  const resp = await fetch(excelBase + `range(address='${cellAddress}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({values:[[value]]})
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en '+cellAddress); }
+}
+
+let _hallazgosExistingCache = null; // [{id:'HA-778', row: 42}, ...] en orden natural de la hoja
+async function hallazgosLoadExistingList(forceRefresh) {
+  if (_hallazgosExistingCache && !forceRefresh) return _hallazgosExistingCache;
+  const cfg = getHallazgosCfg();
+  if (!cfg.excelId) throw new Error('No hay Excel configurado en Cfg Hallazgos.');
+  const token = await getMsToken();
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+  const resp = await fetch(excelBase + `range(address='B6:B500')?$select=values`, {headers:{Authorization:'Bearer '+token}});
+  if (!resp.ok) throw new Error('No se pudo leer el Excel.');
+  const data = await resp.json();
+  const list = [];
+  (data.values||[]).forEach((r,i) => {
+    const s = String(r[0]||'').trim();
+    if (s) list.push({ id: s, row: 6+i });
+  });
+  _hallazgosExistingCache = list;
+  return list;
+}
+
+// Escribe TODOS los campos del hallazgo en el Excel. Si ya se había insertado antes (ha_row
+// guardado), reutiliza esa misma fila; si es la primera vez, genera el próximo HA-### y usa
+// una fila nueva — nunca se pide elegir manualmente en cuál insertar.
+async function hallazgosInsertarEnExcel(id, hRow, fields) {
+  const cfg = getHallazgosCfg();
+  if (!cfg.excelId) throw new Error('No hay Excel configurado. Pedile a un Admin que lo seleccione en Cfg Hallazgos.');
+  const token = await getMsToken();
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+  let targetRow = hRow.ha_row;
+  let newId = hRow.ha_id;
+  if (!targetRow) {
+    const list = await hallazgosLoadExistingList(true);
+    let maxNum = 0;
+    targetRow = 6;
+    list.forEach(x => {
+      targetRow = x.row + 1;
+      const m = x.id.match(/(\d+)\s*$/);
+      if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+    });
+    newId = 'HA-' + (maxNum + 1);
+    await hallazgosPatchCell(token, excelBase, `B${targetRow}`, newId);
+    await hallazgosPatchCell(token, excelBase, `C${targetRow}`, today());
+  }
+  for (const f of HALLAZGOS_FIELDS) {
+    await hallazgosPatchCell(token, excelBase, `${f.col}${targetRow}`, fields[f.key] ?? '');
+  }
+  _hallazgosExistingCache = null; // invalidar cache: el excel cambió
+
+  // El Excel ya se escribió (lo importante). Esto es solo para reflejar el estado acá —
+  // si falla, avisamos explícitamente para no arriesgar una inserción duplicada después.
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const markRes = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
+    method: 'PATCH', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
+    body: JSON.stringify({ estado:'insertado', ha_id:newId, ha_row:targetRow, insertado_at:new Date().toISOString() })
+  });
+  const markData = await markRes.json().catch(()=>null);
+  if (!markRes.ok || !markData || !markData.length) {
+    throw new Error('Se insertó como '+newId+' en el Excel, pero no se pudo actualizar el estado acá — no lo vuelvas a confirmar (se duplicaría en el Excel). Avisá para revisarlo.');
+  }
+  logEvento('hallazgo', id, 'insertado', 'Insertado en el Excel como '+newId);
+}
+
+function hallazgosEstadoBadge(h) {
+  const label = { pendiente: h.asignado_a ? 'Asignado a '+(h.asignado_a_nombre||'—') : 'Pendiente', completado: 'En revisión de HyS', insertado: 'Insertado ('+(h.ha_id||'')+')' }[h.estado] || h.estado;
+  const cls = { pendiente:'badge-pending', completado:'badge-processing', insertado:'badge-done' }[h.estado] || 'badge-pending';
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+// Fila compacta (listas "Asignados a mí" / "Cargados por mí") con botón para expandir el
+// formulario completo de edición inline. Se puede editar en cualquier estado, incluso ya
+// insertado, para cargar más adelante Fecha Verificada/Eficacia de las Acciones, etc.
+function hallazgosRenderCompactItem(h) {
+  _hallazgosRowCache[h.id] = h;
   return `
     <div class="file-item">
       <div class="file-info">
         <div class="file-name">${esc((h.descripcion||'').slice(0,80))}</div>
         <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}</div>
       </div>
-      <span class="badge ${badgeCls}">${esc(estadoLabel)}</span>
-      <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:6px">🕘</button>
-      <button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar del historial" style="margin-left:2px">&#x2715;</button>
+      ${hallazgosEstadoBadge(h)}
+      <button class="np-item-remove" onclick="hallazgosToggleEdit('${h.id}')" title="Editar" style="margin-left:6px">✏️</button>
+      <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:2px">🕘</button>
+      <button class="np-item-remove" onclick="hallazgosEliminar('${h.id}')" title="Eliminar" style="margin-left:2px">&#x2715;</button>
+    </div>
+    <div id="hallazgo-edit-${h.id}"></div>`;
+}
+
+function hallazgosRenderEditForm(h) {
+  const idPrefix = 'hedit-' + h.id;
+  return `
+    <div class="result-card" style="margin-top:8px">
+      ${hallazgosRenderFieldsForm(idPrefix, h)}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="hallazgosGuardar('${h.id}', false)">💾 Guardar</button>
+        <button class="btn btn-primary btn-sm" onclick="hallazgosGuardar('${h.id}', true)">✓ Guardar y enviar a revisión de HyS</button>
+      </div>
+      <div id="hedit-status-${h.id}"></div>
     </div>`;
+}
+
+function hallazgosToggleEdit(id) {
+  const el = document.getElementById('hallazgo-edit-'+id);
+  if (!el) return;
+  if (el.innerHTML) { el.innerHTML = ''; return; }
+  const h = _hallazgosRowCache[id];
+  if (!h) return;
+  el.innerHTML = hallazgosRenderEditForm(h);
 }
 
 function hallazgosEliminar(id) {
@@ -3249,172 +3322,34 @@ async function hallazgosEliminarConfirmado(id) {
   }
 }
 
+// Ítem de la cola de revisión de HyS: mismo formulario completo, ya expandido — "Guardar y
+// enviar a revisión" acá inserta directo en el Excel porque quien lo ve es el coordinador.
 function hallazgosRenderRevisionItem(h) {
+  _hallazgosRowCache[h.id] = h;
   return `
     <div class="result-card" id="hallazgo-rev-${h.id}">
       <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')} <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:4px">🕘</button></div>
-      <label>Descripción</label>
-      <textarea id="hr-descripcion-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.descripcion||'')}</textarea>
-      <label>Acción correctiva inmediata</label>
-      <textarea id="hr-accion-inmediata-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.accion_inmediata||'')}</textarea>
-      <label>¿Por qué surgió?</label>
-      <textarea id="hr-por-que-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.por_que_surgio||'')}</textarea>
-      <label>Acción correctiva</label>
-      <textarea id="hr-accion-correctiva-${h.id}" rows="2" style="margin-bottom:8px">${esc(h.accion_correctiva||'')}</textarea>
-      <label>Fecha probable de ejecución</label>
-      <input type="date" id="hr-fecha-${h.id}" value="${esc(h.fecha_estimada||'')}" style="margin-bottom:10px" />
-
-      <label>¿Cómo insertarlo en el Excel?</label>
-      <select id="hr-modo-${h.id}" onchange="hallazgosToggleModoInsert('${h.id}')" style="margin-bottom:8px">
-        <option value="nuevo">Generar número nuevo automático</option>
-        <option value="existente">Insertar en un hallazgo ya creado</option>
-      </select>
-      <div id="hr-existente-wrap-${h.id}" style="display:none;margin-bottom:10px">
-        <label>Buscar por número de hallazgo</label>
-        <input list="hr-dl-${h.id}" id="hr-existente-input-${h.id}" placeholder="Ej: HA-778" />
-        <datalist id="hr-dl-${h.id}"></datalist>
-      </div>
-
-      <button class="btn btn-primary" onclick="hallazgosConfirmarInsertar('${h.id}')">✓ Confirmar e insertar en Excel</button>
-      <div id="hr-status-${h.id}"></div>
+      ${hallazgosRenderFieldsForm('hedit-'+h.id, h)}
+      <button class="btn btn-primary" onclick="hallazgosGuardar('${h.id}', true)">✓ Confirmar e insertar en Excel</button>
+      <div id="hedit-status-${h.id}"></div>
     </div>`;
-}
-
-async function hallazgosToggleModoInsert(id) {
-  const modo = document.getElementById('hr-modo-'+id).value;
-  const wrap = document.getElementById('hr-existente-wrap-'+id);
-  wrap.style.display = modo === 'existente' ? 'block' : 'none';
-  if (modo !== 'existente') return;
-  const dl = document.getElementById('hr-dl-'+id);
-  dl.innerHTML = '';
-  try {
-    const list = await hallazgosLoadExistingList();
-    dl.innerHTML = list.slice().reverse().map(x => `<option value="${esc(x.id)}"></option>`).join('');
-  } catch(e) {
-    alert('No se pudo cargar la lista de hallazgos existentes: ' + e.message);
-  }
-}
-
-let _hallazgosExistingCache = null; // [{id:'HA-778', row: 42}, ...] en orden natural de la hoja
-
-async function hallazgosLoadExistingList(forceRefresh) {
-  if (_hallazgosExistingCache && !forceRefresh) return _hallazgosExistingCache;
-  const cfg = getHallazgosCfg();
-  if (!cfg.excelId) throw new Error('No hay Excel configurado en Cfg Hallazgos.');
-  const token = await getMsToken();
-  const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
-  const resp = await fetch(excelBase + `range(address='B6:B500')?$select=values`, {headers:{Authorization:'Bearer '+token}});
-  if (!resp.ok) throw new Error('No se pudo leer el Excel.');
-  const data = await resp.json();
-  const list = [];
-  (data.values||[]).forEach((r,i) => {
-    const s = String(r[0]||'').trim();
-    if (s) list.push({ id: s, row: 6+i });
-  });
-  _hallazgosExistingCache = list;
-  return list;
-}
-
-async function hallazgosPatchCell(token, excelBase, cellAddress, value) {
-  const resp = await fetch(excelBase + `range(address='${cellAddress}')`, {
-    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({values:[[value]]})
-  });
-  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al escribir en '+cellAddress); }
-}
-
-async function hallazgosConfirmarInsertar(id) {
-  const cfg = getHallazgosCfg();
-  const statusId = 'hr-status-'+id;
-  if (!cfg.excelId) { showMsg(statusId,'error','No hay Excel configurado. Pedile a un Admin que lo seleccione en Cfg Hallazgos.'); return; }
-
-  const descripcion = document.getElementById('hr-descripcion-'+id).value.trim();
-  const accionInmediata = document.getElementById('hr-accion-inmediata-'+id).value.trim();
-  const porQue = document.getElementById('hr-por-que-'+id).value.trim();
-  const accionCorrectiva = document.getElementById('hr-accion-correctiva-'+id).value.trim();
-  const fechaEstimada = document.getElementById('hr-fecha-'+id).value;
-  const modo = document.getElementById('hr-modo-'+id)?.value || 'nuevo';
-
-  showMsg(statusId,'loading','Conectando...');
-  try {
-    const token = await getMsToken();
-    const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
-    let targetRow, newId;
-
-    if (modo === 'existente') {
-      const inputVal = (document.getElementById('hr-existente-input-'+id).value||'').trim();
-      if (!inputVal) throw new Error('Elegí un número de hallazgo de la lista.');
-      showMsg(statusId,'loading','Buscando hallazgo...');
-      const list = await hallazgosLoadExistingList();
-      const match = list.find(x => x.id.toLowerCase() === inputVal.toLowerCase());
-      if (!match) throw new Error('No encontré ese número de hallazgo. Elegilo de la lista desplegable.');
-      targetRow = match.row;
-      newId = match.id;
-    } else {
-      showMsg(statusId,'loading','Buscando próxima fila...');
-      const list = await hallazgosLoadExistingList(true);
-      let maxNum = 0;
-      targetRow = 6;
-      list.forEach(x => {
-        targetRow = x.row + 1;
-        const m = x.id.match(/(\d+)\s*$/);
-        if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
-      });
-      newId = 'HA-' + (maxNum + 1);
-    }
-
-    // Se escribe celda por celda (no la fila entera) para no pisar otras columnas
-    // que ya puedan tener datos cargados a mano, sobre todo en modo "existente".
-    showMsg(statusId,'loading', modo==='existente' ? 'Actualizando fila...' : 'Insertando en el Excel...');
-    if (modo !== 'existente') {
-      await hallazgosPatchCell(token, excelBase, `B${targetRow}`, newId);
-      await hallazgosPatchCell(token, excelBase, `C${targetRow}`, today());
-    }
-    await hallazgosPatchCell(token, excelBase, `H${targetRow}`, descripcion);
-    await hallazgosPatchCell(token, excelBase, `J${targetRow}`, accionInmediata);
-    await hallazgosPatchCell(token, excelBase, `M${targetRow}`, porQue);
-    await hallazgosPatchCell(token, excelBase, `N${targetRow}`, accionCorrectiva);
-    await hallazgosPatchCell(token, excelBase, `P${targetRow}`, fechaEstimada);
-    _hallazgosExistingCache = null; // invalidar cache: el excel cambió
-
-    // El Excel ya se escribió (lo importante). Esto es solo para sacarlo de la cola de revisión —
-    // si falla, avisamos explícitamente para no arriesgar una inserción duplicada.
-    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const markRes = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
-      method: 'PATCH', headers: { Authorization:'Bearer '+session.token, Prefer:'return=representation' },
-      body: JSON.stringify({
-        estado:'insertado', ha_id:newId, insertado_at:new Date().toISOString(),
-        descripcion, accion_inmediata:accionInmediata, por_que_surgio:porQue, accion_correctiva:accionCorrectiva, fecha_estimada: fechaEstimada||null
-      })
-    });
-    const markData = await markRes.json().catch(()=>null);
-    if (!markRes.ok || !markData || !markData.length) {
-      showMsg(statusId,'error','✓ Se insertó como '+newId+' en el Excel, pero no se pudo sacar de la cola de revisión acá — no vuelvas a confirmarlo (se duplicaría en el Excel). Avisá para revisarlo.');
-      return;
-    }
-
-    logEvento('hallazgo', id, 'insertado', 'Insertado en el Excel como '+newId);
-    showMsg(statusId,'success','✓ Insertado como '+newId);
-    renderHallazgos();
-  } catch(e) {
-    showMsg(statusId,'error','✕ ' + e.message);
-  }
 }
 
 async function renderHallazgos() {
   const newStatusEl = document.getElementById('hallazgos-new-status');
   if (newStatusEl) newStatusEl.innerHTML = '';
-  renderHallazgosNewModo();
+  hallazgosRenderNewForm();
   if (typeof notifLoad === 'function') notifLoad();
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token || !currentUser?.id) return;
 
   const asigEl = document.getElementById('hallazgos-asignados-list');
   try {
-    const res = await supaFetch(`/rest/v1/hallazgos?select=*&asignado_a=eq.${currentUser.id}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    // Sin filtrar por estado: tiene que poder reabrirse aunque ya esté completado/insertado.
+    const res = await supaFetch(`/rest/v1/hallazgos?select=*&asignado_a=eq.${currentUser.id}&order=created_at.desc&limit=20`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
     asigEl.className = rows.length ? '' : 'empty';
-    asigEl.innerHTML = rows.length ? rows.map(hallazgosRenderAsignadoItem).join('') : 'No tenés hallazgos asignados pendientes.';
+    asigEl.innerHTML = rows.length ? rows.map(hallazgosRenderCompactItem).join('') : 'No tenés hallazgos asignados.';
   } catch(e) { asigEl.innerHTML = 'Error al cargar.'; }
 
   const miosEl = document.getElementById('hallazgos-mios-list');
@@ -3422,10 +3357,10 @@ async function renderHallazgos() {
     const res = await supaFetch(`/rest/v1/hallazgos?select=*&creado_por=eq.${currentUser.id}&order=created_at.desc&limit=20`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
     miosEl.className = rows.length ? '' : 'empty';
-    miosEl.innerHTML = rows.length ? rows.map(hallazgosRenderMioItem).join('') : 'Todavía no cargaste ningún hallazgo.';
+    miosEl.innerHTML = rows.length ? rows.map(hallazgosRenderCompactItem).join('') : 'Todavía no cargaste ningún hallazgo.';
   } catch(e) { miosEl.innerHTML = 'Error al cargar.'; }
 
-  const isCoordHyS = currentSector === 'HyS' && !!currentUser?.coordinador;
+  const isCoordHyS = hallazgosIsCoordHyS();
   const revCard = document.getElementById('hallazgos-revision-card');
   if (revCard) revCard.style.display = isCoordHyS ? 'block' : 'none';
   if (isCoordHyS) {
