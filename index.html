@@ -705,6 +705,11 @@
         <button class="btn btn-secondary" onclick="npClearAll('np-loc')" style="color:var(--red)">🗑 Limpiar todo</button>
         <div id="np-loc-gen-status"></div>
       </div>
+      <div class="card">
+        <div class="card-label">Historial de NP creadas</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">NP generadas y filas guardadas en el Registro NP. Se puede editar o eliminar — el cambio impacta en el archivo de SharePoint y en el Excel.</p>
+        <div id="np-loc-historial-list" class="empty">Cargando...</div>
+      </div>
     </div>
 
     <!-- ═══ PANEL: NP Internacionales ═══ -->
@@ -779,6 +784,11 @@
         <button class="btn btn-secondary" id="np-int-btn-np" onclick="npDescargarNP('np-int')" disabled style="margin-bottom:8px">📄 Descargar NP (desde plantilla SharePoint)</button>
         <button class="btn btn-secondary" onclick="npClearAll('np-int')" style="color:var(--red)">🗑 Limpiar todo</button>
         <div id="np-int-gen-status"></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Historial de NP creadas</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">NP generadas y filas guardadas en el Registro NP. Se puede editar o eliminar — el cambio impacta en el archivo de SharePoint y en el Excel.</p>
+        <div id="np-int-historial-list" class="empty">Cargando...</div>
       </div>
     </div>
 
@@ -1760,7 +1770,7 @@ function switchPanel(name) {
   if (name === 'cfg-np-loc') { npLoadFieldsConfig('np-loc').then(()=>npCfgRender('np-loc')); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npLoadFieldsConfig('np-int').then(()=>npCfgRender('np-int')); renderAutoFields('np-int'); }
   if (name === 'rend') { Promise.all([rendLoadClientesProveedores(), rendLoadManualFields()]).then(renderRendResults); renderRendResults(); }
-  if (name === 'np-loc' || name === 'np-int') { npLoadFieldsConfig(name).then(()=>npStep0InitAndCalc(name)); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); }
+  if (name === 'np-loc' || name === 'np-int') { npLoadFieldsConfig(name).then(()=>npStep0InitAndCalc(name)); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); npHistorialRender(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
@@ -6102,6 +6112,8 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
         if (items[r].p_total) await setCellVal(ir.totalCol+row, Number(items[r].p_total)||0);
       }
 
+      await npUpsertHistorial(pfx, d, { np_excel_item_id: copiedItemId, np_excel_site_id: destSiteId, np_excel_name: fileName });
+
       if (npAprobState[pfx] && npAprobState[pfx].requiere) {
         // Requiere aprobación: se queda solo en Excel (sin PDF) y se manda el pedido de aprobación
         btn.textContent = '⏳ Enviando a aprobación...';
@@ -6137,11 +6149,15 @@ async function npGenerateNPFiles(pfx, tmpl, state, destKey, dest) {
           const ep = (dest.path||'').split('/').map(encodeURIComponent).join('/');
           pdfUploadUrl = `https://graph.microsoft.com/v1.0/sites/${destSiteId}/drive/root:/${ep}/${encodeURIComponent(pdfName)}:/content`;
         }
-        await fetch(pdfUploadUrl, {
+        const pdfUploadResp = await fetch(pdfUploadUrl, {
           method: 'PUT',
           headers: { Authorization: 'Bearer '+token, 'Content-Type': 'application/pdf' },
           body: pdfBytes
         });
+        const pdfUploaded = pdfUploadResp.ok ? await pdfUploadResp.json().catch(()=>null) : null;
+        if (pdfUploaded?.id) {
+          await npUpsertHistorial(pfx, d, { np_pdf_item_id: pdfUploaded.id, np_pdf_site_id: destSiteId, np_pdf_name: pdfName });
+        }
 
         _npLastPdf[pfx] = {
           blob: new Blob([pdfBytes], {type:'application/pdf'}), name: pdfName,
@@ -6859,6 +6875,286 @@ async function npAprobReenviar(pfx, aprobId) {
   }
 }
 
+// ── Historial de NP creadas ────────────────────────────
+// Un registro de np_historial junta, para un mismo comprobante, la fila escrita en el
+// Registro NP y/o el archivo de NP (Excel/PDF) generado — lo que se haya hecho hasta el
+// momento. Se va completando de a poco: cada acción (guardar registro, generar NP, subir
+// el PDF) llama a npUpsertHistorial con solo los campos que le corresponden; si el
+// comprobante `d` ya tiene un historial creado (d.__historialId, guardado en memoria
+// durante la sesión) se actualiza esa misma fila en vez de crear una nueva.
+let _npHistorialCache = {};
+
+async function npUpsertHistorial(pfx, d, refPatch) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (!session?.token || !currentUser?.id) return;
+    const manualFields = npGetManual(pfx);
+    const npNumField = manualFields.find(f=>f.auto||f.name.toLowerCase().includes('np'));
+    const npNum = npNumField ? (npState[pfx].manualValues[npNumField.name]||'') : '';
+    const montoField = npGetIA(pfx).find(f => f.name.toLowerCase().replace(/[^a-z]/g,'')==='montototal');
+    const clean = {...d};
+    Object.keys(clean).forEach(k => { if (k.startsWith('__')) delete clean[k]; });
+    const base = {
+      pfx, empresa: currentEmpresa, proveedor: d.proveedor||'', np_num: npNum,
+      monto_total: montoField && d[montoField.name]!=null ? String(d[montoField.name]) : '', moneda: d.moneda||'',
+      extracted_data: clean, manual_values: npState[pfx].manualValues||{},
+      ...refPatch
+    };
+    if (d.__historialId) {
+      await supaFetch(`/rest/v1/np_historial?id=eq.${d.__historialId}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(base) });
+    } else {
+      base.creado_por = currentUser.id; base.creado_por_nombre = currentUser?.nombre||currentUser?.email||'';
+      const res = await supaFetch('/rest/v1/np_historial', { method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(base) });
+      const data = await res.json().catch(()=>null);
+      if (res.ok && data && data[0]) d.__historialId = data[0].id;
+    }
+  } catch(e) { console.warn('No se pudo registrar en el historial de NP:', e.message); }
+}
+
+async function npHistorialRender(pfx) {
+  const list = document.getElementById(pfx+'-historial-list');
+  if (!list || !currentUser?.id) return;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/np_historial?select=*&pfx=eq.${pfx}&empresa=eq.${currentEmpresa}&order=created_at.desc&limit=30`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { list.innerHTML = 'Error al cargar.'; return; }
+    list.className = rows.length ? '' : 'empty';
+    list.innerHTML = rows.length ? rows.map(npHistorialRenderItem).join('') : 'Todavía no hay NPs generadas.';
+  } catch(e) { list.innerHTML = 'Error al cargar.'; }
+}
+
+function npHistorialRenderItem(h) {
+  _npHistorialCache[h.id] = h;
+  const badges = [];
+  if (h.np_excel_name) badges.push('📄 NP: '+h.np_excel_name);
+  if (h.registro_row) badges.push('📋 Registro: fila '+h.registro_row);
+  return `
+    <div class="file-item">
+      <div class="file-info">
+        <div class="file-name">${esc(h.proveedor||'—')}${h.np_num?' — NP '+esc(h.np_num):''}</div>
+        <div class="file-size">${new Date(h.created_at).toLocaleDateString('es-AR')}${badges.length?' · '+esc(badges.join(' · ')):''}</div>
+      </div>
+      <button class="np-item-remove" onclick="npHistorialToggleEdit('${h.id}')" title="Editar">✏️</button>
+      <button class="np-item-remove" onclick="verHistorial('np_historial','${h.id}')" title="Ver historial">🕘</button>
+      <button class="np-item-remove" onclick="npHistorialEliminar('${h.id}')" title="Eliminar" style="margin-left:2px">✕</button>
+    </div>
+    <div id="nphist-edit-${h.id}"></div>`;
+}
+
+function npHistorialToggleEdit(id) {
+  const el = document.getElementById('nphist-edit-'+id);
+  if (!el) return;
+  if (el.innerHTML) { el.innerHTML = ''; return; }
+  const h = _npHistorialCache[id];
+  if (!h) return;
+  el.innerHTML = npHistorialRenderEditForm(h);
+}
+
+function npHistorialUpdateField(id, fieldName, val) { _npHistorialCache[id].extracted_data[fieldName] = val; }
+function npHistorialUpdateManual(id, fieldName, val) { _npHistorialCache[id].manual_values[fieldName] = val; }
+function npHistorialUpdateItemField(id, ii, key, val) {
+  const h = _npHistorialCache[id];
+  const item = (h.extracted_data.items||[])[ii];
+  if (!item) return;
+  item[key] = val;
+  if (key === 'cant' || key === 'p_unitario') {
+    const cant = Number(item.cant)||0, pu = Number(item.p_unitario)||0;
+    item.p_total = +(cant*pu).toFixed(2);
+    const totalEl = document.getElementById(`nphist-item-total-${id}-${ii}`);
+    if (totalEl) totalEl.textContent = item.p_total.toFixed(2);
+  }
+}
+
+function npHistorialRenderEditForm(h) {
+  const iaFields = npGetIA(h.pfx).filter(f=>f.name.trim()&&f.name!=='items');
+  const manualFields = npGetManual(h.pfx).filter(f=>f.name.trim());
+  const d = h.extracted_data || {};
+  const mv = h.manual_values || {};
+  const rowStyle = 'text-align:right;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:60%';
+  const fieldRows = iaFields.map(f => `
+    <div class="np-preview-row">
+      <span class="k">${esc(f.name)}</span>
+      <input value="${esc(d[f.name]!=null?String(d[f.name]):'')}" style="${rowStyle}" oninput="npHistorialUpdateField('${h.id}','${f.name.replace(/'/g,"\\'")}',this.value)" />
+    </div>`).join('');
+  const manualRows = manualFields.map(f => `
+    <div class="np-preview-row">
+      <span class="k">${esc(f.name)}</span>
+      <input value="${esc(mv[f.name]!=null?String(mv[f.name]):'')}" style="${rowStyle}" oninput="npHistorialUpdateManual('${h.id}','${f.name.replace(/'/g,"\\'")}',this.value)" />
+    </div>`).join('');
+  const items = d.items||[];
+  const itemRows = items.map((it,ii)=>`
+    <div class="np-item-row">
+      <span>${it.item}</span>
+      <input type="number" value="${esc(it.cant)}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npHistorialUpdateItemField('${h.id}',${ii},'cant',this.value)" />
+      <input type="text" value="${esc(it.descripcion||'')}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npHistorialUpdateItemField('${h.id}',${ii},'descripcion',this.value)" />
+      <input type="number" step="0.01" value="${esc(it.p_unitario)}" style="width:100%;text-align:right;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npHistorialUpdateItemField('${h.id}',${ii},'p_unitario',this.value)" />
+      <span id="nphist-item-total-${h.id}-${ii}" style="text-align:right">${Number(it.p_total||0).toFixed(2)}</span>
+      <span></span>
+    </div>`).join('');
+  return `<div class="result-card" style="margin-top:8px">
+    <p class="hint" style="margin-top:0">Corrige los valores ya guardados/generados. No se pueden agregar ni sacar ítems acá — para eso, eliminá este registro y volvé a cargar la NP.</p>
+    ${fieldRows}
+    ${manualRows}
+    ${items.length ? `<div class="np-items-header"><span>#</span><span>Cant</span><span>Descripción</span><span style="text-align:right">P.Unit</span><span style="text-align:right">P.Total</span><span></span></div>${itemRows}` : ''}
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary btn-sm" onclick="npHistorialGuardarEdicion('${h.id}')">✓ Guardar cambios</button>
+    </div>
+    <div id="nphist-status-${h.id}"></div>
+  </div>`;
+}
+
+// Reescribe la fila del Registro NP y/o las celdas de la NP generada con los valores
+// editados — el mismo mecanismo de escritura que se usa al crearlas (buildRowFromMapping
+// para el Registro, tmplGetCellMap/tmplGetItemRows para la NP), pero apuntando a la fila/
+// archivo ya existentes en vez de crear uno nuevo.
+async function npHistorialGuardarEdicion(id) {
+  const h = _npHistorialCache[id];
+  if (!h) return;
+  const statusId = 'nphist-status-'+id;
+  const btn = document.querySelector(`#nphist-edit-${id} .btn-primary`);
+  if (btn) btn.disabled = true;
+  showMsg(statusId,'loading','Guardando...');
+  try {
+    const token = await getMsToken();
+    const d = h.extracted_data;
+    const items = d.items||[];
+    const montoField = npGetIA(h.pfx).find(f => f.name.toLowerCase().replace(/[^a-z]/g,'')==='montototal');
+    if (montoField && items.length) {
+      const subtotal = items.reduce((s,it)=>s+(Number(it.p_total)||0),0);
+      const bonifField = npGetIA(h.pfx).find(f => f.name.toLowerCase().replace(/[^a-z]/g,'')==='bonificacion');
+      const ivaField = npGetIA(h.pfx).find(f => f.name.toLowerCase().replace(/[^a-z]/g,'')==='iva');
+      const bonifVal = bonifField ? Number(d[bonifField.name])||0 : 0;
+      const ivaVal = ivaField ? Number(d[ivaField.name])||0 : 0;
+      d[montoField.name] = +(subtotal*(1-bonifVal)*(1+ivaVal)).toFixed(2);
+    }
+
+    // 1. Reescribir la fila del Registro NP, si ya se había guardado ahí
+    if (h.registro_row && h.registro_excel_id && h.registro_site_id && h.registro_sheet) {
+      const excelBase = `https://graph.microsoft.com/v1.0/sites/${h.registro_site_id}/drive/items/${h.registro_excel_id}/workbook/worksheets('${encodeURIComponent(h.registro_sheet)}')/`;
+      const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
+      if (!usedResp.ok) throw new Error('No se pudo leer el Registro NP.');
+      const usedData = await usedResp.json();
+      const headers = (usedData.values && usedData.values[0]) || [];
+      const manualFields = npGetManual(h.pfx);
+      const iaFields = npGetIA(h.pfx).filter(f=>f.name.trim());
+      const savedMap = getMapping(NP_KEYS(h.pfx).map);
+      const useMap = Object.keys(savedMap).length>0 && headers.length>0;
+      let newRow;
+      if (useMap) {
+        newRow = buildRowFromMapping(savedMap, headers, d, h.manual_values, manualFields, iaFields);
+      } else {
+        newRow = new Array(Math.max(headers.length, 20)).fill('');
+        headers.forEach((hd,i)=>{
+          if (!hd) return;
+          const mf=manualFields.find(f=>strSimilarity(f.name,String(hd))>0.5);
+          if (mf) { newRow[i]=h.manual_values[mf.name]||''; return; }
+          const ia=iaFields.find(f=>strSimilarity(f.name,String(hd))>0.5);
+          if (ia) newRow[i]=d[ia.name]!=null?d[ia.name]:'';
+        });
+      }
+      const colCount = headers.length || 18;
+      const rowToWrite = newRow.slice(0, colCount);
+      while (rowToWrite.length < colCount) rowToWrite.push('');
+      const lastCol = colCount<=26 ? String.fromCharCode(64+colCount) : String.fromCharCode(64+Math.floor((colCount-1)/26))+String.fromCharCode(65+((colCount-1)%26));
+      const writeResp = await fetch(excelBase + `range(address='A${h.registro_row}:${lastCol}${h.registro_row}')`, {
+        method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[rowToWrite]})
+      });
+      if (!writeResp.ok) throw new Error('No se pudo actualizar la fila del Registro NP.');
+    }
+
+    // 2. Reescribir las celdas de la NP generada, si existe
+    if (h.np_excel_item_id && h.np_excel_site_id) {
+      const excelBase2 = `https://graph.microsoft.com/v1.0/sites/${h.np_excel_site_id}/drive/items/${h.np_excel_item_id}/workbook/worksheets('Hoja1')/`;
+      const setCellVal = async (addr, val) => {
+        if (!addr || val==='' || val===null || val===undefined) return;
+        await fetch(excelBase2 + `range(address='${addr}')`, {
+          method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[[val]]})
+        });
+      };
+      const fieldValues = {};
+      Object.entries(h.manual_values||{}).forEach(([k,v]) => { fieldValues[k]=v; fieldValues[k.toLowerCase()]=v; });
+      npGetIA(h.pfx).filter(f=>f.name.trim()).forEach(f => { if (d[f.name]!=null) { fieldValues[f.name]=d[f.name]; fieldValues[f.name.toLowerCase()]=d[f.name]; } });
+      Object.entries(d).forEach(([k,v]) => { if (k!=='items' && v!=null) { fieldValues[k]=v; fieldValues[k.toLowerCase()]=v; } });
+      const cellMap = tmplGetCellMap(h.pfx);
+      for (const entry of cellMap) {
+        if (!entry.field || !entry.cell) continue;
+        const val = fieldValues[entry.field] ?? fieldValues[entry.field.toLowerCase()];
+        if (val !== undefined && val !== null && val !== '') await setCellVal(entry.cell, val);
+      }
+      const ir = tmplGetItemRows(h.pfx);
+      const maxRows = ir.end - ir.start + 1;
+      for (let r=0; r<Math.min(items.length, maxRows); r++) {
+        const row = ir.start + r;
+        await setCellVal(ir.itemCol+row, Number(items[r].item)||r+1);
+        await setCellVal(ir.cantCol+row, Number(items[r].cant)||1);
+        await setCellVal(ir.descCol+row, items[r].descripcion||'');
+        await setCellVal(ir.unitCol+row, Number(items[r].p_unitario)||0);
+        if (items[r].p_total) await setCellVal(ir.totalCol+row, Number(items[r].p_total)||0);
+      }
+    }
+
+    // 3. Actualizar el historial en sí
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch(`/rest/v1/np_historial?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({
+        proveedor: d.proveedor||h.proveedor||'', monto_total: montoField && d[montoField.name]!=null ? String(d[montoField.name]) : h.monto_total,
+        extracted_data: d, manual_values: h.manual_values,
+        editado_at: new Date().toISOString(), editado_por_nombre: currentUser?.nombre||currentUser?.email||''
+      })
+    });
+    logEvento('np_historial', id, 'editado', (d.proveedor||'')+' — NP '+(h.np_num||''));
+    showMsg(statusId,'success','✓ Actualizado en el Registro NP y en la NP generada.');
+    npHistorialRender(h.pfx);
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Elimina un registro del historial: borra el archivo de la NP generada (y el PDF, si hay)
+// de SharePoint, y limpia el contenido de la fila del Registro NP — no solo saca la
+// entrada de MAIA. No se puede deshacer.
+async function npHistorialEliminar(id) {
+  const h = _npHistorialCache[id];
+  if (!h) return;
+  const parts = [];
+  if (h.np_excel_item_id) parts.push('el archivo de la NP generada');
+  if (h.np_pdf_item_id) parts.push('el PDF generado');
+  if (h.registro_row) parts.push(`el contenido de la fila ${h.registro_row} del Registro NP`);
+  const msg = parts.length
+    ? `Esto borra definitivamente ${parts.join(', ')}. No se puede deshacer. ¿Continuar?`
+    : '¿Eliminar este registro del historial? No se puede deshacer.';
+  if (!confirm(msg)) return;
+  const statusId = 'nphist-status-'+id;
+  showMsg(statusId,'loading','Eliminando...');
+  try {
+    const token = await getMsToken();
+    if (h.np_excel_item_id && h.np_excel_site_id) {
+      const r = await fetch(`https://graph.microsoft.com/v1.0/sites/${h.np_excel_site_id}/drive/items/${h.np_excel_item_id}`, {method:'DELETE', headers:{Authorization:'Bearer '+token}});
+      if (!r.ok && r.status !== 404) throw new Error('No se pudo borrar el archivo de la NP en SharePoint.');
+    }
+    if (h.np_pdf_item_id && h.np_pdf_site_id) {
+      const r = await fetch(`https://graph.microsoft.com/v1.0/sites/${h.np_pdf_site_id}/drive/items/${h.np_pdf_item_id}`, {method:'DELETE', headers:{Authorization:'Bearer '+token}});
+      if (!r.ok && r.status !== 404) console.warn('No se pudo borrar el PDF de la NP en SharePoint.');
+    }
+    if (h.registro_row && h.registro_excel_id && h.registro_site_id && h.registro_sheet) {
+      const excelBase = `https://graph.microsoft.com/v1.0/sites/${h.registro_site_id}/drive/items/${h.registro_excel_id}/workbook/worksheets('${encodeURIComponent(h.registro_sheet)}')/`;
+      const clearResp = await fetch(excelBase + `range(address='A${h.registro_row}:Z${h.registro_row}')/clear`, {
+        method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({applyTo:'Contents'})
+      });
+      if (!clearResp.ok) throw new Error('No se pudo borrar la fila del Registro NP.');
+    }
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch(`/rest/v1/np_historial?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+    logEvento('np_historial', id, 'eliminado', (h.proveedor||'')+' — NP '+(h.np_num||''));
+    npHistorialRender(h.pfx);
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
 // ── Save to SharePoint (registro) ────────────────────
 let npCurrentModal = null;
 
@@ -7099,6 +7395,7 @@ async function npConfirmSave(pfx) {
         d.__registroExcelId = excelItemId;
         d.__registroSiteId = exSite;
         d.__registroSheet = sheetName;
+        await npUpsertHistorial(pfx, d, { registro_row: d.__registroRow, registro_excel_id: d.__registroExcelId, registro_site_id: d.__registroSiteId, registro_sheet: d.__registroSheet });
         firstEmptyRow++;
       }
 
