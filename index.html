@@ -1317,6 +1317,8 @@
       <div class="modal-body">
         <div class="card-label">Para</div>
         <input type="email" id="np-mail-to" placeholder="proveedor@email.com" style="margin-bottom:12px" />
+        <div class="card-label">CC (opcional, emails separados por coma)</div>
+        <input type="text" id="np-mail-cc" placeholder="persona@empresa.com, otra@empresa.com" style="margin-bottom:12px" />
         <div class="card-label">Asunto</div>
         <input type="text" id="np-mail-subject" style="margin-bottom:12px" />
         <div class="card-label">Mensaje</div>
@@ -1326,6 +1328,31 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="npMailModalClose()">Cancelar</button>
         <button class="btn btn-primary" id="np-mail-send-btn" onclick="npMailModalSend()">Enviar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ NP Approval Mail Modal ═══ -->
+  <div class="modal-overlay hidden" id="npAprobMailModal" onclick="if(event.target===this)npAprobMailModalClose()">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>✉ Revisar mail de aprobación</h2>
+        <button class="modal-close" onclick="npAprobMailModalClose()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="card-label">Para</div>
+        <div id="np-aprob-mail-to" style="font-size:13px;color:var(--text2);margin-bottom:12px"></div>
+        <div class="card-label">CC (opcional, emails separados por coma)</div>
+        <input type="text" id="np-aprob-mail-cc" placeholder="persona@empresa.com, otra@empresa.com" style="margin-bottom:12px" />
+        <div class="card-label">Asunto</div>
+        <input type="text" id="np-aprob-mail-subject" style="margin-bottom:12px" />
+        <div class="card-label">Mensaje</div>
+        <textarea id="np-aprob-mail-body" rows="10"></textarea>
+        <div id="np-aprob-mail-status" class="status-msg" style="display:none;margin-top:10px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="npAprobMailModalClose()">Cancelar</button>
+        <button class="btn btn-primary" id="np-aprob-mail-send-btn" onclick="npAprobMailModalSend()">Enviar a aprobación</button>
       </div>
     </div>
   </div>
@@ -5442,7 +5469,7 @@ function npHandleFiles(eventOrInput, pfx) {
   const state = npState[pfx];
   Array.from(fileList).forEach(f => {
     if (!state.files.find(x=>x.file.name===f.name&&x.file.size===f.size))
-      state.files.push({file:f, status:'pending', b64:null, result:null});
+      state.files.push({file:f, status:'pending', b64:null, result:null, error:null});
   });
   npRenderFileList(pfx);
   document.getElementById(pfx+'-extract-btn').disabled = !state.files.length || !getApiKey();
@@ -5470,12 +5497,27 @@ function npRenderFileList(pfx) {
   const icons={'application/pdf':'\uD83D\uDCC4','image/png':'\uD83D\uDDBC\uFE0F','image/jpeg':'\uD83D\uDDBC\uFE0F'};
   const labels={pending:'Pendiente',processing:'Procesando...',done:'Listo \u2713',error:'Error'};
   const cls={pending:'badge-pending',processing:'badge-processing',done:'badge-done',error:'badge-error'};
-  el.innerHTML = state.files.map(f => `
+  el.innerHTML = state.files.map((f,i) => `
     <div class="file-item">
       <div class="file-icon">${icons[f.file.type]||'\uD83D\uDCCE'}</div>
-      <div class="file-info"><div class="file-name">${esc(f.file.name)}</div><div class="file-size">${formatSize(f.file.size)}</div></div>
+      <div class="file-info"><div class="file-name">${esc(f.file.name)}</div><div class="file-size">${formatSize(f.file.size)}${f.error?' \u00B7 '+esc(f.error):''}</div></div>
       <span class="badge ${cls[f.status]}">${labels[f.status]}</span>
+      <button class="remove-btn" title="Eliminar" onclick="npRemoveFile('${pfx}',${i})">\u2715</button>
     </div>`).join('');
+}
+
+// Saca un archivo de la lista (y su comprobante extra\u00EDdo si ya se hab\u00EDa analizado) sin
+// tener que recargar la p\u00E1gina \u2014 \u00FAtil si se carg\u00F3 por error o la IA extrajo mal los datos.
+function npRemoveFile(pfx, i) {
+  const state = npState[pfx];
+  const item = state.files[i];
+  if (!item) return;
+  state.extracted = state.extracted.filter(d => d.__archivo__ !== item.file.name);
+  state.files.splice(i, 1);
+  npRenderFileList(pfx);
+  npRenderPreviewList(pfx);
+  const btn = document.getElementById(pfx+'-extract-btn');
+  if (btn) btn.disabled = !state.files.length || !getApiKey();
 }
 
 // Claude no analiza .doc/.docx/.xls/.xlsx/.ppt/.pptx directamente — se suben
@@ -5545,13 +5587,16 @@ async function npExtractAll(pfx) {
       extracted.__archivo__ = item.file.name;
       item.result = extracted;
       item.status = 'done';
+      item.error = null;
       state.extracted.push(extracted);
-    } catch(e) { item.status='error'; console.error(e); }
+    } catch(e) { item.status='error'; item.error = e.message; console.error(e); }
     npRenderFileList(pfx);
   }
 
+  const failed = state.files.filter(f=>f.status==='error');
   if (state.extracted.length) {
-    showMsg(pfx+'-status-bar','success',`\u2713 ${state.extracted.length} archivo(s) analizados`);
+    const failMsg = failed.length ? ` \u2014 ${failed.length} con error (ver detalle abajo)` : '';
+    showMsg(pfx+'-status-bar','success',`\u2713 ${state.extracted.length} archivo(s) analizados${failMsg}`);
     npRenderPreviewList(pfx);
     document.getElementById(pfx+'-num2').className='step-num done';
     document.getElementById(pfx+'-num2').textContent='\u2713';
@@ -5560,7 +5605,7 @@ async function npExtractAll(pfx) {
     document.getElementById(pfx+'-btn-registro').disabled=false;
     document.getElementById(pfx+'-btn-np').disabled=false;
   } else {
-    showMsg(pfx+'-status-bar','error','\u2715 No se pudo analizar ning\u00fan archivo');
+    showMsg(pfx+'-status-bar','error','\u2715 No se pudo analizar ning\u00fan archivo \u2014 ver el motivo debajo de cada archivo');
   }
   btn.textContent='\u2736 Extraer datos con IA'; btn.disabled=false;
 }
@@ -5627,18 +5672,66 @@ function npRenderPreviewList(pfx) {
       <div class="np-item-row">
         <span>${it.item}</span>
         <input type="number" value="${esc(it.cant)}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npUpdateItemField('${pfx}',${di},${ii},'cant',this.value)" />
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.descripcion||'')}</span>
+        <input type="text" value="${esc(it.descripcion||'')}" style="width:100%;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text);overflow:hidden;text-overflow:ellipsis" oninput="npUpdateItemField('${pfx}',${di},${ii},'descripcion',this.value)" />
         <input type="number" step="0.01" value="${esc(it.p_unitario)}" style="width:100%;text-align:right;font-size:12px;padding:2px 4px;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text)" oninput="npUpdateItemField('${pfx}',${di},${ii},'p_unitario',this.value)" />
         <span id="np-item-total-${pfx}-${di}-${ii}" style="text-align:right">${Number(it.p_total||0).toFixed(2)}</span>
         <button class="np-item-remove" onclick="npRemoveItem('${pfx}',${di},${ii})" title="Eliminar ítem">&#x2715;</button>
       </div>`).join('');
+    const registroBadge = d.__registroRow ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:11px;color:var(--text3)">
+        <span>\u2713 Guardado en Registro NP (fila ${d.__registroRow})</span>
+        <button class="np-item-remove" onclick="npEliminarRegistro('${pfx}',${di})" title="Eliminar esta fila del Registro NP">\uD83D\uDDD1 Eliminar de Registro</button>
+      </div>` : '';
     return `<div class="np-preview" style="margin-bottom:12px">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;font-weight:600">\uD83D\uDCC4 ${esc(d.__archivo__||'')}</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;font-weight:600;display:flex;justify-content:space-between;align-items:center">
+        <span>\uD83D\uDCC4 ${esc(d.__archivo__||'')}</span>
+        <button class="np-item-remove" onclick="npRemoveExtracted('${pfx}',${di})" title="Eliminar este comprobante de la lista">\u2715</button>
+      </div>
+      ${registroBadge}
       ${fieldRows}
       <div class="np-items-header"><span>#</span><span>Cant</span><span>Descripci\u00f3n</span><span style="text-align:right">P.Unit</span><span style="text-align:right">P.Total</span><span></span></div>
       ${itemRows}
     </div>`;
   }).join('');
+}
+
+// Saca un comprobante entero (y su archivo) de la lista antes de guardarlo \u2014 para corregir
+// un error sin recargar la p\u00E1gina. Si ya estaba guardado en el Registro NP, avisa que hay
+// que borrar esa fila aparte (bot\u00f3n "Eliminar de Registro" arriba).
+function npRemoveExtracted(pfx, di) {
+  const state = npState[pfx];
+  const d = state.extracted[di];
+  if (!d) return;
+  const warn = d.__registroRow ? `\n\nOjo: este comprobante ya est\u00E1 guardado en el Registro NP (fila ${d.__registroRow}). Esto solo lo saca de esta lista \u2014 para borrar tambi\u00E9n esa fila del Excel us\u00E1 "\uD83D\uDDD1 Eliminar de Registro" antes.` : '';
+  if (!confirm('\u00BFEliminar este comprobante de la lista?' + warn)) return;
+  state.extracted.splice(di, 1);
+  const fi = state.files.findIndex(f => f.file.name === d.__archivo__);
+  if (fi >= 0) state.files.splice(fi, 1);
+  npRenderFileList(pfx);
+  npRenderPreviewList(pfx);
+}
+
+// Borra el contenido de la fila ya escrita en el Registro NP (Excel) para este comprobante \u2014
+// para corregir un error sin tener que ir manualmente al Excel ni recargar la p\u00E1gina. No
+// borra la fila en s\u00ED (para no correr las dem\u00E1s filas ya escritas), solo su contenido.
+async function npEliminarRegistro(pfx, di) {
+  const d = npState[pfx].extracted[di];
+  if (!d || !d.__registroRow) return;
+  if (!confirm(`\u00BFBorrar el contenido de la fila ${d.__registroRow} del Registro NP? No se puede deshacer.`)) return;
+  try {
+    showMsg(pfx+'-gen-status','loading','Borrando fila del Registro NP...');
+    const token = await getMsToken();
+    const excelBase = `https://graph.microsoft.com/v1.0/sites/${d.__registroSiteId}/drive/items/${d.__registroExcelId}/workbook/worksheets('${encodeURIComponent(d.__registroSheet)}')/`;
+    const clearResp = await fetch(excelBase + `range(address='A${d.__registroRow}:Z${d.__registroRow}')/clear`, {
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({applyTo:'Contents'})
+    });
+    if (!clearResp.ok) throw new Error('No se pudo borrar la fila del Excel.');
+    delete d.__registroRow; delete d.__registroExcelId; delete d.__registroSiteId; delete d.__registroSheet;
+    showMsg(pfx+'-gen-status','success','\u2713 Fila eliminada del Registro NP.');
+    npRenderPreviewList(pfx);
+  } catch(e) {
+    showMsg(pfx+'-gen-status','error','\u2715 ' + e.message);
+  }
 }
 
 // ── Download NP from SharePoint template ─────────────
@@ -5712,6 +5805,7 @@ function npMailModalOpen(pfx) {
   if (!info) return;
   _npMailPfx = pfx;
   document.getElementById('np-mail-to').value = info.to || '';
+  document.getElementById('np-mail-cc').value = '';
   document.getElementById('np-mail-subject').value = `Nota de Pedido ${info.npNum||''} — ${info.proveedor||''}`.trim();
   document.getElementById('np-mail-body').value = `Estimados,\n\nAdjuntamos la Nota de Pedido ${info.npNum||''}${info.proveedor?' para '+info.proveedor:''}.\n\nSaludos.`;
   document.getElementById('np-mail-status').style.display = 'none';
@@ -5733,6 +5827,7 @@ async function npMailModalSend() {
   const info = _npLastPdf[pfx];
   if (!info) return;
   const to = document.getElementById('np-mail-to').value.trim();
+  const cc = document.getElementById('np-mail-cc').value.trim();
   const subject = document.getElementById('np-mail-subject').value.trim();
   const body = document.getElementById('np-mail-body').value;
   if (!to) { showMsg('np-mail-status','error','Ingresá un email de destino.'); return; }
@@ -5742,6 +5837,7 @@ async function npMailModalSend() {
   try {
     const token = await getMsToken();
     const contentBytes = await blobToBase64(info.blob);
+    const ccList = cc.split(',').map(s=>s.trim()).filter(Boolean);
     const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
       method: 'POST',
       headers: { Authorization: 'Bearer '+token, 'Content-Type': 'application/json' },
@@ -5750,6 +5846,7 @@ async function npMailModalSend() {
           subject,
           body: { contentType: 'Text', content: body },
           toRecipients: [{ emailAddress: { address: to } }],
+          ...(ccList.length ? { ccRecipients: ccList.map(e => ({ emailAddress: { address: e } })) } : {}),
           attachments: [{
             '@odata.type': '#microsoft.graph.fileAttachment',
             name: info.name, contentType: 'application/pdf', contentBytes
@@ -6148,6 +6245,11 @@ function npAprobRemoveArchivo(pfx, i) {
   npAprobRenderArchivosList(pfx);
 }
 
+// Arma el mail de aprobación y lo muestra en un modal editable (destinatarios fijos —
+// elegidos por checkbox más arriba —, pero asunto/cuerpo/CC se pueden tocar) antes de
+// mandarlo. La promesa se resuelve recién cuando se confirma el envío en el modal (o se
+// rechaza si se cancela), para que el llamador (npGenerateNPFiles) siga esperando como antes.
+let _npAprobMailCtx = null;
 async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, copiedItemId, npNum, origFile) {
   const st = npAprobState[pfx];
   if (!st.destinatarios.length) throw new Error('Elegí al menos un coordinador para enviar la aprobación.');
@@ -6162,16 +6264,18 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
   const linksList = (st.links||'').split('\n').map(s=>s.trim()).filter(Boolean);
   const nombre = currentUser?.nombre || currentUser?.email || 'Colaborador';
 
-  const html = `
-    <p>Hola! <b>${esc(nombre)}</b> generó una Nota de Pedido que requiere tu aprobación.</p>
-    <p><b>Proveedor:</b> ${esc(d.proveedor||'—')}<br>
-    <b>NP Nº:</b> ${esc(npNum||'—')}<br>
-    <b>Monto:</b> ${esc(d.monto_total!=null?String(d.monto_total):'—')} ${esc(d.moneda||'')}</p>
-    ${st.descripcion ? `<p><b>Descripción:</b> ${esc(st.descripcion).replace(/\n/g,'<br>')}</p>` : ''}
-    ${excelUrl ? `<p><b>NP (Excel):</b> <a href="${excelUrl}">${esc(fileName)}</a></p>` : ''}
-    ${linksList.length ? `<p><b>Links adicionales:</b><br>${linksList.map(l=>`<a href="${esc(l)}">${esc(l)}</a>`).join('<br>')}</p>` : ''}
-    <p>Se adjunta la proforma original${st.archivos.length ? ' y los archivos adicionales' : ''}.</p>
-    <p>Entrá a la sección ${pfx==='np-loc'?'NP Local':'NP Internacional'} de MAIA para aprobar o rechazar.</p>`;
+  const bodyText = [
+    `Hola! ${nombre} generó una Nota de Pedido que requiere tu aprobación.`,
+    '',
+    `Proveedor: ${d.proveedor||'—'}`,
+    `NP Nº: ${npNum||'—'}`,
+    `Monto: ${d.monto_total!=null?String(d.monto_total):'—'} ${d.moneda||''}`,
+    st.descripcion ? `\nDescripción: ${st.descripcion}` : '',
+    excelUrl ? `\nNP (Excel): ${fileName}\n${excelUrl}` : '',
+    linksList.length ? `\nLinks adicionales:\n${linksList.join('\n')}` : '',
+    `\nSe adjunta la proforma original${st.archivos.length ? ' y los archivos adicionales' : ''}.`,
+    `\nEntrá a la sección ${pfx==='np-loc'?'NP Local':'NP Internacional'} de MAIA para aprobar o rechazar.`
+  ].filter(Boolean).join('\n');
 
   const attachments = st.archivos.map(a => ({
     '@odata.type': '#microsoft.graph.fileAttachment',
@@ -6184,48 +6288,95 @@ async function npEnviarSolicitudAprobacion(pfx, token, d, fileName, destSiteId, 
     });
   }
 
-  const mailBody = { message: {
-    subject: `Aprobación de NP ${npNum||''} — ${d.proveedor||''}`,
-    body: { contentType:'HTML', content: html },
-    toRecipients: destinatariosInfo.map(c => ({ emailAddress:{ address:c.email } })),
-  }, saveToSentItems: true };
-  if (attachments.length) mailBody.message.attachments = attachments;
-
-  const mailResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-    method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify(mailBody)
+  return new Promise((resolve, reject) => {
+    _npAprobMailCtx = {
+      pfx, d, npNum, fileName, excelUrl, destSiteId, copiedItemId, destinatariosInfo, attachments,
+      registroRow: d.__registroRow || null, registroExcelId: d.__registroExcelId || null,
+      registroSiteId: d.__registroSiteId || null, registroSheet: d.__registroSheet || null,
+      solicitanteId: currentUser.id, solicitanteNombre: nombre, destinatarioIds: st.destinatarios.slice(),
+      resolve, reject
+    };
+    document.getElementById('np-aprob-mail-to').textContent = destinatariosInfo.map(c=>c.nombre||c.email).join(', ');
+    document.getElementById('np-aprob-mail-cc').value = '';
+    document.getElementById('np-aprob-mail-subject').value = `Aprobación de NP ${npNum||''} — ${d.proveedor||''}`;
+    document.getElementById('np-aprob-mail-body').value = bodyText;
+    document.getElementById('np-aprob-mail-status').style.display = 'none';
+    document.getElementById('npAprobMailModal').classList.remove('hidden');
   });
-  if (!mailResp.ok) { const e = await mailResp.json().catch(()=>({})); throw new Error(e.error?.message || 'No se pudo enviar el mail de aprobación.'); }
+}
 
-  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const insertRes = await supaFetch('/rest/v1/np_aprobaciones', {
-    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-    body: JSON.stringify({
-      pfx, empresa: currentEmpresa, np_num: npNum||'', proveedor: d.proveedor||'',
-      descripcion: st.descripcion||'', links: linksList.join('\n'),
-      excel_url: excelUrl, excel_name: fileName,
-      excel_item_id: copiedItemId, excel_site_id: destSiteId,
-      extracted_data: d, manual_values: npState[pfx].manualValues || {},
-      registro_row: d.__registroRow || null, registro_excel_id: d.__registroExcelId || null,
-      registro_site_id: d.__registroSiteId || null, registro_sheet: d.__registroSheet || null,
-      solicitado_por: currentUser.id, solicitado_por_nombre: nombre,
-      destinatarios: st.destinatarios, estado:'pendiente'
-    })
-  });
-  const insertData = await insertRes.json().catch(()=>({}));
-  if (!insertRes.ok) {
-    console.warn('No se pudo registrar la solicitud de aprobación en Supabase:', insertData);
-    alert('⚠️ El mail de aprobación se mandó, pero no se pudo guardar el registro en MAIA — no la vas a ver en "pendientes" hasta que se resuelva esto.\n\nError: ' + (insertData.message || insertData.hint || insertData.details || JSON.stringify(insertData)));
-  } else {
-    const coordsInfo = await npGetCoordinadores();
-    const nombresDestinatarios = coordsInfo.filter(c => (st.destinatarios||[]).includes(c.id)).map(c=>c.nombre).join(', ');
-    logEvento('np_aprobacion', insertData[0]?.id, 'enviado_aprobacion', 'Destinatarios: ' + (nombresDestinatarios||'—'));
+function npAprobMailModalClose() {
+  document.getElementById('npAprobMailModal').classList.add('hidden');
+  if (_npAprobMailCtx) {
+    _npAprobMailCtx.reject(new Error('Se canceló el envío — el Excel de la NP ya se generó, pero no se mandó el mail de aprobación.'));
+    _npAprobMailCtx = null;
   }
+}
 
-  npAprobState[pfx] = { requiere:false, destinatarios:[], descripcion:'', links:'', archivos:[] };
-  const chk = document.getElementById(pfx+'-req-aprob'); if (chk) chk.checked = false;
-  const wrap = document.getElementById(pfx+'-aprob-fields'); if (wrap) { wrap.style.display='none'; wrap.dataset.loaded=''; }
-  const npBtn = document.getElementById(pfx+'-btn-np'); if (npBtn) npBtn.textContent = '📄 Descargar NP (desde plantilla SharePoint)';
+async function npAprobMailModalSend() {
+  const ctx = _npAprobMailCtx;
+  if (!ctx) return;
+  const cc = document.getElementById('np-aprob-mail-cc').value.trim();
+  const subject = document.getElementById('np-aprob-mail-subject').value.trim();
+  const bodyText = document.getElementById('np-aprob-mail-body').value;
+  if (!subject) { showMsg('np-aprob-mail-status','error','Falta el asunto.'); return; }
+  const btn = document.getElementById('np-aprob-mail-send-btn');
+  btn.disabled = true;
+  showMsg('np-aprob-mail-status','loading','Enviando...');
+  try {
+    const token = await getMsToken();
+    const ccList = cc.split(',').map(s=>s.trim()).filter(Boolean);
+    const mailBody = { message: {
+      subject,
+      body: { contentType:'Text', content: bodyText },
+      toRecipients: ctx.destinatariosInfo.map(c => ({ emailAddress:{ address:c.email } })),
+    }, saveToSentItems: true };
+    if (ccList.length) mailBody.message.ccRecipients = ccList.map(e => ({ emailAddress:{ address:e } }));
+    if (ctx.attachments.length) mailBody.message.attachments = ctx.attachments;
+
+    const mailResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body: JSON.stringify(mailBody)
+    });
+    if (!mailResp.ok) { const e = await mailResp.json().catch(()=>({})); throw new Error(e.error?.message || 'No se pudo enviar el mail de aprobación.'); }
+
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const insertRes = await supaFetch('/rest/v1/np_aprobaciones', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+      body: JSON.stringify({
+        pfx: ctx.pfx, empresa: currentEmpresa, np_num: ctx.npNum||'', proveedor: ctx.d.proveedor||'',
+        descripcion: subject, links: '',
+        excel_url: ctx.excelUrl, excel_name: ctx.fileName,
+        excel_item_id: ctx.copiedItemId, excel_site_id: ctx.destSiteId,
+        extracted_data: ctx.d, manual_values: npState[ctx.pfx].manualValues || {},
+        registro_row: ctx.registroRow, registro_excel_id: ctx.registroExcelId,
+        registro_site_id: ctx.registroSiteId, registro_sheet: ctx.registroSheet,
+        solicitado_por: ctx.solicitanteId, solicitado_por_nombre: ctx.solicitanteNombre,
+        destinatarios: ctx.destinatarioIds, estado:'pendiente'
+      })
+    });
+    const insertData = await insertRes.json().catch(()=>({}));
+    if (!insertRes.ok) {
+      console.warn('No se pudo registrar la solicitud de aprobación en Supabase:', insertData);
+      alert('⚠️ El mail de aprobación se mandó, pero no se pudo guardar el registro en MAIA — no la vas a ver en "pendientes" hasta que se resuelva esto.\n\nError: ' + (insertData.message || insertData.hint || insertData.details || JSON.stringify(insertData)));
+    } else {
+      logEvento('np_aprobacion', insertData[0]?.id, 'enviado_aprobacion', 'Destinatarios: ' + ctx.destinatariosInfo.map(c=>c.nombre).join(', '));
+    }
+
+    npAprobState[ctx.pfx] = { requiere:false, destinatarios:[], descripcion:'', links:'', archivos:[] };
+    const chk = document.getElementById(ctx.pfx+'-req-aprob'); if (chk) chk.checked = false;
+    const wrap = document.getElementById(ctx.pfx+'-aprob-fields'); if (wrap) { wrap.style.display='none'; wrap.dataset.loaded=''; }
+    const npBtn = document.getElementById(ctx.pfx+'-btn-np'); if (npBtn) npBtn.textContent = '📄 Descargar NP (desde plantilla SharePoint)';
+
+    document.getElementById('npAprobMailModal').classList.add('hidden');
+    const resolve = ctx.resolve;
+    _npAprobMailCtx = null;
+    resolve();
+  } catch(e) {
+    showMsg('np-aprob-mail-status','error','✕ '+e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function npRenderAprobacionesPendientes(pfx) {
