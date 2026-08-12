@@ -2068,8 +2068,11 @@ function renderFileList() {
 function removeFile(i) {
   const item = files[i];
   if (!item) return;
-  const idx = results.findIndex(r => r['__archivo__'] === item.file.name);
-  if (idx >= 0) { results.splice(idx, 1); saveResults(); }
+  // Un mismo archivo puede haber generado varios comprobantes (varias filas en results) —
+  // hay que sacarlos todos, no solo el primero que matchee.
+  const before = results.length;
+  results = results.filter(r => r['__archivo__'] !== item.file.name);
+  if (results.length !== before) saveResults();
   files.splice(i, 1);
   renderFileList();
   renderRendResults();
@@ -2114,25 +2117,34 @@ async function analyzeAll() {
         method: 'POST',
         headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-5', max_tokens: 1000,
-          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. Extraé información y respondé SOLO con JSON válido, sin texto adicional ni markdown. Claves: ${activeFields.map(f=>`"${f.name}"`).join(', ')}. Si no encontrás un valor usá null.`,
+          model: 'claude-sonnet-4-5', max_tokens: 2000,
+          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}. Si no encontrás un valor usá null.`,
           messages: [{ role:'user', content:[
             isPdf ? {type:'document',source:{type:'base64',media_type:mediaType,data:b64}} : {type:'image',source:{type:'base64',media_type:mediaType,data:b64}},
-            {type:'text',text:`Extraé estos campos:\n${fieldPrompt}\nRespondé solo con el JSON.`}
+            {type:'text',text:`Extraé estos campos para cada comprobante distinto que encuentres en el archivo:\n${fieldPrompt}\nRespondé solo con el array JSON.`}
           ]}]
         })
       });
       if (!resp.ok) { const e=await resp.json().catch(()=>({})); throw new Error(e.error?.message||'HTTP '+resp.status); }
       const data = await resp.json();
-      const text = data.content?.find(c=>c.type==='text')?.text||'{}';
-      const extracted = JSON.parse(text.replace(/```json|```/g,'').trim());
-      extracted['__archivo__'] = item.file.name;
-      extracted['__fecha_analisis__'] = new Date().toLocaleString('es-AR');
-      rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNames);
+      const text = data.content?.find(c=>c.type==='text')?.text||'[]';
+      const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+      const extractedList = (Array.isArray(parsed) ? parsed : [parsed]).filter(Boolean);
+      if (!extractedList.length) extractedList.push({});
+      extractedList.forEach(extracted => {
+        extracted['__archivo__'] = item.file.name;
+        extracted['__fecha_analisis__'] = new Date().toLocaleString('es-AR');
+        rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNames);
+      });
+      if (extractedList.length > 1) {
+        extractedList.forEach((e,i) => { e['__comprobante_num__'] = i+1; e['__comprobante_total__'] = extractedList.length; });
+      }
       item.status = 'done';
       item.error = null;
-      const idx = results.findIndex(r=>r['__archivo__']===item.file.name);
-      if (idx>=0) results[idx]=extracted; else results.push(extracted);
+      // Puede haber más de un comprobante por archivo: se reemplazan todos los resultados
+      // previos de este archivo (si ya se había analizado) por la lista nueva completa.
+      results = results.filter(r => r['__archivo__'] !== item.file.name);
+      results.push(...extractedList);
       saveResults();
     } catch(e) {
       item.status = 'error';
@@ -2269,9 +2281,10 @@ function renderRendResults() {
       </div>`;
     }).join('');
     const convNote = r.__conv_note__ ? `<div class="hint" style="color:var(--blue);margin-bottom:8px">🔁 ${esc(r.__conv_note__)}</div>` : '';
+    const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
     return `
       <div class="result-card">
-        <div class="result-filename">📄 ${esc(r['__archivo__']||'')} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
+        <div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
         ${convNote}
         ${manualRows}
         ${fieldRows}
@@ -3405,9 +3418,62 @@ function hallazgosRenderRevisionItem(h) {
     <div class="result-card" id="hallazgo-rev-${h.id}">
       <div class="result-filename">De: ${esc(h.creado_por_nombre||'—')}${h.asignado_a_nombre ? ' · completado por '+esc(h.asignado_a_nombre) : ''} · ${new Date(h.created_at).toLocaleDateString('es-AR')} <button class="np-item-remove" onclick="verHistorial('hallazgo','${h.id}')" title="Ver historial" style="margin-left:4px">🕘</button></div>
       ${hallazgosRenderFieldsForm('hedit-'+h.id, h)}
-      <button class="btn btn-primary" onclick="hallazgosGuardar('${h.id}')">✓ Confirmar e insertar en Excel</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="hallazgosGuardar('${h.id}')">✓ Confirmar e insertar en Excel</button>
+        <button class="btn btn-secondary" style="color:var(--red)" onclick="hallazgosRechazar('${h.id}')">✕ Rechazar</button>
+      </div>
       <div id="hedit-status-${h.id}"></div>
     </div>`;
+}
+
+// A quién avisar cuando se rechaza: si estaba asignado, a quien lo completó (asignado_a);
+// si no, a quien lo creó (hay que resolver su email desde profiles porque no se guarda en la fila).
+async function hallazgosResolveNotifyTarget(h) {
+  if (h.asignado_a_email) return { email: h.asignado_a_email, nombre: h.asignado_a_nombre || '' };
+  if (!h.creado_por) return null;
+  try {
+    if (!_hallazgosUsersCache) {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      const res = await supaFetch('/rest/v1/profiles?select=id,nombre,email&order=nombre', {headers:{Authorization:'Bearer '+session.token}});
+      _hallazgosUsersCache = await res.json();
+    }
+    const u = _hallazgosUsersCache.find(x => x.id === h.creado_por);
+    return u ? { email: u.email, nombre: u.nombre || u.email } : null;
+  } catch(e) { return null; }
+}
+
+// Rechaza un hallazgo en revisión: vuelve a "pendiente" (reaparece para que lo corrija quien
+// lo cargó/completó) y le avisa por mail con el motivo, en vez de insertarlo en el Excel.
+async function hallazgosRechazar(id) {
+  const h = _hallazgosRowCache[id];
+  if (!h) return;
+  const comentario = prompt('Motivo del rechazo (se le va a avisar a quien lo cargó):') || '';
+  const statusId = 'hedit-status-' + id;
+  try {
+    showMsg(statusId, 'loading', 'Rechazando...');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+      body: JSON.stringify({ estado:'pendiente' })
+    });
+    const rows = await res.json().catch(()=>null);
+    if (!res.ok || !rows || !rows.length) throw new Error('No se pudo rechazar (revisá permisos en Supabase).');
+    logEvento('hallazgo', id, 'rechazado', comentario || null);
+    try {
+      const target = await hallazgosResolveNotifyTarget(h);
+      if (target?.email) {
+        await hallazgosSendMail(
+          'Hallazgo rechazado — hay que corregirlo',
+          `<p><b>${esc(currentUser.nombre||currentUser.email)}</b> (HyS) rechazó tu hallazgo y pide que lo corrijas.</p>${comentario ? `<p><b>Motivo:</b> ${esc(comentario).replace(/\n/g,'<br>')}</p>` : ''}<p>Entrá a la sección Hallazgos de MAIA, corregilo y volvé a enviarlo.</p>`,
+          target.email
+        );
+      }
+    } catch(notifyErr) { console.warn('No se pudo notificar el rechazo:', notifyErr.message); }
+    showMsg(statusId, 'success', '✓ Rechazado' + (comentario ? ': ' + comentario : '') + '.');
+    renderHallazgos();
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
 }
 
 async function renderHallazgos() {
