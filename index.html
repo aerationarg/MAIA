@@ -3464,15 +3464,23 @@ async function renderHallazgos() {
 }
 
 // ── Asistente MAIA (chat flotante, con búsqueda en SharePoint) ──
-const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration. Preguntame, por ejemplo, "¿dónde está la plantilla de rendición?".';
+const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, y también explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿dónde está la plantilla de rendición?" o "¿cómo cargo un hallazgo?".';
 let _maiaChatMessages = [];
 let _maiaChatLoading = false;
+let _maiaChatSourceCache = null;
 
-const MAIA_CHAT_TOOLS = [{
-  name: 'buscar_sharepoint',
-  description: 'Busca archivos y carpetas en el SharePoint de Aeration por texto (nombre o contenido). Devuelve nombre, link y ubicación de los resultados encontrados.',
-  input_schema: { type:'object', properties: { query: { type:'string', description:'Texto a buscar' } }, required:['query'] }
-}];
+const MAIA_CHAT_TOOLS = [
+  {
+    name: 'buscar_sharepoint',
+    description: 'Busca archivos y carpetas en el SharePoint de Aeration por texto (nombre o contenido). Devuelve nombre, link y ubicación de los resultados encontrados.',
+    input_schema: { type:'object', properties: { query: { type:'string', description:'Texto a buscar' } }, required:['query'] }
+  },
+  {
+    name: 'leer_codigo_maia',
+    description: 'Lee el código fuente real de MAIA para entender cómo funciona una función y poder explicarle al usuario cómo usarla. Llamala primero SIN el parámetro seccion para ver el índice de secciones disponibles; después volvé a llamarla pasando el nombre (o parte del nombre) de la sección más relevante para leer su código en detalle.',
+    input_schema: { type:'object', properties: { seccion: { type:'string', description:'Nombre o parte del nombre de la sección de código a leer. Si se omite, devuelve el índice de todas las secciones disponibles.' } }, required: [] }
+  }
+];
 
 function maiaChatToggle() {
   const panel = document.getElementById('maia-chat-panel');
@@ -3550,6 +3558,45 @@ async function maiaChatBuscarSharePoint(query) {
   }).join('\n');
 }
 
+// Lee el propio archivo fuente de MAIA (el mismo index.html servido) para que el asistente
+// pueda explicar el funcionamiento real de la app en vez de depender de un manual aparte que
+// hay que ir actualizando a mano. Se corta por las secciones marcadas con comentarios
+// "// ── Nombre ──" que ya dividen el código, así solo se manda al modelo la parte relevante.
+async function maiaChatObtenerFuente() {
+  if (_maiaChatSourceCache) return _maiaChatSourceCache;
+  const resp = await fetch(location.pathname, { cache: 'no-store' });
+  if (!resp.ok) throw new Error('No se pudo leer el código fuente de MAIA.');
+  _maiaChatSourceCache = await resp.text();
+  return _maiaChatSourceCache;
+}
+
+function maiaChatCodeSections(lines) {
+  const re = /^\/\/\s*─{2,}\s*(.+?)\s*─{2,}\s*$/;
+  const sections = [];
+  lines.forEach((line, i) => {
+    const m = line.match(re);
+    if (m) sections.push({ name: m[1].trim(), line: i });
+  });
+  return sections;
+}
+
+async function maiaChatLeerCodigo(seccion) {
+  const source = await maiaChatObtenerFuente();
+  const lines = source.split('\n');
+  const sections = maiaChatCodeSections(lines);
+  if (!seccion || !seccion.trim()) {
+    return 'Índice de secciones del código de MAIA:\n' + sections.map((s,i) => (i+1)+'. '+s.name).join('\n');
+  }
+  const q = seccion.trim().toLowerCase();
+  let idx = sections.findIndex(s => s.name.toLowerCase() === q);
+  if (idx === -1) idx = sections.findIndex(s => s.name.toLowerCase().includes(q));
+  if (idx === -1) return 'No encontré ninguna sección que coincida con "'+seccion+'". Llamá a leer_codigo_maia sin parámetros para ver el índice completo de secciones.';
+  const start = sections[idx].line;
+  const end = idx+1 < sections.length ? sections[idx+1].line : lines.length;
+  const code = lines.slice(start, end).join('\n');
+  return 'Sección "'+sections[idx].name+'" del código de MAIA:\n\n'+code;
+}
+
 async function maiaChatCallClaude(messages) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
@@ -3559,7 +3606,7 @@ async function maiaChatCallClaude(messages) {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos.',
+      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte.',
       tools: MAIA_CHAT_TOOLS,
       messages
     })
@@ -3591,12 +3638,20 @@ async function maiaChatSend() {
         maiaChatRenderMsg('assistant', textBlock?.text || '(sin respuesta)');
         break;
       }
-      if (!hintEl) hintEl = maiaChatRenderMsg('system-hint', '🔎 Buscando en SharePoint...');
+      if (!hintEl) {
+        const usaCodigo = toolUses.some(t => t.name === 'leer_codigo_maia');
+        const usaSp = toolUses.some(t => t.name === 'buscar_sharepoint');
+        const label = usaCodigo && usaSp ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : '🔎 Buscando en SharePoint...';
+        hintEl = maiaChatRenderMsg('system-hint', label);
+      }
       const toolResults = [];
       for (const tu of toolUses) {
         let resultText;
-        try { resultText = await maiaChatBuscarSharePoint(tu.input?.query || ''); }
-        catch(e) { resultText = 'Error al buscar: ' + e.message; }
+        try {
+          if (tu.name === 'leer_codigo_maia') resultText = await maiaChatLeerCodigo(tu.input?.seccion || '');
+          else resultText = await maiaChatBuscarSharePoint(tu.input?.query || '');
+        }
+        catch(e) { resultText = 'Error: ' + e.message; }
         toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: resultText });
       }
       _maiaChatMessages.push({ role:'user', content: toolResults });
