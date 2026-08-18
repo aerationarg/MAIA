@@ -3618,8 +3618,36 @@ const MAIA_CHAT_TOOLS = [
     name: 'leer_codigo_maia',
     description: 'Lee el código fuente real de MAIA para entender cómo funciona una función y poder explicarle al usuario cómo usarla. Llamala primero SIN el parámetro seccion para ver el índice de secciones disponibles; después volvé a llamarla pasando el nombre (o parte del nombre) de la sección más relevante para leer su código en detalle.',
     input_schema: { type:'object', properties: { seccion: { type:'string', description:'Nombre o parte del nombre de la sección de código a leer. Si se omite, devuelve el índice de todas las secciones disponibles.' } }, required: [] }
+  },
+  {
+    name: 'leer_archivo_sharepoint',
+    description: 'Descarga y lee el CONTENIDO de un archivo de SharePoint (Word, Excel, PowerPoint, PDF o imagen) para analizarlo y responder preguntas sobre lo que dice. Usala SOLO después de encontrar el archivo con buscar_sharepoint y de que el usuario haya confirmado cuál(es) leer — nunca la llames sin esa confirmación explícita.',
+    input_schema: { type:'object', properties: { url: { type:'string', description:'El link exacto del archivo, tal cual vino en el resultado de buscar_sharepoint' } }, required:['url'] }
   }
 ];
+
+// ── Historial persistente del chat (por usuario, en localStorage) ──────
+// Guarda solo lo que se ve en pantalla (preguntas y respuestas de texto), no la
+// conversación cruda que se le manda a la API — así no hay riesgo de que un archivo
+// adjunto (leer_archivo_sharepoint) haga explotar el límite de tamaño de localStorage.
+function maiaChatLogKey() { return 'maia_chat_log_' + (currentUser?.id || currentUser?.email || 'anon'); }
+function maiaChatLoadLog() {
+  try { return JSON.parse(localStorage.getItem(maiaChatLogKey()) || '[]'); }
+  catch(e) { return []; }
+}
+function maiaChatSaveLogEntry(role, text) {
+  try {
+    const log = maiaChatLoadLog();
+    log.push({ role, text, ts: Date.now() });
+    while (log.length > 100) log.shift();
+    localStorage.setItem(maiaChatLogKey(), JSON.stringify(log));
+  } catch(e) { console.warn('No se pudo guardar el historial del chat:', e.message); }
+}
+function maiaChatRenderHistory() {
+  const log = maiaChatLoadLog();
+  if (!log.length) { maiaChatRenderMsg('assistant', MAIA_CHAT_WELCOME, false); return; }
+  log.forEach(entry => maiaChatRenderMsg(entry.role, entry.text, false));
+}
 
 function maiaChatToggle() {
   const panel = document.getElementById('maia-chat-panel');
@@ -3627,16 +3655,18 @@ function maiaChatToggle() {
   const opening = !panel.classList.contains('open');
   panel.classList.toggle('open');
   if (opening) {
-    if (!_maiaChatMessages.length) maiaChatRenderMsg('assistant', MAIA_CHAT_WELCOME);
+    const box = document.getElementById('maia-chat-messages');
+    if (box && !box.children.length) maiaChatRenderHistory();
     document.getElementById('maia-chat-input')?.focus();
   }
 }
 
 function maiaChatReset() {
   _maiaChatMessages = [];
+  try { localStorage.removeItem(maiaChatLogKey()); } catch(e) {}
   const box = document.getElementById('maia-chat-messages');
   if (box) box.innerHTML = '';
-  maiaChatRenderMsg('assistant', MAIA_CHAT_WELCOME);
+  maiaChatRenderMsg('assistant', MAIA_CHAT_WELCOME, false);
 }
 
 function maiaChatFormatText(text) {
@@ -3657,7 +3687,7 @@ function maiaChatFormatText(text) {
   }).join('\n');
 }
 
-function maiaChatRenderMsg(role, text) {
+function maiaChatRenderMsg(role, text, persist) {
   const box = document.getElementById('maia-chat-messages');
   if (!box) return;
   const div = document.createElement('div');
@@ -3665,6 +3695,7 @@ function maiaChatRenderMsg(role, text) {
   div.innerHTML = maiaChatFormatText(text);
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+  if (persist !== false && (role === 'user' || role === 'assistant')) maiaChatSaveLogEntry(role, text);
   return div;
 }
 
@@ -3736,6 +3767,66 @@ async function maiaChatLeerCodigo(seccion) {
   return 'Sección "'+sections[idx].name+'" del código de MAIA:\n\n'+code;
 }
 
+// ── Lectura de contenido de archivos (Word/Excel/PowerPoint/PDF/imágenes) ──
+const MAIA_CHAT_OFFICE_EXT = /\.(docx?|xlsx?|pptx?)$/i;
+const MAIA_CHAT_IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+const MAIA_CHAT_MAX_FILE_BYTES = 15 * 1024 * 1024; // 15MB — evita adjuntos gigantes en el chat
+
+function maiaChatImageMediaType(name) {
+  const ext = (name.match(/\.([a-z0-9]+)$/i)||[])[1]?.toLowerCase();
+  return { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', webp:'image/webp' }[ext] || 'image/jpeg';
+}
+// Codifica un link de SharePoint al formato que pide la API de Graph para resolverlo
+// directo a un driveItem, sin tener que buscar antes el site/carpeta a mano.
+function maiaChatEncodeShareUrl(url) {
+  const base64 = btoa(unescape(encodeURIComponent(url.trim())));
+  return 'u!' + base64.replace(/=+$/,'').replace(/\//g,'_').replace(/\+/g,'-');
+}
+
+// Descarga un archivo por su link (el mismo que devuelve buscar_sharepoint) y lo arma como
+// bloque de contenido para mandarle a Claude. Word/Excel/PowerPoint no los puede leer
+// directo — se convierten a PDF vía Graph, igual que se hace en Notas de Pedido.
+async function maiaChatLeerArchivo(url) {
+  if (!url || !/^https?:\/\//i.test(url.trim())) throw new Error('Falta un link válido de SharePoint.');
+  const token = await getMsToken();
+  const shareId = maiaChatEncodeShareUrl(url);
+  const metaResp = await fetch(`https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem?$select=id,name,size,file`, { headers:{ Authorization:'Bearer '+token } });
+  if (!metaResp.ok) throw new Error('No se pudo acceder al archivo (¿el link es correcto y tenés permiso?).');
+  const meta = await metaResp.json();
+  if (meta.size && meta.size > MAIA_CHAT_MAX_FILE_BYTES) {
+    throw new Error(`"${meta.name}" pesa ${(meta.size/1024/1024).toFixed(1)}MB — es demasiado grande para leerlo acá (límite ~15MB).`);
+  }
+  const isPdf = /\.pdf$/i.test(meta.name);
+  const isImage = MAIA_CHAT_IMAGE_EXT.test(meta.name);
+  const isOffice = MAIA_CHAT_OFFICE_EXT.test(meta.name);
+  if (!isPdf && !isImage && !isOffice) {
+    throw new Error(`"${meta.name}" no es un tipo de archivo que pueda leer (solo Word, Excel, PowerPoint, PDF e imágenes).`);
+  }
+  const contentUrl = `https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content` + (isOffice ? '?format=pdf' : '');
+  const contentResp = await fetch(contentUrl, { headers:{ Authorization:'Bearer '+token } });
+  if (!contentResp.ok) throw new Error(`No se pudo descargar "${meta.name}".`);
+  const buf = await contentResp.arrayBuffer();
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const b64 = btoa(binary);
+  const block = isImage
+    ? { type:'image', source:{ type:'base64', media_type: maiaChatImageMediaType(meta.name), data: b64 } }
+    : { type:'document', source:{ type:'base64', media_type:'application/pdf', data: b64 } };
+  return { name: meta.name, block };
+}
+
+// Evita mandar (y re-cobrar) toda la conversación entera en cada mensaje — corta por
+// turnos completos de usuario, nunca en medio de un tool_use/tool_result (rompería la
+// estructura que espera la API). El historial visible en pantalla no se ve afectado por
+// esto, solo lo que efectivamente se le manda a Claude como contexto.
+function maiaChatTrimForApi(messages, maxTurns) {
+  const boundaries = [];
+  messages.forEach((m,i) => { if (m.role === 'user' && typeof m.content === 'string') boundaries.push(i); });
+  if (boundaries.length <= maxTurns) return messages;
+  return messages.slice(boundaries[boundaries.length - maxTurns]);
+}
+
 async function maiaChatCallClaude(messages) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
@@ -3745,9 +3836,9 @@ async function maiaChatCallClaude(messages) {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte.',
+      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer.',
       tools: MAIA_CHAT_TOOLS,
-      messages
+      messages: maiaChatTrimForApi(messages, 8)
     })
   });
   if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
@@ -3778,22 +3869,30 @@ async function maiaChatSend() {
         break;
       }
       if (!hintEl) {
+        const usaArchivo = toolUses.some(t => t.name === 'leer_archivo_sharepoint');
         const usaCodigo = toolUses.some(t => t.name === 'leer_codigo_maia');
         const usaSp = toolUses.some(t => t.name === 'buscar_sharepoint');
-        const label = usaCodigo && usaSp ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : '🔎 Buscando en SharePoint...';
+        const label = usaArchivo ? '📄 Leyendo el archivo...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : '🔎 Buscando en SharePoint...';
         hintEl = maiaChatRenderMsg('system-hint', label);
       }
       const toolResults = [];
+      const extraBlocks = [];
       for (const tu of toolUses) {
-        let resultText;
         try {
-          if (tu.name === 'leer_codigo_maia') resultText = await maiaChatLeerCodigo(tu.input?.seccion || '');
-          else resultText = await maiaChatBuscarSharePoint(tu.input?.query || '');
+          if (tu.name === 'leer_codigo_maia') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatLeerCodigo(tu.input?.seccion || '') });
+          } else if (tu.name === 'leer_archivo_sharepoint') {
+            const file = await maiaChatLeerArchivo(tu.input?.url || '');
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: `Archivo "${file.name}" descargado. Se adjunta a continuación para analizarlo.` });
+            extraBlocks.push(file.block);
+          } else {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarSharePoint(tu.input?.query || '') });
+          }
+        } catch(e) {
+          toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: 'Error: ' + e.message, is_error: true });
         }
-        catch(e) { resultText = 'Error: ' + e.message; }
-        toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: resultText });
       }
-      _maiaChatMessages.push({ role:'user', content: toolResults });
+      _maiaChatMessages.push({ role:'user', content: [...toolResults, ...extraBlocks] });
       if (rounds >= 4) {
         if (hintEl) hintEl.remove();
         maiaChatRenderMsg('assistant', 'No pude terminar de resolver la búsqueda — probá reformular la pregunta.');
