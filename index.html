@@ -319,6 +319,8 @@
     .maia-chat-input-row textarea { flex:1; min-width:0; resize:none; border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; font-family:inherit; font-size:13px; background:var(--surface2); color:var(--text); max-height:80px; outline:none; }
     .maia-chat-input-row textarea:focus { border-color:var(--blue); }
     .maia-chat-input-row button { width:auto; flex:0 0 auto; padding:0 16px; font-size:15px; }
+    #maia-chat-mic-btn.maia-mic-active { background:var(--red); color:#fff; animation:maiaMicPulse 1.2s ease-in-out infinite; }
+    @keyframes maiaMicPulse { 0%,100% { opacity:1; } 50% { opacity:.6; } }
     @media (max-width: 480px) {
       .maia-chat-panel { right:12px; bottom:80px; }
       .maia-chat-fab { right:12px; bottom:16px; }
@@ -379,6 +381,7 @@
     <div class="maia-chat-messages" id="maia-chat-messages"></div>
     <div class="maia-chat-input-row">
       <textarea id="maia-chat-input" rows="1" placeholder="Escribí tu pregunta..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();maiaChatSend();}"></textarea>
+      <button class="btn btn-secondary" id="maia-chat-mic-btn" onclick="maiaChatMicToggle()" title="Dictar por voz">🎤</button>
       <button class="btn btn-primary" id="maia-chat-send-btn" onclick="maiaChatSend()">➤</button>
     </div>
   </div>
@@ -3703,8 +3706,54 @@ function maiaChatSetLoading(loading) {
   _maiaChatLoading = loading;
   const btn = document.getElementById('maia-chat-send-btn');
   const input = document.getElementById('maia-chat-input');
+  const micBtn = document.getElementById('maia-chat-mic-btn');
   if (btn) btn.disabled = loading;
   if (input) input.disabled = loading;
+  if (micBtn) micBtn.disabled = loading;
+}
+
+// ── Dictado por voz (Web Speech API) — transcribe en vivo en el navegador, nunca se
+// manda audio a ningún lado; el resultado se manda como un mensaje de texto normal. ──
+let _maiaChatRecognition = null;
+let _maiaChatListening = false;
+
+function maiaChatMicToggle() {
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionCtor) { alert('Tu navegador no soporta dictado por voz — probá con Chrome o Edge.'); return; }
+  if (_maiaChatListening) { _maiaChatRecognition?.stop(); return; }
+
+  const input = document.getElementById('maia-chat-input');
+  const micBtn = document.getElementById('maia-chat-mic-btn');
+  const baseText = input.value.trim() ? input.value.trim() + ' ' : '';
+
+  _maiaChatRecognition = new SpeechRecognitionCtor();
+  _maiaChatRecognition.lang = 'es-AR';
+  _maiaChatRecognition.continuous = true;
+  _maiaChatRecognition.interimResults = true;
+  _maiaChatRecognition.onresult = (ev) => {
+    let finalText = '', interimText = '';
+    for (let i = 0; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) finalText += r[0].transcript;
+      else interimText += r[0].transcript;
+    }
+    input.value = (baseText + finalText + interimText).trim();
+  };
+  _maiaChatRecognition.onerror = (ev) => {
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      alert('MAIA necesita permiso para usar el micrófono.');
+    } else if (ev.error !== 'no-speech' && ev.error !== 'aborted') {
+      console.warn('Error de dictado:', ev.error);
+    }
+  };
+  _maiaChatRecognition.onend = () => {
+    _maiaChatListening = false;
+    if (micBtn) { micBtn.textContent = '🎤'; micBtn.classList.remove('maia-mic-active'); }
+    input.focus();
+  };
+  _maiaChatRecognition.start();
+  _maiaChatListening = true;
+  if (micBtn) { micBtn.textContent = '⏹'; micBtn.classList.add('maia-mic-active'); }
 }
 
 // Busca en el SharePoint de la organización (archivos/carpetas a los que el usuario logueado
