@@ -1,4 +1,4 @@
-const CACHE = 'maia-v5';
+const CACHE = 'maia-v6';
 const ASSETS = [
   './',
   './index.html',
@@ -17,6 +17,44 @@ self.addEventListener('activate', e => {
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
+});
+
+// ── Web Push: mostrar la notificación aunque MAIA esté cerrada ──
+self.addEventListener('push', e => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch(err) {}
+  const title = data.title || 'MAIA';
+  const options = {
+    body: data.body || '',
+    icon: 'icons/icon-192.png',
+    badge: 'icons/icon-192.png',
+    data: { seccion: data.seccion || '' }
+  };
+  e.waitUntil((async () => {
+    await self.registration.showNotification(title, options);
+    // Numerito en el ícono, aunque la app esté completamente cerrada.
+    if (self.navigator && 'setAppBadge' in self.navigator && typeof data.badge === 'number') {
+      try { await self.navigator.setAppBadge(data.badge); } catch(err) {}
+    }
+  })());
+});
+
+// Tocar la notificación: enfocar MAIA si ya está abierta, o abrirla; y llevar
+// al panel correspondiente avisándole a la pestaña abierta por postMessage.
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const seccion = e.notification.data?.seccion || '';
+  e.waitUntil((async () => {
+    const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of allClients) {
+      if ('focus' in c) {
+        await c.focus();
+        if (seccion) c.postMessage({ type: 'push-nav', seccion });
+        return;
+      }
+    }
+    if (clients.openWindow) await clients.openWindow('./');
+  })());
 });
 
 self.addEventListener('fetch', e => {

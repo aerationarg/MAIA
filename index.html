@@ -452,6 +452,10 @@
               <div id="user-name-display" style="font-weight:600;font-size:13px"></div>
               <div id="user-sector-display" style="font-size:12px;color:var(--text2)"></div>
             </div>
+            <div id="push-toggle-row" style="display:none;padding:10px 16px;border-bottom:1px solid var(--border);margin-bottom:4px">
+              <div id="push-toggle-label" style="font-size:12px;color:var(--text2);margin-bottom:6px">Recibí avisos aunque tengas MAIA cerrada</div>
+              <button id="push-toggle-btn" onclick="pushToggle()" style="width:100%;padding:7px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);cursor:pointer;font-family:inherit;font-size:12px;color:var(--text)">Activar notificaciones</button>
+            </div>
             <button onclick="showChangePassword()" style="width:100%;text-align:left;padding:10px 16px;background:none;border:none;cursor:pointer;font-family:inherit;font-size:13px;color:var(--text)">🔑 Cambiar contraseña</button>
             <button onclick="doLogout()" style="width:100%;text-align:left;padding:10px 16px;background:none;border:none;cursor:pointer;font-family:inherit;font-size:13px;color:#dc2626">↩ Cerrar sesión</button>
           </div>
@@ -8941,6 +8945,7 @@ function applyTabAccess() {
 function toggleAccountMenu() {
   const m = document.getElementById('account-menu');
   m.style.display = m.style.display === 'none' ? 'block' : 'none';
+  if (m.style.display === 'block') pushRenderToggle();
 }
 document.addEventListener('click', e => {
   const btn = document.getElementById('account-btn');
@@ -8949,6 +8954,103 @@ document.addEventListener('click', e => {
     menu.style.display = 'none';
   }
 });
+
+// ── Notificaciones push (Web Push + ícono con numerito) ─
+// La clave pública VAPID es pública por diseño (va en cada suscripción); la
+// privada vive únicamente como secreto de la Edge Function que envía los push.
+const PUSH_VAPID_PUBLIC_KEY = 'BAl7X5jjAAwnazb6DBY5yqbqGbdB2tMQCf7aszrYVlaUiV1uu5RjtWzGzH9i1FsoKihVYFQlO_y8lSk0gzvpIKU';
+
+function pushUrlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+function pushIsSupported() {
+  return ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+}
+
+async function pushGetStatus() {
+  if (!pushIsSupported()) return 'unsupported';
+  if (Notification.permission === 'denied') return 'denied';
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    return sub ? 'subscribed' : 'not-subscribed';
+  } catch(e) { return 'not-subscribed'; }
+}
+
+async function pushSubscribe() {
+  if (!pushIsSupported()) { alert('Este navegador no soporta notificaciones push.'); return; }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { await pushRenderToggle(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: pushUrlBase64ToUint8Array(PUSH_VAPID_PUBLIC_KEY)
+      });
+    }
+    const json = sub.toJSON();
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch('/rest/v1/push_subscriptions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer '+session.token, Prefer: 'resolution=merge-duplicates' },
+      body: JSON.stringify({
+        user_id: currentUser.id, endpoint: json.endpoint,
+        p256dh: json.keys.p256dh, auth: json.keys.auth, user_agent: navigator.userAgent
+      })
+    });
+  } catch(e) { alert('No se pudo activar las notificaciones: ' + e.message); }
+  await pushRenderToggle();
+}
+
+async function pushUnsubscribe() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      const endpoint = sub.endpoint;
+      await sub.unsubscribe();
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      await supaFetch(`/rest/v1/push_subscriptions?endpoint=eq.${encodeURIComponent(endpoint)}`, {
+        method: 'DELETE', headers: { Authorization: 'Bearer '+session.token }
+      });
+    }
+  } catch(e) {}
+  await pushRenderToggle();
+}
+
+async function pushToggle() {
+  const status = await pushGetStatus();
+  if (status === 'subscribed') await pushUnsubscribe();
+  else await pushSubscribe();
+}
+
+async function pushRenderToggle() {
+  const row = document.getElementById('push-toggle-row');
+  if (!row) return;
+  const status = await pushGetStatus();
+  const label = document.getElementById('push-toggle-label');
+  const btn = document.getElementById('push-toggle-btn');
+  if (status === 'unsupported') { row.style.display = 'none'; return; }
+  row.style.display = '';
+  if (status === 'denied') {
+    label.textContent = 'Notificaciones bloqueadas — activalas desde los ajustes del navegador';
+    btn.style.display = 'none';
+  } else if (status === 'subscribed') {
+    label.textContent = 'Notificaciones activadas en este dispositivo';
+    btn.textContent = 'Desactivar'; btn.style.display = '';
+  } else {
+    label.textContent = 'Recibí avisos aunque tengas MAIA cerrada';
+    btn.textContent = 'Activar notificaciones'; btn.style.display = '';
+  }
+}
 
 // ── Notificaciones (dentro de la app) ──────────────────
 // Best-effort: nunca debe interrumpir el flujo principal que la dispara.
@@ -9040,11 +9142,16 @@ async function notifLoad() {
 }
 
 function notifRenderBadge() {
-  const badge = document.getElementById('notif-badge');
-  if (!badge) return;
   const unread = (_notifCache||[]).filter(n => n.live || !n.leida).length;
-  badge.style.display = unread ? 'block' : 'none';
-  badge.textContent = unread > 9 ? '9+' : String(unread);
+  const badge = document.getElementById('notif-badge');
+  if (badge) {
+    badge.style.display = unread ? 'block' : 'none';
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+  }
+  // Numerito en el ícono de la app instalada (Android/desktop; iOS no lo soporta todavía).
+  if ('setAppBadge' in navigator) {
+    (unread ? navigator.setAppBadge(unread) : navigator.clearAppBadge()).catch(()=>{});
+  }
 }
 
 function notifRenderList() {
@@ -9359,6 +9466,12 @@ function renderAdmin() {
 // ── Init ───────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data?.type === 'push-nav' && e.data.seccion && document.getElementById('nav-' + e.data.seccion)) {
+      navSelect(e.data.seccion);
+    }
+    if (typeof notifLoad === 'function' && currentUser?.id) notifLoad();
+  });
 }
 
 // Check session on load - show login or app
