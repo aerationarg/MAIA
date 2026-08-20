@@ -1712,8 +1712,27 @@ function rendFieldMode(f) {
 function rendSetFieldMode(name, mode) { rendManualMode[name] = mode; }
 
 // ── Storage helpers ────────────────────────────────────
-function getRendFields()  { return JSON.parse(localStorage.getItem(FIELDS_KEY()) || 'null') || DEFAULT_REND_FIELDS; }
-function saveRendFields(f){ localStorage.setItem(FIELDS_KEY(), JSON.stringify(f)); }
+// Campos IA de Rendiciones — config global en Supabase, igual en todos los dispositivos.
+let _rendFieldsCache = null;
+function getRendFields()  { return _rendFieldsCache || DEFAULT_REND_FIELDS; }
+function saveRendFields(f){
+  _rendFieldsCache = f;
+  supaConfigSet(FIELDS_KEY(), JSON.stringify(f)).catch(e=>console.log('No se pudo guardar campos IA:', e.message));
+}
+async function rendLoadFields() {
+  try {
+    const raw = await supaConfigGet(FIELDS_KEY());
+    if (raw) { _rendFieldsCache = JSON.parse(raw); return; }
+    // Migración: si todavía no hay nada en Supabase, usar lo de este dispositivo y subirlo.
+    const legacy = JSON.parse(localStorage.getItem(FIELDS_KEY()) || 'null');
+    if (legacy && legacy.length) {
+      _rendFieldsCache = legacy;
+      await supaConfigSet(FIELDS_KEY(), JSON.stringify(legacy));
+    } else {
+      _rendFieldsCache = DEFAULT_REND_FIELDS;
+    }
+  } catch(e) { console.log('No se pudo cargar campos IA:', e.message); }
+}
 function getNpFields()    { return JSON.parse(localStorage.getItem(NP_FIELDS_KEY()) || 'null') || DEFAULT_NP_FIELDS; }
 function saveNpFields(f)  { localStorage.setItem(NP_FIELDS_KEY(), JSON.stringify(f)); }
 let _cachedApiKey = '';
@@ -1804,11 +1823,21 @@ function switchPanel(name) {
   const panel = document.getElementById('panel-' + name);
   if (panel) panel.classList.add('active');
   if (name === 'admin') renderAdmin();
-  if (name === 'cfg-rend') { renderRendFields(); rendLoadManualFields().then(renderRendManualFields); renderAutoFields('rend'); cfgRendLoadAll(); }
+  if (name === 'cfg-rend') {
+    renderRendFields(); rendLoadFields().then(renderRendFields);
+    rendLoadManualFields().then(renderRendManualFields);
+    renderAutoFields('rend'); rendLoadAutoFields().then(()=>renderAutoFields('rend'));
+    rendLoadMapping();
+    rendLoadSpDefaults();
+    cfgRendLoadAll();
+  }
   if (name === 'cfg-clientes') cfgClientesLoad();
   if (name === 'cfg-np-loc') { npLoadFieldsConfig('np-loc').then(()=>npCfgRender('np-loc')); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npLoadFieldsConfig('np-int').then(()=>npCfgRender('np-int')); renderAutoFields('np-int'); }
-  if (name === 'rend') { Promise.all([rendLoadClientesProveedores(), rendLoadManualFields()]).then(renderRendResults); renderRendResults(); }
+  if (name === 'rend') {
+    Promise.all([rendLoadClientesProveedores(), rendLoadManualFields(), rendLoadFields(), rendLoadMapping(), rendLoadAutoFields(), rendLoadSpDefaults()]).then(renderRendResults);
+    renderRendResults();
+  }
   if (name === 'np-loc' || name === 'np-int') { npLoadFieldsConfig(name).then(()=>npStep0InitAndCalc(name)); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); npHistorialRender(name); }
   if (name === 'viajes') renderViajesForm();
   if (name === 'cfg-viajes') renderCfgViajes();
@@ -4644,14 +4673,32 @@ async function procesosChatSend() {
 // ── SharePoint Modal & File Browser ───────────────────
 function SP_DEFAULTS_KEY() { return 'sp_defaults_' + currentEmpresa; }
 
-function getSpDefaults() {
-  return JSON.parse(localStorage.getItem(SP_DEFAULTS_KEY()) || 'null') || {
-    excelPath: null, excelLabel: 'Sin seleccionar',
-    newFolder: null, newFolderLabel: 'Sin seleccionar',
-    mode: 'existing'
-  };
+function SP_DEFAULTS_DEFAULT() {
+  return { excelPath: null, excelLabel: 'Sin seleccionar', newFolder: null, newFolderLabel: 'Sin seleccionar', mode: 'existing' };
 }
-function saveSpDefaults(d) { localStorage.setItem(SP_DEFAULTS_KEY(), JSON.stringify(d)); }
+// Archivo Excel de destino de Rendiciones — config global en Supabase.
+let _spDefaultsCache = null;
+function getSpDefaults() { return _spDefaultsCache || SP_DEFAULTS_DEFAULT(); }
+function saveSpDefaults(d) {
+  _spDefaultsCache = d;
+  supaConfigSet(SP_DEFAULTS_KEY(), JSON.stringify(d)).catch(e=>console.log('No se pudo guardar configuración de SharePoint:', e.message));
+}
+async function rendLoadSpDefaults() {
+  try {
+    const key = SP_DEFAULTS_KEY();
+    const raw = await supaConfigGet(key);
+    if (raw) { _spDefaultsCache = JSON.parse(raw); spDefaults = _spDefaultsCache; return; }
+    const legacy = JSON.parse(localStorage.getItem(key) || 'null');
+    if (legacy) {
+      _spDefaultsCache = legacy;
+      spDefaults = legacy;
+      await supaConfigSet(key, JSON.stringify(legacy));
+    } else {
+      _spDefaultsCache = SP_DEFAULTS_DEFAULT();
+      spDefaults = _spDefaultsCache;
+    }
+  } catch(e) { console.log('No se pudo cargar configuración de SharePoint:', e.message); }
+}
 
 let spDefaults = getSpDefaults();
 let fbMode = 'folder'; // 'folder' | 'file'
@@ -7820,11 +7867,33 @@ const DEFAULT_AUTO = {
   ],
 };
 
+// Campos automáticos de Rendiciones — config global en Supabase (los de NP siguen locales).
+let _rendAutoFieldsCache = null;
 function getAutoFields(target) {
+  if (target === 'rend') return _rendAutoFieldsCache || DEFAULT_AUTO['rend'] || [];
   return JSON.parse(localStorage.getItem(AUTO_KEYS(target)) || 'null') || DEFAULT_AUTO[target] || [];
 }
 function saveAutoFields(target, fields) {
+  if (target === 'rend') {
+    _rendAutoFieldsCache = fields;
+    supaConfigSet(AUTO_KEYS('rend'), JSON.stringify(fields)).catch(e=>console.log('No se pudo guardar campos automáticos:', e.message));
+    return;
+  }
   localStorage.setItem(AUTO_KEYS(target), JSON.stringify(fields));
+}
+async function rendLoadAutoFields() {
+  try {
+    const key = AUTO_KEYS('rend');
+    const raw = await supaConfigGet(key);
+    if (raw) { _rendAutoFieldsCache = JSON.parse(raw); return; }
+    const legacy = JSON.parse(localStorage.getItem(key) || 'null');
+    if (legacy && legacy.length) {
+      _rendAutoFieldsCache = legacy;
+      await supaConfigSet(key, JSON.stringify(legacy));
+    } else {
+      _rendAutoFieldsCache = DEFAULT_AUTO['rend'] || [];
+    }
+  } catch(e) { console.log('No se pudo cargar campos automáticos:', e.message); }
 }
 
 // Render auto fields in config panel
@@ -8138,8 +8207,34 @@ function REND_MAPPING_KEY() { return 'rend_col_mapping_' + currentEmpresa; }
 var NP_MAPPING_KEY   = 'np_col_mapping';
 var mapContext = null;
 
-function getMapping(key) { return JSON.parse(localStorage.getItem(key)||'null') || {}; }
-function saveMapping(key, m) { localStorage.setItem(key, JSON.stringify(m)); }
+// Mapeo de columnas de Rendiciones — config global en Supabase (el de NP sigue local).
+let _rendMappingCache = null;
+function getMapping(key) {
+  if (key === REND_MAPPING_KEY()) return _rendMappingCache || JSON.parse(localStorage.getItem(key)||'null') || {};
+  return JSON.parse(localStorage.getItem(key)||'null') || {};
+}
+function saveMapping(key, m) {
+  if (key === REND_MAPPING_KEY()) {
+    _rendMappingCache = m;
+    supaConfigSet(key, JSON.stringify(m)).catch(e=>console.log('No se pudo guardar mapeo de columnas:', e.message));
+    return;
+  }
+  localStorage.setItem(key, JSON.stringify(m));
+}
+async function rendLoadMapping() {
+  try {
+    const key = REND_MAPPING_KEY();
+    const raw = await supaConfigGet(key);
+    if (raw) { _rendMappingCache = JSON.parse(raw); return; }
+    const legacy = JSON.parse(localStorage.getItem(key) || 'null');
+    if (legacy && Object.keys(legacy).length) {
+      _rendMappingCache = legacy;
+      await supaConfigSet(key, JSON.stringify(legacy));
+    } else {
+      _rendMappingCache = {};
+    }
+  } catch(e) { console.log('No se pudo cargar mapeo de columnas:', e.message); }
+}
 
 function strSimilarity(a, b) {
   a = String(a||'').toLowerCase().trim();
@@ -8794,6 +8889,10 @@ function refreshAllForEmpresa() {
   npState['np-loc'] = { files: [], extracted: [], manualValues: {} };
   npState['np-int'] = { files: [], extracted: [], manualValues: {} };
   spDefaults = getSpDefaults();
+  rendLoadSpDefaults().then(()=>{ spDefaults = getSpDefaults(); });
+  rendLoadFields().then(()=>{ if (typeof renderRendFields === 'function') renderRendFields(); });
+  rendLoadMapping();
+  rendLoadAutoFields().then(()=>{ if (typeof renderAutoFields === 'function') renderAutoFields('rend'); });
 
   // Re-render whichever panel is currently visible
   if (typeof renderFileList === 'function') renderFileList();
