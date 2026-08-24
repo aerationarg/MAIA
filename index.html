@@ -587,7 +587,7 @@
         <div id="hallazgos-new-form-wrap" style="display:none;margin-top:12px">
           <div id="hallazgos-new-campos-wrap"></div>
           <label>Asignar a (opcional — para que otra persona complete el resto)</label>
-          <select id="hallazgos-new-asignado" style="margin-bottom:12px"><option value="">— Nadie, lo completo yo —</option></select>
+          <select id="hallazgos-new-asignado" style="margin-bottom:12px" onchange="hallazgosUpdateNewSubmitLabel()"><option value="">— Nadie, lo completo yo —</option></select>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-primary" id="hallazgos-new-submit-btn" onclick="hallazgosGuardar(null)">✓ Guardar y enviar a revisión de SGI</button>
           </div>
@@ -3320,6 +3320,21 @@ let _hallazgosRowCache = {};
 // inserta directo en el Excel (no necesita aprobarse a sí mismo); si no, que va a revisión.
 function hallazgosSubmitBtnLabel() { return hallazgosIsCoordSGI() ? '✓ Guardar e insertar en Excel' : '✓ Guardar y enviar a revisión de SGI'; }
 
+// En el formulario de "Crear un hallazgo" (todavía sin id), el botón cambia según si se
+// asignó a alguien: asignar es delegar la tarea (no pasa por SGI todavía), así que el
+// texto no debe prometer una revisión que no va a pasar en este paso.
+function hallazgosUpdateNewSubmitLabel() {
+  const btn = document.getElementById('hallazgos-new-submit-btn');
+  const sel = document.getElementById('hallazgos-new-asignado');
+  if (!btn || !sel) return;
+  if (sel.value) {
+    const nombre = sel.options[sel.selectedIndex]?.dataset.nombre || 'la persona asignada';
+    btn.textContent = `✓ Guardar y asignar a ${nombre}`;
+  } else {
+    btn.textContent = hallazgosSubmitBtnLabel();
+  }
+}
+
 // Guarda un hallazgo — crea uno nuevo si id es null, o edita el existente. Siempre queda listo
 // para revisión: si quien guarda es coordinador de SGI se inserta directo en el Excel; si no,
 // queda en la cola de revisión de SGI.
@@ -3344,11 +3359,14 @@ async function hallazgosGuardar(id) {
         const opt = asigSel.options[asigSel.selectedIndex];
         asignadoNombre = opt.dataset.nombre; asignadoEmail = opt.dataset.email;
       }
+      // Si se asigna a otra persona, es una tarea delegada — todavía no hay nada que revisar,
+      // así que queda "pendiente" (y SGI no se entera hasta que esa persona lo complete).
+      // Sin asignar es autoreportado: ya está "completado" y listo para revisión de SGI.
       const payload = Object.assign({}, fields, {
         empresa: currentEmpresa, creado_por: currentUser.id, creado_por_nombre: nombreActor,
         asignado_a: asignadoId, asignado_a_nombre: asignadoNombre, asignado_a_email: asignadoEmail,
-        estado: 'completado', completado_at: new Date().toISOString()
-      });
+        estado: asignadoId ? 'pendiente' : 'completado',
+      }, asignadoId ? {} : { completado_at: new Date().toISOString() });
       const res = await supaFetch('/rest/v1/hallazgos', { method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
       const created = await res.json();
       if (!res.ok) throw new Error(created.message || 'Error al crear el hallazgo.');
@@ -3376,7 +3394,10 @@ async function hallazgosGuardar(id) {
       logEvento('hallazgo', id, 'editado', fields.descripcion.slice(0,150));
     }
 
-    if (isSGI) {
+    if (hRow.estado !== 'completado') {
+      // Quedó "pendiente" (recién asignado a alguien) — SGI todavía no tiene nada que revisar.
+      showMsg(statusId,'success','✓ Guardado y asignado a '+(hRow.asignado_a_nombre||'—')+'. SGI se entera recién cuando lo complete.');
+    } else if (isSGI) {
       showMsg(statusId,'loading','Insertando en el Excel...');
       await hallazgosInsertarEnExcel(hallazgoId, hRow, fields);
       showMsg(statusId,'success','✓ Guardado e insertado en el Excel.');
