@@ -3364,7 +3364,9 @@ async function hallazgosGuardar(id) {
         } catch(notifyErr) { console.warn('No se pudo notificar al asignado:', notifyErr.message); }
       }
     } else {
-      const payload = Object.assign({}, fields, { estado:'completado', completado_at: new Date().toISOString() });
+      // Limpiamos el rechazo previo (si lo hubiera): al reenviar, vuelve a quedar "en revisión"
+      // sin arrastrar la marca de "rechazado" de una vuelta anterior.
+      const payload = Object.assign({}, fields, { estado:'completado', completado_at: new Date().toISOString(), rechazado_at: null, rechazo_comentario: null });
       const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(payload) });
       const rows = await res.json().catch(()=>null);
       if (!res.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
@@ -3458,6 +3460,9 @@ async function hallazgosInsertarEnExcel(id, hRow, fields) {
 }
 
 function hallazgosEstadoBadge(h) {
+  if (h.estado === 'pendiente' && h.rechazado_at) {
+    return `<span class="badge badge-pending" style="color:var(--red);border-color:var(--red)" title="${esc(h.rechazo_comentario||'')}">Rechazado — a corregir</span>`;
+  }
   const label = { pendiente: h.asignado_a ? 'Asignado a '+(h.asignado_a_nombre||'—') : 'Pendiente', completado: 'En revisión de SGI', insertado: 'Insertado ('+(h.ha_id||'')+')' }[h.estado] || h.estado;
   const cls = { pendiente:'badge-pending', completado:'badge-processing', insertado:'badge-done' }[h.estado] || 'badge-pending';
   return `<span class="badge ${cls}">${esc(label)}</span>`;
@@ -3508,18 +3513,32 @@ function hallazgosToggleEdit(id) {
 function hallazgosEliminar(id) {
   const h = _hallazgosRowCache[id];
   const msg = h?.estado === 'insertado'
-    ? `Este hallazgo ya está insertado en el Excel como ${h.ha_id||'—'}. Eliminarlo acá solo lo saca del historial de MAIA — NO borra la fila del Excel. ¿Eliminar igual?`
+    ? `Este hallazgo ya está insertado en el Excel como ${h.ha_id||'—'}. Al eliminarlo también se va a borrar esa fila del Excel. ¿Eliminar igual?`
     : '¿Eliminar este hallazgo del historial? Esta acción no se puede deshacer.';
   if (!confirm(msg)) return;
   hallazgosEliminarConfirmado(id);
 }
 async function hallazgosEliminarConfirmado(id) {
   try {
+    const h = _hallazgosRowCache[id];
+    // Si ya estaba insertado en el Excel, limpiamos esa fila también — si esto falla,
+    // igual seguimos con el borrado en MAIA (mejor eso que dejarlo sin poder eliminar).
+    if (h?.ha_row) {
+      try {
+        const cfg = getHallazgosCfg();
+        const token = await getMsToken();
+        const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
+        await fetch(excelBase + `range(address='B${h.ha_row}:T${h.ha_row}')/clear`, {
+          method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({applyTo:'Contents'})
+        });
+        _hallazgosExistingCache = null;
+      } catch(exErr) { console.warn('No se pudo limpiar la fila del Excel:', exErr.message); }
+    }
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
       method:'DELETE', headers:{Authorization:'Bearer '+session.token}
     });
-    if (!res.ok) throw new Error('No se pudo eliminar (revisá permisos en Supabase).');
+    if (!res.ok) throw new Error('No se pudo eliminar (revisá permisos en Supabase) — si la fila del Excel ya se limpió, no vuelvas a intentarlo dos veces.');
     renderHallazgos();
   } catch(e) {
     alert('✕ ' + e.message);
@@ -3570,7 +3589,7 @@ async function hallazgosRechazar(id) {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/hallazgos?id=eq.${id}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-      body: JSON.stringify({ estado:'pendiente' })
+      body: JSON.stringify({ estado:'pendiente', rechazado_at: new Date().toISOString(), rechazo_comentario: comentario||null, rechazado_por_nombre: currentUser.nombre||currentUser.email })
     });
     const rows = await res.json().catch(()=>null);
     if (!res.ok || !rows || !rows.length) throw new Error('No se pudo rechazar (revisá permisos en Supabase).');
@@ -9101,11 +9120,22 @@ async function notifLoadHallazgosLive() {
   if (!session?.token || !currentUser?.id) return [];
   const items = [];
   try {
-    const res = await supaFetch(`/rest/v1/hallazgos?select=id,descripcion,creado_por_nombre,created_at&asignado_a=eq.${currentUser.id}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const res = await supaFetch(`/rest/v1/hallazgos?select=id,descripcion,creado_por_nombre,created_at,rechazado_at,rechazo_comentario&asignado_a=eq.${currentUser.id}&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
     (rows||[]).forEach(h => items.push({
       id: 'h-asig-'+h.id, live: true, leida: false, seccion: 'hallazgos', created_at: h.created_at,
-      titulo: 'Te asignaron un hallazgo', cuerpo: `${h.creado_por_nombre||''}: ${h.descripcion||''}`
+      titulo: h.rechazado_at ? 'Hallazgo rechazado — hay que corregirlo' : 'Te asignaron un hallazgo',
+      cuerpo: h.rechazado_at ? `${h.rechazo_comentario||'Sin motivo detallado'}` : `${h.creado_por_nombre||''}: ${h.descripcion||''}`
+    }));
+  } catch(e) {}
+  // Lo mismo, pero para hallazgos sin asignar (autoreportados) que rechazaron: le avisa a
+  // quien lo cargó, ya que no hay un "asignado_a" a quien mostrárselo.
+  try {
+    const res = await supaFetch(`/rest/v1/hallazgos?select=id,descripcion,rechazo_comentario,created_at&creado_por=eq.${currentUser.id}&asignado_a=is.null&estado=eq.pendiente&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    (rows||[]).forEach(h => items.push({
+      id: 'h-rech-propio-'+h.id, live: true, leida: false, seccion: 'hallazgos', created_at: h.created_at,
+      titulo: 'Hallazgo rechazado — hay que corregirlo', cuerpo: h.rechazo_comentario || h.descripcion || ''
     }));
   } catch(e) {}
   const isCoordSGI = currentSector === 'SGI' && !!currentUser?.coordinador;
