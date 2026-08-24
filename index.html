@@ -3857,7 +3857,9 @@ async function maiaChatLeerCodigo(seccion) {
 }
 
 // ── Lectura de contenido de archivos (Word/Excel/PowerPoint/PDF/imágenes) ──
-const MAIA_CHAT_OFFICE_EXT = /\.(docx?|xlsx?|pptx?)$/i;
+// Excel se lee aparte (ver más abajo): se manda como texto (CSV), no como PDF/imagen.
+const MAIA_CHAT_WORD_PPT_EXT = /\.(docx?|pptx?)$/i;
+const MAIA_CHAT_EXCEL_EXT = /\.xlsx?$/i;
 const MAIA_CHAT_IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
 const MAIA_CHAT_MAX_FILE_BYTES = 15 * 1024 * 1024; // 15MB — evita adjuntos gigantes en el chat
 
@@ -3873,8 +3875,10 @@ function maiaChatEncodeShareUrl(url) {
 }
 
 // Descarga un archivo por su link (el mismo que devuelve buscar_sharepoint) y lo arma como
-// bloque de contenido para mandarle a Claude. Word/Excel/PowerPoint no los puede leer
-// directo — se convierten a PDF vía Graph, igual que se hace en Notas de Pedido.
+// bloque de contenido para mandarle a Claude. Word/PowerPoint no los puede leer directo —
+// se convierten a PDF vía Graph, igual que se hace en Notas de Pedido. Excel es distinto:
+// se lee directo (sin pasar por PDF) y se manda como texto CSV — sale más barato (nada de
+// tokens de imagen) y es más confiable para números que "mirar" una grilla como imagen.
 async function maiaChatLeerArchivo(url) {
   if (!url || !/^https?:\/\//i.test(url.trim())) throw new Error('Falta un link válido de SharePoint.');
   const token = await getMsToken();
@@ -3887,11 +3891,22 @@ async function maiaChatLeerArchivo(url) {
   }
   const isPdf = /\.pdf$/i.test(meta.name);
   const isImage = MAIA_CHAT_IMAGE_EXT.test(meta.name);
-  const isOffice = MAIA_CHAT_OFFICE_EXT.test(meta.name);
-  if (!isPdf && !isImage && !isOffice) {
+  const isExcel = MAIA_CHAT_EXCEL_EXT.test(meta.name);
+  const isWordPpt = MAIA_CHAT_WORD_PPT_EXT.test(meta.name);
+  if (!isPdf && !isImage && !isExcel && !isWordPpt) {
     throw new Error(`"${meta.name}" no es un tipo de archivo que pueda leer (solo Word, Excel, PowerPoint, PDF e imágenes).`);
   }
-  const contentUrl = `https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content` + (isOffice ? '?format=pdf' : '');
+
+  if (isExcel) {
+    const contentResp = await fetch(`https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content`, { headers:{ Authorization:'Bearer '+token } });
+    if (!contentResp.ok) throw new Error(`No se pudo descargar "${meta.name}".`);
+    const buf = await contentResp.arrayBuffer();
+    const wb = XLSX.read(buf, { type:'array' });
+    const csv = wb.SheetNames.map(name => `### Hoja: ${name}\n${XLSX.utils.sheet_to_csv(wb.Sheets[name])}`).join('\n\n');
+    return { name: meta.name, block: { type:'text', text: `Contenido de "${meta.name}" (convertido a CSV):\n\n${csv}` } };
+  }
+
+  const contentUrl = `https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem/content` + (isWordPpt ? '?format=pdf' : '');
   const contentResp = await fetch(contentUrl, { headers:{ Authorization:'Bearer '+token } });
   if (!contentResp.ok) throw new Error(`No se pudo descargar "${meta.name}".`);
   const buf = await contentResp.arrayBuffer();
