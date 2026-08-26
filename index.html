@@ -4090,7 +4090,7 @@ function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1)
 function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f); renderProcesosIAFields(); }
 
 // ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
-const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', otro:'Otro' };
+const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', otro:'Otro' };
 let _procesosDocTarget = null;
 
 async function renderProcesosDocumentos() {
@@ -4787,40 +4787,90 @@ function procesosStep2AfterRender() {
 // Detecta celdas de entrada (numéricas sin fórmula) y de resultado (con fórmula),
 // con su etiqueta (celda de texto más cercana a la izquierda en la misma fila) y
 // una unidad opcional (celda de texto corta inmediatamente a la derecha).
+// Busca, en las primeras filas de la hoja, el encabezado típico de las planillas
+// de Aeration (Parámetro / Símbolo / Valor / Unidad / Rango / Rango límite /
+// Notas) y devuelve en qué columna está cada uno (-1 si no aparece). Cuando lo
+// encuentra, cada fila de la planilla es un parámetro con su rango y su rango
+// límite propios — mucho más preciso que adivinar la etiqueta por cercanía.
+function procesosStep2DetectarEncabezado(ws, range) {
+  const cols = { parametro: -1, valor: -1, unidad: -1, rango: -1, limite: -1, notas: -1 };
+  for (let r = range.s.r; r <= Math.min(range.s.r + 5, range.e.r); r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (!cell || typeof cell.v !== 'string') continue;
+      const t = cell.v.trim().toLowerCase();
+      if (t === 'parámetro' || t === 'parametro') cols.parametro = c;
+      else if (t === 'valor') cols.valor = c;
+      else if (t === 'unidad') cols.unidad = c;
+      else if ((t.includes('límite') || t.includes('limite')) && !(t === 'valor')) cols.limite = c;
+      else if (t.startsWith('rango')) cols.rango = c;
+      else if (t === 'notas') cols.notas = c;
+    }
+    if (cols.parametro >= 0 && cols.valor >= 0) { cols.headerRow = r; return cols; }
+  }
+  return null;
+}
+
 function procesosStep2BuildModel(ws) {
   const model = { grid: [], cells: [] };
   const ref = ws['!ref'];
   if (!ref) return model;
   const range = XLSX.utils.decode_range(ref);
   const grid = [];
-  const cells = [];
   for (let r = range.s.r; r <= range.e.r; r++) {
     const row = [];
     for (let c = range.s.c; c <= range.e.c; c++) {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = ws[addr];
-      let content = '';
-      if (cell) content = (cell.f != null) ? ('=' + cell.f) : (cell.v !== undefined ? cell.v : '');
-      row.push(content);
-      if (cell) {
-        const isFormula = cell.f != null;
-        const isNumeric = typeof cell.v === 'number';
-        if (isFormula || isNumeric) {
-          let label = '';
-          for (let lc = c - 1; lc >= range.s.c; lc--) {
-            const lcell = ws[XLSX.utils.encode_cell({ r, c: lc })];
-            if (lcell && typeof lcell.v === 'string' && lcell.v.trim()) { label = lcell.v.trim(); break; }
-          }
-          let unidad = '';
-          const rcell = ws[XLSX.utils.encode_cell({ r, c: c + 1 })];
-          if (rcell && typeof rcell.v === 'string' && !rcell.f && rcell.v.trim() && rcell.v.trim().length <= 15) unidad = rcell.v.trim();
-          cells.push({ ref: addr, row: r - range.s.r, col: c - range.s.c, label: label || addr, unidad, isFormula });
-        }
-      }
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      row.push(cell ? ((cell.f != null) ? ('=' + cell.f) : (cell.v !== undefined ? cell.v : '')) : '');
     }
     grid.push(row);
   }
-  model.grid = grid; model.cells = cells;
+  model.grid = grid;
+
+  const encabezado = procesosStep2DetectarEncabezado(ws, range);
+  const cells = [];
+  if (encabezado) {
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      if (r === encabezado.headerRow) continue;
+      const paramCell = ws[XLSX.utils.encode_cell({ r, c: encabezado.parametro })];
+      if (!paramCell || typeof paramCell.v !== 'string' || !paramCell.v.trim()) continue;
+      const valCell = ws[XLSX.utils.encode_cell({ r, c: encabezado.valor })];
+      const isFormula = !!(valCell && valCell.f != null);
+      const isNumeric = !!(valCell && typeof valCell.v === 'number');
+      const get = col => { if (col < 0) return ''; const cell = ws[XLSX.utils.encode_cell({ r, c: col })]; return (cell && cell.v != null) ? String(cell.v).trim() : ''; };
+      const unidad = get(encabezado.unidad), rango = get(encabezado.rango), rango_limite = get(encabezado.limite), notas = get(encabezado.notas);
+      // Sin fórmula, sin valor, sin unidad ni rango ni notas: es una fila de
+      // título de sección (ej. "DISEÑO"), no un parámetro — se descarta.
+      if (!isFormula && !isNumeric && !unidad && !rango && !rango_limite && !notas) continue;
+      cells.push({
+        ref: XLSX.utils.encode_cell({ r, c: encabezado.valor }),
+        row: r - range.s.r, col: encabezado.valor - range.s.c,
+        label: paramCell.v.trim(), unidad, rango, rango_limite, notas, isFormula
+      });
+    }
+  } else {
+    // Respaldo genérico para hojas que no siguen ese esquema: etiqueta = texto
+    // no vacío más cercano a la izquierda en la misma fila.
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (!cell) continue;
+        const isFormula = cell.f != null;
+        const isNumeric = typeof cell.v === 'number';
+        if (!isFormula && !isNumeric) continue;
+        let label = '';
+        for (let lc = c - 1; lc >= range.s.c; lc--) {
+          const lcell = ws[XLSX.utils.encode_cell({ r, c: lc })];
+          if (lcell && typeof lcell.v === 'string' && lcell.v.trim()) { label = lcell.v.trim(); break; }
+        }
+        let unidad = '';
+        const rcell = ws[XLSX.utils.encode_cell({ r, c: c + 1 })];
+        if (rcell && typeof rcell.v === 'string' && !rcell.f && rcell.v.trim() && rcell.v.trim().length <= 15) unidad = rcell.v.trim();
+        cells.push({ ref: XLSX.utils.encode_cell({ r, c }), row: r - range.s.r, col: c - range.s.c, label: label || XLSX.utils.encode_cell({r,c}), unidad, rango:'', rango_limite:'', notas:'', isFormula });
+      }
+    }
+  }
+  model.cells = cells.filter(c => c.ref);
   return model;
 }
 
@@ -4837,6 +4887,23 @@ function procesosStep2GetHF(nombreHoja) {
     if (cell) hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
   });
   return hf;
+}
+
+// Descarga (una sola vez por sesión de Paso 2, no en cada mensaje) el documento
+// de "Criterios de selección / eficiencias" cargado en Cfg Procesos IA — tiene
+// los criterios de cuándo se necesita cada etapa y los rangos de eficiencia de
+// remoción por etapa y por parámetro, para que la IA los use tanto al sugerir
+// qué hojas aplican como al iterar valores en el chat de diseño.
+async function procesosStep2GetCriteriosBlock() {
+  const st = procesosStep2State;
+  if (st.criteriosBlock !== undefined) return st.criteriosBlock;
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['criterios_seleccion']);
+    if (!docs.length) { st.criteriosBlock = null; return null; }
+    const token = await getMsToken();
+    st.criteriosBlock = await procesosDocAsContentBlock(token, docs[0]);
+  } catch (e) { console.warn('No se pudo cargar el documento de criterios:', e.message); st.criteriosBlock = null; }
+  return st.criteriosBlock;
 }
 
 // Recalcula, en orden, cada hoja del tren de tratamiento hasta (e incluyendo)
@@ -5031,10 +5098,11 @@ async function procesosStep2CargarPlanilla() {
             const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
             return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
           }).join('\n');
-          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\nDevolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente, y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
+          const criteriosBlock = await procesosStep2GetCriteriosBlock();
+          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlock ? 'Adjunto el documento de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalo como referencia para decidir.\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
           const resp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...(criteriosBlock?[criteriosBlock]:[]), { type: 'text', text: prompt }] }] })
           });
           if (resp.ok) {
             const data = await resp.json();
@@ -5117,9 +5185,10 @@ function procesosStep2RenderHojaPanel() {
     const mapeo = !c.isFormula ? mapaPorCelda[c.ref] : null;
     const fuentes = (mapeo && mapeo.fuentes) || [];
     const origenTxt = fuentes.length ? fuentes.map(f => f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : f.hoja).join(fuentes.length > 1 ? ' + ' : '') + (fuentes.length > 1 ? ' (ponderado por caudal)' : '') : '';
+    const rangoTxt = [c.rango ? 'Rango: '+c.rango : '', c.rango_limite ? 'Límite: '+c.rango_limite : ''].filter(Boolean).join(' · ');
     return `
     <div class="result-field">
-      <span class="result-key">${esc(c.label)}</span>
+      <span class="result-key">${esc(c.label)}${rangoTxt ? `<br><span style="font-size:11px;font-weight:400;color:var(--text2)">${esc(rangoTxt)}</span>` : ''}</span>
       ${(c.isFormula || mapeo)
         ? `<span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center" title="${esc(origenTxt)}">${val!=null?esc(String(val)):''}${c.unidad?' '+esc(c.unidad):''}</span>`
         : `<input class="result-val" value="${val!=null?esc(String(val)):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
@@ -5219,13 +5288,15 @@ async function procesosStep2ChatSend(nombre) {
     const estadoActual = model.cells.map(c => {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
       const contenido = model.grid[c.row][c.col];
-      return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}`;
+      const extra = [c.rango ? 'rango normal: ' + c.rango : '', c.rango_limite ? 'rango límite: ' + c.rango_limite : '', c.notas ? 'notas: ' + c.notas : ''].filter(Boolean).join(' | ');
+      return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}${extra ? ' | ' + extra : ''}`;
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const criteriosBlock = await procesosStep2GetCriteriosBlock();
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlock ? 'Adjunto el documento de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalo para proponer/validar valores realistas de esta etapa.\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...(criteriosBlock?[criteriosBlock]:[]), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -5287,7 +5358,8 @@ async function procesosStep2GuardarHoja(nombre) {
 
   const orden = dd.orden || [];
   if (orden.length && nombre === orden[orden.length - 1]) {
-    dd.cumplimiento = procesosStep2ChequearCumplimiento(model, hf);
+    showMsg('procesos-step2-status', 'loading', 'Verificando cumplimiento vs. límites de vuelco...');
+    dd.cumplimiento = await procesosStep2ChequearCumplimiento(model, hf);
   }
 
   await procesosSaveProyecto({ diseno_data: dd });
@@ -5298,7 +5370,12 @@ async function procesosStep2GuardarHoja(nombre) {
 // definidos en el Paso 1 para cada parámetro. Matchea por nombre (el del campo del
 // Paso 1 tiene que aparecer en la etiqueta de alguna celda de resultado de la
 // última hoja) — es una heurística simple, revisable a ojo en la tabla resultante.
-function procesosStep2ChequearCumplimiento(model, hf) {
+// Compara el resultado final del tren contra los límites normativos. El nombre
+// del parámetro en el Paso 1 no siempre coincide textualmente con la etiqueta de
+// la celda de resultado en el Excel (ej. "DBO" vs "Concentración DBOs salida"),
+// así que en vez de buscar coincidencia de texto le pedimos a la IA que
+// relacione ambos por significado — igual que ya hace "Sugerir conexiones".
+async function procesosStep2ChequearCumplimiento(model, hf) {
   const p = procesosCurrentProyecto;
   const corrientes = p.info_cliente?.corrientes || [];
   // Los límites de vuelco aplican al efluente ya tratado/unificado, no a cada
@@ -5314,16 +5391,35 @@ function procesosStep2ChequearCumplimiento(model, hf) {
       limitesPorParametro[nombreCampo] = { limite, unidad: v.unidad || '' };
     });
   });
-  const resultados = [];
-  Object.entries(limitesPorParametro).forEach(([nombreCampo, { limite, unidad }]) => {
-    const nombreNorm = nombreCampo.trim().toLowerCase();
-    const cellMatch = model.cells.find(c => c.isFormula && c.label.trim().toLowerCase().includes(nombreNorm));
-    if (!cellMatch) return;
-    const valorFinal = hf.getCellValue({ sheet: 0, row: cellMatch.row, col: cellMatch.col });
-    if (typeof valorFinal !== 'number') return;
-    resultados.push({ parametro: nombreCampo, unidad, limite, valor_final: valorFinal, cumple: valorFinal <= limite });
-  });
-  return resultados;
+  const nombresParametros = Object.keys(limitesPorParametro);
+  const resultCells = model.cells.filter(c => c.isFormula);
+  if (!nombresParametros.length || !resultCells.length) return [];
+
+  const apiKey = getApiKey();
+  if (!apiKey) return [];
+  try {
+    const listadoParams = nombresParametros.map(n => `- ${n} (límite ${limitesPorParametro[n].limite}${limitesPorParametro[n].unidad?' '+limitesPorParametro[n].unidad:''})`).join('\n');
+    const listadoResultados = resultCells.map(c => `${c.ref}: ${c.label}${c.unidad?' ('+c.unidad+')':''} = ${hf.getCellValue({sheet:0,row:c.row,col:c.col})}`).join('\n');
+    const prompt = `Estos son los parámetros con límite normativo definidos en el proyecto:\n${listadoParams}\n\nEstos son los resultados calculados en la última etapa del tren de tratamiento:\n${listadoResultados}\n\nPara cada parámetro con límite, identificá cuál resultado (si hay alguno) corresponde al mismo parámetro, aunque estén nombrados distinto (ej. "DBO" y "Concentración DBOs salida" son el mismo parámetro). Respondé SOLO con JSON válido (sin backticks ni texto extra): {"matches":[{"parametro":"Nombre exacto del parámetro","celda":"C9"}]}. Si un parámetro no tiene ningún resultado correspondiente, no lo incluyas.`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const resultados = [];
+    (parsed.matches || []).forEach(m => {
+      const lim = limitesPorParametro[m.parametro];
+      const cell = resultCells.find(c => c.ref === m.celda);
+      if (!lim || !cell) return;
+      const valorFinal = hf.getCellValue({ sheet: 0, row: cell.row, col: cell.col });
+      if (typeof valorFinal !== 'number') return;
+      resultados.push({ parametro: m.parametro, unidad: lim.unidad, limite: lim.limite, valor_final: valorFinal, cumple: valorFinal <= lim.limite });
+    });
+    return resultados;
+  } catch (e) { console.warn('No se pudo chequear cumplimiento:', e.message); return []; }
 }
 
 function procesosResumenDiseno(p) {
