@@ -4563,7 +4563,7 @@ async function procesosStep1Analizar() {
 
     showMsg(statusId,'loading','Analizando con IA...');
     const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''} [tipo: ${f.tipo==='parametro'?'parámetro numérico':'texto libre'}]`).join('\n');
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>", "limite_normativo": <número o null>} — "limite_normativo" es el valor máximo (o mínimo, según corresponda) que exige la normativa aplicable para ESE MISMO parámetro según la ubicación y el tipo de vuelco detectados (ej. si el campo es "DBO" y la normativa exige DBO ≤ 30 mg/L para vertido, poné 30); si no podés determinarlo con la información disponible, usá null. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible, hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null,"limite_normativo":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>", "limite_normativo": <número o null>} — "limite_normativo" es el valor máximo (o mínimo, según corresponda) que exige la normativa aplicable para ESE MISMO parámetro. Para determinarlo: primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco detectados) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible, hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null,"limite_normativo":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
@@ -5314,26 +5314,34 @@ async function procesosChatSend() {
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(4);
     const carpeta = p.info_cliente?.carpeta_cliente;
+    const camposActuales = p.info_cliente?.campos || {};
+    const nombresCampos = Object.keys(camposActuales).join(', ') || '(ninguno todavía)';
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos ya extraídos del cliente son: ${nombresCampos}. Si por la conversación o por los documentos te das cuenta de que alguno de esos campos está mal o cambió, incluilo en "actualizaciones" con el mismo formato que ya tiene ese campo (un string si es un campo de texto libre; un objeto {"valor":...,"unidad":...,"limite_normativo":...} si es un parámetro numérico) y contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá "actualizaciones" vacío ({}).`;
     const messages = [
-      { role:'user', content: `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.${carpeta ? ' Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá de este resumen ya extraído del Paso 1), respondé ÚNICAMENTE con el JSON {"necesita_documentos":true} y nada más — no dupliques la pregunta ni dés una respuesta parcial. Si con este resumen alcanza, respondé normalmente en texto plano.' : ''}` },
-      { role:'assistant', content: 'Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?' },
+      { role:'user', content: instrucciones },
+      { role:'assistant', content: '{"respuesta":"Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?","necesita_documentos":false,"actualizaciones":{}}' },
       ...p.chat_historial.map(m => ({ role: m.role, content: m.content }))
     ];
+    const parseRespuesta = raw => {
+      try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
+      catch(_e) { return { respuesta: raw, necesita_documentos:false, actualizaciones:{} }; }
+    };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     let data = await resp.json();
-    let respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+    let raw = data.content?.find(c=>c.type==='text')?.text || '{}';
+    let parsed = parseRespuesta(raw);
 
-    if (carpeta && /"necesita_documentos"\s*:\s*true/.test(respuesta)) {
+    if (carpeta && parsed.necesita_documentos) {
       showMsg(statusId,'loading','Revisando los documentos originales del cliente...');
       const token = await getMsToken();
       const contentBlocks = await procesosDescargarCarpetaComoContentBlocks(carpeta, token, name => showMsg(statusId,'loading',`Revisando ${name}...`));
       const messages2 = messages.concat([
-        { role:'assistant', content: respuesta },
-        { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior en texto plano (sin JSON).'}] }
+        { role:'assistant', content: raw },
+        { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -5341,11 +5349,19 @@ async function procesosChatSend() {
       });
       if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
       data = await resp.json();
-      respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+      raw = data.content?.find(c=>c.type==='text')?.text || '{}';
+      parsed = parseRespuesta(raw);
     }
 
+    const respuesta = parsed.respuesta || '(sin respuesta)';
     p.chat_historial.push({ role:'assistant', content: respuesta });
-    await procesosSaveProyecto({ chat_historial: p.chat_historial });
+    const fieldsToSave = { chat_historial: p.chat_historial };
+    if (parsed.actualizaciones && Object.keys(parsed.actualizaciones).length) {
+      const info = Object.assign({}, p.info_cliente);
+      info.campos = Object.assign({}, info.campos, parsed.actualizaciones);
+      fieldsToSave.info_cliente = info;
+    }
+    await procesosSaveProyecto(fieldsToSave);
     renderProcesosChat();
     document.getElementById(statusId).innerHTML = '';
   } catch(e) {
