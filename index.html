@@ -4208,6 +4208,21 @@ async function procesosDocAsContentBlock(token, doc) {
 // Si un documento está vinculado como carpeta (tipo:'carpeta'), trae todos los
 // archivos de esa carpeta (hasta 10, vía procesosDescargarCarpetaComoContentBlocks);
 // si es un archivo suelto, lo trae directo.
+// Reintenta un fetch que falla a nivel de red/TLS (ej. ERR_SSL_BAD_RECORD_MAC_ALERT
+// por un proxy o antivirus con inspección SSL en pedidos grandes) — no reintenta
+// si la API respondió pero con error (eso no se arregla reintentando igual).
+async function procesosFetchConReintento(url, opts, intentos) {
+  intentos = intentos || 3;
+  for (let i = 1; i <= intentos; i++) {
+    try {
+      return await fetch(url, opts);
+    } catch (e) {
+      if (i === intentos) throw e;
+      await new Promise(r => setTimeout(r, 1500 * i));
+    }
+  }
+}
+
 async function procesosDocsToContentBlocks(token, docs) {
   const blocks = [];
   for (const doc of docs) {
@@ -4562,6 +4577,11 @@ function renderProcesosStepContent() {
 // hace falta) y los arma como content blocks para Claude. La usan tanto el
 // análisis del Paso 1 como el chat del proyecto, cuando necesita reconsultarlos.
 async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) {
+  // Tope de tamaño combinado (no solo de cantidad): pedidos muy grandes a la API
+  // de Claude son más propensos a que un proxy/antivirus con inspección SSL
+  // corte la conexión (ERR_SSL_BAD_RECORD_MAC_ALERT) en redes corporativas.
+  const MAX_TOTAL_BYTES = 15 * 1024 * 1024;
+  let totalBytes = 0;
   const blocks = [];
   let children;
   try {
@@ -4572,6 +4592,7 @@ async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) 
 
   const usable = children.filter(f => f.file).slice(0, 50);
   for (const f of usable) {
+    if (totalBytes >= MAX_TOTAL_BYTES) { console.warn(`Se cortó la carpeta en ${blocks.length} archivo(s) por límite de tamaño combinado.`); break; }
     // Un archivo puntual puede fallar (muy pesado, formato no convertible a PDF,
     // bloqueado, etc.) — se lo salta en vez de tirar abajo toda la carpeta.
     try {
@@ -4585,6 +4606,8 @@ async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) 
       const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
       if (!dlResp.ok) continue;
       const buf = await dlResp.arrayBuffer();
+      if (totalBytes + buf.byteLength > MAX_TOTAL_BYTES) { console.warn(`Se omitió "${f.name}" por límite de tamaño combinado.`); continue; }
+      totalBytes += buf.byteLength;
       let binary = '';
       const bytes = new Uint8Array(buf);
       for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -4787,7 +4810,7 @@ async function procesosStep1Analizar() {
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
     });
