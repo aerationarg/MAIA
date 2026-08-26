@@ -4114,8 +4114,9 @@ async function renderProcesosDocumentos() {
           </select>
         </div>
         <div class="sp-selected" style="margin-top:6px">
-          <span style="font-size:12px">${esc(d.path || 'Sin vincular')}</span>
+          <span style="font-size:12px">${esc(d.path || 'Sin vincular')}${d.tipo==='carpeta' ? ' <b>(carpeta — trae todos los archivos)</b>' : ''}</span>
           <button class="sp-browse-btn" onclick="procesosDocSelectFile('${d.id}')">Vincular archivo</button>
+          <button class="sp-browse-btn" onclick="procesosDocSelectFolder('${d.id}')">Vincular carpeta</button>
         </div>
       </div>`).join('');
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; }
@@ -4151,7 +4152,19 @@ async function procesosDocSaveFile(id, path, itemId, siteId) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-    body: JSON.stringify({ path, item_id: itemId, site_id: siteId })
+    body: JSON.stringify({ path, item_id: itemId, site_id: siteId, tipo: 'archivo' })
+  });
+  renderProcesosDocumentos();
+}
+function procesosDocSelectFolder(id) {
+  _procesosDocTarget = id;
+  fbOpen('folder', 'procesos-doc-folder');
+}
+async function procesosDocSaveFolder(id, path, itemId, siteId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ path, item_id: itemId, site_id: siteId, tipo: 'carpeta' })
   });
   renderProcesosDocumentos();
 }
@@ -4181,6 +4194,24 @@ async function procesosDocAsContentBlock(token, doc) {
   if (needsConvert || isPdf) return {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}};
   const mt = /\.png$/i.test(doc.nombre||doc.path||'') ? 'image/png' : 'image/jpeg';
   return {type:'image', source:{type:'base64', media_type:mt, data:b64}};
+}
+
+// Convierte una lista de documentos de referencia en content blocks para Claude.
+// Si un documento está vinculado como carpeta (tipo:'carpeta'), trae todos los
+// archivos de esa carpeta (hasta 10, vía procesosDescargarCarpetaComoContentBlocks);
+// si es un archivo suelto, lo trae directo.
+async function procesosDocsToContentBlocks(token, docs) {
+  const blocks = [];
+  for (const doc of docs) {
+    if (doc.tipo === 'carpeta') {
+      const folderBlocks = await procesosDescargarCarpetaComoContentBlocks({ siteId: doc.site_id, itemId: doc.item_id }, token);
+      blocks.push(...folderBlocks);
+    } else {
+      const block = await procesosDocAsContentBlock(token, doc);
+      if (block) blocks.push(block);
+    }
+  }
+  return blocks;
 }
 
 // Extiende el selector de archivos compartido para vincular documentos de referencia
@@ -4274,6 +4305,11 @@ fbSelectCurrent = function() {
   const label = (fbCurrentSiteName||'') + (path ? ' › ' + path.replace(/\//g,' › ') : '');
   if (fbTarget === 'procesos-catalogo-folder' && _procesosCatalogoFolderTarget) {
     procesosCatalogoSaveFolder(_procesosCatalogoFolderTarget, path, itemId, fbCurrentSiteId, label);
+    fbClose();
+    return;
+  }
+  if (fbTarget === 'procesos-doc-folder' && _procesosDocTarget) {
+    procesosDocSaveFolder(_procesosDocTarget, path, itemId, fbCurrentSiteId);
     fbClose();
     return;
   }
@@ -4600,11 +4636,8 @@ async function procesosStep1Analizar() {
     const docsRef = await procesosGetDocumentosPorCategoria(['normativa','informacion_general']);
     if (docsRef.length) {
       token = token || await getMsToken();
-      for (const doc of docsRef) {
-        showMsg(statusId,'loading',`Adjuntando ${doc.nombre}...`);
-        const block = await procesosDocAsContentBlock(token, doc);
-        if (block) contentBlocks.push(block);
-      }
+      showMsg(statusId,'loading','Adjuntando documentos de referencia...');
+      contentBlocks.push(...await procesosDocsToContentBlocks(token, docsRef));
     }
 
     showMsg(statusId,'loading','Analizando con IA...');
@@ -4894,16 +4927,16 @@ function procesosStep2GetHF(nombreHoja) {
 // los criterios de cuándo se necesita cada etapa y los rangos de eficiencia de
 // remoción por etapa y por parámetro, para que la IA los use tanto al sugerir
 // qué hojas aplican como al iterar valores en el chat de diseño.
-async function procesosStep2GetCriteriosBlock() {
+async function procesosStep2GetCriteriosBlocks() {
   const st = procesosStep2State;
-  if (st.criteriosBlock !== undefined) return st.criteriosBlock;
+  if (st.criteriosBlocks !== undefined) return st.criteriosBlocks;
   try {
     const docs = await procesosGetDocumentosPorCategoria(['criterios_seleccion']);
-    if (!docs.length) { st.criteriosBlock = null; return null; }
+    if (!docs.length) { st.criteriosBlocks = []; return []; }
     const token = await getMsToken();
-    st.criteriosBlock = await procesosDocAsContentBlock(token, docs[0]);
-  } catch (e) { console.warn('No se pudo cargar el documento de criterios:', e.message); st.criteriosBlock = null; }
-  return st.criteriosBlock;
+    st.criteriosBlocks = await procesosDocsToContentBlocks(token, docs);
+  } catch (e) { console.warn('No se pudo cargar el documento de criterios:', e.message); st.criteriosBlocks = []; }
+  return st.criteriosBlocks;
 }
 
 // Recalcula, en orden, cada hoja del tren de tratamiento hasta (e incluyendo)
@@ -5098,11 +5131,11 @@ async function procesosStep2CargarPlanilla() {
             const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
             return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
           }).join('\n');
-          const criteriosBlock = await procesosStep2GetCriteriosBlock();
-          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlock ? 'Adjunto el documento de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalo como referencia para decidir.\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
+          const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
+          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
           const resp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...(criteriosBlock?[criteriosBlock]:[]), { type: 'text', text: prompt }] }] })
+            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
           });
           if (resp.ok) {
             const data = await resp.json();
@@ -5292,11 +5325,11 @@ async function procesosStep2ChatSend(nombre) {
       return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}${extra ? ' | ' + extra : ''}`;
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const criteriosBlock = await procesosStep2GetCriteriosBlock();
-    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlock ? 'Adjunto el documento de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalo para proponer/validar valores realistas de esta etapa.\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...(criteriosBlock?[criteriosBlock]:[]), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
