@@ -930,6 +930,12 @@
         <button class="btn btn-secondary" onclick="procesosCatalogoSelectCarpetaMadre()" style="margin-top:4px">📁 Cargar todos desde una carpeta</button>
         <div id="procesos-catalogo-status" class="status-msg" style="display:none;margin-top:6px"></div>
       </div>
+      <div class="card">
+        <div class="card-label">Lecciones aprendidas</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Reglas o ajustes de diseño que no están en el Excel ni en la bibliografía, aprendidos con la experiencia de proyectos anteriores. La IA las va a tener en cuenta al diseñar, y también puede proponer agregar una nueva sola cuando el chat de diseño detecta algo que valga la pena recordar.</p>
+        <div id="procesos-lecciones-list"></div>
+        <button class="btn btn-secondary" onclick="procesosLeccionAdd()" style="margin-top:4px">+ Agregar lección</button>
+      </div>
     </div>
 
     <!-- ═══ PANEL: Config NP Locales ═══ -->
@@ -1858,7 +1864,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -4280,6 +4286,77 @@ async function procesosCatalogoEliminar(id) {
   renderProcesosCatalogo();
 }
 
+// ── Lecciones aprendidas (Cfg Procesos IA) ──────────────
+async function renderProcesosLecciones() {
+  const el = document.getElementById('procesos-lecciones-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_lecciones?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay lecciones cargadas.</p>'; return; }
+    el.innerHTML = rows.map(l => `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(l.categoria||'')}" placeholder="Categoría (ej. Ecualizador, General)" style="max-width:220px" oninput="procesosLeccionUpdate('${l.id}','categoria',this.value)" />
+          <button class="remove-btn" onclick="procesosLeccionEliminar('${l.id}')">&#x2715;</button>
+        </div>
+        <textarea rows="2" placeholder="Lección aprendida" oninput="procesosLeccionUpdate('${l.id}','texto',this.value)" style="margin-bottom:4px">${esc(l.texto||'')}</textarea>
+        <p class="hint" style="margin:0">${l.origen_proyecto_nombre?'De: '+esc(l.origen_proyecto_nombre)+' · ':''}${esc(l.creado_por_nombre||'')} · ${new Date(l.created_at).toLocaleDateString('es-AR')}</p>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; }
+}
+
+async function procesosLeccionAdd() {
+  const texto = prompt('¿Qué lección querés agregar?');
+  if (!texto || !texto.trim()) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_lecciones', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, texto: texto.trim(), creado_por_nombre: currentUser.nombre||currentUser.email })
+  });
+  if (!res.ok) { alert('No se pudo agregar la lección.'); return; }
+  renderProcesosLecciones();
+}
+async function procesosLeccionUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_lecciones?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function procesosLeccionEliminar(id) {
+  if (!confirm('¿Eliminar esta lección?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_lecciones?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosLecciones();
+}
+
+// Últimas 100 lecciones de la empresa, para pasarle como contexto a la IA al
+// sugerir etapas y al diseñar. El chat de diseño puede además proponer una
+// lección nueva (procesosGuardarLeccion), que queda visible acá para revisar
+// o borrar si hace falta.
+async function procesosGetLecciones() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_lecciones?select=texto,categoria&empresa=eq.${currentEmpresa}&order=created_at.desc&limit=100`, {headers:{Authorization:'Bearer '+session.token}});
+  const rows = await res.json();
+  return (res.ok && Array.isArray(rows)) ? rows : [];
+}
+function procesosResumenLecciones(lecciones) {
+  if (!lecciones.length) return '';
+  return lecciones.map(l => `- ${l.categoria ? '[' + l.categoria + '] ' : ''}${l.texto}`).join('\n');
+}
+async function procesosGuardarLeccion(texto, categoria) {
+  if (!texto || !texto.trim()) return;
+  const p = procesosCurrentProyecto;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch('/rest/v1/procesos_lecciones', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, texto: texto.trim(), categoria: categoria||null, origen_proyecto_id: p?.id||null, origen_proyecto_nombre: p?.nombre||null, creado_por_nombre: currentUser.nombre||currentUser.email })
+  });
+}
+
 function procesosCatalogoSelectFolder(id) {
   _procesosCatalogoFolderTarget = id;
   fbOpen('folder', 'procesos-catalogo-folder');
@@ -5196,7 +5273,8 @@ async function procesosStep2CargarPlanilla() {
             return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
           }).join('\n');
           const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
-          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
+          const lecciones = procesosResumenLecciones(await procesosGetLecciones());
+          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican:\n' + lecciones + '\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
           const resp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
             body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
@@ -5390,7 +5468,8 @@ async function procesosStep2ChatSend(nombre) {
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
-    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const lecciones = procesosResumenLecciones(await procesosGetLecciones());
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara, ponelo en "leccion_aprendida" y mencionalo brevemente en "reply" para que quede claro que lo anotaste; si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
@@ -5399,6 +5478,7 @@ async function procesosStep2ChatSend(nombre) {
     const data = await resp.json();
     const text = data.content?.find(c => c.type === 'text')?.text || '{}';
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    if (parsed.leccion_aprendida) await procesosGuardarLeccion(parsed.leccion_aprendida, nombre);
 
     const cellByRef = r => model.cells.find(c => c.ref === r);
     (parsed.acciones || []).forEach(a => {
