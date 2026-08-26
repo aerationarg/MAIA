@@ -927,6 +927,8 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usa para que la IA detecte automáticamente proyectos parecidos al analizar un cliente nuevo. Cargá acá los proyectos ya hechos por la empresa: nombre, rubro/tags y una breve descripción alcanzan para que la IA los compare.</p>
         <div id="procesos-catalogo-list"></div>
         <button class="btn btn-secondary" onclick="procesosCatalogoAdd()" style="margin-top:4px">+ Agregar proyecto al catálogo</button>
+        <button class="btn btn-secondary" onclick="procesosCatalogoSelectCarpetaMadre()" style="margin-top:4px">📁 Cargar todos desde una carpeta</button>
+        <div id="procesos-catalogo-status" class="status-msg" style="display:none;margin-top:6px"></div>
       </div>
     </div>
 
@@ -4292,6 +4294,46 @@ async function procesosCatalogoSaveFolder(id, path, itemId, siteId, label) {
   renderProcesosCatalogo();
 }
 
+function procesosCatalogoSelectCarpetaMadre() {
+  fbOpen('folder', 'procesos-catalogo-madre');
+}
+
+// Trae todas las subcarpetas de la carpeta elegida y agrega un proyecto al
+// catálogo por cada una (nombre = nombre de la subcarpeta, ya vinculada) — para
+// no tener que agregar y vincular de a uno cuando ya están todas ordenadas en
+// subcarpetas dentro de SharePoint. Salta las que ya estaban cargadas.
+async function procesosCatalogoCargarDesdeCarpetaMadre(siteId, itemId, parentPath) {
+  const statusId = 'procesos-catalogo-status';
+  showMsg(statusId, 'loading', 'Buscando subcarpetas...');
+  try {
+    const token = await getMsToken();
+    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children`, {headers:{Authorization:'Bearer '+token}});
+    if (!childrenResp.ok) throw new Error('No se pudo leer la carpeta.');
+    const children = (await childrenResp.json()).value || [];
+    const subfolders = children.filter(f => f.folder);
+    if (!subfolders.length) throw new Error('No se encontraron subcarpetas ahí adentro.');
+
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const existingRes = await supaFetch(`/rest/v1/procesos_catalogo?select=carpeta_item_id&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    const existing = new Set(((await existingRes.json())||[]).map(r=>r.carpeta_item_id).filter(Boolean));
+
+    let agregados = 0;
+    for (const f of subfolders) {
+      if (existing.has(f.id)) continue;
+      const res = await supaFetch('/rest/v1/procesos_catalogo', {
+        method:'POST', headers:{Authorization:'Bearer '+session.token},
+        body: JSON.stringify({ empresa: currentEmpresa, nombre: f.name, carpeta_path: (parentPath?parentPath+'/':'')+f.name, carpeta_item_id: f.id, carpeta_site_id: siteId })
+      });
+      if (res.ok) agregados++;
+    }
+    const salteados = subfolders.length - agregados;
+    showMsg(statusId, 'success', `✓ Se agregaron ${agregados} proyecto(s) nuevo(s) al catálogo.${salteados ? ` (${salteados} ya estaban.)` : ''}`);
+    renderProcesosCatalogo();
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
 function procesosStep1SelectFolder() {
   fbOpen('folder', 'procesos-step1-folder');
 }
@@ -4306,6 +4348,11 @@ fbSelectCurrent = function() {
   if (fbTarget === 'procesos-catalogo-folder' && _procesosCatalogoFolderTarget) {
     procesosCatalogoSaveFolder(_procesosCatalogoFolderTarget, path, itemId, fbCurrentSiteId, label);
     fbClose();
+    return;
+  }
+  if (fbTarget === 'procesos-catalogo-madre') {
+    fbClose();
+    procesosCatalogoCargarDesdeCarpetaMadre(fbCurrentSiteId, itemId, path);
     return;
   }
   if (fbTarget === 'procesos-doc-folder' && _procesosDocTarget) {
