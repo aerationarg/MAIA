@@ -4185,6 +4185,14 @@ async function procesosGetDocumentosPorCategoria(categorias) {
 }
 
 // Descarga un documento de SharePoint (convirtiendo a PDF si no es ya PDF/imagen) y lo arma como content block para Claude
+// Estimación rápida de páginas de un PDF a partir del binario (cuenta objetos
+// "/Type /Page", sin librería) — aproximada, pero alcanza para no mandarle a
+// Claude un PDF que supere su límite de 100 páginas por documento.
+function procesosContarPaginasPdfAprox(binary) {
+  const matches = binary.match(/\/Type\s*\/Page[^s]/g);
+  return matches ? matches.length : 0;
+}
+
 async function procesosDocAsContentBlock(token, doc) {
   const isPdf = /\.pdf$/i.test(doc.nombre||'') || /\.pdf$/i.test(doc.path||'');
   const isImg = /\.(jpg|jpeg|png)$/i.test(doc.nombre||'') || /\.(jpg|jpeg|png)$/i.test(doc.path||'');
@@ -4198,10 +4206,12 @@ async function procesosDocAsContentBlock(token, doc) {
   let binary = '';
   const bytes = new Uint8Array(buf);
   for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  const b64 = btoa(binary);
-  if (needsConvert || isPdf) return {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}};
+  if (needsConvert || isPdf) {
+    if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${doc.nombre}" por superar las 100 páginas (límite de Claude por PDF).`); return null; }
+    return {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}};
+  }
   const mt = /\.png$/i.test(doc.nombre||doc.path||'') ? 'image/png' : 'image/jpeg';
-  return {type:'image', source:{type:'base64', media_type:mt, data:b64}};
+  return {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}};
 }
 
 // Convierte una lista de documentos de referencia en content blocks para Claude.
@@ -4607,13 +4617,18 @@ async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) 
       if (!dlResp.ok) continue;
       const buf = await dlResp.arrayBuffer();
       if (totalBytes + buf.byteLength > MAX_TOTAL_BYTES) { console.warn(`Se omitió "${f.name}" por límite de tamaño combinado.`); continue; }
-      totalBytes += buf.byteLength;
       let binary = '';
       const bytes = new Uint8Array(buf);
       for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const b64 = btoa(binary);
-      if (needsConvert || isPdf) blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
-      else { const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg'; blocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}}); }
+      if (needsConvert || isPdf) {
+        if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${f.name}" por superar las 100 páginas (límite de Claude por PDF).`); continue; }
+        totalBytes += buf.byteLength;
+        blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}});
+      } else {
+        totalBytes += buf.byteLength;
+        const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg';
+        blocks.push({type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}});
+      }
     } catch (e) { console.warn(`No se pudo traer "${f.name}" de la carpeta:`, e.message); }
   }
   return blocks;
@@ -4781,6 +4796,7 @@ async function procesosStep1Analizar() {
     for (const item of procesosStep1Files) {
       const b64 = await fileToBase64(item.file);
       const isPdf = item.file.type === 'application/pdf';
+      if (isPdf && procesosContarPaginasPdfAprox(atob(b64)) > 100) { console.warn(`Se omitió "${item.file.name}" por superar las 100 páginas (límite de Claude por PDF).`); continue; }
       contentBlocks.push(isPdf
         ? {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}
         : {type:'image', source:{type:'base64', media_type:item.file.type, data:b64}});
