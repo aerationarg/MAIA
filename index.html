@@ -4721,7 +4721,7 @@ function procesosStep1Html(p) {
           </div>
           ${paramFields.map(f => {
             const fKey = f.name.replace(/'/g,"\\'");
-            const v = (c.campos && c.campos[f.name] && typeof c.campos[f.name]==='object') ? c.campos[f.name] : {valor:'', unidad:'', limite_normativo:''};
+            const v = (c.campos && c.campos[f.name] && typeof c.campos[f.name]==='object') ? c.campos[f.name] : {valor:'', unidad:'', limite_normativo:'', fuente:''};
             return `
           <div class="result-field">
             <span class="result-key">${esc(f.name)}</span>
@@ -4730,7 +4730,8 @@ function procesosStep1Html(p) {
               <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','unidad',this.value)" />
               <input class="result-val" style="flex:2" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?String(v.limite_normativo):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','limite_normativo',this.value)" />
             </div>
-          </div>`;
+          </div>
+          ${v.fuente ? `<p class="hint" style="margin:-6px 0 8px;font-size:11px" title="Para verificar — no es una fuente confirmada, revisala si es un dato crítico">📎 ${esc(v.fuente)}</p>` : ''}`;
           }).join('')}
         </div>`).join('')}
       <button class="btn btn-secondary btn-sm" onclick="procesosAgregarCorriente()">+ Agregar corriente</button>
@@ -4772,8 +4773,10 @@ function procesosUpdateCampoCorriente(idx, fieldName, subkey, val) {
   const corrientes = (info.corrientes || []).slice();
   const c = Object.assign({}, corrientes[idx]);
   const campos = Object.assign({}, c.campos);
-  const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:'', limite_normativo:''};
-  campos[fieldName] = Object.assign({}, current, { [subkey]: val });
+  const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:'', limite_normativo:'', fuente:''};
+  const cambios = { [subkey]: val };
+  if (subkey === 'valor') cambios.fuente = ''; // editado a mano: la fuente extraída ya no aplica
+  campos[fieldName] = Object.assign({}, current, cambios);
   c.campos = campos;
   corrientes[idx] = c;
   info.corrientes = corrientes;
@@ -4844,7 +4847,7 @@ async function procesosStep1Analizar() {
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
 
     await procesosStep1EjecutarAnalisis(contentItems, prompt);
   } catch(e) {
@@ -4988,10 +4991,14 @@ async function procesosAvanzarPaso(step) {
 // (variar un dato hasta que un resultado dé un valor buscado, útil para fórmulas
 // que en la práctica hay que "usar al revés").
 let procesosStep2State = { proyectoId:null, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null };
+// Lección aprendida propuesta por el chat de una hoja, pendiente de que el
+// usuario la confirme (editada o no) o la descarte — nunca se guarda sola.
+let procesosStep2PendingLeccion = null; // { hoja, texto }
 
 function procesosStep2ResetIfNeeded(p) {
   if (procesosStep2State.proyectoId !== p.id) {
     procesosStep2State = { proyectoId:p.id, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null };
+    procesosStep2PendingLeccion = null;
   }
 }
 
@@ -5460,6 +5467,7 @@ function procesosStep2ReorderHoja(nombre, dir) {
 
 function procesosStep2AbrirHoja(nombre) {
   procesosStep2State.hojaAbierta = nombre;
+  if (procesosStep2PendingLeccion && procesosStep2PendingLeccion.hoja !== nombre) procesosStep2PendingLeccion = null;
   procesosStep2PropagarCadena(nombre);
   procesosStep2RenderHojaPanel();
 }
@@ -5518,10 +5526,39 @@ function procesosStep2RenderHojaPanel() {
         <button class="btn btn-primary btn-sm" onclick="procesosStep2ChatSend('${safe}')">Enviar</button>
       </div>
       <div id="procesos-step2-chat-status"></div>
+      ${(procesosStep2PendingLeccion && procesosStep2PendingLeccion.hoja === nombre) ? procesosStep2LeccionCardHtml() : ''}
       <div class="gap"></div>
       <button class="btn btn-green" onclick="procesosStep2GuardarHoja('${safe}')">✓ Guardar valores de esta unidad</button>
     </div>
   `;
+}
+
+function procesosStep2LeccionCardHtml() {
+  const texto = procesosStep2PendingLeccion ? procesosStep2PendingLeccion.texto : '';
+  return `
+    <div class="card" style="margin-top:8px;border-color:var(--blue)">
+      <div class="card-label">💡 Posible lección aprendida</div>
+      <p class="hint" style="margin-bottom:6px">La IA detectó algo que podría valer la pena recordar para futuros proyectos. Revisá el texto, editalo si hace falta, y confirmá si querés guardarlo — todavía no se guardó.</p>
+      <textarea id="procesos-step2-leccion-texto" rows="2">${esc(texto)}</textarea>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-primary btn-sm" onclick="procesosStep2ConfirmarLeccion()">✓ Guardar como lección</button>
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep2DescartarLeccion()">Descartar</button>
+      </div>
+    </div>`;
+}
+
+async function procesosStep2ConfirmarLeccion() {
+  const texto = (document.getElementById('procesos-step2-leccion-texto')?.value || '').trim();
+  if (!texto || !procesosStep2PendingLeccion) return;
+  const hoja = procesosStep2PendingLeccion.hoja;
+  procesosStep2PendingLeccion = null;
+  await procesosGuardarLeccion(texto, hoja);
+  procesosStep2RenderHojaPanel();
+}
+
+function procesosStep2DescartarLeccion() {
+  procesosStep2PendingLeccion = null;
+  procesosStep2RenderHojaPanel();
 }
 
 function procesosStep2SetValor(nombre, cellRef, val) {
@@ -5595,7 +5632,7 @@ async function procesosStep2ChatSend(nombre) {
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
-    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara, ponelo en "leccion_aprendida" y mencionalo brevemente en "reply" para que quede claro que lo anotaste; si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
@@ -5604,7 +5641,7 @@ async function procesosStep2ChatSend(nombre) {
     const data = await resp.json();
     const text = data.content?.find(c => c.type === 'text')?.text || '{}';
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    if (parsed.leccion_aprendida) await procesosGuardarLeccion(parsed.leccion_aprendida, nombre);
+    if (parsed.leccion_aprendida) procesosStep2PendingLeccion = { hoja: nombre, texto: parsed.leccion_aprendida };
 
     const cellByRef = r => model.cells.find(c => c.ref === r);
     (parsed.acciones || []).forEach(a => {
@@ -5881,7 +5918,7 @@ async function procesosChatSend() {
     const nombresGenerales = Object.keys(p.info_cliente?.campos || {}).join(', ') || '(ninguno todavía)';
     const corrientesActuales = p.info_cliente?.corrientes || [];
     const descCorrientes = corrientesActuales.map(c => `"${c.nombre}" (parámetros: ${Object.keys(c.campos||{}).join(', ')||'ninguno'})`).join('; ') || '(ninguna todavía)';
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...}}}. En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.`;
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.`;
     const messages = [
       { role:'user', content: instrucciones },
       { role:'assistant', content: '{"respuesta":"Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}' },
