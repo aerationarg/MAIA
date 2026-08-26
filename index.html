@@ -4441,9 +4441,12 @@ function procesosStep1RemoveFile(i) { procesosStep1Files.splice(i,1); renderProc
 function procesosStep1Html(p) {
   const info = p.info_cliente || {};
   const campos = info.campos || {};
-  const tieneAnalisis = Object.keys(campos).length > 0;
+  const corrientes = info.corrientes || [];
+  const tieneAnalisis = Object.keys(campos).length > 0 || corrientes.length > 0;
   const refs = p.proyectos_referencia || [];
   const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
+  const textoFields = iaFields.filter(f => f.tipo !== 'parametro');
+  const paramFields = iaFields.filter(f => f.tipo === 'parametro');
   return `
     <div class="card-label">Paso 1 — Analizar cliente</div>
     <label>Nombre del cliente</label>
@@ -4468,27 +4471,38 @@ function procesosStep1Html(p) {
 
     ${tieneAnalisis ? `
       <div class="gap"></div>
-      <label>Información extraída (editable)</label>
-      ${iaFields.map(f => {
-        const fKey = f.name.replace(/'/g,"\\'");
-        if (f.tipo === 'parametro') {
-          const v = (campos[f.name] && typeof campos[f.name]==='object') ? campos[f.name] : {valor: campos[f.name]!=null?campos[f.name]:'', unidad:'', limite_normativo:''};
-          return `
+      <label>Información general (editable)</label>
+      ${textoFields.map(f => `
         <div class="result-field">
           <span class="result-key">${esc(f.name)}</span>
-          <div style="display:flex;gap:6px;flex:1">
-            <input class="result-val" style="flex:2" placeholder="Valor" value="${esc(v.valor!=null?String(v.valor):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','valor',this.value)" />
-            <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','unidad',this.value)" />
-            <input class="result-val" style="flex:2" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?String(v.limite_normativo):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','limite_normativo',this.value)" />
+          <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${f.name.replace(/'/g,"\\'")}',this.value)" />
+        </div>`).join('')}
+
+      <div class="gap"></div>
+      <div class="card-label">Corrientes de efluente</div>
+      <p class="hint" style="margin-bottom:8px">La IA detectó estas corrientes y extrajo sus parámetros por separado. Ajustalas si hace falta (agregá una que falte, o borrá una que no aplique).</p>
+      ${corrientes.map((c, ci) => `
+        <div class="card" style="margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <input value="${esc(c.nombre||'')}" placeholder="Nombre de la corriente" style="flex:1;font-weight:600" oninput="procesosUpdateCorrienteNombre(${ci},this.value)" />
+            <button class="remove-btn" onclick="procesosEliminarCorriente(${ci})">&#x2715;</button>
           </div>
-        </div>`;
-        }
-        return `
-        <div class="result-field">
-          <span class="result-key">${esc(f.name)}</span>
-          <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${fKey}',this.value)" />
-        </div>`;
-      }).join('')}
+          ${paramFields.map(f => {
+            const fKey = f.name.replace(/'/g,"\\'");
+            const v = (c.campos && c.campos[f.name] && typeof c.campos[f.name]==='object') ? c.campos[f.name] : {valor:'', unidad:'', limite_normativo:''};
+            return `
+          <div class="result-field">
+            <span class="result-key">${esc(f.name)}</span>
+            <div style="display:flex;gap:6px;flex:1">
+              <input class="result-val" style="flex:2" placeholder="Valor" value="${esc(v.valor!=null?String(v.valor):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','valor',this.value)" />
+              <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','unidad',this.value)" />
+              <input class="result-val" style="flex:2" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?String(v.limite_normativo):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','limite_normativo',this.value)" />
+            </div>
+          </div>`;
+          }).join('')}
+        </div>`).join('')}
+      <button class="btn btn-secondary btn-sm" onclick="procesosAgregarCorriente()">+ Agregar corriente</button>
+
       <div class="gap"></div>
       <div class="card-label">Proyectos anteriores parecidos (detectados por IA)</div>
       <div id="procesos-step1-similares-status"></div>
@@ -4511,14 +4525,46 @@ function procesosUpdateCampoCliente(fieldName, val) {
   procesosSaveProyectoDebounced({ info_cliente: info });
 }
 
-function procesosUpdateCampoClienteParam(fieldName, subkey, val) {
+function procesosUpdateCorrienteNombre(idx, nombre) {
   const p = procesosCurrentProyecto;
   const info = Object.assign({}, p.info_cliente);
-  const campos = Object.assign({}, info.campos);
-  const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:''};
-  campos[fieldName] = Object.assign({}, current, { [subkey]: val });
-  info.campos = campos;
+  const corrientes = (info.corrientes || []).slice();
+  corrientes[idx] = Object.assign({}, corrientes[idx], { nombre });
+  info.corrientes = corrientes;
   procesosSaveProyectoDebounced({ info_cliente: info });
+}
+
+function procesosUpdateCampoCorriente(idx, fieldName, subkey, val) {
+  const p = procesosCurrentProyecto;
+  const info = Object.assign({}, p.info_cliente);
+  const corrientes = (info.corrientes || []).slice();
+  const c = Object.assign({}, corrientes[idx]);
+  const campos = Object.assign({}, c.campos);
+  const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:'', limite_normativo:''};
+  campos[fieldName] = Object.assign({}, current, { [subkey]: val });
+  c.campos = campos;
+  corrientes[idx] = c;
+  info.corrientes = corrientes;
+  procesosSaveProyectoDebounced({ info_cliente: info });
+}
+
+function procesosAgregarCorriente() {
+  const p = procesosCurrentProyecto;
+  const info = Object.assign({}, p.info_cliente);
+  const corrientes = (info.corrientes || []).slice();
+  corrientes.push({ nombre: 'Nueva corriente', campos: {} });
+  info.corrientes = corrientes;
+  procesosSaveProyecto({ info_cliente: info }).then(renderProcesosStepContent);
+}
+
+function procesosEliminarCorriente(idx) {
+  if (!confirm('¿Eliminar esta corriente?')) return;
+  const p = procesosCurrentProyecto;
+  const info = Object.assign({}, p.info_cliente);
+  const corrientes = (info.corrientes || []).slice();
+  corrientes.splice(idx, 1);
+  info.corrientes = corrientes;
+  procesosSaveProyecto({ info_cliente: info }).then(renderProcesosStepContent);
 }
 
 async function procesosStep1Analizar() {
@@ -4562,8 +4608,11 @@ async function procesosStep1Analizar() {
     }
 
     showMsg(statusId,'loading','Analizando con IA...');
-    const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''} [tipo: ${f.tipo==='parametro'?'parámetro numérico':'texto libre'}]`).join('\n');
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>", "limite_normativo": <número o null>} — "limite_normativo" es el valor máximo (o mínimo, según corresponda) que exige la normativa aplicable para ESE MISMO parámetro. Para determinarlo: primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco detectados) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible, hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null,"limite_normativo":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
+    const textoFields = iaFields.filter(f => f.tipo !== 'parametro');
+    const paramFields = iaFields.filter(f => f.tipo === 'parametro');
+    const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
+    const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
@@ -4571,9 +4620,9 @@ async function procesosStep1Analizar() {
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     const data = await resp.json();
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
-    const campos = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const extraido = JSON.parse(text.replace(/```json|```/g,'').trim());
 
-    await procesosSaveProyecto({ info_cliente: { campos, carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
+    await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
     showMsg(statusId,'success','✓ Análisis completo.');
     renderProcesosStepContent();
     procesosDetectarSimilares();
@@ -4666,6 +4715,7 @@ function procesosStep2Html(p) {
   const todasConfirmadas = algunaSeleccionada && nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada).every(n => hojasGuardadas[n]?.confirmada);
   const orden = dd.orden || [];
   const cumplimiento = dd.cumplimiento || [];
+  const ponderaciones = dd.ponderaciones || {};
 
   return `
     <div class="card-label">Paso 2 — Diseñar el proyecto</div>
@@ -4702,6 +4752,16 @@ function procesosStep2Html(p) {
     <p class="hint" style="margin-top:6px">Esto hace que, por ejemplo, el resultado de DBO de una etapa alimente automáticamente el dato de entrada de DBO de la siguiente, en vez de tener que cargarlo a mano.</p>
     ` : ''}
     <div id="procesos-step2-hoja-panel"></div>
+    ${Object.keys(ponderaciones).length ? `
+    <div class="gap"></div>
+    <label>Ponderaciones aplicadas (unificación de corrientes)</label>
+    <p class="hint" style="margin-bottom:6px">Estos valores se calcularon como promedio ponderado por caudal de las fuentes indicadas.</p>
+    ${Object.entries(ponderaciones).map(([hoja, celdas]) => Object.values(celdas).map(c => `
+      <div class="result-field">
+        <span class="result-key">${esc(hoja)}: ${esc(c.etiqueta)}</span>
+        <span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center" title="${esc(c.detalle.map(d=>`${d.fuente}: ${d.valor} (peso ${d.peso})`).join(' · '))}">${c.resultado.toFixed(2)} — ${c.detalle.map(d=>`${esc(d.fuente)}: ${d.valor}`).join(' + ')}</span>
+      </div>`).join('')).join('')}
+    ` : ''}
     ${cumplimiento.length ? `
     <div class="gap"></div>
     <label>Chequeo de cumplimiento vs. límites de vuelco</label>
@@ -4783,11 +4843,73 @@ function procesosStep2GetHF(nombreHoja) {
 // "hastaHoja", empujando a cada una los valores mapeados desde el Paso 1 o desde
 // el resultado de la hoja inmediata anterior. Así el orden y las conexiones no
 // dependen del Excel (que no lo sabe) sino de la configuración de este proyecto.
+// Valor actual de una fuente de un mapeo: un parámetro de una corriente del Paso 1,
+// o el resultado de una celda de una hoja anterior en el tren.
+function procesosStep2GetValorFuente(fuente) {
+  const p = procesosCurrentProyecto;
+  if (fuente.origen === 'paso1') {
+    const corrientes = p.info_cliente?.corrientes || [];
+    const c = corrientes.find(x => x.nombre === fuente.corriente);
+    const campo = c && c.campos && c.campos[fuente.campo];
+    const val = (campo && typeof campo === 'object') ? campo.valor : campo;
+    return (typeof val === 'number') ? val : null;
+  }
+  if (fuente.origen === 'hoja' && fuente.hoja && fuente.celda_origen) {
+    const hfOrigen = procesosStep2State.hfInstances[fuente.hoja];
+    const modelOrigen = procesosStep2State.hojaModels[fuente.hoja];
+    const cellOrigen = modelOrigen && modelOrigen.cells.find(c => c.ref === fuente.celda_origen);
+    if (hfOrigen && cellOrigen) {
+      const val = hfOrigen.getCellValue({ sheet: 0, row: cellOrigen.row, col: cellOrigen.col });
+      return (typeof val === 'number') ? val : null;
+    }
+  }
+  return null;
+}
+
+// Caudal asociado a una fuente, usado como peso al ponderar dos o más fuentes que
+// confluyen en la misma celda (ej. el DBO de la corriente cloacal y de la
+// industrial, ponderados por sus respectivos caudales). Si no encuentra un caudal,
+// usa 1 (o sea, promedio simple) como respaldo.
+function procesosStep2GetPeso(fuente) {
+  const p = procesosCurrentProyecto;
+  if (fuente.origen === 'paso1') {
+    const corrientes = p.info_cliente?.corrientes || [];
+    const c = corrientes.find(x => x.nombre === fuente.corriente);
+    if (!c) return 1;
+    const entry = Object.entries(c.campos || {}).find(([k]) => k.toLowerCase().includes('caudal'));
+    const val = entry && entry[1] && typeof entry[1] === 'object' ? entry[1].valor : null;
+    return (typeof val === 'number' && val > 0) ? val : 1;
+  }
+  if (fuente.origen === 'hoja' && fuente.hoja) {
+    const model = procesosStep2State.hojaModels[fuente.hoja];
+    const hf = procesosStep2State.hfInstances[fuente.hoja];
+    if (model && hf) {
+      const cell = model.cells.find(c => c.label.toLowerCase().includes('caudal'));
+      if (cell) {
+        const val = hf.getCellValue({ sheet: 0, row: cell.row, col: cell.col });
+        if (typeof val === 'number' && val > 0) return val;
+      }
+    }
+  }
+  return 1;
+}
+
+function procesosStep2DescribirFuente(f) {
+  return f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : `${f.hoja}`;
+}
+
+// Recalcula, en el orden del tren, cada hoja seleccionada, empujando a cada celda
+// mapeada el valor de su(s) fuente(s) — un parámetro del Paso 1 (de la corriente
+// que corresponda) o el resultado de una hoja anterior. Si una celda tiene más de
+// una fuente (varias corrientes/hojas confluyendo ahí), se pondera por caudal. El
+// orden y las conexiones son configuración de este proyecto, no del Excel — así no
+// dependen de qué etapas se usen ni de si hay una o varias corrientes.
 function procesosStep2PropagarCadena(hastaHoja) {
   const p = procesosCurrentProyecto;
   const dd = p.diseno_data || {};
   const orden = dd.orden || [];
   const mapeos = dd.mapeos || {};
+  const ponderaciones = {};
   const idxHasta = hastaHoja ? orden.indexOf(hastaHoja) : orden.length - 1;
   for (let i = 0; i <= idxHasta && i < orden.length; i++) {
     const nombre = orden[i];
@@ -4797,19 +4919,27 @@ function procesosStep2PropagarCadena(hastaHoja) {
     (mapeos[nombre] || []).forEach(m => {
       const cell = model.cells.find(c => c.ref === m.celda);
       if (!cell || cell.isFormula) return;
-      let val = null;
-      if (m.origen === 'paso1') {
-        const campo = (p.info_cliente?.campos || {})[m.campo];
-        val = (campo && typeof campo === 'object') ? campo.valor : campo;
-      } else if (m.origen === 'hoja' && m.hoja && m.celda_origen) {
-        const hfOrigen = procesosStep2State.hfInstances[m.hoja];
-        const modelOrigen = procesosStep2State.hojaModels[m.hoja];
-        const cellOrigen = modelOrigen && modelOrigen.cells.find(c => c.ref === m.celda_origen);
-        if (hfOrigen && cellOrigen) val = hfOrigen.getCellValue({ sheet: 0, row: cellOrigen.row, col: cellOrigen.col });
+      const fuentes = m.fuentes || [];
+      const valores = fuentes.map(f => ({ f, val: procesosStep2GetValorFuente(f) })).filter(x => x.val != null);
+      if (!valores.length) return;
+      let val;
+      if (valores.length === 1) {
+        val = valores[0].val;
+      } else {
+        const pesos = valores.map(x => procesosStep2GetPeso(x.f));
+        const sumaPesos = pesos.reduce((a, b) => a + b, 0) || valores.length;
+        val = valores.reduce((acc, x, idx) => acc + x.val * pesos[idx], 0) / sumaPesos;
+        ponderaciones[nombre] = ponderaciones[nombre] || {};
+        ponderaciones[nombre][m.celda] = {
+          celda: m.celda, etiqueta: cell.label,
+          detalle: valores.map((x, idx) => ({ fuente: procesosStep2DescribirFuente(x.f), valor: x.val, peso: pesos[idx] })),
+          resultado: val
+        };
       }
-      if (val != null && val !== '' && typeof val !== 'object') hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
+      hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
     });
   }
+  return ponderaciones;
 }
 
 async function procesosStep2SugerirMapeos() {
@@ -4822,31 +4952,44 @@ async function procesosStep2SugerirMapeos() {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const paramsPaso1 = Object.entries(p.info_cliente?.campos || {})
-      .filter(([, v]) => v && typeof v === 'object')
-      .map(([k, v]) => `- ${k}${v.unidad ? ' (' + v.unidad + ')' : ''}: valor ${v.valor}`).join('\n') || '(sin parámetros numéricos definidos en el Paso 1)';
+    const corrientes = p.info_cliente?.corrientes || [];
+    const paramsPaso1 = corrientes.map(c => {
+      const vals = Object.entries(c.campos || {})
+        .filter(([, v]) => v && typeof v === 'object' && v.valor != null && v.valor !== '')
+        .map(([k, v]) => `  - ${k}${v.unidad ? ' (' + v.unidad + ')' : ''}: valor ${v.valor}`).join('\n');
+      return `Corriente "${c.nombre}":\n${vals || '  (sin parámetros)'}`;
+    }).join('\n\n') || '(sin corrientes definidas en el Paso 1)';
     const descHojas = orden.map(nombre => {
       const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
       const editables = model.cells.filter(c => !c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
       const resultados = model.cells.filter(c => c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
       return `Hoja "${nombre}":\n  Datos editables: ${editables || '(ninguno)'}\n  Resultados: ${resultados || '(ninguno)'}`;
     }).join('\n\n');
-    const prompt = `Este es el tren de tratamiento del proyecto, en orden: ${orden.join(' → ')}.\n\nParámetros de diseño ya definidos en el Paso 1:\n${paramsPaso1}\n\nDetalle de cada hoja (datos editables que hay que completar, y resultados que calcula):\n${descHojas}\n\nPara cada hoja del tren, identificá qué datos editables deberían alimentarse automáticamente de: (a) un parámetro del Paso 1 con el mismo significado, o (b) un resultado de la hoja INMEDIATA ANTERIOR en el tren con el mismo significado (nunca de una hoja no adyacente). Si un dato editable no tiene relación clara con ningún parámetro de arrastre (por ejemplo es una dimensión o elección de diseño propia de esa etapa), no lo incluyas — queda como dato manual.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"mapeos": {"NombreHoja": [{"celda":"C4","origen":"paso1","campo":"Nombre exacto del parámetro del Paso 1"}, {"celda":"C7","origen":"hoja","celda_origen":"C12"}]}}. Para origen "hoja" no hace falta indicar de qué hoja viene, siempre es la anterior en el tren.`;
+    const multiCorriente = corrientes.length > 1;
+    const prompt = `Este es el tren de tratamiento del proyecto, en orden: ${orden.join(' → ')}.\n\nParámetros de diseño ya definidos en el Paso 1, por corriente de efluente:\n${paramsPaso1}\n\nDetalle de cada hoja (datos editables que hay que completar, y resultados que calcula):\n${descHojas}\n\nPara cada hoja del tren, identificá qué datos editables deberían alimentarse automáticamente de: (a) un parámetro de alguna corriente del Paso 1 con el mismo significado, o (b) el resultado de una hoja ANTERIOR en el tren (una que aparezca antes en la lista de orden) con el mismo significado.${multiCorriente ? ' Como hay más de una corriente, es esperable que en algún punto del tren (donde se unifican los tratamientos) una misma celda tenga MÁS DE UNA fuente — por ejemplo el DBO de entrada de la etapa donde confluye el tratamiento de la corriente cloacal y de la industrial debería tener como fuentes el resultado de la última hoja de cada corriente (o el parámetro del Paso 1 de esa corriente, si esa corriente no pasa por ninguna hoja antes de unificarse). Identificá vos en qué hoja ocurre esa unificación según las etapas de cada corriente.' : ''} Si un dato editable no tiene relación clara con ningún parámetro de arrastre (por ejemplo es una dimensión o elección de diseño propia de esa etapa), no lo incluyas — queda como dato manual.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"mapeos": {"NombreHoja": [{"celda":"C4","fuentes":[{"origen":"paso1","corriente":"Nombre exacto de la corriente","campo":"Nombre exacto del parámetro"}]}, {"celda":"C7","fuentes":[{"origen":"hoja","hoja":"Nombre exacto de la hoja anterior","celda_origen":"C12"}]}, {"celda":"C9","fuentes":[{"origen":"hoja","hoja":"HojaCorrienteA","celda_origen":"C5"},{"origen":"hoja","hoja":"HojaCorrienteB","celda_origen":"C6"}]}]}}. El array "fuentes" tiene un elemento salvo en un punto de unificación, donde puede tener dos o más.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
     const text = data.content?.find(c => c.type === 'text')?.text || '{}';
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const nombresCorrientes = corrientes.map(c => c.nombre);
     const mapeos = {};
     orden.forEach((nombre, i) => {
+      const hojasAnteriores = orden.slice(0, i);
       const raw = (parsed.mapeos && parsed.mapeos[nombre]) || [];
       mapeos[nombre] = raw.map(m => {
-        if (m.origen === 'hoja') return { celda: m.celda, origen: 'hoja', hoja: orden[i - 1], celda_origen: m.celda_origen };
-        return { celda: m.celda, origen: 'paso1', campo: m.campo };
-      }).filter(m => (m.origen === 'paso1' && m.campo) || (m.origen === 'hoja' && m.hoja && m.celda_origen));
+        const fuentes = (m.fuentes || []).map(f => {
+          if (f.origen === 'hoja') return { origen: 'hoja', hoja: f.hoja, celda_origen: f.celda_origen };
+          return { origen: 'paso1', corriente: f.corriente, campo: f.campo };
+        }).filter(f =>
+          (f.origen === 'paso1' && f.campo && nombresCorrientes.includes(f.corriente)) ||
+          (f.origen === 'hoja' && f.celda_origen && hojasAnteriores.includes(f.hoja))
+        );
+        return { celda: m.celda, fuentes };
+      }).filter(m => m.celda && m.fuentes.length);
     });
     dd.mapeos = mapeos;
     await procesosSaveProyecto({ diseno_data: dd });
@@ -4972,7 +5115,8 @@ function procesosStep2RenderHojaPanel() {
   const rowHtml = c => {
     const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
     const mapeo = !c.isFormula ? mapaPorCelda[c.ref] : null;
-    const origenTxt = mapeo ? (mapeo.origen === 'paso1' ? `desde Paso 1: ${mapeo.campo}` : `desde ${mapeo.hoja}`) : '';
+    const fuentes = (mapeo && mapeo.fuentes) || [];
+    const origenTxt = fuentes.length ? fuentes.map(f => f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : f.hoja).join(fuentes.length > 1 ? ' + ' : '') + (fuentes.length > 1 ? ' (ponderado por caudal)' : '') : '';
     return `
     <div class="result-field">
       <span class="result-key">${esc(c.label)}</span>
@@ -5121,7 +5265,7 @@ async function procesosStep2ChatSend(nombre) {
 }
 
 async function procesosStep2GuardarHoja(nombre) {
-  procesosStep2PropagarCadena(nombre);
+  const ponderacionesNuevas = procesosStep2PropagarCadena(nombre);
   const model = procesosStep2State.hojaModels[nombre];
   const hf = procesosStep2GetHF(nombre);
   const valoresConEtiqueta = {};
@@ -5136,6 +5280,10 @@ async function procesosStep2GuardarHoja(nombre) {
   h.confirmada = true;
   h.valoresConEtiqueta = valoresConEtiqueta;
   dd.hojas[nombre] = h;
+
+  if (ponderacionesNuevas[nombre]) {
+    dd.ponderaciones = Object.assign({}, dd.ponderaciones, { [nombre]: ponderacionesNuevas[nombre] });
+  }
 
   const orden = dd.orden || [];
   if (orden.length && nombre === orden[orden.length - 1]) {
@@ -5152,18 +5300,28 @@ async function procesosStep2GuardarHoja(nombre) {
 // última hoja) — es una heurística simple, revisable a ojo en la tabla resultante.
 function procesosStep2ChequearCumplimiento(model, hf) {
   const p = procesosCurrentProyecto;
-  const campos = p.info_cliente?.campos || {};
+  const corrientes = p.info_cliente?.corrientes || [];
+  // Los límites de vuelco aplican al efluente ya tratado/unificado, no a cada
+  // corriente por separado — junta un límite por nombre de parámetro (la primera
+  // corriente que lo tenga definido) en vez de repetir el chequeo por corriente.
+  const limitesPorParametro = {};
+  corrientes.forEach(c => {
+    Object.entries(c.campos || {}).forEach(([nombreCampo, v]) => {
+      if (limitesPorParametro[nombreCampo]) return;
+      if (!v || typeof v !== 'object' || v.limite_normativo == null || v.limite_normativo === '') return;
+      const limite = Number(v.limite_normativo);
+      if (isNaN(limite)) return;
+      limitesPorParametro[nombreCampo] = { limite, unidad: v.unidad || '' };
+    });
+  });
   const resultados = [];
-  Object.entries(campos).forEach(([nombreCampo, v]) => {
-    if (!v || typeof v !== 'object' || v.limite_normativo == null || v.limite_normativo === '') return;
-    const limite = Number(v.limite_normativo);
-    if (isNaN(limite)) return;
+  Object.entries(limitesPorParametro).forEach(([nombreCampo, { limite, unidad }]) => {
     const nombreNorm = nombreCampo.trim().toLowerCase();
     const cellMatch = model.cells.find(c => c.isFormula && c.label.trim().toLowerCase().includes(nombreNorm));
     if (!cellMatch) return;
     const valorFinal = hf.getCellValue({ sheet: 0, row: cellMatch.row, col: cellMatch.col });
     if (typeof valorFinal !== 'number') return;
-    resultados.push({ parametro: nombreCampo, unidad: v.unidad || '', limite, valor_final: valorFinal, cumple: valorFinal <= limite });
+    resultados.push({ parametro: nombreCampo, unidad, limite, valor_final: valorFinal, cumple: valorFinal <= limite });
   });
   return resultados;
 }
@@ -5205,22 +5363,25 @@ function procesosStepGenericHtml(p, step) {
 }
 
 function procesosResumenCampos(p) {
-  const campos = p.info_cliente?.campos || {};
-  const entries = Object.entries(campos).filter(([,v]) => {
-    if (v && typeof v === 'object') return v.valor != null && v.valor !== '';
-    return v != null && v !== '';
+  const info = p.info_cliente || {};
+  const campos = info.campos || {};
+  const corrientes = info.corrientes || [];
+  const parts = [];
+  const generalEntries = Object.entries(campos).filter(([,v]) => v != null && v !== '');
+  if (generalEntries.length) parts.push('Información general:\n' + generalEntries.map(([k,v]) => `${k}: ${v}`).join('\n'));
+  corrientes.forEach(c => {
+    const entries = Object.entries(c.campos || {}).filter(([,v]) => v && typeof v === 'object' && v.valor != null && v.valor !== '');
+    const vals = entries.map(([k,v]) => `  ${k}: ${v.valor}${v.unidad?' '+v.unidad:''}${(v.limite_normativo!=null&&v.limite_normativo!=='')?' (límite normativo: '+v.limite_normativo+(v.unidad?' '+v.unidad:'')+')':''}`).join('\n');
+    parts.push(`Corriente "${c.nombre||'(sin nombre)'}":\n${vals || '  (sin parámetros)'}`);
   });
-  if (!entries.length) return '(sin analizar todavía)';
-  return entries.map(([k,v]) => {
-    if (v && typeof v === 'object') return `${k}: ${v.valor}${v.unidad?' '+v.unidad:''}${(v.limite_normativo!=null&&v.limite_normativo!=='')?' (límite normativo: '+v.limite_normativo+(v.unidad?' '+v.unidad:'')+')':''}`;
-    return `${k}: ${v}`;
-  }).join('\n');
+  if (!parts.length) return '(sin analizar todavía)';
+  return parts.join('\n\n');
 }
 
 function procesosBuildContexto(hastaStep) {
   const p = procesosCurrentProyecto;
   let ctx = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n\n`;
-  if (p.info_cliente?.campos) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
+  if (p.info_cliente?.campos || p.info_cliente?.corrientes?.length) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
   const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
   if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
@@ -5314,17 +5475,18 @@ async function procesosChatSend() {
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(4);
     const carpeta = p.info_cliente?.carpeta_cliente;
-    const camposActuales = p.info_cliente?.campos || {};
-    const nombresCampos = Object.keys(camposActuales).join(', ') || '(ninguno todavía)';
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos ya extraídos del cliente son: ${nombresCampos}. Si por la conversación o por los documentos te das cuenta de que alguno de esos campos está mal o cambió, incluilo en "actualizaciones" con el mismo formato que ya tiene ese campo (un string si es un campo de texto libre; un objeto {"valor":...,"unidad":...,"limite_normativo":...} si es un parámetro numérico) y contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá "actualizaciones" vacío ({}).`;
+    const nombresGenerales = Object.keys(p.info_cliente?.campos || {}).join(', ') || '(ninguno todavía)';
+    const corrientesActuales = p.info_cliente?.corrientes || [];
+    const descCorrientes = corrientesActuales.map(c => `"${c.nombre}" (parámetros: ${Object.keys(c.campos||{}).join(', ')||'ninguno'})`).join('; ') || '(ninguna todavía)';
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...}}}. En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.`;
     const messages = [
       { role:'user', content: instrucciones },
-      { role:'assistant', content: '{"respuesta":"Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?","necesita_documentos":false,"actualizaciones":{}}' },
+      { role:'assistant', content: '{"respuesta":"Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}' },
       ...p.chat_historial.map(m => ({ role: m.role, content: m.content }))
     ];
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
-      catch(_e) { return { respuesta: raw, necesita_documentos:false, actualizaciones:{} }; }
+      catch(_e) { return { respuesta: raw, necesita_documentos:false, actualizaciones_generales:{}, actualizaciones_corrientes:{} }; }
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -5356,9 +5518,20 @@ async function procesosChatSend() {
     const respuesta = parsed.respuesta || '(sin respuesta)';
     p.chat_historial.push({ role:'assistant', content: respuesta });
     const fieldsToSave = { chat_historial: p.chat_historial };
-    if (parsed.actualizaciones && Object.keys(parsed.actualizaciones).length) {
+    const hayGenerales = parsed.actualizaciones_generales && Object.keys(parsed.actualizaciones_generales).length;
+    const hayCorrientes = parsed.actualizaciones_corrientes && Object.keys(parsed.actualizaciones_corrientes).length;
+    if (hayGenerales || hayCorrientes) {
       const info = Object.assign({}, p.info_cliente);
-      info.campos = Object.assign({}, info.campos, parsed.actualizaciones);
+      if (hayGenerales) info.campos = Object.assign({}, info.campos, parsed.actualizaciones_generales);
+      if (hayCorrientes) {
+        const corrientes = (info.corrientes || []).map(c => Object.assign({}, c, { campos: Object.assign({}, c.campos) }));
+        Object.entries(parsed.actualizaciones_corrientes).forEach(([nombreCorriente, camposUpd]) => {
+          let c = corrientes.find(x => x.nombre === nombreCorriente);
+          if (!c) { c = { nombre: nombreCorriente, campos: {} }; corrientes.push(c); }
+          c.campos = Object.assign({}, c.campos, camposUpd);
+        });
+        info.corrientes = corrientes;
+      }
       fieldsToSave.info_cliente = info;
     }
     await procesosSaveProyecto(fieldsToSave);
