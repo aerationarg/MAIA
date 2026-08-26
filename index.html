@@ -5480,6 +5480,36 @@ function procesosStep2AbrirHoja(nombre) {
   if (procesosStep2PendingLeccion && procesosStep2PendingLeccion.hoja !== nombre) procesosStep2PendingLeccion = null;
   procesosStep2PropagarCadena(nombre);
   procesosStep2RenderHojaPanel();
+  procesosStep2AutoCompletarSiHaceFalta(nombre);
+}
+
+// La primera vez que se abre una hoja, si quedan datos sin completar después
+// de aplicar los mapeos del Paso 1, le pedimos a la IA que los adopte sola
+// (parámetro de diseño si corresponde, o un valor dentro del rango normal,
+// iterando si hace falta) — en vez de esperar a que el usuario lo pida por
+// chat. Solo una vez por hoja (autoCompletado), para no repetirlo cada vez
+// que se reabre.
+async function procesosStep2AutoCompletarSiHaceFalta(nombre) {
+  const p = procesosCurrentProyecto;
+  const h = p.diseno_data?.hojas?.[nombre];
+  if (h && (h.autoCompletado || h.confirmada)) return;
+  const model = procesosStep2State.hojaModels[nombre];
+  const hf = procesosStep2GetHF(nombre);
+  if (!model || !hf) return;
+  const mapeosHoja = (p.diseno_data?.mapeos?.[nombre]) || [];
+  const celdasConMapeo = new Set(mapeosHoja.map(m => m.celda));
+  const faltantes = model.cells.filter(c => !c.isFormula && !celdasConMapeo.has(c.ref)).filter(c => {
+    const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    return v == null || v === '';
+  });
+  if (!faltantes.length) return;
+
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  dd.hojas[nombre] = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre], { autoCompletado: true });
+  p.diseno_data = dd; // se persiste junto con el resto en procesosStep2ChatSend
+
+  await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. Contame brevemente qué adoptaste y por qué.');
 }
 
 function procesosStep2RenderHojaPanel() {
@@ -5613,9 +5643,9 @@ function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) 
   evalAt(mid);
 }
 
-async function procesosStep2ChatSend(nombre) {
+async function procesosStep2ChatSend(nombre, msgOverride) {
   const input = document.getElementById('procesos-step2-chat-input');
-  const msg = (input.value || '').trim();
+  const msg = msgOverride != null ? msgOverride.trim() : (input?.value || '').trim();
   if (!msg) return;
   const statusId = 'procesos-step2-chat-status';
   const p = procesosCurrentProyecto;
@@ -5625,7 +5655,7 @@ async function procesosStep2ChatSend(nombre) {
   hPrev.chat = (hPrev.chat || []).concat([{ role: 'user', content: msg }]);
   ddPrev.hojas[nombre] = hPrev;
   p.diseno_data = ddPrev;
-  input.value = '';
+  if (input) input.value = '';
   procesosStep2RenderHojaPanel();
   showMsg(statusId, 'loading', 'Pensando...');
   try {
