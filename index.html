@@ -4235,19 +4235,165 @@ async function procesosFetchConReintento(url, opts, intentos) {
   }
 }
 
-// Devuelve [{block, nombre}] — cada content block junto con el nombre del
-// archivo del que salió, para poder avisar cuál se omitió si hace falta.
+// Le pide a Claude que transcriba TODO el contenido de un documento a texto
+// plano (una sola vez por archivo) — de ahí en adelante se reusa ese texto en
+// vez de reprocesar el PDF/imagen, mucho más barato y sin el límite de 100
+// páginas. No es un resumen: tiene que preservar todo el contenido útil.
+async function procesosExtraerTextoDeContentBlock(block, nombre) {
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+  const prompt = `Transcribí TODO el contenido de este documento ("${nombre}") a texto plano, preservando la estructura (títulos, secciones) y toda la información — tablas como tablas en formato markdown, y si hay gráficos o diagramas relevantes para diseño de tratamiento de efluentes, describilos en palabras. No resumas ni omitas datos, parámetros, rangos ni tablas: este texto va a reemplazar al documento original de acá en adelante.`;
+  try {
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:8000, messages:[{role:'user', content:[block, {type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.content?.find(c=>c.type==='text')?.text || null;
+  } catch(e) { console.warn(`No se pudo extraer texto de "${nombre}":`, e.message); return null; }
+}
+
+// Texto cacheado de un documento vinculado como archivo suelto (procesos_documentos,
+// tipo:'archivo') — lo (re)extrae solo si cambió (por fecha de modificación real
+// en SharePoint) o si todavía no tiene caché.
+async function procesosDocGetTexto(doc, token) {
+  try {
+    const metaResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}?$select=lastModifiedDateTime`, {headers:{Authorization:'Bearer '+token}});
+    const modificado = metaResp.ok ? (await metaResp.json()).lastModifiedDateTime : null;
+    if (doc.texto_extraido && doc.texto_extraido_at && modificado && new Date(modificado) <= new Date(doc.texto_extraido_at)) {
+      return doc.texto_extraido;
+    }
+    const block = await procesosDocAsContentBlock(token, doc);
+    if (!block) return doc.texto_extraido || null;
+    const texto = await procesosExtraerTextoDeContentBlock(block, doc.nombre);
+    if (!texto) return doc.texto_extraido || null;
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch(`/rest/v1/procesos_documentos?id=eq.${doc.id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ texto_extraido: texto, texto_extraido_at: new Date().toISOString() })
+    });
+    doc.texto_extraido = texto;
+    return texto;
+  } catch(e) { console.warn(`No se pudo actualizar la caché de "${doc.nombre}":`, e.message); return doc.texto_extraido || null; }
+}
+
+// Igual que procesosDocGetTexto pero para un documento vinculado como carpeta —
+// cachea el texto POR ARCHIVO adentro (archivos_cache), así solo reprocesa los
+// que son nuevos o cambiaron, no toda la carpeta de nuevo cada vez. Sirve tanto
+// para procesos_documentos como para procesos_catalogo (pasando `tabla`).
+async function procesosDocGetTextosCarpeta(doc, token, tabla) {
+  tabla = tabla || 'procesos_documentos';
+  const cacheActual = doc.archivos_cache || [];
+  const cachePorId = {}; cacheActual.forEach(f => { cachePorId[f.item_id] = f; });
+  let children;
+  try {
+    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}/children`, {headers:{Authorization:'Bearer '+token}});
+    if (!childrenResp.ok) throw new Error('HTTP '+childrenResp.status);
+    children = ((await childrenResp.json()).value || []).filter(f => f.file).slice(0, 50);
+  } catch(e) {
+    console.warn(`No se pudo listar la carpeta "${doc.nombre}", usando caché existente:`, e.message);
+    return cacheActual.map(f => ({ nombre: f.nombre, texto: f.texto }));
+  }
+
+  const resultado = [];
+  let cambios = false;
+  for (const f of children) {
+    const cacheado = cachePorId[f.id];
+    if (cacheado && cacheado.modificado === f.lastModifiedDateTime) {
+      resultado.push({ nombre: f.name, texto: cacheado.texto });
+      continue;
+    }
+    try {
+      const isPdf = /\.pdf$/i.test(f.name);
+      const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
+      const needsConvert = !isPdf && !isImg;
+      const dlUrl = needsConvert
+        ? `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${f.id}/content?format=pdf`
+        : `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${f.id}/content`;
+      const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+      if (!dlResp.ok) continue;
+      const buf = await dlResp.arrayBuffer();
+      let binary = ''; const bytes = new Uint8Array(buf);
+      for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      let block;
+      if (needsConvert || isPdf) {
+        if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${f.name}" por superar las 100 páginas.`); continue; }
+        block = {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}};
+      } else {
+        const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg';
+        block = {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}};
+      }
+      const texto = await procesosExtraerTextoDeContentBlock(block, f.name);
+      if (texto) {
+        resultado.push({ nombre: f.name, texto });
+        cachePorId[f.id] = { item_id: f.id, nombre: f.name, modificado: f.lastModifiedDateTime, texto };
+        cambios = true;
+      }
+    } catch(e) { console.warn(`No se pudo extraer "${f.name}":`, e.message); }
+  }
+
+  if (cambios) {
+    const nuevoCache = Object.values(cachePorId);
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const campoFecha = tabla === 'procesos_catalogo' ? 'resumen_ia_at' : 'texto_extraido_at';
+    await supaFetch(`/rest/v1/${tabla}?id=eq.${doc.id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ archivos_cache: nuevoCache, [campoFecha]: new Date().toISOString() })
+    });
+    doc.archivos_cache = nuevoCache;
+  }
+  return resultado;
+}
+
+// Devuelve [{block, nombre}] — cada documento como un content block de TEXTO
+// (cacheado, no PDF/imagen crudo cada vez) junto con el nombre del archivo, para
+// poder avisar cuál se omitió si hace falta.
 async function procesosDocsToContentBlocks(token, docs) {
   const items = [];
   for (const doc of docs) {
     if (doc.tipo === 'carpeta') {
-      items.push(...await procesosDescargarCarpetaComoContentBlocks({ siteId: doc.site_id, itemId: doc.item_id }, token));
+      const textos = await procesosDocGetTextosCarpeta(doc, token);
+      textos.forEach(t => items.push({ block: {type:'text', text:`Documento: ${t.nombre}\n\n${t.texto}`}, nombre: t.nombre }));
     } else {
-      const block = await procesosDocAsContentBlock(token, doc);
-      if (block) items.push({ block, nombre: doc.nombre });
+      const texto = await procesosDocGetTexto(doc, token);
+      if (texto) items.push({ block: {type:'text', text:`Documento: ${doc.nombre}\n\n${texto}`}, nombre: doc.nombre });
     }
   }
   return items;
+}
+
+// Genera (y cachea) un resumen breve de un proyecto del catálogo a partir de los
+// documentos de su carpeta vinculada — se usa para detectar proyectos parecidos
+// cuando la entrada no tiene rubro/descripción cargados a mano. El texto de cada
+// archivo ya viene cacheado por procesosDocGetTextosCarpeta; acá solo se arma el
+// resumen (una llamada corta) y se guarda.
+async function procesosCatalogoGenerarResumen(entry, token) {
+  if (!entry.carpeta_item_id || !entry.carpeta_site_id) return null;
+  const docLike = { id: entry.id, site_id: entry.carpeta_site_id, item_id: entry.carpeta_item_id, nombre: entry.nombre, archivos_cache: entry.archivos_cache };
+  const textos = await procesosDocGetTextosCarpeta(docLike, token, 'procesos_catalogo');
+  if (!textos.length) return null;
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+  const combinado = textos.map(t => `Documento: ${t.nombre}\n${t.texto}`).join('\n\n---\n\n');
+  const prompt = `Este es el contenido de los documentos del proyecto anterior "${entry.nombre}":\n\n${combinado}\n\nRedactá un resumen breve (3-5 líneas, en español) para usar como referencia al comparar con proyectos nuevos: rubro/industria del cliente, tipo de efluente, caudal y parámetros clave si figuran, y tecnología/etapas de tratamiento usadas. Respondé solo con el resumen, sin encabezados ni JSON.`;
+  try {
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const resumen = data.content?.find(c=>c.type==='text')?.text || null;
+    if (resumen) {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${entry.id}`, {
+        method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+        body: JSON.stringify({ resumen_ia: resumen, resumen_ia_at: new Date().toISOString() })
+      });
+    }
+    return resumen;
+  } catch(e) { console.warn(`No se pudo generar el resumen de "${entry.nombre}":`, e.message); return null; }
 }
 
 // Extiende el selector de archivos compartido para vincular documentos de referencia
@@ -4281,9 +4427,11 @@ async function renderProcesosCatalogo() {
         <input class="desc-input" value="${esc(p.rubro||'')}" placeholder="Rubro/industria" oninput="procesosCatalogoUpdate('${p.id}','rubro',this.value)" style="margin-bottom:6px" />
         <input class="desc-input" value="${esc(p.tags||'')}" placeholder="Tags (separados por coma)" oninput="procesosCatalogoUpdate('${p.id}','tags',this.value)" style="margin-bottom:6px" />
         <textarea rows="2" placeholder="Descripción breve del proyecto" oninput="procesosCatalogoUpdate('${p.id}','descripcion',this.value)" style="margin-bottom:6px">${esc(p.descripcion||'')}</textarea>
+        ${(!p.descripcion && p.resumen_ia) ? `<p class="hint" style="margin-bottom:6px" title="Generado con IA a partir de los documentos de la carpeta — se usa como descripción mientras no cargues una a mano">🤖 ${esc(p.resumen_ia)}</p>` : ''}
         <div class="sp-selected">
           <span style="font-size:12px">${esc(p.carpeta_path || 'Sin carpeta vinculada')}</span>
           <button class="sp-browse-btn" onclick="procesosCatalogoSelectFolder('${p.id}')">Vincular carpeta</button>
+          ${p.carpeta_item_id ? `<button class="sp-browse-btn" onclick="procesosCatalogoRegenerarResumen('${p.id}')">${p.resumen_ia?'↻ Regenerar':'✦ Generar'} resumen con IA</button>` : ''}
         </div>
       </div>`).join('');
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
@@ -4397,6 +4545,24 @@ async function procesosCatalogoSaveFolder(id, path, itemId, siteId, label) {
     body: JSON.stringify({ carpeta_path: path, carpeta_item_id: itemId, carpeta_site_id: siteId })
   });
   renderProcesosCatalogo();
+}
+
+async function procesosCatalogoRegenerarResumen(id) {
+  const statusId = 'procesos-catalogo-status';
+  showMsg(statusId, 'loading', 'Generando resumen con IA...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !rows.length) throw new Error('No se encontró el proyecto.');
+    const token = await getMsToken();
+    const resumen = await procesosCatalogoGenerarResumen(rows[0], token);
+    if (!resumen) throw new Error('No se pudo generar el resumen (¿la carpeta tiene documentos legibles?).');
+    showMsg(statusId, 'success', '✓ Resumen generado.');
+    renderProcesosCatalogo();
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
 }
 
 function procesosCatalogoSelectCarpetaMadre() {
@@ -4943,11 +5109,25 @@ async function procesosDetectarSimilares() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_site_id,carpeta_item_id,archivos_cache&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
     const catalogo = await res.json();
     if (!res.ok || !Array.isArray(catalogo) || !catalogo.length) { if(hasEl) showMsg(statusId,'error','No hay proyectos cargados en el catálogo (Cfg Procesos IA).'); return; }
 
-    const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion||''}`).join('\n');
+    // Genera el resumen automático (con IA, cacheado) para hasta 3 entradas que
+    // tienen carpeta vinculada pero todavía no tienen ni descripción ni resumen
+    // — de a poco, no todas de golpe, para no disparar un lote grande de costo.
+    const pendientes = catalogo.filter(c => c.carpeta_item_id && !c.descripcion && !c.resumen_ia).slice(0, 3);
+    if (pendientes.length) {
+      if (hasEl) showMsg(statusId,'loading','Generando resúmenes de proyectos sin descripción...');
+      const tokenMs = await getMsToken();
+      for (const entry of pendientes) {
+        const resumen = await procesosCatalogoGenerarResumen(entry, tokenMs);
+        if (resumen) entry.resumen_ia = resumen;
+      }
+      if (hasEl) showMsg(statusId,'loading','Buscando proyectos parecidos...');
+    }
+
+    const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion || c.resumen_ia || ''}`).join('\n');
     const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
