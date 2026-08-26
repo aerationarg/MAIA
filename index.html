@@ -4233,18 +4233,19 @@ async function procesosFetchConReintento(url, opts, intentos) {
   }
 }
 
+// Devuelve [{block, nombre}] — cada content block junto con el nombre del
+// archivo del que salió, para poder avisar cuál se omitió si hace falta.
 async function procesosDocsToContentBlocks(token, docs) {
-  const blocks = [];
+  const items = [];
   for (const doc of docs) {
     if (doc.tipo === 'carpeta') {
-      const folderBlocks = await procesosDescargarCarpetaComoContentBlocks({ siteId: doc.site_id, itemId: doc.item_id }, token);
-      blocks.push(...folderBlocks);
+      items.push(...await procesosDescargarCarpetaComoContentBlocks({ siteId: doc.site_id, itemId: doc.item_id }, token));
     } else {
       const block = await procesosDocAsContentBlock(token, doc);
-      if (block) blocks.push(block);
+      if (block) items.push({ block, nombre: doc.nombre });
     }
   }
-  return blocks;
+  return items;
 }
 
 // Extiende el selector de archivos compartido para vincular documentos de referencia
@@ -4583,26 +4584,27 @@ function renderProcesosStepContent() {
   if (step === 2) procesosStep2AfterRender();
 }
 
-// Descarga hasta 10 archivos de una carpeta de SharePoint (convirtiendo a PDF si
+// Descarga hasta 50 archivos de una carpeta de SharePoint (convirtiendo a PDF si
 // hace falta) y los arma como content blocks para Claude. La usan tanto el
 // análisis del Paso 1 como el chat del proyecto, cuando necesita reconsultarlos.
+// Devuelve [{block, nombre}] — el nombre sirve para avisar cuál se omitió.
 async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) {
   // Tope de tamaño combinado (no solo de cantidad): pedidos muy grandes a la API
   // de Claude son más propensos a que un proxy/antivirus con inspección SSL
   // corte la conexión (ERR_SSL_BAD_RECORD_MAC_ALERT) en redes corporativas.
   const MAX_TOTAL_BYTES = 15 * 1024 * 1024;
   let totalBytes = 0;
-  const blocks = [];
+  const items = [];
   let children;
   try {
     const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${folder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
-    if (!childrenResp.ok) return blocks;
+    if (!childrenResp.ok) return items;
     children = (await childrenResp.json()).value || [];
-  } catch (e) { console.warn('No se pudo listar la carpeta de SharePoint:', e.message); return blocks; }
+  } catch (e) { console.warn('No se pudo listar la carpeta de SharePoint:', e.message); return items; }
 
   const usable = children.filter(f => f.file).slice(0, 50);
   for (const f of usable) {
-    if (totalBytes >= MAX_TOTAL_BYTES) { console.warn(`Se cortó la carpeta en ${blocks.length} archivo(s) por límite de tamaño combinado.`); break; }
+    if (totalBytes >= MAX_TOTAL_BYTES) { console.warn(`Se cortó la carpeta en ${items.length} archivo(s) por límite de tamaño combinado.`); break; }
     // Un archivo puntual puede fallar (muy pesado, formato no convertible a PDF,
     // bloqueado, etc.) — se lo salta en vez de tirar abajo toda la carpeta.
     try {
@@ -4623,15 +4625,15 @@ async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) 
       if (needsConvert || isPdf) {
         if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${f.name}" por superar las 100 páginas (límite de Claude por PDF).`); continue; }
         totalBytes += buf.byteLength;
-        blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}});
+        items.push({ block: {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}}, nombre: f.name });
       } else {
         totalBytes += buf.byteLength;
         const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg';
-        blocks.push({type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}});
+        items.push({ block: {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}}, nombre: f.name });
       }
     } catch (e) { console.warn(`No se pudo traer "${f.name}" de la carpeta:`, e.message); }
   }
-  return blocks;
+  return items;
 }
 
 // ── Paso 1: analizar cliente ───────────────────────────
@@ -4792,24 +4794,23 @@ async function procesosStep1Analizar() {
     const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
     if (!iaFields.length) throw new Error('Configurá al menos un campo en Cfg Procesos IA.');
 
-    const contentBlocks = [];
+    const contentItems = [];
     for (const item of procesosStep1Files) {
       const b64 = await fileToBase64(item.file);
       const isPdf = item.file.type === 'application/pdf';
       if (isPdf && procesosContarPaginasPdfAprox(atob(b64)) > 100) { console.warn(`Se omitió "${item.file.name}" por superar las 100 páginas (límite de Claude por PDF).`); continue; }
-      contentBlocks.push(isPdf
+      contentItems.push({ nombre: item.file.name, block: isPdf
         ? {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}
-        : {type:'image', source:{type:'base64', media_type:item.file.type, data:b64}});
+        : {type:'image', source:{type:'base64', media_type:item.file.type, data:b64}} });
     }
 
     let token = null;
     if (procesosStep1SpFolder) {
       showMsg(statusId,'loading','Leyendo carpeta de SharePoint...');
       token = token || await getMsToken();
-      const blocks = await procesosDescargarCarpetaComoContentBlocks(procesosStep1SpFolder, token, name => showMsg(statusId,'loading',`Descargando ${name}...`));
-      contentBlocks.push(...blocks);
+      contentItems.push(...await procesosDescargarCarpetaComoContentBlocks(procesosStep1SpFolder, token, name => showMsg(statusId,'loading',`Descargando ${name}...`)));
     }
-    if (!contentBlocks.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
+    if (!contentItems.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
     // Documentos de referencia que se adjuntan solos en este paso: Normativa + Información general
     showMsg(statusId,'loading','Buscando documentos de referencia...');
@@ -4817,7 +4818,7 @@ async function procesosStep1Analizar() {
     if (docsRef.length) {
       token = token || await getMsToken();
       showMsg(statusId,'loading','Adjuntando documentos de referencia...');
-      contentBlocks.push(...await procesosDocsToContentBlocks(token, docsRef));
+      contentItems.push(...await procesosDocsToContentBlocks(token, docsRef));
     }
 
     showMsg(statusId,'loading','Analizando con IA...');
@@ -4826,17 +4827,38 @@ async function procesosStep1Analizar() {
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
-    const data = await resp.json();
+    // Si la API rechaza un documento puntual (ej. supera las 100 páginas y no lo
+    // detectamos antes), lo sacamos y reintentamos, en vez de perder todo el
+    // análisis — al final se avisa qué documento(s) quedaron afuera.
+    const omitidos = [];
+    let data;
+    for (let intento = 0; ; intento++) {
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentItems.map(x=>x.block), {type:'text', text:prompt}]}] })
+      });
+      if (resp.ok) { data = await resp.json(); break; }
+      const e = await resp.json();
+      const msg = e.error?.message || 'Error de la IA';
+      const m = intento < 20 && /messages\.\d+\.content\.(\d+)\./.exec(msg);
+      const idx = m ? Number(m[1]) : -1;
+      if (idx >= 0 && idx < contentItems.length) {
+        const culpable = contentItems.splice(idx, 1)[0];
+        omitidos.push(culpable.nombre);
+        console.warn(`Se omitió "${culpable.nombre}" — la IA lo rechazó: ${msg}`);
+        if (!contentItems.length) throw new Error('Ningún documento pudo ser analizado.');
+        showMsg(statusId,'loading',`"${culpable.nombre}" no se pudo analizar, reintentando sin él...`);
+        continue;
+      }
+      throw new Error(msg);
+    }
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     const extraido = JSON.parse(text.replace(/```json|```/g,'').trim());
 
     await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
-    showMsg(statusId,'success','✓ Análisis completo.');
+    showMsg(statusId,'success', omitidos.length
+      ? `✓ Análisis completo. No se pudieron analizar: ${omitidos.join(', ')}.`
+      : '✓ Análisis completo.');
     renderProcesosStepContent();
     procesosDetectarSimilares();
   } catch(e) {
@@ -5316,7 +5338,7 @@ async function procesosStep2CargarPlanilla() {
           const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican:\n' + lecciones + '\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
           const resp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
+            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
           });
           if (resp.ok) {
             const data = await resp.json();
@@ -5511,7 +5533,7 @@ async function procesosStep2ChatSend(nombre) {
     const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara, ponelo en "leccion_aprendida" y mencionalo brevemente en "reply" para que quede claro que lo anotaste; si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks, { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -5815,7 +5837,7 @@ async function procesosChatSend() {
       const contentBlocks = await procesosDescargarCarpetaComoContentBlocks(carpeta, token, name => showMsg(statusId,'loading',`Revisando ${name}...`));
       const messages2 = messages.concat([
         { role:'assistant', content: raw },
-        { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
+        { role:'user', content: [...contentBlocks.map(x=>x.block), {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
