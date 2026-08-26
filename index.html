@@ -4472,13 +4472,14 @@ function procesosStep1Html(p) {
       ${iaFields.map(f => {
         const fKey = f.name.replace(/'/g,"\\'");
         if (f.tipo === 'parametro') {
-          const v = (campos[f.name] && typeof campos[f.name]==='object') ? campos[f.name] : {valor: campos[f.name]!=null?campos[f.name]:'', unidad:''};
+          const v = (campos[f.name] && typeof campos[f.name]==='object') ? campos[f.name] : {valor: campos[f.name]!=null?campos[f.name]:'', unidad:'', limite_normativo:''};
           return `
         <div class="result-field">
           <span class="result-key">${esc(f.name)}</span>
           <div style="display:flex;gap:6px;flex:1">
             <input class="result-val" style="flex:2" placeholder="Valor" value="${esc(v.valor!=null?String(v.valor):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','valor',this.value)" />
             <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','unidad',this.value)" />
+            <input class="result-val" style="flex:2" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?String(v.limite_normativo):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','limite_normativo',this.value)" />
           </div>
         </div>`;
         }
@@ -4562,7 +4563,7 @@ async function procesosStep1Analizar() {
 
     showMsg(statusId,'loading','Analizando con IA...');
     const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''} [tipo: ${f.tipo==='parametro'?'parámetro numérico':'texto libre'}]`).join('\n');
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>"} — si no encontrás la unidad explícita, inferila si es razonable, si no dejala en null. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible (por ejemplo la normativa aplicable a partir de la ubicación y el tipo de vuelco), hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>", "limite_normativo": <número o null>} — "limite_normativo" es el valor máximo (o mínimo, según corresponda) que exige la normativa aplicable para ESE MISMO parámetro según la ubicación y el tipo de vuelco detectados (ej. si el campo es "DBO" y la normativa exige DBO ≤ 30 mg/L para vertido, poné 30); si no podés determinarlo con la información disponible, usá null. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible, hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null,"limite_normativo":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
@@ -4663,6 +4664,8 @@ function procesosStep2Html(p) {
   const nombresHojas = st.workbook.SheetNames;
   const algunaSeleccionada = nombresHojas.some(n => hojasGuardadas[n]?.seleccionada);
   const todasConfirmadas = algunaSeleccionada && nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada).every(n => hojasGuardadas[n]?.confirmada);
+  const orden = dd.orden || [];
+  const cumplimiento = dd.cumplimiento || [];
 
   return `
     <div class="card-label">Paso 2 — Diseñar el proyecto</div>
@@ -4680,7 +4683,34 @@ function procesosStep2Html(p) {
         ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2AbrirHoja('${safe}')">${h.confirmada?'Editar':'Definir'} valores →</button>` : ''}
       </div>`;
     }).join('')}
+    ${orden.length ? `
+    <div class="gap"></div>
+    <label>Orden del tren de tratamiento</label>
+    <p class="hint" style="margin-bottom:6px">Define qué etapa alimenta a cuál — usalo para revisar/ajustar el orden que sugirió la IA.</p>
+    ${orden.map((nombre, i) => {
+      const safe = nombre.replace(/'/g,"\\'");
+      return `
+      <div class="field-row-top" style="padding:4px 0">
+        <div class="reorder-btns">
+          <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',-1)" ${i===0?'disabled':''}>&#9650;</button>
+          <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',1)" ${i===orden.length-1?'disabled':''}>&#9660;</button>
+        </div>
+        <span style="font-size:13px">${i+1}. ${esc(nombre)}</span>
+      </div>`;
+    }).join('')}
+    <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2SugerirMapeos()">${dd.mapeos ? '↻ Volver a sugerir conexiones' : '✦ Sugerir conexiones entre etapas'}</button>
+    <p class="hint" style="margin-top:6px">Esto hace que, por ejemplo, el resultado de DBO de una etapa alimente automáticamente el dato de entrada de DBO de la siguiente, en vez de tener que cargarlo a mano.</p>
+    ` : ''}
     <div id="procesos-step2-hoja-panel"></div>
+    ${cumplimiento.length ? `
+    <div class="gap"></div>
+    <label>Chequeo de cumplimiento vs. límites de vuelco</label>
+    ${cumplimiento.map(r => `
+      <div class="result-field">
+        <span class="result-key">${esc(r.parametro)}</span>
+        <span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center;color:${r.cumple?'var(--green)':'var(--red)'}">${r.cumple?'✓ cumple':'✕ no cumple'} — ${r.valor_final}${r.unidad?' '+esc(r.unidad):''} (límite: ${r.limite}${r.unidad?' '+esc(r.unidad):''})</span>
+      </div>`).join('')}
+    ` : ''}
     <div class="gap"></div>
     <button class="btn btn-primary" ${!todasConfirmadas?'disabled':''} onclick="procesosAvanzarPaso(3)">Continuar al Paso 3 →</button>
     ${(algunaSeleccionada && !todasConfirmadas) ? '<p class="hint" style="margin-top:6px">Definí y guardá los valores de cada unidad seleccionada para continuar.</p>' : ''}
@@ -4749,6 +4779,84 @@ function procesosStep2GetHF(nombreHoja) {
   return hf;
 }
 
+// Recalcula, en orden, cada hoja del tren de tratamiento hasta (e incluyendo)
+// "hastaHoja", empujando a cada una los valores mapeados desde el Paso 1 o desde
+// el resultado de la hoja inmediata anterior. Así el orden y las conexiones no
+// dependen del Excel (que no lo sabe) sino de la configuración de este proyecto.
+function procesosStep2PropagarCadena(hastaHoja) {
+  const p = procesosCurrentProyecto;
+  const dd = p.diseno_data || {};
+  const orden = dd.orden || [];
+  const mapeos = dd.mapeos || {};
+  const idxHasta = hastaHoja ? orden.indexOf(hastaHoja) : orden.length - 1;
+  for (let i = 0; i <= idxHasta && i < orden.length; i++) {
+    const nombre = orden[i];
+    if (!procesosStep2State.workbook.Sheets[nombre]) continue;
+    const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+    const hf = procesosStep2GetHF(nombre);
+    (mapeos[nombre] || []).forEach(m => {
+      const cell = model.cells.find(c => c.ref === m.celda);
+      if (!cell || cell.isFormula) return;
+      let val = null;
+      if (m.origen === 'paso1') {
+        const campo = (p.info_cliente?.campos || {})[m.campo];
+        val = (campo && typeof campo === 'object') ? campo.valor : campo;
+      } else if (m.origen === 'hoja' && m.hoja && m.celda_origen) {
+        const hfOrigen = procesosStep2State.hfInstances[m.hoja];
+        const modelOrigen = procesosStep2State.hojaModels[m.hoja];
+        const cellOrigen = modelOrigen && modelOrigen.cells.find(c => c.ref === m.celda_origen);
+        if (hfOrigen && cellOrigen) val = hfOrigen.getCellValue({ sheet: 0, row: cellOrigen.row, col: cellOrigen.col });
+      }
+      if (val != null && val !== '' && typeof val !== 'object') hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
+    });
+  }
+}
+
+async function procesosStep2SugerirMapeos() {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  const orden = dd.orden || [];
+  if (!orden.length) { alert('Primero seleccioná al menos una unidad/etapa.'); return; }
+  const statusId = 'procesos-step2-status';
+  showMsg(statusId, 'loading', 'Sugiriendo conexiones entre etapas...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const paramsPaso1 = Object.entries(p.info_cliente?.campos || {})
+      .filter(([, v]) => v && typeof v === 'object')
+      .map(([k, v]) => `- ${k}${v.unidad ? ' (' + v.unidad + ')' : ''}: valor ${v.valor}`).join('\n') || '(sin parámetros numéricos definidos en el Paso 1)';
+    const descHojas = orden.map(nombre => {
+      const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+      const editables = model.cells.filter(c => !c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
+      const resultados = model.cells.filter(c => c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
+      return `Hoja "${nombre}":\n  Datos editables: ${editables || '(ninguno)'}\n  Resultados: ${resultados || '(ninguno)'}`;
+    }).join('\n\n');
+    const prompt = `Este es el tren de tratamiento del proyecto, en orden: ${orden.join(' → ')}.\n\nParámetros de diseño ya definidos en el Paso 1:\n${paramsPaso1}\n\nDetalle de cada hoja (datos editables que hay que completar, y resultados que calcula):\n${descHojas}\n\nPara cada hoja del tren, identificá qué datos editables deberían alimentarse automáticamente de: (a) un parámetro del Paso 1 con el mismo significado, o (b) un resultado de la hoja INMEDIATA ANTERIOR en el tren con el mismo significado (nunca de una hoja no adyacente). Si un dato editable no tiene relación clara con ningún parámetro de arrastre (por ejemplo es una dimensión o elección de diseño propia de esa etapa), no lo incluyas — queda como dato manual.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"mapeos": {"NombreHoja": [{"celda":"C4","origen":"paso1","campo":"Nombre exacto del parámetro del Paso 1"}, {"celda":"C7","origen":"hoja","celda_origen":"C12"}]}}. Para origen "hoja" no hace falta indicar de qué hoja viene, siempre es la anterior en el tren.`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const mapeos = {};
+    orden.forEach((nombre, i) => {
+      const raw = (parsed.mapeos && parsed.mapeos[nombre]) || [];
+      mapeos[nombre] = raw.map(m => {
+        if (m.origen === 'hoja') return { celda: m.celda, origen: 'hoja', hoja: orden[i - 1], celda_origen: m.celda_origen };
+        return { celda: m.celda, origen: 'paso1', campo: m.campo };
+      }).filter(m => (m.origen === 'paso1' && m.campo) || (m.origen === 'hoja' && m.hoja && m.celda_origen));
+    });
+    dd.mapeos = mapeos;
+    await procesosSaveProyecto({ diseno_data: dd });
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+    renderProcesosStepContent();
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
 async function procesosStep2CargarPlanilla() {
   const p = procesosCurrentProyecto;
   const st = procesosStep2State;
@@ -4780,7 +4888,7 @@ async function procesosStep2CargarPlanilla() {
             const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
             return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
           }).join('\n');
-          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\nDevolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}]}. Incluí todas las hojas de la lista, cada una con incluir true o false.`;
+          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\nDevolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente, y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última).`;
           const resp = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
             body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
@@ -4792,10 +4900,14 @@ async function procesosStep2CargarPlanilla() {
             (parsed.hojas || []).forEach(h => {
               if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false };
             });
+            if (Array.isArray(parsed.orden) && parsed.orden.length) {
+              dd.orden = parsed.orden.filter(n => dd.hojas[n] && dd.hojas[n].seleccionada);
+            }
           }
         } catch (e) { console.warn('No se pudo sugerir hojas automáticamente:', e.message); }
       }
       workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }; });
+      if (!dd.orden) dd.orden = workbook.SheetNames.filter(n => dd.hojas[n]?.seleccionada);
       await procesosSaveProyecto({ diseno_data: dd });
     }
 
@@ -4814,11 +4926,29 @@ function procesosStep2ToggleHoja(nombre, checked) {
   const h = Object.assign({ seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
   h.seleccionada = checked;
   dd.hojas[nombre] = h;
+  let orden = (dd.orden || []).slice();
+  if (checked) { if (!orden.includes(nombre)) orden.push(nombre); }
+  else { orden = orden.filter(n => n !== nombre); }
+  dd.orden = orden;
+  procesosSaveProyecto({ diseno_data: dd }).then(() => renderProcesosStepContent());
+}
+
+function procesosStep2ReorderHoja(nombre, dir) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  const orden = (dd.orden || []).slice();
+  const idx = orden.indexOf(nombre);
+  if (idx < 0) return;
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= orden.length) return;
+  const tmp = orden[idx]; orden[idx] = orden[newIdx]; orden[newIdx] = tmp;
+  dd.orden = orden;
   procesosSaveProyecto({ diseno_data: dd }).then(() => renderProcesosStepContent());
 }
 
 function procesosStep2AbrirHoja(nombre) {
   procesosStep2State.hojaAbierta = nombre;
+  procesosStep2PropagarCadena(nombre);
   procesosStep2RenderHojaPanel();
 }
 
@@ -4832,19 +4962,26 @@ function procesosStep2RenderHojaPanel() {
   const p = procesosCurrentProyecto;
   const h = (p.diseno_data?.hojas?.[nombre]) || { valores: {}, chat: [] };
   const safe = nombre.replace(/'/g,"\\'");
+  const mapeosHoja = (p.diseno_data?.mapeos?.[nombre]) || [];
+  const mapaPorCelda = {};
+  mapeosHoja.forEach(m => { mapaPorCelda[m.celda] = m; });
 
   const inputs = model.cells.filter(c => !c.isFormula);
   const outputs = model.cells.filter(c => c.isFormula);
 
   const rowHtml = c => {
     const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    const mapeo = !c.isFormula ? mapaPorCelda[c.ref] : null;
+    const origenTxt = mapeo ? (mapeo.origen === 'paso1' ? `desde Paso 1: ${mapeo.campo}` : `desde ${mapeo.hoja}`) : '';
     return `
     <div class="result-field">
       <span class="result-key">${esc(c.label)}</span>
-      ${c.isFormula
-        ? `<span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center">${val!=null?esc(String(val)):''}${c.unidad?' '+esc(c.unidad):''}</span>`
+      ${(c.isFormula || mapeo)
+        ? `<span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center" title="${esc(origenTxt)}">${val!=null?esc(String(val)):''}${c.unidad?' '+esc(c.unidad):''}</span>`
         : `<input class="result-val" value="${val!=null?esc(String(val)):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
-      ${(c.unidad && !c.isFormula) ? `<span style="font-size:12px;color:var(--text2);align-self:center;margin-left:6px">${esc(c.unidad)}</span>` : ''}
+      ${mapeo
+        ? `<span style="font-size:11px;color:var(--text2);align-self:center;margin-left:6px">🔗 ${esc(origenTxt)}</span>`
+        : ((c.unidad && !c.isFormula) ? `<span style="font-size:12px;color:var(--text2);align-self:center;margin-left:6px">${esc(c.unidad)}</span>` : '')}
     </div>`;
   };
 
@@ -4933,6 +5070,7 @@ async function procesosStep2ChatSend(nombre) {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const model = procesosStep2State.hojaModels[nombre];
+    procesosStep2PropagarCadena(nombre);
     const hf = procesosStep2GetHF(nombre);
     const estadoActual = model.cells.map(c => {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
@@ -4983,6 +5121,7 @@ async function procesosStep2ChatSend(nombre) {
 }
 
 async function procesosStep2GuardarHoja(nombre) {
+  procesosStep2PropagarCadena(nombre);
   const model = procesosStep2State.hojaModels[nombre];
   const hf = procesosStep2GetHF(nombre);
   const valoresConEtiqueta = {};
@@ -4997,18 +5136,53 @@ async function procesosStep2GuardarHoja(nombre) {
   h.confirmada = true;
   h.valoresConEtiqueta = valoresConEtiqueta;
   dd.hojas[nombre] = h;
+
+  const orden = dd.orden || [];
+  if (orden.length && nombre === orden[orden.length - 1]) {
+    dd.cumplimiento = procesosStep2ChequearCumplimiento(model, hf);
+  }
+
   await procesosSaveProyecto({ diseno_data: dd });
   renderProcesosStepContent();
 }
 
+// Compara el resultado final del tren de tratamiento contra los límites normativos
+// definidos en el Paso 1 para cada parámetro. Matchea por nombre (el del campo del
+// Paso 1 tiene que aparecer en la etiqueta de alguna celda de resultado de la
+// última hoja) — es una heurística simple, revisable a ojo en la tabla resultante.
+function procesosStep2ChequearCumplimiento(model, hf) {
+  const p = procesosCurrentProyecto;
+  const campos = p.info_cliente?.campos || {};
+  const resultados = [];
+  Object.entries(campos).forEach(([nombreCampo, v]) => {
+    if (!v || typeof v !== 'object' || v.limite_normativo == null || v.limite_normativo === '') return;
+    const limite = Number(v.limite_normativo);
+    if (isNaN(limite)) return;
+    const nombreNorm = nombreCampo.trim().toLowerCase();
+    const cellMatch = model.cells.find(c => c.isFormula && c.label.trim().toLowerCase().includes(nombreNorm));
+    if (!cellMatch) return;
+    const valorFinal = hf.getCellValue({ sheet: 0, row: cellMatch.row, col: cellMatch.col });
+    if (typeof valorFinal !== 'number') return;
+    resultados.push({ parametro: nombreCampo, unidad: v.unidad || '', limite, valor_final: valorFinal, cumple: valorFinal <= limite });
+  });
+  return resultados;
+}
+
 function procesosResumenDiseno(p) {
-  const hojas = Object.entries((p.diseno_data || {}).hojas || {}).filter(([, h]) => h.seleccionada && h.confirmada);
+  const dd = p.diseno_data || {};
+  const orden = dd.orden && dd.orden.length ? dd.orden : Object.keys(dd.hojas || {});
+  const hojas = orden.filter(n => dd.hojas?.[n]?.seleccionada && dd.hojas[n]?.confirmada);
   if (!hojas.length) return '';
-  return hojas.map(([nombre, h]) => {
+  let ctx = hojas.map(nombre => {
+    const h = dd.hojas[nombre];
     const entries = Object.entries(h.valoresConEtiqueta || {});
     const vals = entries.map(([label, v]) => `  - ${label}: ${v}`).join('\n');
     return `Unidad/etapa "${nombre}":\n${vals || '  (sin valores)'}`;
   }).join('\n\n');
+  if (dd.cumplimiento && dd.cumplimiento.length) {
+    ctx += '\n\nCumplimiento vs. límites de vuelco:\n' + dd.cumplimiento.map(r => `  - ${r.parametro}: ${r.valor_final}${r.unidad?' '+r.unidad:''} (límite ${r.limite}${r.unidad?' '+r.unidad:''}) — ${r.cumple?'cumple':'NO cumple'}`).join('\n');
+  }
+  return ctx;
 }
 
 // ── Pasos 2-4: diseño, etapas y equipos, propuesta (patrón genérico) ──
@@ -5038,7 +5212,7 @@ function procesosResumenCampos(p) {
   });
   if (!entries.length) return '(sin analizar todavía)';
   return entries.map(([k,v]) => {
-    if (v && typeof v === 'object') return `${k}: ${v.valor}${v.unidad?' '+v.unidad:''}`;
+    if (v && typeof v === 'object') return `${k}: ${v.valor}${v.unidad?' '+v.unidad:''}${(v.limite_normativo!=null&&v.limite_normativo!=='')?' (límite normativo: '+v.limite_normativo+(v.unidad?' '+v.unidad:'')+')':''}`;
     return `${k}: ${v}`;
   }).join('\n');
 }
