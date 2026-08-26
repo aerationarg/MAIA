@@ -12,6 +12,7 @@
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.png?v=3" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hyperformula@2/dist/hyperformula.full.min.js"></script>
   <script src="msal-browser.min.js"></script>
   <style>
     :root {
@@ -1603,13 +1604,13 @@ function NP_FIELDS_KEY()  { return 'np_fields_' + currentEmpresa; }
 const API_KEY_KEY    = 'rend_api_key';
 
 const DEFAULT_PROCESOS_IA_FIELDS = [
-  { name: 'Ubicación',            desc: 'Ubicación geográfica del proyecto/cliente (provincia, localidad, país si aplica).' },
-  { name: 'Tipo de vuelco',       desc: 'Tipo de vuelco o descarga mencionado (cloacal, industrial, pluvial, etc.), si aplica.' },
-  { name: 'Normativa aplicable',  desc: 'Normativa ambiental/de vertido aplicable según la ubicación y el tipo de vuelco. Si no está explícita en los documentos, inferila con tu conocimiento según la jurisdicción y el tipo de vuelco detectados.' },
-  { name: 'Tecnología solicitada',desc: 'Tecnología particular que pide o prefiere el cliente, si menciona alguna.' },
-  { name: 'Alcance del proyecto', desc: 'Qué se pide específicamente: equipos, servicios, obra, etc.' },
-  { name: 'Contexto y necesidad', desc: 'Por qué necesita el proyecto, problema a resolver.' },
-  { name: 'Restricciones',        desc: 'Condicionantes, plazos, presupuesto u otras restricciones mencionadas.' },
+  { name: 'Ubicación',            desc: 'Ubicación geográfica del proyecto/cliente (provincia, localidad, país si aplica).', tipo: 'texto' },
+  { name: 'Tipo de vuelco',       desc: 'Tipo de vuelco o descarga mencionado (cloacal, industrial, pluvial, etc.), si aplica.', tipo: 'texto' },
+  { name: 'Normativa aplicable',  desc: 'Normativa ambiental/de vertido aplicable según la ubicación y el tipo de vuelco. Si no está explícita en los documentos, inferila con tu conocimiento según la jurisdicción y el tipo de vuelco detectados.', tipo: 'texto' },
+  { name: 'Tecnología solicitada',desc: 'Tecnología particular que pide o prefiere el cliente, si menciona alguna.', tipo: 'texto' },
+  { name: 'Alcance del proyecto', desc: 'Qué se pide específicamente: equipos, servicios, obra, etc.', tipo: 'texto' },
+  { name: 'Contexto y necesidad', desc: 'Por qué necesita el proyecto, problema a resolver.', tipo: 'texto' },
+  { name: 'Restricciones',        desc: 'Condicionantes, plazos, presupuesto u otras restricciones mencionadas.', tipo: 'texto' },
 ];
 function PROCESOS_IA_KEY() { return 'procesos_ia_fields_' + currentEmpresa; }
 function getProcesosIAFields()  { return JSON.parse(localStorage.getItem(PROCESOS_IA_KEY()) || 'null') || DEFAULT_PROCESOS_IA_FIELDS; }
@@ -4075,6 +4076,10 @@ function renderProcesosIAFields() {
           <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},1)" ${i===fields.length-1?'disabled':''}>&#9660;</button>
         </div>
         <input value="${esc(f.name)}" placeholder="Nombre del campo" oninput="procesosIAUpdateField(${i},'name',this.value)" />
+        <select class="type-select" onchange="procesosIAUpdateField(${i},'tipo',this.value)">
+          <option value="texto" ${f.tipo!=='parametro'?'selected':''}>Texto</option>
+          <option value="parametro" ${f.tipo==='parametro'?'selected':''}>Parámetro (valor + unidad)</option>
+        </select>
         <button class="remove-btn" onclick="procesosIARemoveField(${i})">&#x2715;</button>
       </div>
       <input class="desc-input" value="${esc(f.desc)}" placeholder="Descripción / instrucción para la IA" oninput="procesosIAUpdateField(${i},'desc',this.value)" />
@@ -4082,7 +4087,7 @@ function renderProcesosIAFields() {
 }
 function procesosIAUpdateField(i, key, val) { const f=getProcesosIAFields(); f[i][key]=val; saveProcesosIAFields(f); }
 function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1); saveProcesosIAFields(f); renderProcesosIAFields(); }
-function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:''}); saveProcesosIAFields(f); renderProcesosIAFields(); }
+function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f); renderProcesosIAFields(); }
 
 // ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
 const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', otro:'Otro' };
@@ -4380,7 +4385,8 @@ function renderProcesosStepContent() {
   const p = procesosCurrentProyecto;
   const step = p._viewingStep || p.paso_actual;
   const el = document.getElementById('procesos-step-content');
-  el.innerHTML = step === 1 ? procesosStep1Html(p) : procesosStepGenericHtml(p, step);
+  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : procesosStepGenericHtml(p, step);
+  if (step === 2) procesosStep2AfterRender();
 }
 
 // ── Paso 1: analizar cliente ───────────────────────────
@@ -4433,11 +4439,25 @@ function procesosStep1Html(p) {
     ${tieneAnalisis ? `
       <div class="gap"></div>
       <label>Información extraída (editable)</label>
-      ${iaFields.map(f => `
+      ${iaFields.map(f => {
+        const fKey = f.name.replace(/'/g,"\\'");
+        if (f.tipo === 'parametro') {
+          const v = (campos[f.name] && typeof campos[f.name]==='object') ? campos[f.name] : {valor: campos[f.name]!=null?campos[f.name]:'', unidad:''};
+          return `
         <div class="result-field">
           <span class="result-key">${esc(f.name)}</span>
-          <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${f.name.replace(/'/g,"\\'")}',this.value)" />
-        </div>`).join('')}
+          <div style="display:flex;gap:6px;flex:1">
+            <input class="result-val" style="flex:2" placeholder="Valor" value="${esc(v.valor!=null?String(v.valor):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','valor',this.value)" />
+            <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoClienteParam('${fKey}','unidad',this.value)" />
+          </div>
+        </div>`;
+        }
+        return `
+        <div class="result-field">
+          <span class="result-key">${esc(f.name)}</span>
+          <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${fKey}',this.value)" />
+        </div>`;
+      }).join('')}
       <div class="gap"></div>
       <div class="card-label">Proyectos anteriores parecidos (detectados por IA)</div>
       <div id="procesos-step1-similares-status"></div>
@@ -4457,6 +4477,16 @@ function procesosUpdateCampoCliente(fieldName, val) {
   const p = procesosCurrentProyecto;
   const info = Object.assign({}, p.info_cliente);
   info.campos = Object.assign({}, info.campos, { [fieldName]: val });
+  procesosSaveProyectoDebounced({ info_cliente: info });
+}
+
+function procesosUpdateCampoClienteParam(fieldName, subkey, val) {
+  const p = procesosCurrentProyecto;
+  const info = Object.assign({}, p.info_cliente);
+  const campos = Object.assign({}, info.campos);
+  const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:''};
+  campos[fieldName] = Object.assign({}, current, { [subkey]: val });
+  info.campos = campos;
   procesosSaveProyectoDebounced({ info_cliente: info });
 }
 
@@ -4526,8 +4556,8 @@ async function procesosStep1Analizar() {
     }
 
     showMsg(statusId,'loading','Analizando con IA...');
-    const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n');
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible (por ejemplo la normativa aplicable a partir de la ubicación y el tipo de vuelco), hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null.\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
+    const fieldPrompt = iaFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''} [tipo: ${f.tipo==='parametro'?'parámetro numérico':'texto libre'}]`).join('\n');
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos) y extraé los siguientes datos. Respondé SOLO con JSON válido, sin backticks ni texto extra. Claves: ${iaFields.map(f=>`"${f.name}"`).join(', ')}. Para los campos marcados [tipo: texto libre] el valor debe ser un string. Para los campos marcados [tipo: parámetro numérico] el valor debe ser un objeto {"valor": <número>, "unidad": "<unidad tal como aparece o se infiere, ej. 'm3/h', 'mg/L', 'ha'>"} — si no encontrás la unidad explícita, inferila si es razonable, si no dejala en null. Si no encontrás un valor explícito pero podés inferirlo razonablemente con la información disponible (por ejemplo la normativa aplicable a partir de la ubicación y el tipo de vuelco), hacelo y decilo con tu mejor criterio; si no podés inferirlo, usá null (o {"valor":null,"unidad":null} para los parámetros).\n\nCampos a extraer:\n${fieldPrompt}\n\nRespondé solo con el JSON.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
@@ -4595,6 +4625,387 @@ async function procesosAvanzarPaso(step) {
   renderProcesosStepContent();
 }
 
+// ── Paso 2: diseñar el proyecto con la planilla de cálculo (Excel con una hoja
+// por unidad/etapa). Detección automática de celdas: cualquier celda con fórmula
+// es un resultado (solo lectura); cualquier celda numérica sin fórmula es un dato
+// editable. Las fórmulas se recalculan en el navegador con HyperFormula, y el chat
+// de cada hoja puede fijar valores directamente o pedir una búsqueda de objetivo
+// (variar un dato hasta que un resultado dé un valor buscado, útil para fórmulas
+// que en la práctica hay que "usar al revés").
+let procesosStep2State = { proyectoId:null, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null };
+
+function procesosStep2ResetIfNeeded(p) {
+  if (procesosStep2State.proyectoId !== p.id) {
+    procesosStep2State = { proyectoId:p.id, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null };
+  }
+}
+
+function procesosStep2Html(p) {
+  procesosStep2ResetIfNeeded(p);
+  const st = procesosStep2State;
+  const dd = p.diseno_data || {};
+  const hojasGuardadas = dd.hojas || {};
+
+  if (!st.workbook) {
+    return `
+      <div class="card-label">Paso 2 — Diseñar el proyecto</div>
+      <div id="procesos-step2-status"></div>
+      <p class="hint" style="margin:6px 0 10px">Se usa la planilla de diseño vinculada en Cfg Procesos IA (documento de referencia con categoría "Planilla de cálculo"), donde cada hoja es el cálculo de una unidad/etapa de tratamiento.</p>
+      <button class="btn btn-primary" onclick="procesosStep2CargarPlanilla()">✦ Leer planilla y sugerir unidades/etapas</button>
+    `;
+  }
+
+  const nombresHojas = st.workbook.SheetNames;
+  const algunaSeleccionada = nombresHojas.some(n => hojasGuardadas[n]?.seleccionada);
+  const todasConfirmadas = algunaSeleccionada && nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada).every(n => hojasGuardadas[n]?.confirmada);
+
+  return `
+    <div class="card-label">Paso 2 — Diseñar el proyecto</div>
+    <div id="procesos-step2-status"></div>
+    <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto (la IA ya sugirió una selección inicial — ajustala si hace falta).</p>
+    ${nombresHojas.map(nombre => {
+      const h = hojasGuardadas[nombre] || {};
+      const safe = nombre.replace(/'/g,"\\'");
+      return `
+      <div class="field-row" style="padding:8px 0">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
+          <input type="checkbox" ${h.seleccionada?'checked':''} onchange="procesosStep2ToggleHoja('${safe}',this.checked)" />
+          <span><b>${esc(nombre)}</b>${h.motivo?' — '+esc(h.motivo):''}${h.confirmada?' <span style="color:var(--green)">✓ definida</span>':''}</span>
+        </label>
+        ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2AbrirHoja('${safe}')">${h.confirmada?'Editar':'Definir'} valores →</button>` : ''}
+      </div>`;
+    }).join('')}
+    <div id="procesos-step2-hoja-panel"></div>
+    <div class="gap"></div>
+    <button class="btn btn-primary" ${!todasConfirmadas?'disabled':''} onclick="procesosAvanzarPaso(3)">Continuar al Paso 3 →</button>
+    ${(algunaSeleccionada && !todasConfirmadas) ? '<p class="hint" style="margin-top:6px">Definí y guardá los valores de cada unidad seleccionada para continuar.</p>' : ''}
+  `;
+}
+
+function procesosStep2AfterRender() {
+  const st = procesosStep2State;
+  if (st.loading) showMsg('procesos-step2-status','loading', st.loadingMsg || 'Cargando...');
+  else if (st.error) showMsg('procesos-step2-status','error', '✕ '+st.error);
+  if (st.hojaAbierta) procesosStep2RenderHojaPanel();
+}
+
+// Detecta celdas de entrada (numéricas sin fórmula) y de resultado (con fórmula),
+// con su etiqueta (celda de texto más cercana a la izquierda en la misma fila) y
+// una unidad opcional (celda de texto corta inmediatamente a la derecha).
+function procesosStep2BuildModel(ws) {
+  const model = { grid: [], cells: [] };
+  const ref = ws['!ref'];
+  if (!ref) return model;
+  const range = XLSX.utils.decode_range(ref);
+  const grid = [];
+  const cells = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const row = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[addr];
+      let content = '';
+      if (cell) content = (cell.f != null) ? ('=' + cell.f) : (cell.v !== undefined ? cell.v : '');
+      row.push(content);
+      if (cell) {
+        const isFormula = cell.f != null;
+        const isNumeric = typeof cell.v === 'number';
+        if (isFormula || isNumeric) {
+          let label = '';
+          for (let lc = c - 1; lc >= range.s.c; lc--) {
+            const lcell = ws[XLSX.utils.encode_cell({ r, c: lc })];
+            if (lcell && typeof lcell.v === 'string' && lcell.v.trim()) { label = lcell.v.trim(); break; }
+          }
+          let unidad = '';
+          const rcell = ws[XLSX.utils.encode_cell({ r, c: c + 1 })];
+          if (rcell && typeof rcell.v === 'string' && !rcell.f && rcell.v.trim() && rcell.v.trim().length <= 15) unidad = rcell.v.trim();
+          cells.push({ ref: addr, row: r - range.s.r, col: c - range.s.c, label: label || addr, unidad, isFormula });
+        }
+      }
+    }
+    grid.push(row);
+  }
+  model.grid = grid; model.cells = cells;
+  return model;
+}
+
+function procesosStep2GetHF(nombreHoja) {
+  const st = procesosStep2State;
+  if (st.hfInstances[nombreHoja]) return st.hfInstances[nombreHoja];
+  const model = st.hojaModels[nombreHoja] || (st.hojaModels[nombreHoja] = procesosStep2BuildModel(st.workbook.Sheets[nombreHoja]));
+  const hf = HyperFormula.buildFromArray(model.grid, { licenseKey: 'gpl-v3' });
+  st.hfInstances[nombreHoja] = hf;
+  const p = procesosCurrentProyecto;
+  const guardado = (p.diseno_data?.hojas?.[nombreHoja]?.valores) || {};
+  Object.entries(guardado).forEach(([cellRef, val]) => {
+    const cell = model.cells.find(c => c.ref === cellRef);
+    if (cell) hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
+  });
+  return hf;
+}
+
+async function procesosStep2CargarPlanilla() {
+  const p = procesosCurrentProyecto;
+  const st = procesosStep2State;
+  st.loading = true; st.error = null; st.loadingMsg = 'Buscando la planilla de diseño...';
+  renderProcesosStepContent();
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['planilla_calculo']);
+    if (!docs.length) throw new Error('No hay ninguna planilla de diseño vinculada en Cfg Procesos IA (documento con categoría "Planilla de cálculo").');
+    const doc = docs[0];
+    st.loadingMsg = `Descargando ${doc.nombre}...`; renderProcesosStepContent();
+    const token = await getMsToken();
+    const dlResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}/content`, { headers: { Authorization: 'Bearer ' + token } });
+    if (!dlResp.ok) throw new Error('No se pudo descargar la planilla desde SharePoint.');
+    const buf = await dlResp.arrayBuffer();
+    const workbook = XLSX.read(buf, { type: 'array', cellFormula: true });
+    st.workbook = workbook;
+
+    const dd = Object.assign({}, p.diseno_data);
+    dd.hojas = Object.assign({}, dd.hojas);
+    const faltaSugerencia = workbook.SheetNames.some(n => !dd.hojas[n]);
+    if (faltaSugerencia) {
+      st.loadingMsg = 'Analizando con IA qué unidades/etapas aplican...'; renderProcesosStepContent();
+      const apiKey = getApiKey();
+      if (apiKey) {
+        try {
+          const firmas = workbook.SheetNames.map(nombre => {
+            const model = procesosStep2BuildModel(workbook.Sheets[nombre]);
+            st.hojaModels[nombre] = model;
+            const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
+            return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
+          }).join('\n');
+          const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\nDevolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}]}. Incluí todas las hojas de la lista, cada una con incluir true o false.`;
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+            body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+            const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+            (parsed.hojas || []).forEach(h => {
+              if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false };
+            });
+          }
+        } catch (e) { console.warn('No se pudo sugerir hojas automáticamente:', e.message); }
+      }
+      workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }; });
+      await procesosSaveProyecto({ diseno_data: dd });
+    }
+
+    st.loading = false; st.loadingMsg = '';
+    renderProcesosStepContent();
+  } catch (e) {
+    st.loading = false; st.error = e.message;
+    renderProcesosStepContent();
+  }
+}
+
+function procesosStep2ToggleHoja(nombre, checked) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({ seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  h.seleccionada = checked;
+  dd.hojas[nombre] = h;
+  procesosSaveProyecto({ diseno_data: dd }).then(() => renderProcesosStepContent());
+}
+
+function procesosStep2AbrirHoja(nombre) {
+  procesosStep2State.hojaAbierta = nombre;
+  procesosStep2RenderHojaPanel();
+}
+
+function procesosStep2RenderHojaPanel() {
+  const el = document.getElementById('procesos-step2-hoja-panel');
+  if (!el) return;
+  const nombre = procesosStep2State.hojaAbierta;
+  if (!nombre) { el.innerHTML = ''; return; }
+  const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+  const hf = procesosStep2GetHF(nombre);
+  const p = procesosCurrentProyecto;
+  const h = (p.diseno_data?.hojas?.[nombre]) || { valores: {}, chat: [] };
+  const safe = nombre.replace(/'/g,"\\'");
+
+  const inputs = model.cells.filter(c => !c.isFormula);
+  const outputs = model.cells.filter(c => c.isFormula);
+
+  const rowHtml = c => {
+    const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    return `
+    <div class="result-field">
+      <span class="result-key">${esc(c.label)}</span>
+      ${c.isFormula
+        ? `<span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center">${val!=null?esc(String(val)):''}${c.unidad?' '+esc(c.unidad):''}</span>`
+        : `<input class="result-val" value="${val!=null?esc(String(val)):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
+      ${(c.unidad && !c.isFormula) ? `<span style="font-size:12px;color:var(--text2);align-self:center;margin-left:6px">${esc(c.unidad)}</span>` : ''}
+    </div>`;
+  };
+
+  el.innerHTML = `
+    <div class="card" style="margin-top:10px">
+      <div class="card-label">${esc(nombre)}</div>
+      <label>Datos / parámetros de entrada</label>
+      ${inputs.length ? inputs.map(rowHtml).join('') : '<p class="hint">No se detectaron celdas de entrada en esta hoja.</p>'}
+      <div class="gap"></div>
+      <label>Resultados calculados</label>
+      ${outputs.length ? outputs.map(rowHtml).join('') : '<p class="hint">No se detectaron celdas de fórmula en esta hoja.</p>'}
+      <div class="gap"></div>
+      <label>Chat de diseño de esta unidad</label>
+      <p class="hint" style="margin-bottom:6px">Pedile que pruebe valores, o que itere hasta lograr un resultado (ej: "necesito que el volumen dé al menos 200 m3, ajustá el largo").</p>
+      <div id="procesos-step2-chat-box" style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto;margin-bottom:8px">
+        ${(h.chat||[]).map(m => `<div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:85%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="procesos-step2-chat-input" placeholder="Escribí acá..." style="flex:1" onkeydown="if(event.key==='Enter'){procesosStep2ChatSend('${safe}')}" />
+        <button class="btn btn-primary btn-sm" onclick="procesosStep2ChatSend('${safe}')">Enviar</button>
+      </div>
+      <div id="procesos-step2-chat-status"></div>
+      <div class="gap"></div>
+      <button class="btn btn-green" onclick="procesosStep2GuardarHoja('${safe}')">✓ Guardar valores de esta unidad</button>
+    </div>
+  `;
+}
+
+function procesosStep2SetValor(nombre, cellRef, val) {
+  const model = procesosStep2State.hojaModels[nombre];
+  const cell = model.cells.find(c => c.ref === cellRef);
+  if (!cell) return;
+  const numVal = val === '' ? '' : (isNaN(Number(val)) ? val : Number(val));
+  const hf = procesosStep2GetHF(nombre);
+  hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[numVal]]);
+
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  h.valores = Object.assign({}, h.valores, { [cellRef]: numVal });
+  h.confirmada = false;
+  dd.hojas[nombre] = h;
+  procesosSaveProyectoDebounced({ diseno_data: dd });
+  procesosStep2RenderHojaPanel();
+}
+
+// Búsqueda numérica (bisección) del valor de una celda editable que hace que una
+// celda de fórmula llegue a un valor objetivo. Asume una relación monótona entre
+// ambas dentro del rango [min,max], que es el caso típico en estas planillas.
+function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) {
+  let lo = min != null ? min : 0.0001;
+  let hi = max != null ? max : 1e6;
+  const evalAt = x => { hf.setCellContents({ sheet: 0, row: varyCell.row, col: varyCell.col }, [[x]]); return hf.getCellValue({ sheet: 0, row: targetCell.row, col: targetCell.col }); };
+  let fLo = evalAt(lo), fHi = evalAt(hi), tries = 0;
+  while (typeof fLo === 'number' && typeof fHi === 'number' && (fLo - targetValue) * (fHi - targetValue) > 0 && tries < 20) {
+    hi *= 2; fHi = evalAt(hi); tries++;
+  }
+  let mid = (lo + hi) / 2;
+  for (let i = 0; i < 60; i++) {
+    mid = (lo + hi) / 2;
+    const fMid = evalAt(mid);
+    if (typeof fMid !== 'number') break;
+    if (Math.abs(fMid - targetValue) < Math.abs(targetValue) * 1e-4 + 1e-6) break;
+    if ((fMid - targetValue) * (fLo - targetValue) <= 0) { hi = mid; fHi = fMid; } else { lo = mid; fLo = fMid; }
+  }
+  evalAt(mid);
+}
+
+async function procesosStep2ChatSend(nombre) {
+  const input = document.getElementById('procesos-step2-chat-input');
+  const msg = (input.value || '').trim();
+  if (!msg) return;
+  const statusId = 'procesos-step2-chat-status';
+  const p = procesosCurrentProyecto;
+  const ddPrev = Object.assign({}, p.diseno_data);
+  ddPrev.hojas = Object.assign({}, ddPrev.hojas);
+  const hPrev = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, ddPrev.hojas[nombre]);
+  hPrev.chat = (hPrev.chat || []).concat([{ role: 'user', content: msg }]);
+  ddPrev.hojas[nombre] = hPrev;
+  p.diseno_data = ddPrev;
+  input.value = '';
+  procesosStep2RenderHojaPanel();
+  showMsg(statusId, 'loading', 'Pensando...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const model = procesosStep2State.hojaModels[nombre];
+    const hf = procesosStep2GetHF(nombre);
+    const estadoActual = model.cells.map(c => {
+      const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+      const contenido = model.grid[c.row][c.col];
+      return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}`;
+    }).join('\n');
+    const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}]}\n\nUsá "set" para fijar directamente el valor de una celda editable (nunca una celda de fórmula). Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado (celda_objetivo debe ser una celda de fórmula) variando una celda editable (variar) dentro de un rango [min,max] razonable que vos definas según el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+
+    const cellByRef = r => model.cells.find(c => c.ref === r);
+    (parsed.acciones || []).forEach(a => {
+      try {
+        if (a.tipo === 'set') {
+          const c = cellByRef(a.celda);
+          if (c && !c.isFormula) hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(a.valor)]]);
+        } else if (a.tipo === 'buscar_objetivo') {
+          const cv = cellByRef(a.variar), co = cellByRef(a.celda_objetivo);
+          if (cv && co && !cv.isFormula && co.isFormula) {
+            procesosStep2GoalSeek(hf, cv, co, Number(a.valor_objetivo), a.min != null ? Number(a.min) : undefined, a.max != null ? Number(a.max) : undefined);
+          }
+        }
+      } catch (_e) { /* acción individual inválida, seguir con las demás */ }
+    });
+
+    const nuevosValores = Object.assign({}, hPrev.valores);
+    model.cells.filter(c => !c.isFormula).forEach(c => { nuevosValores[c.ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
+
+    const dd = Object.assign({}, procesosCurrentProyecto.diseno_data);
+    dd.hojas = Object.assign({}, dd.hojas);
+    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, confirmada: false });
+    h.chat = hPrev.chat.concat([{ role: 'assistant', content: parsed.reply || '(sin respuesta)' }]);
+    dd.hojas[nombre] = h;
+    await procesosSaveProyecto({ diseno_data: dd });
+
+    document.getElementById(statusId) && (document.getElementById(statusId).innerHTML = '');
+    procesosStep2RenderHojaPanel();
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+async function procesosStep2GuardarHoja(nombre) {
+  const model = procesosStep2State.hojaModels[nombre];
+  const hf = procesosStep2GetHF(nombre);
+  const valoresConEtiqueta = {};
+  model.cells.forEach(c => {
+    const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    valoresConEtiqueta[c.label + (c.unidad ? ' (' + c.unidad + ')' : '')] = v;
+  });
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({ seleccionada: true, valores: {}, chat: [] }, dd.hojas[nombre]);
+  h.confirmada = true;
+  h.valoresConEtiqueta = valoresConEtiqueta;
+  dd.hojas[nombre] = h;
+  await procesosSaveProyecto({ diseno_data: dd });
+  renderProcesosStepContent();
+}
+
+function procesosResumenDiseno(p) {
+  const hojas = Object.entries((p.diseno_data || {}).hojas || {}).filter(([, h]) => h.seleccionada && h.confirmada);
+  if (!hojas.length) return '';
+  return hojas.map(([nombre, h]) => {
+    const entries = Object.entries(h.valoresConEtiqueta || {});
+    const vals = entries.map(([label, v]) => `  - ${label}: ${v}`).join('\n');
+    return `Unidad/etapa "${nombre}":\n${vals || '  (sin valores)'}`;
+  }).join('\n\n');
+}
+
 // ── Pasos 2-4: diseño, etapas y equipos, propuesta (patrón genérico) ──
 function procesosStepGenericHtml(p, step) {
   const field = PROCESOS_STEP_FIELD[step];
@@ -4616,9 +5027,15 @@ function procesosStepGenericHtml(p, step) {
 
 function procesosResumenCampos(p) {
   const campos = p.info_cliente?.campos || {};
-  const entries = Object.entries(campos).filter(([,v]) => v != null && v !== '');
+  const entries = Object.entries(campos).filter(([,v]) => {
+    if (v && typeof v === 'object') return v.valor != null && v.valor !== '';
+    return v != null && v !== '';
+  });
   if (!entries.length) return '(sin analizar todavía)';
-  return entries.map(([k,v]) => `${k}: ${v}`).join('\n');
+  return entries.map(([k,v]) => {
+    if (v && typeof v === 'object') return `${k}: ${v.valor}${v.unidad?' '+v.unidad:''}`;
+    return `${k}: ${v}`;
+  }).join('\n');
 }
 
 function procesosBuildContexto(hastaStep) {
@@ -4627,7 +5044,7 @@ function procesosBuildContexto(hastaStep) {
   if (p.info_cliente?.campos) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
   const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
-  if (hastaStep > 2 && p.diseno) ctx += `Diseño del proyecto definido:\n${p.diseno}\n\n`;
+  if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
   if (hastaStep > 3 && p.etapas_equipos) ctx += `Etapas y equipos definidos:\n${p.etapas_equipos}\n\n`;
   return ctx;
 }
