@@ -4330,7 +4330,7 @@ async function procesosAbrirProyecto(id) {
   if (!res.ok || !rows.length) { alert('No se pudo abrir el proyecto.'); return; }
   procesosCurrentProyecto = rows[0];
   procesosStep1Files = [];
-  procesosStep1SpFolder = null;
+  procesosStep1SpFolder = rows[0].info_cliente?.carpeta_cliente || null;
   document.getElementById('procesos-list-view').style.display = 'none';
   document.getElementById('procesos-proyecto-view').style.display = '';
   renderProcesosStepsNav();
@@ -4387,6 +4387,36 @@ function renderProcesosStepContent() {
   const el = document.getElementById('procesos-step-content');
   el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : procesosStepGenericHtml(p, step);
   if (step === 2) procesosStep2AfterRender();
+}
+
+// Descarga hasta 10 archivos de una carpeta de SharePoint (convirtiendo a PDF si
+// hace falta) y los arma como content blocks para Claude. La usan tanto el
+// análisis del Paso 1 como el chat del proyecto, cuando necesita reconsultarlos.
+async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) {
+  const blocks = [];
+  const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${folder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
+  if (!childrenResp.ok) return blocks;
+  const children = (await childrenResp.json()).value || [];
+  const usable = children.filter(f => f.file).slice(0, 10);
+  for (const f of usable) {
+    const isPdf = /\.pdf$/i.test(f.name);
+    const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
+    const needsConvert = !isPdf && !isImg;
+    if (onFile) onFile(f.name);
+    const dlUrl = needsConvert
+      ? `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content?format=pdf`
+      : `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content`;
+    const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+    if (!dlResp.ok) continue;
+    const buf = await dlResp.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+    if (needsConvert || isPdf) blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
+    else { const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg'; blocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}}); }
+  }
+  return blocks;
 }
 
 // ── Paso 1: analizar cliente ───────────────────────────
@@ -4513,33 +4543,8 @@ async function procesosStep1Analizar() {
     if (procesosStep1SpFolder) {
       showMsg(statusId,'loading','Leyendo carpeta de SharePoint...');
       token = token || await getMsToken();
-      const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${procesosStep1SpFolder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
-      if (childrenResp.ok) {
-        const children = (await childrenResp.json()).value || [];
-        const usable = children.filter(f => f.file).slice(0, 10);
-        for (const f of usable) {
-          const isPdf = /\.pdf$/i.test(f.name);
-          const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
-          const needsConvert = !isPdf && !isImg;
-          showMsg(statusId,'loading',`Descargando ${f.name}...`);
-          const dlUrl = needsConvert
-            ? `https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${f.id}/content?format=pdf`
-            : `https://graph.microsoft.com/v1.0/sites/${procesosStep1SpFolder.siteId}/drive/items/${f.id}/content`;
-          const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
-          if (!dlResp.ok) continue;
-          const buf = await dlResp.arrayBuffer();
-          let binary = '';
-          const bytes = new Uint8Array(buf);
-          for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const b64 = btoa(binary);
-          if (needsConvert || isPdf) {
-            contentBlocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
-          } else {
-            const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg';
-            contentBlocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}});
-          }
-        }
-      }
+      const blocks = await procesosDescargarCarpetaComoContentBlocks(procesosStep1SpFolder, token, name => showMsg(statusId,'loading',`Descargando ${name}...`));
+      contentBlocks.push(...blocks);
     }
     if (!contentBlocks.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
@@ -4567,7 +4572,7 @@ async function procesosStep1Analizar() {
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     const campos = JSON.parse(text.replace(/```json|```/g,'').trim());
 
-    await procesosSaveProyecto({ info_cliente: { campos } });
+    await procesosSaveProyecto({ info_cliente: { campos, carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
     showMsg(statusId,'success','✓ Análisis completo.');
     renderProcesosStepContent();
     procesosDetectarSimilares();
@@ -5134,18 +5139,37 @@ async function procesosChatSend() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(4);
+    const carpeta = p.info_cliente?.carpeta_cliente;
     const messages = [
-      { role:'user', content: `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.` },
+      { role:'user', content: `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}\nA partir de ahora respondeme como asistente de este proyecto, en español.${carpeta ? ' Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá de este resumen ya extraído del Paso 1), respondé ÚNICAMENTE con el JSON {"necesita_documentos":true} y nada más — no dupliques la pregunta ni dés una respuesta parcial. Si con este resumen alcanza, respondé normalmente en texto plano.' : ''}` },
       { role:'assistant', content: 'Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?' },
       ...p.chat_historial.map(m => ({ role: m.role, content: m.content }))
     ];
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
-    const data = await resp.json();
-    const respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+    let data = await resp.json();
+    let respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+
+    if (carpeta && /"necesita_documentos"\s*:\s*true/.test(respuesta)) {
+      showMsg(statusId,'loading','Revisando los documentos originales del cliente...');
+      const token = await getMsToken();
+      const contentBlocks = await procesosDescargarCarpetaComoContentBlocks(carpeta, token, name => showMsg(statusId,'loading',`Revisando ${name}...`));
+      const messages2 = messages.concat([
+        { role:'assistant', content: respuesta },
+        { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior en texto plano (sin JSON).'}] }
+      ]);
+      resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages: messages2 })
+      });
+      if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
+      data = await resp.json();
+      respuesta = data.content?.find(c=>c.type==='text')?.text || '';
+    }
+
     p.chat_historial.push({ role:'assistant', content: respuesta });
     await procesosSaveProyecto({ chat_historial: p.chat_historial });
     renderProcesosChat();
