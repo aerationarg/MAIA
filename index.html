@@ -4441,6 +4441,16 @@ function procesosStep1SelectFolder() {
   fbOpen('folder', 'procesos-step1-folder');
 }
 
+function procesosStep1QuitarCarpeta() {
+  procesosStep1SpFolder = null;
+  const p = procesosCurrentProyecto;
+  if (p.info_cliente?.carpeta_cliente) {
+    const info = Object.assign({}, p.info_cliente, { carpeta_cliente: null });
+    procesosSaveProyectoDebounced({ info_cliente: info });
+  }
+  renderProcesosStepContent();
+}
+
 // Extiende el selector de carpetas compartido para los targets propios de Procesos IA
 var _origFbSCProcesos = fbSelectCurrent;
 fbSelectCurrent = function() {
@@ -4526,6 +4536,7 @@ async function procesosAbrirProyecto(id) {
   procesosCurrentProyecto = rows[0];
   procesosStep1Files = [];
   procesosStep1SpFolder = rows[0].info_cliente?.carpeta_cliente || null;
+  procesosStep1PendingRetry = null;
   document.getElementById('procesos-list-view').style.display = 'none';
   document.getElementById('procesos-proyecto-view').style.display = '';
   renderProcesosStepsNav();
@@ -4680,11 +4691,13 @@ function procesosStep1Html(p) {
     <div class="sp-selected" style="margin:10px 0">
       <span style="font-size:13px">${procesosStep1SpFolder ? esc(procesosStep1SpFolder.label) : 'O elegí una carpeta de SharePoint con los archivos del cliente'}</span>
       <button class="sp-browse-btn" onclick="procesosStep1SelectFolder()">Seleccionar carpeta</button>
+      ${procesosStep1SpFolder ? `<button class="sp-browse-btn" onclick="procesosStep1QuitarCarpeta()">Quitar carpeta</button>` : ''}
     </div>
     <p class="hint" style="margin-bottom:10px">También se suman solos los documentos de "Normativa" e "Información general" cargados en Cfg Procesos IA.</p>
 
     <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ ${tieneAnalisis?'Volver a analizar':'Analizar'} con IA</button>
     <div id="procesos-step1-status"></div>
+    ${procesosStep1PendingRetry ? procesosStep1ChooserHtml() : ''}
 
     ${tieneAnalisis ? `
       <div class="gap"></div>
@@ -4784,13 +4797,17 @@ function procesosEliminarCorriente(idx) {
   procesosSaveProyecto({ info_cliente: info }).then(renderProcesosStepContent);
 }
 
+// Cuando un intento de análisis choca con el límite de 100 páginas de PDF (por
+// documento o total del pedido), se guarda acá el estado para que el usuario
+// elija a mano qué sacar, en vez de que MAIA decida solo.
+let procesosStep1PendingRetry = null; // { contentItems, prompt, sugeridos: Set<string> }
+
 async function procesosStep1Analizar() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-status';
+  procesosStep1PendingRetry = null;
   showMsg(statusId,'loading','Preparando archivos...');
   try {
-    const apiKey = getApiKey();
-    if (!apiKey) throw new Error('API key no disponible. Recargá la página.');
     const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
     if (!iaFields.length) throw new Error('Configurá al menos un campo en Cfg Procesos IA.');
 
@@ -4821,63 +4838,95 @@ async function procesosStep1Analizar() {
       contentItems.push(...await procesosDocsToContentBlocks(token, docsRef));
     }
 
-    showMsg(statusId,'loading','Analizando con IA...');
     const textoFields = iaFields.filter(f => f.tipo !== 'parametro');
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
-    // Si la API rechaza un documento puntual (ej. supera las 100 páginas y no lo
-    // detectamos antes), lo sacamos y reintentamos, en vez de perder todo el
-    // análisis — al final se avisa qué documento(s) quedaron afuera.
-    const omitidos = [];
-    let data;
-    for (let intento = 0; ; intento++) {
-      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentItems.map(x=>x.block), {type:'text', text:prompt}]}] })
-      });
-      if (resp.ok) { data = await resp.json(); break; }
+
+    await procesosStep1EjecutarAnalisis(contentItems, prompt);
+  } catch(e) {
+    showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+// Un solo intento de análisis. Si la API rechaza el pedido por el límite de 100
+// páginas de PDF (de un documento puntual, o del total sumado), no decide solo
+// qué sacar — muestra un selector para que el usuario elija y reintente.
+async function procesosStep1EjecutarAnalisis(contentItems, prompt) {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step1-status';
+  showMsg(statusId,'loading','Analizando con IA...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible. Recargá la página.');
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentItems.map(x=>x.block), {type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) {
       const e = await resp.json();
       const msg = e.error?.message || 'Error de la IA';
-      const m = intento < 20 && /messages\.\d+\.content\.(\d+)\./.exec(msg);
-      const idx = m ? Number(m[1]) : -1;
-      if (idx >= 0 && idx < contentItems.length) {
-        const culpable = contentItems.splice(idx, 1)[0];
-        omitidos.push(culpable.nombre);
-        console.warn(`Se omitió "${culpable.nombre}" — la IA lo rechazó: ${msg}`);
-        if (!contentItems.length) throw new Error('Ningún documento pudo ser analizado.');
-        showMsg(statusId,'loading',`"${culpable.nombre}" no se pudo analizar, reintentando sin él...`);
-        continue;
-      }
-      // Sin índice puntual: es el límite TOTAL de 100 páginas de PDF sumadas en
-      // todo el pedido (no de un documento en particular) — vamos sacando
-      // documentos PDF de a uno, del final, hasta que el conjunto entre.
-      if (/100 PDF pages/i.test(msg) && intento < 60) {
-        let ultimoIdx = -1;
-        for (let i = contentItems.length - 1; i >= 0; i--) { if (contentItems[i].block.type === 'document') { ultimoIdx = i; break; } }
-        if (ultimoIdx < 0) throw new Error(msg);
-        const culpable = contentItems.splice(ultimoIdx, 1)[0];
-        omitidos.push(culpable.nombre);
-        console.warn(`Se omitió "${culpable.nombre}" por el límite total de 100 páginas de PDF por pedido.`);
-        if (!contentItems.length) throw new Error('Ningún documento pudo ser analizado (el conjunto supera el límite de 100 páginas de PDF por pedido).');
-        showMsg(statusId,'loading',`Se superó el límite de páginas combinado, sacando "${culpable.nombre}" y reintentando...`);
-        continue;
+      if (/100 PDF pages/i.test(msg)) {
+        const m = /messages\.\d+\.content\.(\d+)\./.exec(msg);
+        const idx = m ? Number(m[1]) : -1;
+        const sugeridos = new Set();
+        if (idx >= 0 && idx < contentItems.length) sugeridos.add(contentItems[idx].nombre);
+        procesosStep1PendingRetry = { contentItems: contentItems.map(it => Object.assign({}, it, { excluido: sugeridos.has(it.nombre) })), prompt, sugeridos };
+        showMsg(statusId,'error','✕ '+msg);
+        renderProcesosStepContent();
+        return;
       }
       throw new Error(msg);
     }
+    const data = await resp.json();
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     const extraido = JSON.parse(text.replace(/```json|```/g,'').trim());
 
     await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
-    showMsg(statusId,'success', omitidos.length
-      ? `✓ Análisis completo. No se pudieron analizar: ${omitidos.join(', ')}.`
-      : '✓ Análisis completo.');
+    showMsg(statusId,'success','✓ Análisis completo.');
     renderProcesosStepContent();
     procesosDetectarSimilares();
   } catch(e) {
     showMsg(statusId,'error','✕ '+e.message);
   }
+}
+
+function procesosStep1ChooserHtml() {
+  const { contentItems, sugeridos } = procesosStep1PendingRetry;
+  return `
+    <div class="card" style="margin-top:8px;border-color:var(--red)">
+      <div class="card-label" style="color:var(--red)">Supera el límite de 100 páginas de PDF por pedido</div>
+      <p class="hint" style="margin-bottom:8px">${sugeridos.size ? 'Ese documento en particular supera las 100 páginas — desmarcalo, o desmarcá otros para hacer lugar.' : 'Ningún documento individual supera 100 páginas, pero la suma de todos sí — desmarcá alguno para que el conjunto entre.'} Después tocá "Reintentar".</p>
+      ${contentItems.map((item, i) => `
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:13px;color:${sugeridos.has(item.nombre)?'var(--red)':'var(--text)'}">
+          <input type="checkbox" ${item.excluido?'':'checked'} onchange="procesosStep1ChooserToggle(${i},!this.checked)" />
+          <span>${esc(item.nombre)}${item.block.type!=='document'?' (imagen)':''}</span>
+        </label>`).join('')}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-primary btn-sm" onclick="procesosStep1ReintentarConSeleccion()">Reintentar</button>
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep1CancelarChooser()">Cancelar</button>
+      </div>
+    </div>
+  `;
+}
+
+function procesosStep1ChooserToggle(i, excluido) {
+  if (procesosStep1PendingRetry) procesosStep1PendingRetry.contentItems[i].excluido = excluido;
+}
+
+async function procesosStep1ReintentarConSeleccion() {
+  if (!procesosStep1PendingRetry) return;
+  const { contentItems, prompt } = procesosStep1PendingRetry;
+  const seleccion = contentItems.filter(it => !it.excluido);
+  if (!seleccion.length) { alert('Tenés que dejar al menos un documento seleccionado.'); return; }
+  procesosStep1PendingRetry = null;
+  await procesosStep1EjecutarAnalisis(seleccion, prompt);
+}
+
+function procesosStep1CancelarChooser() {
+  procesosStep1PendingRetry = null;
+  renderProcesosStepContent();
 }
 
 async function procesosDetectarSimilares() {
