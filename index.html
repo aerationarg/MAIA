@@ -4339,8 +4339,17 @@ async function renderProcesosList() {
           <div class="file-name">${esc(p.nombre)}${p.cliente?' — '+esc(p.cliente):''}</div>
           <div class="file-size">Paso ${p.paso_actual}/4 — ${esc(PROCESOS_STEP_LABEL[p.paso_actual]||'')} · ${esc(p.creado_por_nombre||'')} · ${new Date(p.created_at).toLocaleDateString('es-AR')}</div>
         </div>
+        <button class="np-item-remove" onclick="event.stopPropagation();procesosEliminarProyecto('${p.id}')">&#x2715;</button>
       </div>`).join('');
   } catch(e) { el.innerHTML = '<div class="empty">Error al cargar proyectos.</div>'; }
+}
+
+async function procesosEliminarProyecto(id) {
+  if (!confirm('¿Eliminar este proyecto? Esta acción no se puede deshacer.')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (!res.ok) { alert('No se pudo eliminar el proyecto.'); return; }
+  renderProcesosList();
 }
 
 async function procesosNuevoProyecto() {
@@ -4430,27 +4439,35 @@ function renderProcesosStepContent() {
 // análisis del Paso 1 como el chat del proyecto, cuando necesita reconsultarlos.
 async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) {
   const blocks = [];
-  const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${folder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
-  if (!childrenResp.ok) return blocks;
-  const children = (await childrenResp.json()).value || [];
-  const usable = children.filter(f => f.file).slice(0, 10);
+  let children;
+  try {
+    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${folder.itemId}/children`, {headers:{Authorization:'Bearer '+token}});
+    if (!childrenResp.ok) return blocks;
+    children = (await childrenResp.json()).value || [];
+  } catch (e) { console.warn('No se pudo listar la carpeta de SharePoint:', e.message); return blocks; }
+
+  const usable = children.filter(f => f.file).slice(0, 50);
   for (const f of usable) {
-    const isPdf = /\.pdf$/i.test(f.name);
-    const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
-    const needsConvert = !isPdf && !isImg;
-    if (onFile) onFile(f.name);
-    const dlUrl = needsConvert
-      ? `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content?format=pdf`
-      : `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content`;
-    const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
-    if (!dlResp.ok) continue;
-    const buf = await dlResp.arrayBuffer();
-    let binary = '';
-    const bytes = new Uint8Array(buf);
-    for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    const b64 = btoa(binary);
-    if (needsConvert || isPdf) blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
-    else { const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg'; blocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}}); }
+    // Un archivo puntual puede fallar (muy pesado, formato no convertible a PDF,
+    // bloqueado, etc.) — se lo salta en vez de tirar abajo toda la carpeta.
+    try {
+      const isPdf = /\.pdf$/i.test(f.name);
+      const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
+      const needsConvert = !isPdf && !isImg;
+      if (onFile) onFile(f.name);
+      const dlUrl = needsConvert
+        ? `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content?format=pdf`
+        : `https://graph.microsoft.com/v1.0/sites/${folder.siteId}/drive/items/${f.id}/content`;
+      const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+      if (!dlResp.ok) continue;
+      const buf = await dlResp.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      if (needsConvert || isPdf) blocks.push({type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}});
+      else { const mt = /\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg'; blocks.push({type:'image', source:{type:'base64', media_type:mt, data:b64}}); }
+    } catch (e) { console.warn(`No se pudo traer "${f.name}" de la carpeta:`, e.message); }
   }
   return blocks;
 }
