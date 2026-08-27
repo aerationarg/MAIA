@@ -5177,7 +5177,7 @@ let procesosStep2PendingLeccion = null; // { hoja, texto }
 
 function procesosStep2ResetIfNeeded(p) {
   if (procesosStep2State.proyectoId !== p.id) {
-    procesosStep2State = { proyectoId:p.id, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null, autoLoadIntentado:false };
+    procesosStep2State = { proyectoId:p.id, workbook:null, hojaModels:{}, hfInstances:{}, hfShared:null, sheetIndex:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null, autoLoadIntentado:false };
     procesosStep2PendingLeccion = null;
   }
 }
@@ -5207,7 +5207,13 @@ function procesosStep2Html(p) {
   return `
     <div class="card-label">Paso 2 — Diseñar el proyecto</div>
     <div id="procesos-step2-status"></div>
-    <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto (la IA ya sugirió una selección inicial — ajustala si hace falta).</p>
+    ${st.sugerenciaError ? `
+    <div class="card" style="margin:6px 0;border-color:var(--red)">
+      <p class="hint" style="color:var(--red)">✕ No se pudo sugerir automáticamente qué unidades/etapas aplican ni sus parámetros: ${esc(st.sugerenciaError)}</p>
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2ReintentarSugerencia()">↻ Reintentar sugerencia</button>
+    </div>
+    ` : ''}
+    <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto${st.sugerenciaError ? '' : ' (la IA ya sugirió una selección inicial — ajustala si hace falta)'}.</p>
     ${nombresHojas.map(nombre => {
       const h = hojasGuardadas[nombre] || {};
       const safe = nombre.replace(/'/g,"\\'");
@@ -5600,10 +5606,14 @@ async function procesosStep2SugerirMapeos() {
   }
 }
 
-async function procesosStep2CargarPlanilla() {
+function procesosStep2ReintentarSugerencia() {
+  procesosStep2CargarPlanilla(true);
+}
+
+async function procesosStep2CargarPlanilla(forzarSugerencia) {
   const p = procesosCurrentProyecto;
   const st = procesosStep2State;
-  st.loading = true; st.error = null; st.loadingMsg = 'Buscando la planilla de diseño...'; st.autoLoadIntentado = true;
+  st.loading = true; st.error = null; st.sugerenciaError = null; st.loadingMsg = 'Buscando la planilla de diseño...'; st.autoLoadIntentado = true;
   renderProcesosStepContent();
   try {
     const docs = await procesosGetDocumentosPorCategoria(['planilla_calculo']);
@@ -5619,7 +5629,7 @@ async function procesosStep2CargarPlanilla() {
 
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
-    const faltaSugerencia = workbook.SheetNames.some(n => !dd.hojas[n]);
+    const faltaSugerencia = forzarSugerencia || workbook.SheetNames.some(n => !dd.hojas[n]);
     if (faltaSugerencia) {
       st.loadingMsg = 'Analizando con IA qué unidades/etapas aplican...'; renderProcesosStepContent();
       const apiKey = getApiKey();
@@ -5634,22 +5644,26 @@ async function procesosStep2CargarPlanilla() {
           const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
           const lecciones = procesosResumenLecciones(await procesosGetLecciones());
           const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican:\n' + lecciones + '\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"breve razón"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última). Importante: en "nombre" de "hojas" y en "orden" usá SIEMPRE el nombre EXACTO de la hoja tal como aparece en la lista de arriba (aunque sea una sigla, ej. "EQ") — nunca lo traduzcas ni pongas un alias distinto (ej. "Ecualizador"), incluso si en "motivo" lo explicás con el nombre completo. Y sé consistente entre "hojas" y "orden": una hoja que marcaste incluir:false no puede aparecer en "orden".`;
-          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+          const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
             body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
           });
-          if (resp.ok) {
-            const data = await resp.json();
-            const text = data.content?.find(c => c.type === 'text')?.text || '{}';
-            const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-            (parsed.hojas || []).forEach(h => {
-              if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false };
-            });
-            if (Array.isArray(parsed.orden) && parsed.orden.length) {
-              dd.orden = parsed.orden.filter(n => dd.hojas[n] && dd.hojas[n].seleccionada);
-            }
+          if (!resp.ok) { const errBody = await resp.json().catch(()=>({})); throw new Error(errBody.error?.message || `Error de la IA (HTTP ${resp.status})`); }
+          const data = await resp.json();
+          const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+          const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+          (parsed.hojas || []).forEach(h => {
+            if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false };
+          });
+          if (Array.isArray(parsed.orden) && parsed.orden.length) {
+            dd.orden = parsed.orden.filter(n => dd.hojas[n] && dd.hojas[n].seleccionada);
           }
-        } catch (e) { console.warn('No se pudo sugerir hojas automáticamente:', e.message); }
+        } catch (e) {
+          console.warn('No se pudo sugerir hojas automáticamente:', e.message);
+          st.sugerenciaError = e.message;
+        }
+      } else {
+        st.sugerenciaError = 'No hay API key disponible — recargá la página.';
       }
       workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }; });
       if (!dd.orden) dd.orden = workbook.SheetNames.filter(n => dd.hojas[n]?.seleccionada);
