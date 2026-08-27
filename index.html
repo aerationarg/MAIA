@@ -5170,7 +5170,7 @@ async function procesosAvanzarPaso(step) {
 // de cada hoja puede fijar valores directamente o pedir una búsqueda de objetivo
 // (variar un dato hasta que un resultado dé un valor buscado, útil para fórmulas
 // que en la práctica hay que "usar al revés").
-let procesosStep2State = { proyectoId:null, workbook:null, hojaModels:{}, hfInstances:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null, autoLoadIntentado:false };
+let procesosStep2State = { proyectoId:null, workbook:null, hojaModels:{}, hfInstances:{}, hfShared:null, sheetIndex:{}, loading:false, loadingMsg:'', error:null, hojaAbierta:null, autoLoadIntentado:false };
 // Lección aprendida propuesta por el chat de una hoja, pendiente de que el
 // usuario la confirme (editada o no) o la descarte — nunca se guarda sola.
 let procesosStep2PendingLeccion = null; // { hoja, texto }
@@ -5371,19 +5371,52 @@ function procesosStep2BuildModel(ws) {
   return model;
 }
 
+// Una sola instancia de HyperFormula con TODAS las hojas del libro (no una por
+// hoja) — así las fórmulas que cruzan de hoja (ej. ='Bases de diseño'!B5) se
+// resuelven igual que en Excel, en vez de dar #REF!. Se arma una sola vez y se
+// reaplican los valores guardados de TODAS las hojas del proyecto, no solo la
+// que se está abriendo.
+function procesosStep2GetSharedHF() {
+  const st = procesosStep2State;
+  if (st.hfShared) return st.hfShared;
+  const sheets = {};
+  const sheetIndex = {};
+  st.workbook.SheetNames.forEach((nombre, i) => {
+    const model = st.hojaModels[nombre] || (st.hojaModels[nombre] = procesosStep2BuildModel(st.workbook.Sheets[nombre]));
+    sheets[nombre] = model.grid;
+    sheetIndex[nombre] = i;
+  });
+  st.hfShared = HyperFormula.buildFromSheets(sheets, { licenseKey: 'gpl-v3' });
+  st.sheetIndex = sheetIndex;
+  const p = procesosCurrentProyecto;
+  Object.entries(p.diseno_data?.hojas || {}).forEach(([nombreHoja, h]) => {
+    const model = st.hojaModels[nombreHoja];
+    const idx = sheetIndex[nombreHoja];
+    if (!model || idx == null) return;
+    Object.entries(h.valores || {}).forEach(([cellRef, val]) => {
+      const cell = model.cells.find(c => c.ref === cellRef);
+      if (cell) st.hfShared.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[val]]);
+    });
+  });
+  return st.hfShared;
+}
+
+// Wrapper liviano por hoja sobre la instancia compartida — expone la misma
+// forma de llamada de siempre (getCellValue/setCellContents con {row,col}, el
+// "sheet" que le pasen se ignora y se usa el índice real de esta hoja), así el
+// resto del código no tiene que cambiar.
 function procesosStep2GetHF(nombreHoja) {
   const st = procesosStep2State;
   if (st.hfInstances[nombreHoja]) return st.hfInstances[nombreHoja];
-  const model = st.hojaModels[nombreHoja] || (st.hojaModels[nombreHoja] = procesosStep2BuildModel(st.workbook.Sheets[nombreHoja]));
-  const hf = HyperFormula.buildFromArray(model.grid, { licenseKey: 'gpl-v3' });
-  st.hfInstances[nombreHoja] = hf;
-  const p = procesosCurrentProyecto;
-  const guardado = (p.diseno_data?.hojas?.[nombreHoja]?.valores) || {};
-  Object.entries(guardado).forEach(([cellRef, val]) => {
-    const cell = model.cells.find(c => c.ref === cellRef);
-    if (cell) hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
-  });
-  return hf;
+  const sharedHf = procesosStep2GetSharedHF();
+  const idx = st.sheetIndex[nombreHoja];
+  if (idx == null) return null;
+  const wrapper = {
+    getCellValue: addr => sharedHf.getCellValue({ sheet: idx, row: addr.row, col: addr.col }),
+    setCellContents: (addr, data) => sharedHf.setCellContents({ sheet: idx, row: addr.row, col: addr.col }, data),
+  };
+  st.hfInstances[nombreHoja] = wrapper;
+  return wrapper;
 }
 
 // Descarga (una sola vez por sesión de Paso 2, no en cada mensaje) el documento
@@ -5868,6 +5901,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     if (parsed.leccion_aprendida) procesosStep2PendingLeccion = { hoja: nombre, texto: parsed.leccion_aprendida };
 
     const cellByRef = r => model.cells.find(c => c.ref === r);
+    const celdasForzadas = new Set(); // celdas de fórmula que el chat pisó a mano — hay que guardarlas igual que un dato editable, si no se pierden al refrescar
     (parsed.acciones || []).forEach(a => {
       try {
         if (a.tipo === 'set') {
@@ -5876,7 +5910,10 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
           // este segundo caso se pierde la fórmula de esa celda en esta sesión de
           // diseño (igual que sobreescribir una fórmula a mano en Excel): si más
           // adelante cambia un dato de entrada, esa celda ya no se recalcula sola.
-          if (c) hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(a.valor)]]);
+          if (c) {
+            hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(a.valor)]]);
+            if (c.isFormula) celdasForzadas.add(c.ref);
+          }
         } else if (a.tipo === 'buscar_objetivo') {
           const cv = cellByRef(a.variar), co = cellByRef(a.celda_objetivo);
           if (cv && co && !cv.isFormula && co.isFormula) {
@@ -5888,6 +5925,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
 
     const nuevosValores = Object.assign({}, hPrev.valores);
     model.cells.filter(c => !c.isFormula).forEach(c => { nuevosValores[c.ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
+    celdasForzadas.forEach(ref => { const c = cellByRef(ref); if (c) nuevosValores[ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
 
     const dd = Object.assign({}, procesosCurrentProyecto.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
