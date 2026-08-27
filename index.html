@@ -5199,7 +5199,9 @@ function procesosStep2Html(p) {
 
   const nombresHojas = st.workbook.SheetNames;
   const algunaSeleccionada = nombresHojas.some(n => hojasGuardadas[n]?.seleccionada);
-  const todasConfirmadas = algunaSeleccionada && nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada).every(n => hojasGuardadas[n]?.confirmada);
+  const seleccionadas = nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada);
+  const todasConfirmadas = algunaSeleccionada && seleccionadas.every(n => hojasGuardadas[n]?.confirmada);
+  const algunaDesactualizada = seleccionadas.some(n => procesosStep2HojaDesactualizada(n));
   const orden = dd.orden || [];
   const cumplimiento = dd.cumplimiento || [];
   const ponderaciones = dd.ponderaciones || {};
@@ -5217,11 +5219,12 @@ function procesosStep2Html(p) {
     ${nombresHojas.map(nombre => {
       const h = hojasGuardadas[nombre] || {};
       const safe = nombre.replace(/'/g,"\\'");
+      const desactualizada = h.seleccionada && procesosStep2HojaDesactualizada(nombre);
       return `
       <div class="field-row" style="padding:8px 0">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
           <input type="checkbox" ${h.seleccionada?'checked':''} onchange="procesosStep2ToggleHoja('${safe}',this.checked)" />
-          <span><b>${esc(nombre)}</b>${h.motivo?' — '+esc(h.motivo):''}${h.confirmada?' <span style="color:var(--green)">✓ definida</span>':''}</span>
+          <span><b>${esc(nombre)}</b>${h.motivo?' — '+esc(h.motivo):''}${h.confirmada?(desactualizada?' <span style="color:var(--red)" title="Una hoja de la que toma datos se actualizó después de guardar esta — revisala de nuevo">⚠ desactualizada</span>':' <span style="color:var(--green)">✓ definida</span>'):''}</span>
         </label>
         ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2AbrirHoja('${safe}')">${h.confirmada?'Editar':'Definir'} valores →</button>` : ''}
       </div>`;
@@ -5265,8 +5268,9 @@ function procesosStep2Html(p) {
       </div>`).join('')}
     ` : ''}
     <div class="gap"></div>
-    <button class="btn btn-primary" ${!todasConfirmadas?'disabled':''} onclick="procesosAvanzarPaso(3)">Continuar al Paso 3 →</button>
+    <button class="btn btn-primary" ${(!todasConfirmadas || algunaDesactualizada)?'disabled':''} onclick="procesosAvanzarPaso(3)">Continuar al Paso 3 →</button>
     ${(algunaSeleccionada && !todasConfirmadas) ? '<p class="hint" style="margin-top:6px">Definí y guardá los valores de cada unidad seleccionada para continuar.</p>' : ''}
+    ${(todasConfirmadas && algunaDesactualizada) ? '<p class="hint" style="margin-top:6px;color:var(--red)">Hay unidades marcadas ⚠ desactualizada — revisalas de nuevo antes de continuar.</p>' : ''}
   `;
 }
 
@@ -5499,6 +5503,23 @@ function procesosStep2GetPeso(fuente) {
 
 function procesosStep2DescribirFuente(f) {
   return f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : `${f.hoja}`;
+}
+
+// Una hoja confirmada queda "desactualizada" si alguna hoja de la que toma
+// datos (por mapeo) se guardó/confirmó DESPUÉS que ella — significa que se
+// volvió a tocar la etapa anterior y esta todavía no reflejó ese cambio.
+function procesosStep2HojaDesactualizada(nombre) {
+  const dd = procesosCurrentProyecto?.diseno_data || {};
+  const h = dd.hojas?.[nombre];
+  if (!h || !h.confirmada || !h.confirmada_at) return false;
+  const mapeosHoja = (dd.mapeos?.[nombre]) || [];
+  const hojasOrigen = new Set();
+  mapeosHoja.forEach(m => (m.fuentes || []).forEach(f => { if (f.origen === 'hoja' && f.hoja) hojasOrigen.add(f.hoja); }));
+  for (const hojaOrigen of hojasOrigen) {
+    const hOrigen = dd.hojas?.[hojaOrigen];
+    if (hOrigen && hOrigen.confirmada_at && new Date(hOrigen.confirmada_at) > new Date(h.confirmada_at)) return true;
+  }
+  return false;
 }
 
 // Recalcula, en el orden del tren, cada hoja seleccionada, empujando a cada celda
@@ -5798,6 +5819,12 @@ function procesosStep2RenderHojaPanel() {
   el.innerHTML = `
     <div class="card" style="margin-top:10px">
       <div class="card-label">${esc(nombre)}</div>
+      ${procesosStep2HojaDesactualizada(nombre) ? `
+      <div class="card" style="margin-bottom:10px;border-color:var(--red)">
+        <p class="hint" style="color:var(--red)">⚠ Una hoja de la que toma datos se guardó de nuevo después que esta — puede estar desactualizada.</p>
+        <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2GuardarHoja('${safe}')">↻ Actualizar y guardar</button>
+      </div>
+      ` : ''}
       <label>Datos / parámetros de entrada</label>
       ${inputs.length ? inputs.map(rowHtml).join('') : '<p class="hint">No se detectaron celdas de entrada en esta hoja.</p>'}
       <div class="gap"></div>
@@ -5994,6 +6021,7 @@ async function procesosStep2GuardarHoja(nombre) {
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({ seleccionada: true, valores: {}, chat: [] }, dd.hojas[nombre]);
     h.confirmada = true;
+    h.confirmada_at = new Date().toISOString();
     h.valoresConEtiqueta = valoresConEtiqueta;
     dd.hojas[nombre] = h;
 
