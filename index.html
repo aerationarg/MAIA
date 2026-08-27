@@ -5801,7 +5801,10 @@ function procesosStep2RenderHojaPanel() {
       <div id="procesos-step2-chat-status"></div>
       ${(procesosStep2PendingLeccion && procesosStep2PendingLeccion.hoja === nombre) ? procesosStep2LeccionCardHtml() : ''}
       <div class="gap"></div>
-      <button class="btn btn-green" onclick="procesosStep2GuardarHoja('${safe}')">✓ Guardar valores de esta unidad</button>
+      <div id="procesos-step2-guardar-status"></div>
+      ${h.confirmada
+        ? `<button class="btn btn-secondary" disabled style="opacity:0.75;cursor:default">✓ Guardado — unidad definida</button>`
+        : `<button class="btn btn-green" onclick="procesosStep2GuardarHoja('${safe}')">✓ Guardar valores de esta unidad</button>`}
     </div>
   `;
 }
@@ -5961,34 +5964,40 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
 }
 
 async function procesosStep2GuardarHoja(nombre) {
-  const ponderacionesNuevas = procesosStep2PropagarCadena(nombre);
-  const model = procesosStep2State.hojaModels[nombre];
-  const hf = procesosStep2GetHF(nombre);
-  const valoresConEtiqueta = {};
-  model.cells.forEach(c => {
-    const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
-    valoresConEtiqueta[c.label + (c.unidad ? ' (' + c.unidad + ')' : '')] = v;
-  });
-  const p = procesosCurrentProyecto;
-  const dd = Object.assign({}, p.diseno_data);
-  dd.hojas = Object.assign({}, dd.hojas);
-  const h = Object.assign({ seleccionada: true, valores: {}, chat: [] }, dd.hojas[nombre]);
-  h.confirmada = true;
-  h.valoresConEtiqueta = valoresConEtiqueta;
-  dd.hojas[nombre] = h;
+  try {
+    const ponderacionesNuevas = procesosStep2PropagarCadena(nombre);
+    const model = procesosStep2State.hojaModels[nombre];
+    const hf = procesosStep2GetHF(nombre);
+    const valoresConEtiqueta = {};
+    model.cells.forEach(c => {
+      const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+      valoresConEtiqueta[c.label + (c.unidad ? ' (' + c.unidad + ')' : '')] = v;
+    });
+    const p = procesosCurrentProyecto;
+    const dd = Object.assign({}, p.diseno_data);
+    dd.hojas = Object.assign({}, dd.hojas);
+    const h = Object.assign({ seleccionada: true, valores: {}, chat: [] }, dd.hojas[nombre]);
+    h.confirmada = true;
+    h.valoresConEtiqueta = valoresConEtiqueta;
+    dd.hojas[nombre] = h;
 
-  if (ponderacionesNuevas[nombre]) {
-    dd.ponderaciones = Object.assign({}, dd.ponderaciones, { [nombre]: ponderacionesNuevas[nombre] });
+    if (ponderacionesNuevas[nombre]) {
+      dd.ponderaciones = Object.assign({}, dd.ponderaciones, { [nombre]: ponderacionesNuevas[nombre] });
+    }
+
+    const orden = dd.orden || [];
+    if (orden.length && nombre === orden[orden.length - 1]) {
+      showMsg('procesos-step2-status', 'loading', 'Verificando cumplimiento vs. límites de vuelco...');
+      dd.cumplimiento = await procesosStep2ChequearCumplimiento(model, hf);
+      const st = document.getElementById('procesos-step2-status'); if (st) st.innerHTML = '';
+    }
+
+    await procesosSaveProyecto({ diseno_data: dd });
+    renderProcesosStepContent();
+    showMsg('procesos-step2-guardar-status', 'success', '✓ Guardado correctamente.');
+  } catch (e) {
+    showMsg('procesos-step2-guardar-status', 'error', '✕ No se pudo guardar: ' + e.message);
   }
-
-  const orden = dd.orden || [];
-  if (orden.length && nombre === orden[orden.length - 1]) {
-    showMsg('procesos-step2-status', 'loading', 'Verificando cumplimiento vs. límites de vuelco...');
-    dd.cumplimiento = await procesosStep2ChequearCumplimiento(model, hf);
-  }
-
-  await procesosSaveProyecto({ diseno_data: dd });
-  renderProcesosStepContent();
 }
 
 // Compara el resultado final del tren de tratamiento contra los límites normativos
