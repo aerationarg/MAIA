@@ -5725,23 +5725,38 @@ async function procesosStep2AutoCompletarSiHaceFalta(nombre) {
   const p = procesosCurrentProyecto;
   const h = p.diseno_data?.hojas?.[nombre];
   if (h && (h.autoCompletado || h.confirmada)) return;
+  await procesosStep2RevisarYCompletar(nombre, true);
+}
+
+// Ídem, pero invocable las veces que haga falta (botón "Revisar y completar"),
+// no solo la primera vez que se abre la hoja.
+async function procesosStep2RevisarYCompletar(nombre, esAuto) {
+  const p = procesosCurrentProyecto;
   const model = procesosStep2State.hojaModels[nombre];
   const hf = procesosStep2GetHF(nombre);
   if (!model || !hf) return;
   const mapeosHoja = (p.diseno_data?.mapeos?.[nombre]) || [];
   const celdasConMapeo = new Set(mapeosHoja.map(m => m.celda));
-  const faltantes = model.cells.filter(c => !c.isFormula && !celdasConMapeo.has(c.ref)).filter(c => {
+  const faltantes = model.cells.filter(c => !celdasConMapeo.has(c.ref)).filter(c => {
     const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
-    return v == null || v === '';
+    if (v == null || v === '') return true;
+    if (typeof v === 'string' && v.startsWith('#')) return true; // #DIV/0!, #REF!, #VALUE!, etc.
+    // Una celda editable en 0 no es sospechosa (puede ser un dato real). Una
+    // celda CALCULADA en 0 sí puede serlo — a veces es solo una referencia a
+    // otra hoja de parámetros base que quedó sin cargar (ej. ='Bases de
+    // diseño'!B5) en vez de un cálculo real; se la marca para que la IA
+    // revise si corresponde reemplazarla por el dato real del Paso 1.
+    if (c.isFormula && v === 0) return true;
+    return false;
   });
-  if (!faltantes.length) return;
+  if (!faltantes.length) { if (!esAuto) alert('No se encontraron datos vacíos, en 0 o con error para revisar.'); return; }
 
   const dd = Object.assign({}, p.diseno_data);
   dd.hojas = Object.assign({}, dd.hojas);
   dd.hojas[nombre] = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre], { autoCompletado: true });
   p.diseno_data = dd; // se persiste junto con el resto en procesosStep2ChatSend
 
-  await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. Contame brevemente qué adoptaste y por qué.');
+  await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real. Contame brevemente qué adoptaste y por qué.');
 }
 
 function procesosStep2RenderHojaPanel() {
@@ -5789,7 +5804,8 @@ function procesosStep2RenderHojaPanel() {
       <label>Resultados calculados</label>
       ${outputs.length ? outputs.map(rowHtml).join('') : '<p class="hint">No se detectaron celdas de fórmula en esta hoja.</p>'}
       <div class="gap"></div>
-      <label>Chat de diseño de esta unidad</label>
+      <button class="btn btn-secondary btn-sm" onclick="procesosStep2RevisarYCompletar('${safe}', false)">↻ Revisar y completar automáticamente</button>
+      <label style="margin-top:10px">Chat de diseño de esta unidad</label>
       <p class="hint" style="margin-bottom:6px">Pedile que pruebe valores, o que itere hasta lograr un resultado (ej: "necesito que el volumen dé al menos 200 m3, ajustá el largo").</p>
       <div id="procesos-step2-chat-box" style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto;margin-bottom:8px">
         ${(h.chat||[]).map(m => `<div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:85%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('')}
@@ -5911,7 +5927,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
-    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas):\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
