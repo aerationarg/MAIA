@@ -4284,22 +4284,21 @@ async function procesosDocGetTexto(doc, token) {
   } catch(e) { console.warn(`No se pudo actualizar la caché de "${doc.nombre}":`, e.message); return doc.texto_extraido || null; }
 }
 
-// Igual que procesosDocGetTexto pero para un documento vinculado como carpeta —
-// cachea el texto POR ARCHIVO adentro (archivos_cache), así solo reprocesa los
-// que son nuevos o cambiaron, no toda la carpeta de nuevo cada vez. Sirve tanto
-// para procesos_documentos como para procesos_catalogo (pasando `tabla`).
-async function procesosDocGetTextosCarpeta(doc, token, tabla) {
-  tabla = tabla || 'procesos_documentos';
-  const cacheActual = doc.archivos_cache || [];
-  const cachePorId = {}; cacheActual.forEach(f => { cachePorId[f.item_id] = f; });
+// Núcleo compartido: descarga y extrae (con caché por archivo, comparando id y
+// fecha de modificación real en SharePoint) el texto de todos los archivos de
+// una carpeta. El llamador decide dónde persistir el resultado — lo usan tanto
+// documentos de referencia/catálogo (procesosDocGetTextosCarpeta) como la
+// carpeta propia del cliente de cada proyecto (procesosClienteGetTextosCarpeta).
+async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token) {
+  const cachePorId = {}; (cacheActual || []).forEach(f => { cachePorId[f.item_id] = f; });
   let children;
   try {
-    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}/children`, {headers:{Authorization:'Bearer '+token}});
+    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children`, {headers:{Authorization:'Bearer '+token}});
     if (!childrenResp.ok) throw new Error('HTTP '+childrenResp.status);
     children = ((await childrenResp.json()).value || []).filter(f => f.file).slice(0, 50);
   } catch(e) {
-    console.warn(`No se pudo listar la carpeta "${doc.nombre}", usando caché existente:`, e.message);
-    return cacheActual.map(f => ({ nombre: f.nombre, texto: f.texto }));
+    console.warn('No se pudo listar la carpeta, usando caché existente:', e.message);
+    return { resultado: (cacheActual || []).map(f => ({ nombre: f.nombre, texto: f.texto })), cachePorId, cambios: false };
   }
 
   const resultado = [];
@@ -4315,8 +4314,8 @@ async function procesosDocGetTextosCarpeta(doc, token, tabla) {
       const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
       const needsConvert = !isPdf && !isImg;
       const dlUrl = needsConvert
-        ? `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${f.id}/content?format=pdf`
-        : `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${f.id}/content`;
+        ? `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${f.id}/content?format=pdf`
+        : `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${f.id}/content`;
       const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
       if (!dlResp.ok) continue;
       const buf = await dlResp.arrayBuffer();
@@ -4338,7 +4337,16 @@ async function procesosDocGetTextosCarpeta(doc, token, tabla) {
       }
     } catch(e) { console.warn(`No se pudo extraer "${f.name}":`, e.message); }
   }
+  return { resultado, cachePorId, cambios };
+}
 
+// Igual que procesosDocGetTexto pero para un documento vinculado como carpeta —
+// cachea el texto POR ARCHIVO adentro (archivos_cache), así solo reprocesa los
+// que son nuevos o cambiaron, no toda la carpeta de nuevo cada vez. Sirve tanto
+// para procesos_documentos como para procesos_catalogo (pasando `tabla`).
+async function procesosDocGetTextosCarpeta(doc, token, tabla) {
+  tabla = tabla || 'procesos_documentos';
+  const { resultado, cachePorId, cambios } = await procesosExtraerTextosDeCarpeta(doc.site_id, doc.item_id, doc.archivos_cache, token);
   if (cambios) {
     const nuevoCache = Object.values(cachePorId);
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -4348,6 +4356,24 @@ async function procesosDocGetTextosCarpeta(doc, token, tabla) {
       body: JSON.stringify({ archivos_cache: nuevoCache, [campoFecha]: new Date().toISOString() })
     });
     doc.archivos_cache = nuevoCache;
+  }
+  return resultado;
+}
+
+// Texto cacheado de la carpeta del CLIENTE de este proyecto puntual —
+// info_cliente.carpeta_cliente. Vive ahí (no en procesos_documentos) porque es
+// específica de este proyecto, no se comparte entre proyectos distintos; pero
+// dentro del mismo proyecto se reusa entre re-consultas del chat en vez de
+// volver a descargar y procesar los documentos originales cada vez.
+async function procesosClienteGetTextosCarpeta(token) {
+  const p = procesosCurrentProyecto;
+  const carpeta = p.info_cliente?.carpeta_cliente;
+  if (!carpeta) return [];
+  const { resultado, cachePorId, cambios } = await procesosExtraerTextosDeCarpeta(carpeta.siteId, carpeta.itemId, carpeta.archivos_cache, token);
+  if (cambios) {
+    const info = Object.assign({}, p.info_cliente);
+    info.carpeta_cliente = Object.assign({}, carpeta, { archivos_cache: Object.values(cachePorId) });
+    await procesosSaveProyecto({ info_cliente: info });
   }
   return resultado;
 }
@@ -6296,10 +6322,14 @@ async function procesosChatSend() {
     if (carpeta && parsed.necesita_documentos) {
       showMsg(statusId,'loading','Revisando los documentos originales del cliente...');
       const token = await getMsToken();
-      const contentBlocks = await procesosDescargarCarpetaComoContentBlocks(carpeta, token, name => showMsg(statusId,'loading',`Revisando ${name}...`));
+      // Texto cacheado por archivo (info_cliente.carpeta_cliente.archivos_cache) —
+      // solo reprocesa lo nuevo/cambiado, no vuelve a mandar los PDF/imágenes
+      // originales cada vez que hace falta reconsultar algo en este proyecto.
+      const textos = await procesosClienteGetTextosCarpeta(token);
+      const contentBlocks = textos.map(t => ({type:'text', text:`Documento: ${t.nombre}\n\n${t.texto}`}));
       const messages2 = messages.concat([
         { role:'assistant', content: raw },
-        { role:'user', content: [...contentBlocks.map(x=>x.block), {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
+        { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
