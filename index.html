@@ -2078,9 +2078,21 @@ async function cfgClientesSave() {
 async function rendFetchExcelUsedRange(token, siteId, itemId, sheetName) {
   const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/usedRange?$select=values`;
   const resp = await fetch(url, {headers:{Authorization:'Bearer '+token}});
-  if (!resp.ok) throw new Error('No se pudo leer la hoja "' + sheetName + '".');
-  const data = await resp.json();
-  return data.values || [];
+  if (resp.ok) { const data = await resp.json(); return data.values || []; }
+  // La hoja no se llama como se esperaba (ej. le cambiaron el nombre, o
+  // reemplazaron el archivo y quedó "Sheet1" en vez de "Hoja1") — antes de
+  // rendirse, probamos con la primera hoja real que tenga el archivo.
+  const listResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets?$select=name`, {headers:{Authorization:'Bearer '+token}});
+  if (listResp.ok) {
+    const listData = await listResp.json();
+    const primera = (listData.value||[])[0];
+    if (primera && primera.name !== sheetName) {
+      const url2 = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(primera.name)}')/usedRange?$select=values`;
+      const resp2 = await fetch(url2, {headers:{Authorization:'Bearer '+token}});
+      if (resp2.ok) { const data2 = await resp2.json(); return data2.values || []; }
+    }
+  }
+  throw new Error('No se pudo leer la hoja "' + sheetName + '".');
 }
 // Lee Clientes (col. C, hoja "Hoja1") y Q (col. D/E, hoja "Q-") desde los Excel configurados.
 // Requiere sesión de Microsoft — si ya hay una activa se hace en silencio; si no, quien la
@@ -6531,11 +6543,18 @@ async function spEnsureFolder(token, siteId, parentId, name) {
   if (createResp.ok) { const item = await createResp.json(); return item.id; }
   if (createResp.status === 409) {
     const listResp = await fetch(base + '/children?$select=id,name,folder', { headers: { Authorization: 'Bearer '+token } });
-    const listData = await listResp.json();
-    const existing = (listData.value||[]).find(it => it.folder && it.name.toLowerCase() === name.toLowerCase());
-    if (existing) return existing.id;
+    if (listResp.ok) {
+      const listData = await listResp.json();
+      const nameNorm = name.trim().toLowerCase();
+      const existing = (listData.value||[]).find(it => it.folder && it.name.trim().toLowerCase() === nameNorm);
+      if (existing) return existing.id;
+      throw new Error(`La carpeta "${name}" ya existe según SharePoint (409) pero no aparece en el listado de la carpeta — puede ser un problema de permisos de lectura, o el nombre no coincide exactamente.`);
+    }
+    const listErr = await listResp.json().catch(()=>({}));
+    throw new Error(`No se pudo listar el contenido de la carpeta para buscar "${name}": ${listErr.error?.message || 'HTTP '+listResp.status}`);
   }
-  throw new Error('No se pudo crear/encontrar la carpeta "' + name + '".');
+  const createErr = await createResp.json().catch(()=>({}));
+  throw new Error(`No se pudo crear la carpeta "${name}": ${createErr.error?.message || 'HTTP '+createResp.status} — revisá que la cuenta tenga permiso de escritura en esa carpeta de SharePoint.`);
 }
 async function spResolveCompFolder(token, siteId, baseFolderId) {
   const metodoPago = spMetodoPagoValue();
