@@ -2751,13 +2751,39 @@ async function rendGenerarNueva() {
       if (copyResp.status === 409) throw new Error(`Ya existe "${newFileName}" en esa carpeta (rendición de hoy ya generada). Usá "Insertar en última rendición".`);
       throw new Error('Error al copiar la plantilla: HTTP '+copyResp.status);
     }
-    await new Promise(r=>setTimeout(r,2500));
+    // Copiar un archivo en SharePoint es asíncrono: Graph responde "aceptado" al
+    // toque pero la copia en sí puede tardar más — si asumimos un tiempo fijo y
+    // no alcanzó, el archivo puede aparecer recién después, ya con MAIA mostrando
+    // error. Acá chequeamos el estado real de la operación (si vino el header de
+    // monitoreo) antes de seguir.
+    const monitorUrl = copyResp.headers.get('Location');
+    if (monitorUrl) {
+      let completado = false;
+      for (let i = 0; i < 20 && !completado; i++) {
+        try {
+          const monResp = await fetch(monitorUrl);
+          if (monResp.ok) {
+            const monData = await monResp.json();
+            if (monData.status === 'completed') { completado = true; break; }
+            if (monData.status === 'failed') throw new Error('Falló la copia de la plantilla en SharePoint.');
+          } else if (monResp.status === 404) { completado = true; break; } // ya terminó y el monitor dejó de existir
+        } catch(_e) { /* seguir intentando */ }
+        showMsg(statusId,'loading',`Copiando plantilla... (${i+1})`);
+        await new Promise(r=>setTimeout(r,1500));
+      }
+    } else {
+      await new Promise(r=>setTimeout(r,2500)); // respaldo si Graph no mandó el header de monitoreo
+    }
 
     showMsg(statusId,'loading','Buscando el archivo copiado...');
-    const listResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=id,name`, {headers:{Authorization:'Bearer '+token}});
-    const listData = await listResp.json();
-    const copiedItem = (listData.value||[]).find(f => f.name === newFileName);
-    if (!copiedItem) throw new Error('No se encontró el archivo copiado. Intentá de nuevo.');
+    let copiedItem = null;
+    for (let i = 0; i < 6 && !copiedItem; i++) {
+      if (i > 0) await new Promise(r=>setTimeout(r,1500));
+      const listResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=id,name`, {headers:{Authorization:'Bearer '+token}});
+      const listData = await listResp.json();
+      copiedItem = (listData.value||[]).find(f => f.name === newFileName);
+    }
+    if (!copiedItem) throw new Error('La copia de la plantilla está tardando más de lo normal — esperá un minuto y probá "Insertar en última rendición" (probablemente ya esté creada) en vez de "Generar nueva rendición" de nuevo.');
 
     showMsg(statusId,'loading','Insertando datos...');
     const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiedItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
