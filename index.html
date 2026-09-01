@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2556,6 +2556,19 @@ function renderRendResults() {
 // está cargado en esta sesión, lo embebe en base64 junto con los datos, para
 // poder subirlo como comprobante después aunque la página se recargue al
 // cambiar de entorno (ahí se pierden los File en memoria).
+// Trae los campos configurados (Cfg Rendiciones) de OTRO entorno sin depender
+// de la caché en memoria (que solo tiene los del entorno activo).
+async function rendFieldsDeOtraEmpresa(empresa) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (!session?.token) return null;
+    const res = await supaFetch(`/rest/v1/app_config?select=value&key=eq.rend_fields_${empresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data[0]?.value ? JSON.parse(data[0].value) : null;
+  } catch(e) { return null; }
+}
+
 async function rendMoverComprobanteAOtraEmpresa(ri) {
   const r = results[ri];
   if (!r) return;
@@ -2563,32 +2576,69 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
   const nombreDestino = destino === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
   if (!confirm(`¿Pasar este comprobante ("${r['__archivo__']||''}") a ${nombreDestino} (${destino})? Se va a sacar de este entorno.`)) return;
 
-  const copia = Object.assign({}, r);
-  delete copia.__advertencia__;
-  delete copia.__empresa_incorrecta__;
-  const archivoOriginal = files.find(f => f.file.name === r['__archivo__']);
-  if (archivoOriginal) {
-    try {
-      copia.__archivo_b64__ = await fileToBase64(archivoOriginal.file);
-      copia.__archivo_mime__ = archivoOriginal.file.type;
-    } catch(e) { /* si falla, se mueve el dato igual, pero sin el archivo adjunto */ }
-  }
-
-  const otros = JSON.parse(localStorage.getItem('rend_results_' + destino) || '[]');
-  otros.push(copia);
+  const statusId = 'rend-save-status';
+  showMsg(statusId,'loading','Moviendo comprobante...');
   try {
-    localStorage.setItem('rend_results_' + destino, JSON.stringify(otros));
+    const camposOrigen = getRendFields().filter(f=>f.name.trim());
+    const camposDestinoRaw = await rendFieldsDeOtraEmpresa(destino);
+    const camposDestino = (camposDestinoRaw || camposOrigen).filter(f=>f.name.trim());
+
+    const copia = { __archivo__: r['__archivo__'], __fecha_analisis__: r['__fecha_analisis__'] };
+    if (r.__comprobante_num__) { copia.__comprobante_num__ = r.__comprobante_num__; copia.__comprobante_total__ = r.__comprobante_total__; }
+
+    const mismosNombres = camposOrigen.length === camposDestino.length && camposOrigen.every((f,i) => f.name === camposDestino[i].name);
+    if (mismosNombres) {
+      // Los dos entornos tienen los mismos campos configurados — copia directa.
+      camposDestino.forEach(f => { copia[f.name] = r[f.name] ?? null; });
+    } else {
+      // Los campos configurados son distintos entre entornos (nombres y/o
+      // cantidad, ej. AA tiene percepciones de IIBB que AS no tiene) — le
+      // pedimos a la IA que traduzca los valores ya extraídos al set de campos
+      // del entorno destino, en vez de perderlos o volver a analizar la imagen.
+      showMsg(statusId,'loading','Traduciendo campos al otro entorno...');
+      const apiKey = getApiKey();
+      if (!apiKey) throw new Error('API key no disponible.');
+      const datosOrigen = JSON.stringify(Object.fromEntries(camposOrigen.map(f => [f.name, r[f.name] ?? null])));
+      const listaDestino = camposDestino.map((f,idx) => `${idx+1}. "${f.name}"${f.desc?': '+f.desc:''}`).join('\n');
+      const prompt = `Estos son los datos ya extraídos de un comprobante, con los nombres de campo del entorno de ORIGEN:\n${datosOrigen}\n\nEstos son los campos configurados en el entorno DESTINO (pueden tener nombres distintos, o ser más o menos campos que el origen):\n${listaDestino}\n\nPara cada campo del destino que tenga una correspondencia clara de significado con algún dato de origen, asignale ese valor. Si un campo del destino no tiene ninguna correspondencia clara en los datos de origen, dejalo en null — no inventes valores. Respondé SOLO con un JSON válido (sin backticks ni texto extra): un objeto con las claves EXACTAS de los campos del destino y sus valores.`;
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+      });
+      if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al traducir los campos.'); }
+      const data = await resp.json();
+      const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+      const mapeado = JSON.parse(text.replace(/```json|```/g,'').trim());
+      camposDestino.forEach(f => { copia[f.name] = mapeado[f.name] ?? null; });
+    }
+
+    showMsg(statusId,'loading','Guardando en el otro entorno...');
+    const archivoOriginal = files.find(f => f.file.name === r['__archivo__']);
+    if (archivoOriginal) {
+      try {
+        copia.__archivo_b64__ = await fileToBase64(archivoOriginal.file);
+        copia.__archivo_mime__ = archivoOriginal.file.type;
+      } catch(e) { /* si falla, se mueve el dato igual, pero sin el archivo adjunto */ }
+    }
+
+    const otros = JSON.parse(localStorage.getItem('rend_results_' + destino) || '[]');
+    otros.push(copia);
+    try {
+      localStorage.setItem('rend_results_' + destino, JSON.stringify(otros));
+    } catch(e) {
+      throw new Error('No se pudo guardar en el otro entorno (puede ser espacio de almacenamiento lleno) — no se movió nada.');
+    }
+
+    results.splice(ri, 1);
+    saveResults();
+    renderRendResults();
+    showMsg(statusId,'success',`✓ Se pasó a ${nombreDestino}.`);
+
+    if (confirm(`Listo, se pasó a ${nombreDestino}. ¿Cambiar a ese entorno ahora para seguir con la rendición ahí?`)) {
+      switchEmpresa(destino);
+    }
   } catch(e) {
-    alert('No se pudo guardar en el otro entorno (puede ser espacio de almacenamiento lleno) — no se movió nada.');
-    return;
-  }
-
-  results.splice(ri, 1);
-  saveResults();
-  renderRendResults();
-
-  if (confirm(`Listo, se pasó a ${nombreDestino}. ¿Cambiar a ese entorno ahora para seguir con la rendición ahí?`)) {
-    switchEmpresa(destino);
+    showMsg(statusId,'error','✕ No se pudo mover: ' + e.message);
   }
 }
 
