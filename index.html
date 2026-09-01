@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2342,6 +2342,7 @@ async function analyzeAll() {
           const nombreReceptora = receptora === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
           const nombreActual = currentEmpresa === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
           rendAgregarAdvertencia(extracted, `⚠ Este comprobante parece ser de ${nombreReceptora} (${receptora}), pero estás cargando en ${nombreActual} (${currentEmpresa}).`);
+          extracted['__empresa_incorrecta__'] = receptora;
         }
       });
 
@@ -2523,11 +2524,14 @@ function renderRendResults() {
     }).join('');
     const convNote = r.__conv_note__ ? `<div class="hint" style="color:var(--blue);margin-bottom:8px">🔁 ${esc(r.__conv_note__)}</div>` : '';
     const advertencia = r.__advertencia__ ? `<div class="hint" style="color:var(--red);font-weight:600;margin-bottom:8px">${esc(r.__advertencia__)}</div>` : '';
+    const nombreEmpresaIncorrecta = r.__empresa_incorrecta__ === 'AA' ? 'Aeration Argentina (AA)' : r.__empresa_incorrecta__ === 'AS' ? 'Aeration Servicios (AS)' : '';
+    const botonMover = nombreEmpresaIncorrecta ? `<button class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="rendMoverComprobanteAOtraEmpresa(${ri})">↪ Pasar a ${nombreEmpresaIncorrecta}</button>` : '';
     const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
     return `
       <div class="result-card"${r.__advertencia__ ? ' style="border-color:var(--red)"' : ''}>
         <div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
         ${advertencia}
+        ${botonMover}
         ${convNote}
         ${manualRows}
         ${fieldRows}
@@ -2544,6 +2548,70 @@ function renderRendResults() {
     </div>
     <div id="rend-save-status" class="status-msg" style="display:none;margin-bottom:12px"></div>
     ${cards}`;
+}
+
+// Pasa un comprobante ya analizado (con sus datos extraídos) al OTRO entorno
+// (AA/AS) sin volver a analizarlo con IA — lo saca de acá y lo agrega a la
+// lista de resultados guardada del otro entorno. Si el archivo original todavía
+// está cargado en esta sesión, lo embebe en base64 junto con los datos, para
+// poder subirlo como comprobante después aunque la página se recargue al
+// cambiar de entorno (ahí se pierden los File en memoria).
+async function rendMoverComprobanteAOtraEmpresa(ri) {
+  const r = results[ri];
+  if (!r) return;
+  const destino = r.__empresa_incorrecta__ === 'AA' || r.__empresa_incorrecta__ === 'AS' ? r.__empresa_incorrecta__ : (currentEmpresa === 'AA' ? 'AS' : 'AA');
+  const nombreDestino = destino === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
+  if (!confirm(`¿Pasar este comprobante ("${r['__archivo__']||''}") a ${nombreDestino} (${destino})? Se va a sacar de este entorno.`)) return;
+
+  const copia = Object.assign({}, r);
+  delete copia.__advertencia__;
+  delete copia.__empresa_incorrecta__;
+  const archivoOriginal = files.find(f => f.file.name === r['__archivo__']);
+  if (archivoOriginal) {
+    try {
+      copia.__archivo_b64__ = await fileToBase64(archivoOriginal.file);
+      copia.__archivo_mime__ = archivoOriginal.file.type;
+    } catch(e) { /* si falla, se mueve el dato igual, pero sin el archivo adjunto */ }
+  }
+
+  const otros = JSON.parse(localStorage.getItem('rend_results_' + destino) || '[]');
+  otros.push(copia);
+  try {
+    localStorage.setItem('rend_results_' + destino, JSON.stringify(otros));
+  } catch(e) {
+    alert('No se pudo guardar en el otro entorno (puede ser espacio de almacenamiento lleno) — no se movió nada.');
+    return;
+  }
+
+  results.splice(ri, 1);
+  saveResults();
+  renderRendResults();
+
+  if (confirm(`Listo, se pasó a ${nombreDestino}. ¿Cambiar a ese entorno ahora para seguir con la rendición ahí?`)) {
+    switchEmpresa(destino);
+  }
+}
+
+// Arma la lista de archivos a subir como comprobantes a partir de los
+// resultados ACTUALES: usa el archivo vivo de esta sesión si está cargado, o
+// lo reconstruye desde el base64 embebido (comprobantes que se "pasaron" desde
+// el otro entorno con rendMoverComprobanteAOtraEmpresa).
+function rendArchivosParaSubir() {
+  const nombres = [...new Set(results.map(r => r['__archivo__']).filter(Boolean))];
+  const items = [];
+  for (const nombre of nombres) {
+    const vivo = files.find(f => f.file.name === nombre && f.status === 'done');
+    if (vivo) { items.push(vivo); continue; }
+    const conB64 = results.find(r => r['__archivo__'] === nombre && r.__archivo_b64__);
+    if (conB64) {
+      try {
+        const bytes = Uint8Array.from(atob(conB64.__archivo_b64__), c => c.charCodeAt(0));
+        const file = new File([bytes], nombre, { type: conB64.__archivo_mime__ || 'application/octet-stream' });
+        items.push({ file, status: 'done' });
+      } catch(e) { /* si no se puede reconstruir, se sigue sin ese adjunto */ }
+    }
+  }
+  return items;
 }
 
 function rendManualValueFor(f, record) {
@@ -2783,7 +2851,7 @@ async function rendInsertarUltima() {
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
-  const doneFiles = files.filter(f => f.status === 'done');
+  const doneFiles = rendArchivosParaSubir();
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
   try {
@@ -2834,7 +2902,7 @@ async function rendGenerarNueva() {
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
-  const doneFiles = files.filter(f => f.status === 'done');
+  const doneFiles = rendArchivosParaSubir();
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
   try {
