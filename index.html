@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -645,6 +645,36 @@
           </div>
           <div id="procesos-chat-status"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Cotizaciones ═══ -->
+    <div class="panel" id="panel-cotizaciones">
+      <div class="card">
+        <div class="card-label">Historial de ventas</div>
+        <p class="hint" style="margin-bottom:10px">Buscá qué se vendió antes (a qué cliente, a qué precio) para usarlo de referencia al armar una cotización nueva.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <input id="cotiz-hist-buscar" placeholder="Buscar por ítem, marca, modelo..." style="flex:2;min-width:180px" oninput="cotizHistorialBuscarDebounced()" />
+          <input id="cotiz-hist-cliente" placeholder="Cliente" style="flex:1;min-width:140px" oninput="cotizHistorialBuscarDebounced()" />
+        </div>
+        <div id="cotiz-hist-list" class="empty">Cargando...</div>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="card-label">Cargar una venta</div>
+          <button class="btn btn-secondary btn-sm" onclick="cotizHistorialToggleForm()" id="cotiz-hist-form-toggle">+ Cargar venta</button>
+        </div>
+        <div id="cotiz-hist-form" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Cfg Cotizaciones ═══ -->
+    <div class="panel" id="panel-cfg-cotizaciones">
+      <div class="card">
+        <div class="card-label">Catálogo de productos</div>
+        <p class="hint" style="margin-bottom:10px">Marca/modelo/descripción estándar de lo que vende la empresa — se usa como referencia al cargar una venta o armar una cotización, para no reescribir la descripción cada vez.</p>
+        <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
+        <div id="cotiz-catalogo-list" class="empty">Cargando...</div>
       </div>
     </div>
 
@@ -1866,6 +1896,8 @@ function switchPanel(name) {
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
   if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
+  if (name === 'cotizaciones') cotizHistorialRender();
+  if (name === 'cfg-cotizaciones') cotizCatalogoRender();
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -11437,10 +11469,152 @@ function tmplRenderCellMap(pfx) {
 // (already called via switchPanel -> npCfgRender, extend it)
 // npCfgRender override removed - merged into original
 
+// ── Cotizaciones (Comercial) ───────────────────────────
+// Primera parte: catálogo de productos + historial de ventas efectivamente
+// cerradas, buscable por ítem/cliente. El generador de cotizaciones (arma el
+// Excel F-COM-04 con los ítems elegidos) se agrega en una próxima vuelta.
+async function cotizCatalogoRender() {
+  const el = document.getElementById('cotiz-catalogo-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el catálogo.</p>'; return; }
+    if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
+    el.innerHTML = rows.map(r => `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(r.marca||'')}" placeholder="Marca" style="max-width:140px" oninput="cotizCatalogoUpdate('${r.id}','marca',this.value)" />
+          <input value="${esc(r.modelo||'')}" placeholder="Modelo" style="max-width:140px" oninput="cotizCatalogoUpdate('${r.id}','modelo',this.value)" />
+          <button class="remove-btn" onclick="cotizCatalogoEliminar('${r.id}')">&#x2715;</button>
+        </div>
+        <textarea rows="2" placeholder="Descripción" oninput="cotizCatalogoUpdate('${r.id}','descripcion',this.value)">${esc(r.descripcion||'')}</textarea>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
+}
+async function cotizCatalogoAdd() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, marca:'', modelo:'', descripcion:'' })
+  });
+  if (!res.ok) { alert('No se pudo agregar.'); return; }
+  cotizCatalogoRender();
+}
+async function cotizCatalogoUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function cotizCatalogoEliminar(id) {
+  if (!confirm('¿Eliminar este producto del catálogo?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  cotizCatalogoRender();
+}
+
+let _cotizHistBuscarTimeout = null;
+function cotizHistorialBuscarDebounced() {
+  clearTimeout(_cotizHistBuscarTimeout);
+  _cotizHistBuscarTimeout = setTimeout(cotizHistorialRender, 400);
+}
+async function cotizHistorialRender() {
+  const el = document.getElementById('cotiz-hist-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const texto = (document.getElementById('cotiz-hist-buscar')?.value || '').trim();
+    const cliente = (document.getElementById('cotiz-hist-cliente')?.value || '').trim();
+    let url = `/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&order=fecha.desc&limit=200`;
+    if (texto) url += `&or=(descripcion.ilike.*${encodeURIComponent(texto)}*,marca.ilike.*${encodeURIComponent(texto)}*,modelo.ilike.*${encodeURIComponent(texto)}*)`;
+    if (cliente) url += `&cliente=ilike.*${encodeURIComponent(cliente)}*`;
+    const res = await supaFetch(url, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el historial.</p>'; return; }
+    if (!rows.length) { el.innerHTML = '<p class="hint">Sin resultados — probá otra búsqueda, o cargá una venta abajo.</p>'; return; }
+    el.innerHTML = rows.map(r => `
+      <div class="result-field" style="flex-direction:column;align-items:stretch;gap:2px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <b style="font-size:13px">${esc([r.marca,r.modelo].filter(Boolean).join(' — ')) || '(sin marca/modelo)'}</b>
+          <span style="font-size:13px;font-weight:600;white-space:nowrap">${esc(r.moneda||'USD')} ${procesosFormatearNumero(r.precio_unitario)} c/u</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2)">${esc(r.descripcion||'')}</div>
+        <div style="font-size:11px;color:var(--text2)">${esc(r.cliente||'')} · ${esc(r.fecha||'')}${r.q_numero?' · Q'+esc(r.q_numero):''}${r.cantidad?' · Cant: '+esc(String(r.cantidad)):''}${r.vendedor_nombre?' · '+esc(r.vendedor_nombre):''}</div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al buscar en el historial.</p>'; }
+}
+
+let _cotizHistFormOpen = false;
+function cotizHistorialToggleForm() {
+  _cotizHistFormOpen = !_cotizHistFormOpen;
+  const el = document.getElementById('cotiz-hist-form');
+  const btn = document.getElementById('cotiz-hist-form-toggle');
+  if (!el || !btn) return;
+  if (!_cotizHistFormOpen) { el.style.display = 'none'; el.innerHTML = ''; btn.textContent = '+ Cargar venta'; return; }
+  btn.textContent = 'Cancelar';
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+      <div><label style="font-size:12px">Fecha</label><input type="date" id="cotiz-nv-fecha" value="${new Date().toISOString().slice(0,10)}" /></div>
+      <div><label style="font-size:12px">Cliente</label><input id="cotiz-nv-cliente" /></div>
+      <div><label style="font-size:12px">Nº de cotización (Q)</label><input id="cotiz-nv-qnum" /></div>
+      <div><label style="font-size:12px">Vendedor</label><input id="cotiz-nv-vendedor" value="${esc(currentUser?.nombre||'')}" /></div>
+      <div><label style="font-size:12px">Marca</label><input id="cotiz-nv-marca" /></div>
+      <div><label style="font-size:12px">Modelo</label><input id="cotiz-nv-modelo" /></div>
+      <div><label style="font-size:12px">Cantidad</label><input id="cotiz-nv-cantidad" type="number" value="1" /></div>
+      <div><label style="font-size:12px">Precio unitario</label><input id="cotiz-nv-precio" type="number" /></div>
+      <div><label style="font-size:12px">Moneda</label><select id="cotiz-nv-moneda"><option value="USD">USD</option><option value="ARS">ARS</option></select></div>
+    </div>
+    <label style="margin-top:8px">Descripción</label>
+    <textarea id="cotiz-nv-descripcion" rows="2"></textarea>
+    <button class="btn btn-green" style="margin-top:10px" onclick="cotizHistorialGuardar()">✓ Guardar venta</button>
+    <div id="cotiz-nv-status"></div>
+  `;
+}
+async function cotizHistorialGuardar() {
+  const statusId = 'cotiz-nv-status';
+  const cliente = document.getElementById('cotiz-nv-cliente').value.trim();
+  const descripcion = document.getElementById('cotiz-nv-descripcion').value.trim();
+  const precio = Number(document.getElementById('cotiz-nv-precio').value);
+  if (!cliente || !descripcion || !precio) { showMsg(statusId,'error','✕ Completá al menos cliente, descripción y precio.'); return; }
+  showMsg(statusId,'loading','Guardando...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const body = {
+      empresa: currentEmpresa,
+      fecha: document.getElementById('cotiz-nv-fecha').value || new Date().toISOString().slice(0,10),
+      cliente,
+      q_numero: document.getElementById('cotiz-nv-qnum').value.trim() || null,
+      vendedor_nombre: document.getElementById('cotiz-nv-vendedor').value.trim() || null,
+      marca: document.getElementById('cotiz-nv-marca').value.trim() || null,
+      modelo: document.getElementById('cotiz-nv-modelo').value.trim() || null,
+      descripcion,
+      cantidad: Number(document.getElementById('cotiz-nv-cantidad').value) || 1,
+      precio_unitario: precio,
+      moneda: document.getElementById('cotiz-nv-moneda').value,
+      creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+    };
+    const res = await supaFetch('/rest/v1/cotizaciones_historial_ventas', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+    cotizHistorialToggleForm();
+    cotizHistorialRender();
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo guardar: ' + e.message);
+  }
+}
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
-const NAV_AREA_ORDER = ['General', 'Compras y Comex', 'Procesos'];
+const NAV_AREA_ORDER = ['General', 'Compras y Comex', 'Comercial', 'Procesos'];
 const NAV_GEAR_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 const NAV_SECTIONS = [
   { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
@@ -11448,6 +11622,7 @@ const NAV_SECTIONS = [
   { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
   { id:'np-loc',    label:'NP Local',         area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
   { id:'np-int',    label:'NP Internacional', area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
+  { id:'cotizaciones', label:'Cotizaciones',   area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>' },
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
@@ -11457,6 +11632,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras y Comex', icon:NAV_GEAR_ICON },
   { id:'cfg-np-int',    label:'Cfg NP Internacional', area:'Compras y Comex', icon:NAV_GEAR_ICON },
+  { id:'cfg-cotizaciones', label:'Cfg Cotizaciones',  area:'Comercial',     icon:NAV_GEAR_ICON },
   { id:'cfg-procesos',  label:'Cfg Procesos IA',      area:'Procesos',      icon:NAV_GEAR_ICON },
 ];
 
@@ -11509,10 +11685,10 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','cfg-rend','cfg-clientes','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-procesos','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','cotizaciones','cfg-rend','cfg-clientes','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-procesos','cfg-cotizaciones','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-clientes','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
-  'Comercial':         ['rend','viajes','hallazgos'],
+  'Comercial':         ['rend','viajes','hallazgos','cotizaciones','cfg-cotizaciones'],
   'Compras y Comex':   ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
@@ -11723,6 +11899,8 @@ const PANEL_TITLES = {
   'cfg-np-int': 'Configuración — NP Internacional',
   'procesos': 'Procesos IA',
   'cfg-procesos': 'Configuración — Procesos IA',
+  'cotizaciones': 'Cotizaciones',
+  'cfg-cotizaciones': 'Configuración — Cotizaciones',
   'admin': 'Administración',
 };
 
