@@ -13,6 +13,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png?v=3" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hyperformula@2/dist/hyperformula.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="msal-browser.min.js"></script>
   <style>
     :root {
@@ -343,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4399,7 +4400,6 @@ let procesosStep1SpFolder = null;
 let _procesosCatalogoFolderTarget = null;
 let _procesosSaveTimeout = null;
 
-const PROCESOS_STEP_FIELD = { 4:'propuesta_texto' };
 const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:'Definir etapas y equipos', 4:'Generar la propuesta' };
 
 // ── Campos IA — qué extrae el análisis del cliente (Cfg Procesos IA) ──
@@ -4429,7 +4429,7 @@ function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1)
 function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f); renderProcesosIAFields(); }
 
 // ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
-const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', otro:'Otro' };
+const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', propuesta_base:'Propuesta base', otro:'Otro' };
 let _procesosDocTarget = null;
 
 async function renderProcesosDocumentos() {
@@ -5116,7 +5116,7 @@ function renderProcesosStepContent() {
   const p = procesosCurrentProyecto;
   const step = p._viewingStep || p.paso_actual;
   const el = document.getElementById('procesos-step-content');
-  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStepGenericHtml(p, step);
+  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStep4Html(p);
   if (step === 2) procesosStep2AfterRender();
 }
 
@@ -6802,26 +6802,6 @@ function procesosResumenDiseno(p) {
   return ctx;
 }
 
-// ── Paso 4: propuesta (patrón genérico, texto libre — se va a reemplazar por
-// un flujo basado en la plantilla .docx en la próxima iteración) ──
-function procesosStepGenericHtml(p, step) {
-  const field = PROCESOS_STEP_FIELD[step];
-  const value = p[field] || '';
-  return `
-    <div class="card-label">Paso ${step} — ${esc(PROCESOS_STEP_LABEL[step])}</div>
-    <label>Instrucciones para la IA (opcional)</label>
-    <textarea id="procesos-step${step}-prompt" rows="2" placeholder="Ej: priorizá tal enfoque, considerá tal restricción..." style="margin-bottom:10px"></textarea>
-    <button class="btn btn-primary" onclick="procesosGenerarPaso(${step})">✦ ${value ? 'Regenerar' : 'Generar'} con IA</button>
-    <div id="procesos-step${step}-status"></div>
-    <div class="gap"></div>
-    <label>Contenido (editable)</label>
-    <textarea id="procesos-step${step}-content" rows="14" oninput="procesosSaveProyectoDebounced({${JSON.stringify(field)}: this.value})">${esc(value)}</textarea>
-    ${step < 4
-      ? `<button class="btn btn-secondary" style="margin-top:10px" onclick="procesosAvanzarPaso(${step+1})">Continuar al Paso ${step+1} →</button>`
-      : `<button class="btn btn-green" style="margin-top:10px" onclick="procesosDescargarPropuesta()">⬇ Descargar propuesta (Word)</button>`}
-  `;
-}
-
 function procesosResumenCampos(p) {
   const info = p.info_cliente || {};
   const campos = info.campos || {};
@@ -6849,45 +6829,648 @@ function procesosBuildContexto(hastaStep) {
   return ctx;
 }
 
-async function procesosGenerarPaso(step) {
+// ── Paso 4: generar la propuesta desde la plantilla .docx ("Propuesta base"
+// en Cfg Procesos IA) ───────────────────────────────────────────────────
+// El Word final se arma fusionando la plantilla ORIGINAL (nunca se modifica
+// el archivo real de SharePoint — todo pasa en memoria, en el navegador) con
+// lo definido acá: los datos de la carátula, el texto de cada sección y las
+// tablas de Suministro / Propuesta Comercial. Se usa DOM real (DOMParser/
+// XMLSerializer) en vez de buscar texto plano en el XML, porque Word suele
+// partir una misma frase en varios <w:r> — comparando el texto ya
+// concatenado de cada párrafo no importa cómo esté fragmentado por dentro.
+const PROCESOS_PROPUESTA_WNS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+
+function procesosPropuestaXmlEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function procesosPropuestaElText(el) {
+  const ts = el.getElementsByTagName('w:t');
+  let s = '';
+  for (let i = 0; i < ts.length; i++) s += ts[i].textContent;
+  return s;
+}
+function procesosPropuestaHijos(el, tag) {
+  const out = [];
+  for (let i = 0; i < el.childNodes.length; i++) { const n = el.childNodes[i]; if (n.nodeType === 1 && n.tagName === tag) out.push(n); }
+  return out;
+}
+function procesosPropuestaEsEncabezado(p) {
+  if (!p || p.nodeType !== 1 || p.tagName !== 'w:p') return false;
+  const styles = p.getElementsByTagName('w:pStyle');
+  if (!styles.length) return false;
+  const v = styles[0].getAttribute('w:val');
+  return v === 'Ttulo1' || v === 'Ttulo2';
+}
+function procesosPropuestaBuscarEncabezado(doc, nivel, texto) {
+  const paras = doc.getElementsByTagName('w:p');
+  for (let i = 0; i < paras.length; i++) {
+    const p = paras[i];
+    const styles = p.getElementsByTagName('w:pStyle');
+    if (styles.length && styles[0].getAttribute('w:val') === 'Ttulo' + nivel && procesosPropuestaElText(p).trim() === texto) return p;
+  }
+  throw new Error(`No se encontró en la plantilla el encabezado "${texto}" (Título${nivel}) — ¿es la plantilla F-PP-02 sin cambios de títulos?`);
+}
+// Parsea un fragmento XML (uno o más elementos hermanos) y devuelve sus
+// nodos ya importados al documento destino, listos para insertar.
+function procesosPropuestaParsearFragmento(doc, xmlStr) {
+  const wrapped = `<w:tmproot xmlns:w="${PROCESOS_PROPUESTA_WNS}">${xmlStr}</w:tmproot>`;
+  const frag = new DOMParser().parseFromString(wrapped, 'application/xml');
+  const root = frag.documentElement;
+  const nodes = [];
+  for (let i = 0; i < root.childNodes.length; i++) if (root.childNodes[i].nodeType === 1) nodes.push(doc.importNode(root.childNodes[i], true));
+  return nodes;
+}
+function procesosPropuestaParrafoNormal(texto) {
+  return `<w:p><w:pPr><w:rPr><w:rFonts w:cs="Tahoma"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:cs="Tahoma"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+}
+// Ítem con viñeta — reusa el mismo numId=5 que ya trae la plantilla en
+// "Límite de suministro"/"Observaciones", así se ve idéntico a las originales.
+function procesosPropuestaParrafoVineta(texto) {
+  return `<w:p><w:pPr><w:pStyle w:val="Prrafodelista"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="5"/></w:numPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+}
+function procesosPropuestaParrafoSubtitulo(texto) {
+  return `<w:p><w:pPr><w:ind w:firstLine="0"/><w:rPr><w:b/><w:bCs/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:bCs/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+}
+// Convierte texto editable (multilínea) en párrafos: 'prosa' = un párrafo por
+// línea no vacía; 'bullets' = viñeta por línea, salvo las que arrancan con
+// "## " que se arman como subtítulo en negrita sin viñeta (para agrupar,
+// como "Exclusiones Generales"/"SGI" en Límite de suministro).
+function procesosPropuestaTextoAXml(texto, tipo) {
+  const lineas = String(texto || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lineas.length) return '';
+  if (tipo === 'bullets') return lineas.map(l => l.startsWith('## ') ? procesosPropuestaParrafoSubtitulo(l.slice(3).trim()) : procesosPropuestaParrafoVineta(l)).join('');
+  return lineas.map(procesosPropuestaParrafoNormal).join('');
+}
+// Reemplaza todo lo que hay entre el encabezado y el próximo encabezado (de
+// cualquier nivel, o el final del documento) por los párrafos generados.
+function procesosPropuestaReemplazarBloque(doc, nivel, texto, nuevoTexto, tipo) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto);
+  const parent = heading.parentNode;
+  let node = heading.nextSibling;
+  const aSacar = [];
+  while (node) {
+    if (node.nodeType === 1 && (procesosPropuestaEsEncabezado(node) || node.tagName === 'w:tbl' || node.tagName === 'w:sectPr')) break;
+    aSacar.push(node);
+    node = node.nextSibling;
+  }
+  const refNode = node;
+  const nuevos = procesosPropuestaParsearFragmento(doc, procesosPropuestaTextoAXml(nuevoTexto, tipo) || procesosPropuestaParrafoNormal(''));
+  aSacar.forEach(n => parent.removeChild(n));
+  nuevos.forEach(n => parent.insertBefore(n, refNode));
+}
+function procesosPropuestaBuscarTabla(doc, nivel, texto) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto);
+  let node = heading.nextSibling;
+  while (node) {
+    if (node.nodeType === 1 && node.tagName === 'w:tbl') return node;
+    if (node.nodeType === 1 && procesosPropuestaEsEncabezado(node)) throw new Error(`No hay una tabla justo después de "${texto}" en la plantilla.`);
+    node = node.nextSibling;
+  }
+  throw new Error(`No se encontró la tabla después de "${texto}" en la plantilla.`);
+}
+function procesosPropuestaFilasDeTabla(tbl) { return procesosPropuestaHijos(tbl, 'w:tr'); }
+function procesosPropuestaReemplazarFilas(doc, tbl, filasEncabezado, nuevasFilasXml) {
+  const filas = procesosPropuestaFilasDeTabla(tbl);
+  for (let i = filas.length - 1; i >= filasEncabezado; i--) tbl.removeChild(filas[i]);
+  procesosPropuestaParsearFragmento(doc, nuevasFilasXml).forEach(f => tbl.appendChild(f));
+}
+function procesosPropuestaFilaSuministro(cantidad, detalle) {
+  return `<w:tr><w:tc><w:tcPr><w:tcW w:w="727" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(cantidad)}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="8912" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(detalle)}</w:t></w:r></w:p></w:tc></w:tr>`;
+}
+function procesosPropuestaReemplazarTablaSuministro(doc, items) {
+  const tbl = procesosPropuestaBuscarTabla(doc, 2, 'Suministro');
+  const xml = items.map(it => procesosPropuestaFilaSuministro(it.cantidad, it.detalle)).join('');
+  procesosPropuestaReemplazarFilas(doc, tbl, 1, xml || procesosPropuestaFilaSuministro('', '(sin equipos definidos)'));
+}
+function procesosPropuestaCeldaComercial(texto, w) {
+  return `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:pStyle w:val="Textoindependiente"/><w:ind w:firstLine="0"/><w:jc w:val="center"/><w:rPr><w:rFonts w:ascii="Tahoma" w:hAnsi="Tahoma" w:cs="Tahoma"/><w:b w:val="0"/><w:bCs w:val="0"/><w:lang w:val="es-AR"/></w:rPr></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Tahoma" w:hAnsi="Tahoma" w:cs="Tahoma"/><w:b w:val="0"/><w:bCs w:val="0"/><w:lang w:val="es-AR"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p></w:tc>`;
+}
+function procesosPropuestaFilaComercial(item) {
+  const total = (Number(item.cantidad) || 0) * (Number(item.precio_unitario) || 0);
+  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return '<w:tr>'
+    + procesosPropuestaCeldaComercial(item.item, 755)
+    + procesosPropuestaCeldaComercial(String(item.cantidad), 1202)
+    + procesosPropuestaCeldaComercial(item.descripcion, 2861)
+    + procesosPropuestaCeldaComercial(item.precio_unitario ? fmt(Number(item.precio_unitario)) : '', 2128)
+    + procesosPropuestaCeldaComercial(item.precio_unitario ? fmt(total) : '', 2268)
+    + '</w:tr>';
+}
+function procesosPropuestaReemplazarTablaComercial(doc, items) {
+  const tbl = procesosPropuestaBuscarTabla(doc, 1, 'PROPUESTA COMERCIAL');
+  const xml = items.map((it,i) => procesosPropuestaFilaComercial(Object.assign({item:i+1}, it))).join('');
+  procesosPropuestaReemplazarFilas(doc, tbl, 1, xml || procesosPropuestaFilaComercial({item:'',cantidad:'',descripcion:'(sin ítems cargados)',precio_unitario:0}));
+}
+// Condiciones Comerciales: tabla de filas fijas (etiqueta | valor) — solo se
+// reemplaza el texto de la celda de valor, sin tocar la cantidad de filas.
+function procesosPropuestaReemplazarCondicionesComerciales(doc, valores) {
+  const tbl = procesosPropuestaBuscarTabla(doc, 2, 'Condiciones Comerciales');
+  const filas = procesosPropuestaFilasDeTabla(tbl);
+  const etiquetaAClave = { 'Moneda':'moneda', 'Forma de Pago':'forma_pago', 'Forma de Cancelación':'forma_cancelacion', 'Plazo de Entrega':'plazo_entrega', 'Lugar de entrega':'lugar_entrega', 'Validez de la oferta':'validez_oferta' };
+  filas.forEach(fila => {
+    const tcs = procesosPropuestaHijos(fila, 'w:tc');
+    if (tcs.length < 2) return;
+    const etiqueta = procesosPropuestaElText(tcs[0]).replace(/:$/,'').trim();
+    const clave = etiquetaAClave[etiqueta];
+    if (!clave || valores[clave] == null) return;
+    procesosPropuestaSetTextoCelda(doc, tcs[1], valores[clave]);
+  });
+}
+function procesosPropuestaSetTextoCelda(doc, tc, texto) {
+  const ps = procesosPropuestaHijos(tc, 'w:p');
+  if (!ps.length) return;
+  procesosPropuestaHijos(ps[0], 'w:r').forEach(r => ps[0].removeChild(r));
+  ps[0].appendChild(procesosPropuestaParsearFragmento(doc, `<w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r>`)[0]);
+  for (let i = 1; i < ps.length; i++) procesosPropuestaHijos(ps[i], 'w:r').forEach(r => ps[i].removeChild(r));
+}
+// Reescribe el texto visible de un párrafo entero: conserva el primer <w:r>
+// (con su formato) con un único <w:t>, y borra los demás runs del párrafo —
+// Word suele fragmentar una misma frase en varios runs con igual formato.
+function procesosPropuestaSetTextoParrafo(doc, p, texto) {
+  const runs = procesosPropuestaHijos(p, 'w:r');
+  if (!runs.length) { p.appendChild(procesosPropuestaParsearFragmento(doc, `<w:r><w:rPr><w:rFonts w:cs="Tahoma"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r>`)[0]); return; }
+  const first = runs[0];
+  procesosPropuestaHijos(first, 'w:t').forEach(t => first.removeChild(t));
+  const newT = doc.createElementNS(PROCESOS_PROPUESTA_WNS, 'w:t');
+  newT.setAttribute('xml:space', 'preserve');
+  newT.appendChild(doc.createTextNode(texto));
+  first.appendChild(newT);
+  for (let i = 1; i < runs.length; i++) p.removeChild(runs[i]);
+}
+function procesosPropuestaBuscarParrafo(doc, pStyleVal, prefijo) {
+  const paras = doc.getElementsByTagName('w:p');
+  for (let i = 0; i < paras.length; i++) {
+    const p = paras[i];
+    const styles = p.getElementsByTagName('w:pStyle');
+    const val = styles.length ? styles[0].getAttribute('w:val') : null;
+    if (val !== pStyleVal) continue;
+    if (procesosPropuestaElText(p).trim().startsWith(prefijo)) return p;
+  }
+  throw new Error(`No se encontró en la plantilla el párrafo esperado (estilo ${pStyleVal}, "${prefijo}...").`);
+}
+function procesosPropuestaReemplazarCaratula(doc, c) {
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Firmacaratula', 'Acassuso'), `Acassuso, ${c.fecha || 'XX de XX de XXXX'}.`);
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Destinatario', 'At:'), `At: ${c.destinatario_at || ''}`);
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Destinatario', 'E-mail:'), `E-mail: ${c.destinatario_email || ''}`);
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Destinatario', 'Teléfono'), `Teléfono: ${c.destinatario_telefono || ''}`);
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Referencia', 'Ref'), `Ref.: (Q-) ${c.ref_numero || ''}`);
+  procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarParrafo(doc, 'Firmacaratula', 'Ing.'), `Ing. ${c.firmante_nombre || 'XXXX'}`);
+  const sres = procesosPropuestaBuscarParrafo(doc, 'Destinatario', 'Sres');
+  const vacio = sres.nextSibling && sres.nextSibling.nodeType === 1 ? sres.nextSibling : null;
+  if (!vacio) throw new Error('No se encontró el párrafo del destinatario (después de "Sres.").');
+  procesosPropuestaSetTextoParrafo(doc, vacio, c.destinatario_empresa || '');
+  const paras = doc.getElementsByTagName('w:p');
+  let intro = null;
+  for (let i = 0; i < paras.length; i++) { if (procesosPropuestaElText(paras[i]).trim().startsWith('Por la presente enviamos')) { intro = paras[i]; break; } }
+  if (!intro) throw new Error('No se encontró el párrafo de introducción de la carátula.');
+  procesosPropuestaSetTextoParrafo(doc, intro, `Por la presente enviamos nuestra propuesta técnica y comercial por el suministro de ${c.suministro_objeto || 'XX'} para el proyecto de tratamiento de efluentes de ${c.cliente || 'XXXX'}, ubicada en ${c.ubicacion || 'XXXX'}.`);
+}
+// Aplica TODOS los datos del proyecto sobre el DOM de la plantilla ya
+// parseada — la usan tanto la vista previa como la descarga final, así las
+// dos muestran exactamente lo mismo.
+function procesosPropuestaAplicarDatos(doc, p) {
+  const pd = p.propuesta_data || {};
+  procesosPropuestaReemplazarCaratula(doc, pd.caratula || {});
+  PROCESOS_PROPUESTA_SECCIONES.forEach(s => {
+    const texto = (pd.secciones && pd.secciones[s.key] && pd.secciones[s.key].texto) || '';
+    procesosPropuestaReemplazarBloque(doc, s.nivel, s.heading, texto, s.tipo);
+  });
+  const items = pd.comercial_items || [];
+  procesosPropuestaReemplazarTablaSuministro(doc, items.map(it => ({ cantidad: it.cantidad, detalle: it.descripcion })));
+  procesosPropuestaReemplazarTablaComercial(doc, items);
+  procesosPropuestaReemplazarCondicionesComerciales(doc, pd.condiciones_comerciales || {});
+}
+// Vuelca el contenido del documento ya fusionado a un HTML simple, solo para
+// la vista previa dentro de MAIA (no es lo que se descarga).
+function procesosPropuestaDocATextoHtml(doc) {
+  const body = doc.getElementsByTagName('w:body')[0];
+  if (!body) return '<p class="hint">No se pudo leer el contenido.</p>';
+  let html = '';
+  for (let i = 0; i < body.childNodes.length; i++) {
+    const node = body.childNodes[i];
+    if (node.nodeType !== 1) continue;
+    if (node.tagName === 'w:sdt') continue; // tabla de contenidos, no hace falta en la vista previa
+    if (node.tagName === 'w:p') {
+      const styles = node.getElementsByTagName('w:pStyle');
+      const styleVal = styles.length ? styles[0].getAttribute('w:val') : null;
+      const texto = procesosPropuestaElText(node).trim();
+      if (!texto) continue;
+      if (styleVal === 'Ttulo1') html += `<h3 style="margin:14px 0 4px">${esc(texto)}</h3>`;
+      else if (styleVal === 'Ttulo2') html += `<h4 style="margin:10px 0 4px">${esc(texto)}</h4>`;
+      else if (styleVal === 'Prrafodelista') html += `<div style="margin-left:16px;font-size:13px">• ${esc(texto)}</div>`;
+      else html += `<p style="font-size:13px;margin:4px 0">${esc(texto)}</p>`;
+    } else if (node.tagName === 'w:tbl') {
+      const filas = procesosPropuestaHijos(node, 'w:tr');
+      html += '<table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:12px">' + filas.map(fila => {
+        const celdas = procesosPropuestaHijos(fila, 'w:tc');
+        return '<tr>' + celdas.map(c => `<td style="border:1px solid var(--border);padding:4px">${esc(procesosPropuestaElText(c).trim())}</td>`).join('') + '</tr>';
+      }).join('') + '</table>';
+    }
+  }
+  return html;
+}
+
+// ── Contenido editable de cada sección + valores por defecto ──────────────
+// Las 4 primeras secciones están vacías en la plantilla original (se llenan
+// solas al escribir la propuesta, no traen texto de base) — para esas no hay
+// default. Las demás son texto estándar de Aeration: se precargan tal cual
+// viene en la plantilla, así si el usuario no las toca, el Word final queda
+// igual al original (nada se pierde). El usuario puede editarlas o pedirle
+// ajustes a la IA por chat igual que a cualquier otra sección.
+const PROCESOS_PROPUESTA_DEFAULT_GARANTIA = 'El plazo de garantía es de 12 meses desde la finalización del montaje (a partir de la firma del acta de finalización del montaje) o 18 meses desde la entrega de los equipos, lo que ocurra primero. Aeration garantiza su provisión mecánica siempre que la planta sea operada adecuadamente o que sea operada por Aeration. Para ello, durante la puesta en marcha se capacitará al personal para la operación de la planta.';
+const PROCESOS_PROPUESTA_DEFAULT_FUERZA_MAYOR = 'Ante situaciones de fuerza mayor, condiciones climáticas adversas u otros eventos externos no controlables, la empresa evaluará el impacto sobre los plazos y entregables, comunicará formalmente al cliente las posibles afectaciones y coordinará acciones de contingencia, quedando eximida de responsabilidad por demoras o incumplimientos derivados exclusivamente de dichas causas.';
+const PROCESOS_PROPUESTA_DEFAULT_POLITICA_SGI = `El compromiso que asumimos en Aeration Argentina S.A. es lograr la satisfacción de nuestros clientes a través de la optimización del diseño, desarrollo de la Ingeniería, Construcción, Montaje y Puesta en Marcha de los equipos y Plantas de tratamiento de agua y efluentes que comercializamos.
+Lo hacemos cumpliendo los requisitos del cliente, como también las normativas legales y cualquier otro requisito aplicable. Toda nuestra organización está alineada con este compromiso, para lograr proveer equipos y obras de ingeniería con la calidad y tiempos de entrega convenidos.
+Para lograrlo, nuestro personal clave se mantiene técnicamente actualizado respecto a las tecnologías de punta disponibles en el mundo, haciendo acuerdos de colaboración con empresas que desarrollan esas tecnologías, buscando además contar con líneas de representación que ofrezcan los mejores equipamientos para cada proceso de tratamiento.
+Nos comprometemos a prevenir la contaminación ambiental y mitigar los impactos ambientales producto de nuestras actividades, como así también proporcionar condiciones de trabajo seguro reduciendo los peligros y riesgos laborales, fomentando la participación y consulta de todos los trabajadores que conforman parte de nuestro equipo trabajando en pos de la mejora continua del sistema de gestión integrado.
+Todo lo antedicho, se desarrolla manteniendo la rentabilidad, con costos competitivos, a fin de superar las expectativas de nuestros clientes.`;
+const PROCESOS_PROPUESTA_DEFAULT_LIMITE_SUMINISTRO = `## Exclusiones Generales
+Iluminación general y de emergencia de interiores y exteriores.
+Acometida eléctrica con trifásica, neutro y puesta a tierra (sistema equipotencial).
+Protección por descargas atmosféricas.
+Identificación de líneas y tag en campo.
+Demoliciones y desmontajes de estructuras y equipos existentes.
+Acometida de agua cruda y tratada.
+Agua de servicio.
+Aire comprimido.
+Estudios pluviales, de renovación de aire y sistemas de refrigeración.
+Impulsión de líquido tratado a punto de vuelco (revisar piezométrica).
+Estudios de suelo y topográficos.
+## SGI
+Gestión medioambiental, presentación ante autoridades, costos de sellados y colegiados.
+Servicio de enfermería y sanitario en sitio.
+Seguridad patrimonial en obra.
+Obrador y baños en obra.
+Mediciones de gases y otros.
+Sistema de monitoreo y control de incendios.
+Personal de higiene y seguridad en obra.
+Disposición final de residuos.
+## Exclusiones Particulares
+Provisión y mano de obra de materiales para interconexiones hidráulicas de entrada y salida del reactor.
+Definición de traza de piping bypass, construcción de zanja, movimiento de caños y cámaras de inspección.
+El cliente deberá proveer la energía eléctrica necesaria para el funcionamiento de la máquina de termofusión.
+Tanque de recepción de permeado.
+Sistema de izaje de parrilla de difusores.
+Cabina de insonorización de soplantes.
+Filtros de carbón activado.
+Volquete para depósito de sólidos del tamiz.
+Aislamiento térmico y acústico de tuberías (tracing).
+Grúa para descarga y posicionamiento de equipos.
+Tomas auxiliares de mantenimiento, tomas de corriente y circuitos para servicios externos.
+Llaves de corte de emergencia de equipos.
+Cerco perimetral.
+Cañeros y canalizaciones eléctricas, estructuras metálicas y soportería de piping. Incluye únicamente bandejas portacables tipo escalera y caños camisa sin curvas ni accesorios.
+Conducciones enterradas, escaleras, accesos, barandas, tapas, vigas elevadoras y soporte para las mismas, en caso de corresponder.
+Transporte de equipos a planta.
+Trabajos de excavación, cálculo y obra civil (ni obras temporales). Se entregarán los planos de implantación con descripción de cargas para que especialistas realicen los cálculos estructurales.
+Mano de obra para montaje eléctrico y mecánico.
+## Exclusiones de Proceso
+Ensayos de banco de equipos electromecánicos.
+Elementos de laboratorio.
+Ensayos destructivos y no destructivos de materiales.
+Productos químicos, repuestos y consumibles.
+## Exclusiones Administrativas y Notas
+Nota sobre repuestos: a través de Aeration, nuestros clientes cuentan con distintas modalidades para asegurar la disponibilidad inmediata de repuestos de todos los equipos.
+La obra civil se cotiza en pesos base XX, con fórmula de actualización 60% UOCRA y 40% CAC.
+Trámites de autorización frente a las autoridades.
+Pólizas, cauciones y seguros.
+Costos de nacionalización e impuestos de importación.
+Traslados internos y almacenamiento de la mercadería.
+Todo ítem no contemplado en esta propuesta.`;
+const PROCESOS_PROPUESTA_DEFAULT_OBSERVACIONES = `En caso de que la planta sea operada por Aeration, la garantía se extenderá por 6 meses más.
+Las facturas deberán ser efectivamente canceladas dentro de los 10 días de su presentación. Tipo de Cambio: Pagadero en pesos al tipo de cambio Dólar/Euro billete vendedor según cotización del Banco de la Nación Argentina al día previo a la acreditación del pago. Se emitirá Nota de Crédito/Débito según corresponda, por la diferencia que pudiera generarse.
+Los plazos de entrega quedarán sujetos a la recepción y aprobación de OC, cobro de anticipo y aprobación de documentación técnica por el cliente.
+El inicio del montaje y/o supervisión de montaje comenzará una vez terminadas las obras civiles, pruebas hidráulicas y pinturas de revestimiento. Si la obra civil está excluida de la oferta, las pruebas hidráulicas deberán ser realizadas por el cliente o su subcontratista.
+Equipos importados: los precios han sido calculados en base a impuestos, tasas y derechos de importación vigentes a la fecha de la presente propuesta. En caso de producirse cambios, los mismos se trasladarán a los precios en la proporción que corresponda.
+Las condiciones comerciales quedarán sujetas a la aprobación del permiso de importación, recepción de Orden de Compra, cobro de anticipo y aprobación técnica por parte del cliente.
+La aceptación de la OC quedará supeditada a la posibilidad de acceder, en el momento de la recepción de la OC, al Mercado Único y Libre de cambios (MULC) utilizado para realizar las importaciones.`;
+
+const PROCESOS_PROPUESTA_SECCIONES = [
+  { key:'intro_parametros', heading:'Parámetros de diseño', nivel:2, tipo:'prosa', label:'Parámetros de diseño', default:'' },
+  { key:'intro_calidad_vuelco', heading:'Calidad de vuelco', nivel:2, tipo:'prosa', label:'Calidad de vuelco', default:'' },
+  { key:'intro_seleccion_tecnologia', heading:'Selección de tecnología', nivel:2, tipo:'prosa', label:'Selección de tecnología', default:'' },
+  { key:'etapas_proceso', heading:'Etapas de proceso', nivel:2, tipo:'prosa', label:'Etapas de proceso', default:'' },
+  { key:'limite_suministro', heading:'Límite de suministro', nivel:2, tipo:'bullets', label:'Límite de suministro (exclusiones)', default: PROCESOS_PROPUESTA_DEFAULT_LIMITE_SUMINISTRO },
+  { key:'garantia_mecanica', heading:'Garantía mecánica', nivel:2, tipo:'prosa', label:'Garantía mecánica', default: PROCESOS_PROPUESTA_DEFAULT_GARANTIA },
+  { key:'fuerza_mayor', heading:'Eventos de fuerza mayor', nivel:2, tipo:'prosa', label:'Eventos de fuerza mayor', default: PROCESOS_PROPUESTA_DEFAULT_FUERZA_MAYOR },
+  { key:'observaciones', heading:'Observaciones', nivel:2, tipo:'bullets', label:'Observaciones', default: PROCESOS_PROPUESTA_DEFAULT_OBSERVACIONES },
+  { key:'politica_sgi', heading:'POLITICA DE GESTIÓN INTEGRADA', nivel:1, tipo:'prosa', label:'Política de Gestión Integrada', default: PROCESOS_PROPUESTA_DEFAULT_POLITICA_SGI },
+];
+
+// Arma los ítems de Suministro/Propuesta Comercial a partir de los equipos ya
+// definidos y confirmados en el Paso 3 (uno por equipo, con la etapa como
+// referencia) — el precio unitario queda en null, se completa a mano acá.
+function procesosPropuestaItemsDesdeEquipos(p) {
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const etapas = procesosStep3EtapasConfirmadas(p).filter(n => ed[n]?.confirmada);
+  const items = [];
+  etapas.forEach(nombre => {
+    (ed[nombre].equipos || []).forEach(eq => {
+      const desc = [eq.tipo, eq.especificacion].filter(Boolean).join(' — ') || '(sin descripción)';
+      items.push({ id: procesosNuevoId(), etapa: nombre, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null });
+    });
+  });
+  return items;
+}
+function procesosPropuestaSeedIfNeeded(p) {
+  if (p.propuesta_data) return p.propuesta_data;
+  const secciones = {};
+  PROCESOS_PROPUESTA_SECCIONES.forEach(s => { secciones[s.key] = { texto: s.default || '', chat: [] }; });
+  const pd = {
+    caratula: {
+      fecha: '', destinatario_empresa: '', destinatario_at: '', destinatario_email: '', destinatario_telefono: '',
+      ref_numero: '', suministro_objeto: '', cliente: p.cliente || '', ubicacion: '', firmante_nombre: currentUser?.nombre || ''
+    },
+    secciones,
+    condiciones_comerciales: { moneda: 'Dólares estadounidenses.', forma_pago: '', forma_cancelacion: 'Transferencia bancaria.', plazo_entrega: 'desde recibida OC, aceptada la OC, aprobado el permiso de importación y cobrado el anticipo', lugar_entrega: '', validez_oferta: '' },
+    comercial_items: procesosPropuestaItemsDesdeEquipos(p),
+  };
+  p.propuesta_data = pd;
+  return pd;
+}
+
+// ── UI del Paso 4 ───────────────────────────────────────────────────────
+let procesosStep4State = { proyectoId: null, seccionAbierta: null };
+function procesosStep4ResetIfNeeded(p) {
+  if (procesosStep4State.proyectoId !== p.id) procesosStep4State = { proyectoId: p.id, seccionAbierta: null };
+}
+const PROCESOS_PROPUESTA_CAMPOS_CARATULA = [
+  ['destinatario_empresa','Empresa destinataria'], ['destinatario_at','Contacto (At:)'],
+  ['destinatario_email','E-mail'], ['destinatario_telefono','Teléfono'],
+  ['ref_numero','Nº de referencia (Q-)'], ['fecha','Fecha (ej: 15 de marzo de 2026)'],
+  ['suministro_objeto','Objeto del suministro'], ['cliente','Cliente (para "efluentes de...")'],
+  ['ubicacion','Ubicación de la obra'], ['firmante_nombre','Firma — Ingeniero/a'],
+];
+const PROCESOS_PROPUESTA_CAMPOS_CONDICIONES = [
+  ['moneda','Moneda'], ['forma_pago','Forma de pago'], ['forma_cancelacion','Forma de cancelación'],
+  ['plazo_entrega','Plazo de entrega'], ['lugar_entrega','Lugar de entrega'], ['validez_oferta','Validez de la oferta'],
+];
+
+function procesosStep4Html(p) {
+  procesosStep4ResetIfNeeded(p);
+  const pd = procesosPropuestaSeedIfNeeded(p);
+  const c = pd.caratula;
+  const abierta = procesosStep4State.seccionAbierta;
+
+  const filaSeccion = meta => {
+    const sec = pd.secciones[meta.key] || { texto:'', chat:[] };
+    const esAbierta = abierta === meta.key;
+    const tieneContenido = (sec.texto||'').trim().length > 0;
+    return `
+    <div class="field-row" style="padding:8px 0">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span style="font-size:13px;color:var(--text)"><b>${esc(meta.label)}</b>${tieneContenido ? ' <span style="color:var(--green)">✓</span>' : ' <span style="color:var(--text2)">(vacío)</span>'}</span>
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep4ToggleSeccion('${meta.key}')">${esAbierta ? 'Cerrar' : 'Editar →'}</button>
+      </div>
+      ${esAbierta ? procesosStep4SeccionPanelHtml(meta) : ''}
+    </div>`;
+  };
+
+  const items = pd.comercial_items || [];
+  const totalGeneral = items.reduce((acc,it) => acc + (Number(it.cantidad)||0) * (Number(it.precio_unitario)||0), 0);
+
+  return `
+    <div class="card-label">Paso 4 — Generar la propuesta</div>
+    <p class="hint" style="margin:6px 0 10px">Se usa la plantilla vinculada como "Propuesta base" en Cfg Procesos IA — se completa con lo definido en los pasos anteriores, se puede editar cada sección a mano o pedirle ajustes a la IA por chat, y se genera el Word manteniendo el formato y la letra chica original.</p>
+    <div id="procesos-step4-status"></div>
+    <button class="btn btn-primary" onclick="procesosStep4GenerarConIA()">✦ Generar contenido con IA</button>
+    <p class="hint" style="margin-top:4px">Redacta las secciones sin texto todavía (parámetros, calidad de vuelco, tecnología, etapas) y sugiere los datos de la carátula. No toca las secciones de términos estándar — esas las podés editar o pedirle ajustes vos, si hace falta.</p>
+    <div class="gap"></div>
+
+    <label>Datos de la carátula</label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      ${PROCESOS_PROPUESTA_CAMPOS_CARATULA.map(([campo,label]) => `
+      <div><label style="font-size:12px">${esc(label)}</label>
+      <input value="${esc(c[campo]||'')}" oninput="procesosStep4SetCaratula('${campo}', this.value)" /></div>`).join('')}
+    </div>
+
+    <label>Secciones de la propuesta</label>
+    ${PROCESOS_PROPUESTA_SECCIONES.map(filaSeccion).join('')}
+
+    <div class="gap"></div>
+    <label>Propuesta comercial — ítems y precios</label>
+    <p class="hint" style="margin-bottom:6px">Se cargan solos desde los equipos definidos en el Paso 3 — completá el precio unitario de cada uno (MAIA no tiene datos de costos).</p>
+    ${items.length ? `
+      <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2)">
+        <span style="flex:2">Descripción</span><span style="width:60px">Cant.</span><span style="width:120px">Precio unit. (USD)</span><span style="width:110px">Total</span>
+      </div>
+      ${items.map(it => `
+      <div class="field-row" style="padding:4px 0;display:flex;gap:6px;align-items:center">
+        <span style="flex:2;font-size:13px">${esc(it.descripcion)}${it.etapa?` <span style="color:var(--text2);font-size:11px">(${esc(it.etapa)})</span>`:''}</span>
+        <input value="${esc(String(it.cantidad))}" style="width:60px" onchange="procesosStep4SetItemCampo('${it.id}','cantidad',this.value)" />
+        <input value="${it.precio_unitario!=null?esc(String(it.precio_unitario)):''}" placeholder="0.00" style="width:120px" onchange="procesosStep4SetItemCampo('${it.id}','precio_unitario',this.value)" />
+        <span style="width:110px;font-size:13px">${it.precio_unitario ? procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0)) : '—'}</span>
+      </div>`).join('')}
+      <div style="text-align:right;margin-top:6px;font-weight:600">Total: USD ${procesosFormatearNumero(totalGeneral)}</div>
+    ` : '<p class="hint">Todavía no hay equipos definidos en el Paso 3.</p>'}
+    <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep4RecargarItemsDesdeEquipos()">↻ Volver a traer ítems desde el Paso 3</button>
+
+    <div class="gap"></div>
+    <label>Condiciones comerciales</label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      ${PROCESOS_PROPUESTA_CAMPOS_CONDICIONES.map(([campo,label]) => `
+      <div><label style="font-size:12px">${esc(label)}</label>
+      <input value="${esc(pd.condiciones_comerciales[campo]||'')}" oninput="procesosStep4SetCondicion('${campo}', this.value)" /></div>`).join('')}
+    </div>
+
+    <div class="gap"></div>
+    <button class="btn btn-secondary" onclick="procesosStep4Previsualizar()">👁 Previsualizar propuesta</button>
+    <button class="btn btn-green" style="margin-left:8px" onclick="procesosStep4Descargar()">⬇ Generar y descargar propuesta (Word)</button>
+    <div id="procesos-step4-generar-status"></div>
+    <div id="procesos-step4-preview"></div>
+  `;
+}
+
+function procesosStep4SeccionPanelHtml(meta) {
   const p = procesosCurrentProyecto;
-  const field = PROCESOS_STEP_FIELD[step];
-  const statusId = 'procesos-step'+step+'-status';
-  const userPrompt = document.getElementById('procesos-step'+step+'-prompt')?.value || '';
-  showMsg(statusId,'loading','Generando con IA...');
+  const pd = p.propuesta_data;
+  const sec = pd.secciones[meta.key] || { texto:'', chat:[] };
+  return `
+    <div class="card" style="margin-top:8px">
+      <p class="hint" style="margin-bottom:6px">${meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>
+      <textarea rows="${meta.tipo==='bullets'?12:6}" oninput="procesosStep4SetSeccionTexto('${meta.key}', this.value)">${esc(sec.texto||'')}</textarea>
+      <div class="gap"></div>
+      <label>Chat de esta sección</label>
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto;margin-bottom:8px">
+        ${(sec.chat||[]).map(m => `<div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:85%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('') || '<div class="hint">Sin mensajes todavía.</div>'}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="procesos-step4-chat-input-${meta.key}" placeholder="Ej: hacela más corta, agregá..." style="flex:1" onkeydown="if(event.key==='Enter'){procesosStep4SeccionChatSend('${meta.key}')}" />
+        <button class="btn btn-primary btn-sm" onclick="procesosStep4SeccionChatSend('${meta.key}')">Enviar</button>
+      </div>
+      <div id="procesos-step4-chat-status-${meta.key}"></div>
+    </div>`;
+}
+
+function procesosStep4ToggleSeccion(key) {
+  procesosStep4State.seccionAbierta = (procesosStep4State.seccionAbierta === key) ? null : key;
+  renderProcesosStepContent();
+}
+function procesosStep4SetSeccionTexto(key, val) {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.secciones = Object.assign({}, pd.secciones);
+  pd.secciones[key] = Object.assign({ texto:'', chat:[] }, pd.secciones[key], { texto: val });
+  procesosSaveProyectoDebounced({ propuesta_data: pd });
+}
+function procesosStep4SetCaratula(campo, val) {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.caratula = Object.assign({}, pd.caratula, { [campo]: val });
+  procesosSaveProyectoDebounced({ propuesta_data: pd });
+}
+function procesosStep4SetCondicion(campo, val) {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.condiciones_comerciales = Object.assign({}, pd.condiciones_comerciales, { [campo]: val });
+  procesosSaveProyectoDebounced({ propuesta_data: pd });
+}
+function procesosStep4SetItemCampo(id, campo, val) {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.comercial_items = (pd.comercial_items||[]).map(it => it.id===id ? Object.assign({}, it, { [campo]: campo==='descripcion' ? val : (val===''?'':Number(val)) }) : it);
+  procesosSaveProyecto({ propuesta_data: pd });
+  renderProcesosStepContent();
+}
+function procesosStep4RecargarItemsDesdeEquipos() {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  const preciosAnteriores = {};
+  (pd.comercial_items||[]).forEach(it => { preciosAnteriores[it.etapa+'|'+it.descripcion] = it.precio_unitario; });
+  pd.comercial_items = procesosPropuestaItemsDesdeEquipos(p).map(it => Object.assign({}, it, { precio_unitario: preciosAnteriores[it.etapa+'|'+it.descripcion] ?? null }));
+  procesosSaveProyecto({ propuesta_data: pd });
+  renderProcesosStepContent();
+}
+
+// ── Generación con IA + chat por sección ──────────────────────────────────
+async function procesosStep4GenerarConIA() {
+  const p = procesosCurrentProyecto;
+  procesosPropuestaSeedIfNeeded(p);
+  const statusId = 'procesos-step4-status';
+  showMsg(statusId, 'loading', 'Generando contenido de la propuesta con IA...');
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const contexto = procesosBuildContexto(step);
-    const instrucciones = {
-      4: 'Redactá la propuesta final para el cliente (oferta técnica y comercial), en el tono y formato habitual de una propuesta profesional de ingeniería/servicios, integrando todo lo definido en los pasos anteriores.'
-    }[step];
-    const prompt = `${contexto}\n${instrucciones}${userPrompt ? '\n\nIndicaciones adicionales del usuario: '+userPrompt : ''}`;
-
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const contexto = procesosBuildContexto(4);
+    const prompt = `${contexto}\nRedactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
     });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
-    const texto = data.content?.find(c=>c.type==='text')?.text || '';
-    await procesosSaveProyecto({ [field]: texto });
-    showMsg(statusId,'success','✓ Generado.');
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+
+    const pd = Object.assign({}, p.propuesta_data);
+    pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
+    pd.secciones = Object.assign({}, pd.secciones);
+    Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
+    await procesosSaveProyecto({ propuesta_data: pd });
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
     renderProcesosStepContent();
   } catch(e) {
-    showMsg(statusId,'error','✕ '+e.message);
+    showMsg(statusId, 'error', '✕ ' + e.message);
   }
 }
 
-function procesosDescargarPropuesta() {
+async function procesosStep4SeccionChatSend(key) {
+  const input = document.getElementById('procesos-step4-chat-input-'+key);
+  const msg = (input?.value || '').trim();
+  if (!msg) return;
+  const meta = PROCESOS_PROPUESTA_SECCIONES.find(s => s.key === key);
   const p = procesosCurrentProyecto;
-  const html = `<html><head><meta charset="utf-8"></head><body><h1>${esc(p.nombre)}</h1><pre style="font-family:Calibri,Arial,sans-serif;white-space:pre-wrap;font-size:11pt">${esc(p.propuesta_texto||'')}</pre></body></html>`;
-  const blob = new Blob(['﻿', html], {type:'application/msword'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `Propuesta - ${p.nombre}.doc`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.secciones = Object.assign({}, pd.secciones);
+  const sec = Object.assign({ texto:'', chat:[] }, pd.secciones[key]);
+  sec.chat = (sec.chat||[]).concat([{role:'user', content:msg}]);
+  pd.secciones[key] = sec;
+  p.propuesta_data = pd;
+  if (input) input.value = '';
+  renderProcesosStepContent();
+  const statusId = 'procesos-step4-chat-status-'+key;
+  showMsg(statusId, 'loading', 'Pensando...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const contexto = procesosBuildContexto(4);
+    const historialPrevio = (sec.chat||[]).slice(0,-1).map(m=>`${m.role==='user'?'Usuario':'Asistente'}: ${m.content}`).join('\n');
+    const formatoTxt = meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
+    const prompt = `${contexto}\nEstás ayudando a redactar la sección "${meta.label}" de una propuesta técnica de Aeration Argentina (formato: ${formatoTxt}).\n\nTexto actual de la sección:\n"""\n${sec.texto || '(vacío)'}\n"""\n\n${historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : ''}Pedido del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+
+    const pd2 = Object.assign({}, procesosCurrentProyecto.propuesta_data);
+    pd2.secciones = Object.assign({}, pd2.secciones);
+    const sec2 = Object.assign({}, pd2.secciones[key], sec, { texto: parsed.texto_nuevo != null ? parsed.texto_nuevo : sec.texto });
+    sec2.chat = sec.chat.concat([{role:'assistant', content: parsed.reply || '(sin respuesta)'}]);
+    pd2.secciones[key] = sec2;
+    await procesosSaveProyecto({ propuesta_data: pd2 });
+
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+    renderProcesosStepContent();
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+// ── Generar / previsualizar / descargar el Word final ─────────────────────
+async function procesosPropuestaObtenerPlantillaBytes() {
+  const docs = await procesosGetDocumentosPorCategoria(['propuesta_base']);
+  if (!docs.length) throw new Error('No hay ninguna "Propuesta base" vinculada en Cfg Procesos IA (Documentos de referencia).');
+  const token = await getMsToken();
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${docs[0].site_id}/drive/items/${docs[0].item_id}/content`, { headers: { Authorization: 'Bearer '+token } });
+  if (!resp.ok) throw new Error('No se pudo descargar la plantilla de SharePoint (HTTP '+resp.status+').');
+  return await resp.arrayBuffer();
+}
+async function procesosStep4ConstruirDoc() {
+  const p = procesosCurrentProyecto;
+  const bytes = await procesosPropuestaObtenerPlantillaBytes();
+  const zip = await JSZip.loadAsync(bytes);
+  const file = zip.file('word/document.xml');
+  if (!file) throw new Error('El archivo vinculado como "Propuesta base" no parece un .docx válido.');
+  let xmlStr = await file.async('string');
+  if (xmlStr.charCodeAt(0) === 0xFEFF) xmlStr = xmlStr.slice(1);
+  const doc = new DOMParser().parseFromString(xmlStr, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('No se pudo leer el XML de la plantilla.');
+  procesosPropuestaAplicarDatos(doc, p);
+  return { zip, doc };
+}
+async function procesosStep4Previsualizar() {
+  const statusId = 'procesos-step4-generar-status';
+  showMsg(statusId, 'loading', 'Generando vista previa...');
+  try {
+    const { doc } = await procesosStep4ConstruirDoc();
+    const html = procesosPropuestaDocATextoHtml(doc);
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+    document.getElementById('procesos-step4-preview').innerHTML = `<div class="card" style="margin-top:10px;max-height:500px;overflow-y:auto">${html}</div>`;
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo generar la vista previa: ' + e.message);
+  }
+}
+async function procesosStep4Descargar() {
+  const statusId = 'procesos-step4-generar-status';
+  showMsg(statusId, 'loading', 'Generando el Word...');
+  try {
+    const { zip, doc } = await procesosStep4ConstruirDoc();
+    zip.file('word/document.xml', new XMLSerializer().serializeToString(doc));
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const p = procesosCurrentProyecto;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `Propuesta - ${p.nombre}.docx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showMsg(statusId, 'success', '✓ Propuesta generada y descargada.');
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo generar la propuesta: ' + e.message);
+  }
 }
 
 // ── Chat del proyecto ───────────────────────────────────
