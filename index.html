@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2558,6 +2558,24 @@ function renderRendResults() {
 // cambiar de entorno (ahí se pierden los File en memoria).
 // Trae los campos configurados (Cfg Rendiciones) de OTRO entorno sin depender
 // de la caché en memoria (que solo tiene los del entorno activo).
+// Traducción fija AA↔AS de los campos de extracción de Rendiciones, confirmada
+// a mano con Fede — evita depender de la IA para traducir cada vez que se
+// mueve un comprobante entre entornos. Los campos de AA sin equivalente en AS
+// (percepciones de IIBB, Otros Imp, Moneda) quedan sin mapear a propósito. Si
+// algún día cambian los campos configurados en Cfg Rendiciones, esta tabla
+// hay que actualizarla a mano también.
+const REND_MAPEO_CAMPOS_AA_AS = {
+  'Fecha': 'Fecha',
+  'Proveedor': 'Proveedor',
+  'Nro CUIT Proveedor': 'CUIT emisor',
+  'Nro comprobante': 'Nro. comprobante',
+  'Detalle del gasto': 'Concepto',
+  'Monto sin iva': 'Neto gravado',
+  'IVA': 'IVA',
+  'Monto final': 'Total',
+};
+const REND_MAPEO_CAMPOS_AS_AA = Object.fromEntries(Object.entries(REND_MAPEO_CAMPOS_AA_AS).map(([k,v]) => [v,k]));
+
 async function rendFieldsDeOtraEmpresa(empresa) {
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -2586,15 +2604,27 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
     const copia = { __archivo__: r['__archivo__'], __fecha_analisis__: r['__fecha_analisis__'] };
     if (r.__comprobante_num__) { copia.__comprobante_num__ = r.__comprobante_num__; copia.__comprobante_total__ = r.__comprobante_total__; }
 
+    const nombresDestino = new Set(camposDestino.map(f=>f.name));
     const mismosNombres = camposOrigen.length === camposDestino.length && camposOrigen.every((f,i) => f.name === camposDestino[i].name);
+    const mapeoFijo = currentEmpresa === 'AA' && destino === 'AS' ? REND_MAPEO_CAMPOS_AA_AS
+      : currentEmpresa === 'AS' && destino === 'AA' ? REND_MAPEO_CAMPOS_AS_AA
+      : null;
     if (mismosNombres) {
       // Los dos entornos tienen los mismos campos configurados — copia directa.
       camposDestino.forEach(f => { copia[f.name] = r[f.name] ?? null; });
+    } else if (mapeoFijo) {
+      // Traducción ya confirmada a mano — sin llamar a la IA. Solo se aplican
+      // las correspondencias cuyo campo destino sigue configurado hoy; el
+      // resto de los campos del destino quedan en null.
+      camposOrigen.forEach(f => {
+        const destinoNombre = mapeoFijo[f.name];
+        if (destinoNombre && nombresDestino.has(destinoNombre)) copia[destinoNombre] = r[f.name] ?? null;
+      });
+      camposDestino.forEach(f => { if (!(f.name in copia)) copia[f.name] = null; });
     } else {
-      // Los campos configurados son distintos entre entornos (nombres y/o
-      // cantidad, ej. AA tiene percepciones de IIBB que AS no tiene) — le
-      // pedimos a la IA que traduzca los valores ya extraídos al set de campos
-      // del entorno destino, en vez de perderlos o volver a analizar la imagen.
+      // Combinación de entornos sin traducción fija conocida (o campos que ya
+      // no coinciden con la tabla) — se le pide a la IA que traduzca los
+      // valores ya extraídos, en vez de perderlos o volver a analizar la imagen.
       showMsg(statusId,'loading','Traduciendo campos al otro entorno...');
       const apiKey = getApiKey();
       if (!apiKey) throw new Error('API key no disponible.');
