@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.11</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.12</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.11</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.12</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -651,6 +651,16 @@
     <!-- ═══ PANEL: Cotizaciones ═══ -->
     <div class="panel" id="panel-cotizaciones">
       <div class="card">
+        <div class="card-label">Armar cotización</div>
+        <p class="hint" style="margin-bottom:10px">Completá los datos, agregá ítems buscando en el historial/catálogo o a mano, y generá el Excel con la plantilla real.</p>
+        <div id="cotiz-armado-body"></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Historial de cotizaciones</div>
+        <p class="hint" style="margin-bottom:10px">Cada cotización generada queda acá — marcala como vendida (se suma sola al historial de ventas) o perdida cuando se resuelva.</p>
+        <div id="cotiz-cotizaciones-list" class="empty">Cargando...</div>
+      </div>
+      <div class="card">
         <div class="card-label">Historial de ventas</div>
         <p class="hint" style="margin-bottom:10px">Buscá qué se vendió antes (a qué cliente, a qué precio) para usarlo de referencia al armar una cotización nueva.</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
@@ -666,11 +676,6 @@
           <button class="btn btn-secondary btn-sm" onclick="cotizHistorialToggleForm()" id="cotiz-hist-form-toggle">+ Cargar venta</button>
         </div>
         <div id="cotiz-hist-form" style="display:none"></div>
-      </div>
-      <div class="card">
-        <div class="card-label">Armar cotización</div>
-        <p class="hint" style="margin-bottom:10px">Completá los datos, agregá ítems buscando en el historial/catálogo o a mano, y generá el Excel con la plantilla real.</p>
-        <div id="cotiz-armado-body"></div>
       </div>
     </div>
 
@@ -1910,7 +1915,7 @@ function switchPanel(name) {
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
   if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
-  if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); }
+  if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'cfg-cotizaciones') { cotizCatalogoRender(); cotizPlantillaRender(); }
 }
 
@@ -11648,9 +11653,18 @@ async function cotizHistorialGuardar() {
 
 // ── Generador de cotizaciones ──────────────────────────
 // Arma el Excel real (plantilla F-COM-04, hoja "Modelo AA") completando los
-// campos fijos del encabezado/condiciones y las filas de ítems, usando
-// SheetJS (ya cargado para Procesos IA) — todo en el navegador, sobre una
-// copia en memoria de la plantilla, nunca se toca el archivo de SharePoint.
+// campos fijos del encabezado/condiciones y las filas de ítems.
+//
+// IMPORTANTE: esto NO usa SheetJS (XLSX.read/write) — se probó y reescribe
+// todo el archivo, perdiendo estilos/tema/logo que esa librería (versión
+// gratuita) no sabe preservar del todo, y el resultado se veía "de cero".
+// En cambio, igual que el motor de Word del Paso 4 de Procesos IA, se trata
+// el .xlsx como lo que es (un zip de XML) y se edita SOLO
+// xl/worksheets/sheet1.xml con reemplazos quirúrgicos por celda — todo lo
+// demás del zip (styles.xml, tema, logo, etc.) queda copiado tal cual, byte
+// a byte. Verificado con la plantilla real: todas las demás partes del zip
+// dan idénticas al original después de generar.
+//
 // La plantilla trae 14 filas de ítems ya armadas (12 a 25); por ahora el
 // generador no agrega filas de más si hacen falta — si esto se vuelve un
 // problema frecuente, se puede sumar en una próxima vuelta (mismo mecanismo
@@ -11745,9 +11759,6 @@ function cotizArmadoRender() {
     <div class="gap"></div>
     <button class="btn btn-green" onclick="cotizArmadoGenerar()">⬇ Generar y descargar cotización (Excel)</button>
     <div id="cotiz-armado-status"></div>
-    <div id="cotiz-armado-vendida-wrap" style="display:none;margin-top:10px">
-      <button class="btn btn-primary btn-sm" onclick="cotizArmadoMarcarVendida()">✓ Esta cotización se vendió — agregar al historial</button>
-    </div>
   `;
 }
 
@@ -11828,12 +11839,113 @@ function cotizFormatFechaDDMMYYYY(iso) {
   const [y,m,d] = iso.split('-');
   return `${d}/${m}/${y}`;
 }
-function cotizSetCell(ws, addr, valor, tipo) {
-  const cell = ws[addr] || {};
-  if (tipo === 'f') { cell.f = valor; cell.t = 'n'; delete cell.v; }
-  else { cell.v = valor; cell.t = tipo || 's'; delete cell.f; }
-  ws[addr] = cell;
+
+// ── Motor de fusión del Excel (cirugía de XML sobre sheet1.xml) ──────────
+function cotizXlsxEsc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function cotizXlsxColNum(letra) {
+  let n = 0;
+  for (let i = 0; i < letra.length; i++) n = n * 26 + (letra.charCodeAt(i) - 64);
+  return n;
 }
+function cotizXlsxBuildCellInner(contenido) {
+  if (contenido.type === 'f') return { attrsExtra: '', inner: `<f>${cotizXlsxEsc(contenido.formula)}</f>` };
+  if (contenido.type === 'n') return { attrsExtra: '', inner: `<v>${contenido.value}</v>` };
+  return { attrsExtra: ' t="inlineStr"', inner: `<is><t xml:space="preserve">${cotizXlsxEsc(String(contenido.value))}</t></is>` };
+}
+// Inserta una celda que no existía en el XML de la fila (celdas realmente
+// vacías/sin formato no quedan escritas por Excel) — respeta el orden de
+// columnas, que OOXML exige.
+function cotizXlsxInsertarCeldaEnFila(sheetXml, filaNum, addr, cellXml) {
+  const colTarget = cotizXlsxColNum(addr.match(/^[A-Z]+/)[0]);
+  const rowRe = new RegExp(`<row r="${filaNum}"([^>]*)>([\\s\\S]*?)</row>`);
+  const m = rowRe.exec(sheetXml);
+  if (!m) throw new Error(`No se encontró la fila ${filaNum} en la plantilla.`);
+  const rowAttrs = m[1], rowInner = m[2];
+  const cellRe = /<c r="([A-Z]+)\d+"[^>]*(?:\/>|>[\s\S]*?<\/c>)/g;
+  let insertAt = rowInner.length, cm;
+  while ((cm = cellRe.exec(rowInner))) { if (cotizXlsxColNum(cm[1]) > colTarget) { insertAt = cm.index; break; } }
+  const newInner = rowInner.slice(0, insertAt) + cellXml + rowInner.slice(insertAt);
+  return sheetXml.slice(0, m.index) + `<row r="${filaNum}"${rowAttrs}>${newInner}</row>` + sheetXml.slice(m.index + m[0].length);
+}
+// Reemplaza (o inserta) una celda por su dirección (ej. "C1"), conservando
+// su estilo (s="...") si ya existía — nunca toca ninguna otra parte del
+// archivo, así el diseño/formato original queda intacto.
+function cotizXlsxSetCelda(sheetXml, addr, contenido) {
+  const filaNum = addr.match(/\d+/)[0];
+  const cellRe = new RegExp(`<c r="${addr}"([^>]*?)(/>|>([\\s\\S]*?)</c>)`);
+  const built = cotizXlsxBuildCellInner(contenido);
+  const m = cellRe.exec(sheetXml);
+  if (m) {
+    const attrs = m[1].replace(/\st="[^"]*"/, '');
+    const newCell = `<c r="${addr}"${attrs}${built.attrsExtra}>${built.inner}</c>`;
+    return sheetXml.slice(0, m.index) + newCell + sheetXml.slice(m.index + m[0].length);
+  }
+  return cotizXlsxInsertarCeldaEnFila(sheetXml, filaNum, addr, `<c r="${addr}"${built.attrsExtra}>${built.inner}</c>`);
+}
+const cotizXlsxTexto = valor => ({ type:'s', value: valor });
+const cotizXlsxNumero = valor => ({ type:'n', value: valor });
+const cotizXlsxFormula = formula => ({ type:'f', formula });
+
+async function cotizPlantillaObtenerBytes() {
+  const raw = await supaConfigGet(COTIZ_TEMPLATE_KEY());
+  if (!raw) throw new Error('No hay ninguna plantilla de cotización vinculada — andá a Cfg Cotizaciones y vinculala.');
+  const tmpl = JSON.parse(raw);
+  const token = await getMsToken();
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/content`, { headers: { Authorization: 'Bearer '+token } });
+  if (!resp.ok) throw new Error('No se pudo descargar la plantilla de SharePoint (HTTP '+resp.status+').');
+  return await resp.arrayBuffer();
+}
+// Arma el .xlsx final (Blob) a partir de los datos de una cotización — la
+// usan tanto "Generar" (datos en vivo del armador) como "Descargar de nuevo"
+// desde el historial (datos ya guardados).
+async function cotizGenerarXlsxBlob(st) {
+  const buf = await cotizPlantillaObtenerBytes();
+  const zip = await JSZip.loadAsync(buf);
+  const sheetPath = 'xl/worksheets/sheet1.xml'; // "Modelo AA" — primera hoja de la plantilla
+  const file = zip.file(sheetPath);
+  if (!file) throw new Error('La plantilla no tiene la hoja esperada (xl/worksheets/sheet1.xml).');
+  let sheetXml = await file.async('string');
+
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C1', cotizXlsxTexto(`CLIENTE: ${st.cliente || ''}`));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E1', cotizXlsxTexto(st.q_numero || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C3', cotizXlsxTexto(`Atención: ${st.atencion || ''}`));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C4', cotizXlsxTexto(`Teléfono: ${st.telefono || ''}`));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E4', cotizXlsxTexto(cotizFormatFechaDDMMYYYY(st.fecha)));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C5', cotizXlsxTexto(`Celular: ${st.celular || ''}`));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C6', cotizXlsxTexto(`e-mail: ${st.email || ''}`));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E6', cotizXlsxTexto(st.moneda || 'Dólar'));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C30', cotizXlsxTexto(st.forma_pago || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C32', cotizXlsxTexto(st.forma_cancelacion || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C34', cotizXlsxTexto(st.plazo_entrega || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C36', cotizXlsxTexto(st.lugar_entrega || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'B38', cotizXlsxTexto(st.garantia || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'C41', cotizXlsxTexto(st.validez_oferta || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'A44', cotizXlsxTexto(st.observaciones || ''));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'D49', cotizXlsxTexto(`Ing. ${st.firmante_nombre || ''}`));
+
+  (st.items || []).forEach((it, idx) => {
+    const fila = 12 + idx;
+    sheetXml = cotizXlsxSetCelda(sheetXml, `A${fila}`, cotizXlsxNumero(idx + 1));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `B${fila}`, cotizXlsxNumero(Number(it.cantidad)||0));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `C${fila}`, cotizXlsxTexto(it.descripcion || ''));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `D${fila}`, cotizXlsxNumero(Number(it.precio_unitario)||0));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `E${fila}`, cotizXlsxFormula(`B${fila}*D${fila}`));
+  });
+
+  zip.file(sheetPath, sheetXml);
+  // calcChain queda desactualizado (fórmulas nuevas) — Excel lo reconstruye
+  // solo al abrir; se saca para no dejar uno inconsistente sin necesidad.
+  zip.remove('xl/calcChain.xml');
+  return await zip.generateAsync({ type:'blob', mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', compression:'DEFLATE', compressionOptions:{level:9} });
+}
+function cotizDescargarBlob(blob, nombreArchivo) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nombreArchivo;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function cotizArmadoGenerar() {
   const statusId = 'cotiz-armado-status';
   const st = cotizArmadoInit();
@@ -11842,82 +11954,101 @@ async function cotizArmadoGenerar() {
   if (st.items.length > COTIZ_MAX_ITEMS) { showMsg(statusId,'error',`✕ Hay ${st.items.length} ítems y la plantilla solo tiene lugar para ${COTIZ_MAX_ITEMS} — sacá alguno antes de generar.`); return; }
   showMsg(statusId, 'loading', 'Generando el Excel...');
   try {
-    const raw = await supaConfigGet(COTIZ_TEMPLATE_KEY());
-    if (!raw) throw new Error('No hay ninguna plantilla de cotización vinculada — andá a Cfg Cotizaciones y vinculala.');
-    const tmpl = JSON.parse(raw);
-    const token = await getMsToken();
-    const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/content`, { headers: { Authorization: 'Bearer '+token } });
-    if (!resp.ok) throw new Error('No se pudo descargar la plantilla de SharePoint (HTTP '+resp.status+').');
-    const buf = await resp.arrayBuffer();
-    const wb = XLSX.read(buf, { type:'array', cellStyles:true, cellDates:true });
-    const sheetName = wb.SheetNames.find(n => n.toLowerCase().includes('modelo')) || wb.SheetNames[0];
-    const ws = wb.Sheets[sheetName];
+    const blob = await cotizGenerarXlsxBlob(st);
+    cotizDescargarBlob(blob, `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}.xlsx`);
+    showMsg(statusId, 'loading', 'Guardando en el historial de cotizaciones...');
 
-    cotizSetCell(ws, 'C1', `CLIENTE: ${st.cliente}`);
-    cotizSetCell(ws, 'E1', st.q_numero || '');
-    cotizSetCell(ws, 'C3', `Atención: ${st.atencion || ''}`);
-    cotizSetCell(ws, 'C4', `Teléfono: ${st.telefono || ''}`);
-    cotizSetCell(ws, 'E4', cotizFormatFechaDDMMYYYY(st.fecha));
-    cotizSetCell(ws, 'C5', `Celular: ${st.celular || ''}`);
-    cotizSetCell(ws, 'C6', `e-mail: ${st.email || ''}`);
-    cotizSetCell(ws, 'E6', st.moneda || 'Dólar');
-    cotizSetCell(ws, 'C30', st.forma_pago || '');
-    cotizSetCell(ws, 'C32', st.forma_cancelacion || '');
-    cotizSetCell(ws, 'C34', st.plazo_entrega || '');
-    cotizSetCell(ws, 'C36', st.lugar_entrega || '');
-    cotizSetCell(ws, 'B38', st.garantia || '');
-    cotizSetCell(ws, 'C41', st.validez_oferta || '');
-    cotizSetCell(ws, 'A44', st.observaciones || '');
-    cotizSetCell(ws, 'D49', `Ing. ${st.firmante_nombre || ''}`);
-
-    st.items.forEach((it, idx) => {
-      const row = 12 + idx;
-      cotizSetCell(ws, `A${row}`, idx + 1, 'n');
-      cotizSetCell(ws, `B${row}`, Number(it.cantidad)||0, 'n');
-      cotizSetCell(ws, `C${row}`, it.descripcion || '');
-      cotizSetCell(ws, `D${row}`, Number(it.precio_unitario)||0, 'n');
-      cotizSetCell(ws, `E${row}`, `B${row}*D${row}`, 'f');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch('/rest/v1/cotizaciones', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({
+        empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
+        telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
+        moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
+        plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
+        garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
+        firmante_nombre: st.firmante_nombre||null, items: st.items, estado: 'pendiente',
+        vendedor_nombre: currentUser?.nombre || currentUser?.email || null,
+        creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+      })
     });
-
-    const out = XLSX.write(wb, { type:'array', bookType:'xlsx', cellStyles:true });
-    const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showMsg(statusId, 'success', '✓ Cotización generada y descargada.');
-    const vendidaWrap = document.getElementById('cotiz-armado-vendida-wrap');
-    if (vendidaWrap) vendidaWrap.style.display = 'block';
+    if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+    showMsg(statusId, 'success', '✓ Cotización generada, descargada y guardada en el historial de cotizaciones — marcala como vendida o perdida ahí cuando se resuelva.');
+    cotizCotizacionesRender();
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo generar: ' + e.message);
   }
 }
-async function cotizArmadoMarcarVendida() {
-  const st = cotizArmadoInit();
-  if (!confirm(`¿Confirmás que esta cotización a "${st.cliente}" se vendió? Se van a agregar sus ${st.items.length} ítem(s) al historial de ventas.`)) return;
-  const statusId = 'cotiz-armado-status';
-  showMsg(statusId, 'loading', 'Guardando en el historial...');
+
+// ── Historial de cotizaciones (persistido, con estado) ────────────────────
+let _cotizCotizacionesCache = [];
+async function cotizCotizacionesRender() {
+  const el = document.getElementById('cotiz-cotizaciones-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const moneda3 = st.moneda === 'Dólar' ? 'USD' : (st.moneda === 'Peso' ? 'ARS' : (st.moneda||'USD'));
-    const rows = st.items.map(it => ({
-      empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, q_numero: st.q_numero || null,
-      vendedor_nombre: currentUser?.nombre || currentUser?.email || null,
-      descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
-      moneda: moneda3, creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
-    }));
-    const res = await supaFetch('/rest/v1/cotizaciones_historial_ventas', {
-      method:'POST', headers:{Authorization:'Bearer '+session.token},
-      body: JSON.stringify(rows)
+    const res = await supaFetch(`/rest/v1/cotizaciones?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc&limit=100`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el historial de cotizaciones.</p>'; return; }
+    _cotizCotizacionesCache = rows;
+    if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no generaste ninguna cotización.</p>'; return; }
+    const estadoInfo = { pendiente: ['○ Pendiente','var(--text2)'], vendida: ['✓ Vendida','var(--green)'], perdida: ['✕ Perdida','var(--red)'] };
+    el.innerHTML = rows.map(r => {
+      const total = (r.items||[]).reduce((a,it) => a + (Number(it.cantidad)||0) * (Number(it.precio_unitario)||0), 0);
+      const [estadoLabel, estadoColor] = estadoInfo[r.estado] || estadoInfo.pendiente;
+      const monedaCorta = r.moneda === 'Dólar' ? 'USD' : (r.moneda === 'Peso' ? 'ARS' : (r.moneda||'USD'));
+      return `
+      <div class="result-field" style="flex-direction:column;align-items:stretch;gap:4px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <b style="font-size:13px">${esc(r.cliente)}${r.q_numero?' — Q'+esc(r.q_numero):''}</b>
+          <span style="font-size:12px;color:${estadoColor};font-weight:600;white-space:nowrap">${estadoLabel}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2)">${esc(r.fecha||'')} · ${(r.items||[]).length} ítem(s) · ${esc(monedaCorta)} ${procesosFormatearNumero(total)}${r.vendedor_nombre?' · '+esc(r.vendedor_nombre):''}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px">
+          ${r.estado!=='vendida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','vendida')">✓ Marcar vendida</button>`:''}
+          ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','perdida')">✕ Marcar perdida</button>`:''}
+          ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','pendiente')">↺ Volver a pendiente</button>`:''}
+          <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionDescargar('${r.id}')">⬇ Descargar de nuevo</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el historial de cotizaciones.</p>'; }
+}
+async function cotizCotizacionMarcar(id, estado) {
+  const row = _cotizCotizacionesCache.find(r => r.id === id);
+  if (!row) return;
+  if (estado === 'vendida' && !confirm(`¿Marcar como vendida? Se van a agregar sus ${(row.items||[]).length} ítem(s) al historial de ventas.`)) return;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ estado, updated_at: new Date().toISOString() })
     });
-    if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
-    showMsg(statusId, 'success', '✓ Se agregó al historial de ventas.');
-    const vendidaWrap = document.getElementById('cotiz-armado-vendida-wrap');
-    if (vendidaWrap) vendidaWrap.style.display = 'none';
-  } catch(e) {
-    showMsg(statusId, 'error', '✕ No se pudo guardar en el historial: ' + e.message);
-  }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (estado === 'vendida') {
+      const moneda3 = row.moneda === 'Dólar' ? 'USD' : (row.moneda === 'Peso' ? 'ARS' : (row.moneda||'USD'));
+      const rows = (row.items||[]).map(it => ({
+        empresa: currentEmpresa, fecha: row.fecha, cliente: row.cliente, q_numero: row.q_numero || null,
+        vendedor_nombre: row.vendedor_nombre || null,
+        descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
+        moneda: moneda3, creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+      }));
+      if (rows.length) {
+        const res2 = await supaFetch('/rest/v1/cotizaciones_historial_ventas', { method:'POST', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(rows) });
+        if (!res2.ok) throw new Error('Se marcó como vendida pero no se pudo cargar al historial de ventas (HTTP '+res2.status+').');
+      }
+    }
+    cotizCotizacionesRender();
+  } catch(e) { alert('No se pudo actualizar: ' + e.message); }
+}
+async function cotizCotizacionDescargar(id) {
+  const row = _cotizCotizacionesCache.find(r => r.id === id);
+  if (!row) return;
+  try {
+    const blob = await cotizGenerarXlsxBlob(row);
+    cotizDescargarBlob(blob, `Cotización - ${row.cliente}${row.q_numero?' Q-'+row.q_numero:''}.xlsx`);
+  } catch(e) { alert('No se pudo generar el archivo: ' + e.message); }
 }
 
 // ── Sidebar: secciones agrupadas por área ───────────────
