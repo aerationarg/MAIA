@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4399,7 +4399,7 @@ let procesosStep1SpFolder = null;
 let _procesosCatalogoFolderTarget = null;
 let _procesosSaveTimeout = null;
 
-const PROCESOS_STEP_FIELD = { 2:'diseno', 3:'etapas_equipos', 4:'propuesta_texto' };
+const PROCESOS_STEP_FIELD = { 4:'propuesta_texto' };
 const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:'Definir etapas y equipos', 4:'Generar la propuesta' };
 
 // ── Campos IA — qué extrae el análisis del cliente (Cfg Procesos IA) ──
@@ -5116,7 +5116,7 @@ function renderProcesosStepContent() {
   const p = procesosCurrentProyecto;
   const step = p._viewingStep || p.paso_actual;
   const el = document.getElementById('procesos-step-content');
-  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : procesosStepGenericHtml(p, step);
+  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStepGenericHtml(p, step);
   if (step === 2) procesosStep2AfterRender();
 }
 
@@ -6482,6 +6482,301 @@ async function procesosStep2ChequearCumplimiento(model, hf) {
   } catch (e) { console.warn('No se pudo chequear cumplimiento:', e.message); return []; }
 }
 
+// ── Paso 3: etapas y equipos ────────────────────────────
+// Toma las unidades/etapas ya confirmadas en el Paso 2 (el diseño no se toca
+// acá) y para cada una permite definir qué equipos hacen falta — sugeridos por
+// IA en base a los valores de diseño de esa etapa y a proyectos de referencia,
+// editables a mano o por chat, igual que el patrón del Paso 2.
+let procesosStep3State = { proyectoId: null, etapaAbierta: null };
+function procesosStep3ResetIfNeeded(p) {
+  if (procesosStep3State.proyectoId !== p.id) procesosStep3State = { proyectoId: p.id, etapaAbierta: null };
+}
+function procesosNuevoId() { return 'eq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+function procesosStep3EtapasConfirmadas(p) {
+  const dd = p.diseno_data || {};
+  return (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada && dd.hojas[n]?.confirmada);
+}
+
+// Resumen en texto de los equipos definidos, para usar como contexto del Paso 4.
+function procesosResumenEquipos(p) {
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const etapas = procesosStep3EtapasConfirmadas(p).filter(n => ed[n]?.confirmada && (ed[n].equipos || []).length);
+  if (!etapas.length) return '';
+  return etapas.map(nombre => {
+    const eqs = ed[nombre].equipos.map(e => `  - ${e.cantidad || 1}x ${e.tipo || '(sin tipo)'}${e.especificacion ? ' — ' + e.especificacion : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n');
+    return `Etapa "${nombre}":\n${eqs}`;
+  }).join('\n\n');
+}
+
+// Resumen (descripción o resumen_ia) de los proyectos anteriores marcados como
+// referencia en el Paso 1 — se usa para que la IA se base en cómo se resolvieron
+// etapas similares en esos proyectos, no solo en los valores de diseño sueltos.
+async function procesosGetResumenesReferencias() {
+  const p = procesosCurrentProyecto;
+  const refs = (p.proyectos_referencia || []).filter(r => r.incluido);
+  if (!refs.length) return '';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+    const ids = refs.map(r => r.id).join(',');
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=nombre,resumen_ia,descripcion&id=in.(${ids})`, { headers: { Authorization: 'Bearer ' + session.token } });
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) return '';
+    return rows.map(r => `- ${r.nombre}: ${r.descripcion || r.resumen_ia || '(sin resumen todavía)'}`).join('\n');
+  } catch (e) { return ''; }
+}
+
+function procesosStep3Html(p) {
+  procesosStep3ResetIfNeeded(p);
+  const etapas = procesosStep3EtapasConfirmadas(p);
+  if (!etapas.length) {
+    return `
+      <div class="card-label">Paso 3 — Definir etapas y equipos</div>
+      <p class="hint">Todavía no hay unidades/etapas confirmadas en el Paso 2 — volvé ahí para definirlas antes de seguir.</p>
+      <button class="btn btn-secondary" onclick="procesosVerPaso(2)">← Volver al Paso 2</button>
+    `;
+  }
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const todasConfirmadas = etapas.every(n => ed[n]?.confirmada);
+  const abierta = procesosStep3State.etapaAbierta;
+  const filaEtapa = nombre => {
+    const e = ed[nombre] || {};
+    const safe = nombre.replace(/'/g, "\\'");
+    const cant = (e.equipos || []).length;
+    const esAbierta = abierta === nombre;
+    return `
+    <div class="field-row" style="padding:8px 0">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span style="font-size:13px;color:var(--text)"><b>${esc(nombre)}</b>${cant ? ` — ${cant} equipo${cant === 1 ? '' : 's'}` : ''}${e.confirmada ? ' <span style="color:var(--green)">✓ definida</span>' : ''}</span>
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep3AbrirEtapa('${safe}')">${esAbierta ? 'Cerrar' : ((e.confirmada ? 'Editar' : 'Definir') + ' equipos →')}</button>
+      </div>
+      ${esAbierta ? procesosStep3EtapaPanelHtml(nombre) : ''}
+    </div>`;
+  };
+  return `
+    <div class="card-label">Paso 3 — Definir etapas y equipos</div>
+    <p class="hint" style="margin:6px 0 10px">Para cada unidad/etapa definida en el Paso 2, definí los equipos necesarios (bombas, sopladores, tableros, etc.) — pedile a la IA que sugiera en base al diseño y a proyectos de referencia, o armalos a mano.</p>
+    ${etapas.map(filaEtapa).join('')}
+    <div class="gap"></div>
+    <button class="btn btn-primary" ${!todasConfirmadas ? 'disabled' : ''} onclick="procesosAvanzarPaso(4)">Continuar al Paso 4 →</button>
+    ${!todasConfirmadas ? '<p class="hint" style="margin-top:6px">Definí y guardá los equipos de cada etapa para continuar.</p>' : ''}
+  `;
+}
+
+function procesosStep3AbrirEtapa(nombre) {
+  procesosStep3State.etapaAbierta = (procesosStep3State.etapaAbierta === nombre) ? null : nombre;
+  renderProcesosStepContent();
+}
+
+function procesosStep3EtapaPanelHtml(nombreEtapa) {
+  const p = procesosCurrentProyecto;
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const e = ed[nombreEtapa] || { equipos: [], chat: [], confirmada: false };
+  const safe = nombreEtapa.replace(/'/g, "\\'");
+  const dd = p.diseno_data || {};
+  const h = dd.hojas?.[nombreEtapa] || {};
+  const valoresResumen = Object.entries(h.valoresConEtiqueta || {}).slice(0, 6);
+
+  const filaEquipo = eq => `
+    <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
+      <input value="${esc(String(eq.cantidad ?? ''))}" placeholder="Cant." style="width:56px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','cantidad',this.value)" />
+      <input value="${esc(eq.tipo || '')}" placeholder="Tipo de equipo" style="flex:1;min-width:160px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','tipo',this.value)" />
+      <input value="${esc(eq.especificacion || '')}" placeholder="Especificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','especificacion',this.value)" />
+      <input value="${esc(eq.justificacion || '')}" placeholder="Justificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','justificacion',this.value)" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosStep3EliminarEquipo('${safe}','${eq.id}')" title="Quitar">✕</button>
+    </div>`;
+
+  return `
+    <div class="card" style="margin-top:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="card-label">${esc(nombreEtapa)}</div>
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep3AbrirEtapa('${safe}')">✕ Cerrar</button>
+      </div>
+      ${valoresResumen.length ? `<p class="hint" style="margin-bottom:8px">${valoresResumen.map(([k, v]) => `${esc(k)}: ${esc(String(v))}`).join(' · ')}</p>` : ''}
+      <div id="procesos-step3-status"></div>
+      <button class="btn btn-primary btn-sm" onclick="procesosStep3SugerirEquipos('${safe}')">✦ Sugerir equipos con IA</button>
+      <div class="gap"></div>
+      <label>Equipos</label>
+      ${(e.equipos || []).length ? `
+        <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2);flex-wrap:wrap">
+          <span style="width:56px">Cant.</span><span style="flex:1;min-width:160px">Tipo</span><span style="flex:2;min-width:200px">Especificación</span><span style="flex:2;min-width:200px">Justificación</span>
+        </div>
+        ${e.equipos.map(filaEquipo).join('')}
+      ` : '<p class="hint">Todavía no hay equipos cargados para esta etapa.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep3AgregarEquipo('${safe}')">+ Agregar equipo</button>
+
+      <label style="margin-top:14px">Chat de esta etapa</label>
+      <p class="hint" style="margin-bottom:6px">Pedile que agregue, saque o ajuste equipos (ej: "agregá una bomba de reserva", "sacá el soplador y poné dos de menor capacidad").</p>
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;margin-bottom:8px">
+        ${(e.chat || []).map(m => `<div style="align-self:${m.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%;background:${m.role === 'user' ? 'var(--blue-bg)' : 'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('') || '<div class="hint">Sin mensajes todavía.</div>'}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="procesos-step3-chat-input" placeholder="Escribí acá..." style="flex:1" onkeydown="if(event.key==='Enter'){procesosStep3ChatSend('${safe}')}" />
+        <button class="btn btn-primary btn-sm" onclick="procesosStep3ChatSend('${safe}')">Enviar</button>
+      </div>
+      <div id="procesos-step3-chat-status"></div>
+
+      <div class="gap"></div>
+      <div id="procesos-step3-guardar-status"></div>
+      ${e.confirmada
+        ? `<button class="btn btn-secondary" disabled style="opacity:0.75;cursor:default">✓ Guardado — etapa definida</button>`
+        : `<button class="btn btn-green" ${(e.equipos || []).length ? '' : 'disabled'} onclick="procesosStep3ConfirmarEtapa('${safe}')">✓ Guardar equipos de esta etapa</button>`}
+    </div>`;
+}
+
+function procesosStep3SetEquipoCampo(nombreEtapa, equipoId, campo, valor) {
+  const p = procesosCurrentProyecto;
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+  e.equipos = (e.equipos || []).map(eq => eq.id === equipoId ? Object.assign({}, eq, { [campo]: campo === 'cantidad' ? (valor === '' ? '' : Number(valor)) : valor }) : eq);
+  e.confirmada = false;
+  ed.etapas[nombreEtapa] = e;
+  procesosSaveProyecto({ equipos_data: ed });
+  renderProcesosStepContent();
+}
+
+function procesosStep3AgregarEquipo(nombreEtapa) {
+  const p = procesosCurrentProyecto;
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+  e.equipos = (e.equipos || []).concat([{ id: procesosNuevoId(), tipo: '', cantidad: 1, especificacion: '', justificacion: '' }]);
+  e.confirmada = false;
+  ed.etapas[nombreEtapa] = e;
+  procesosSaveProyecto({ equipos_data: ed });
+  renderProcesosStepContent();
+}
+
+function procesosStep3EliminarEquipo(nombreEtapa, equipoId) {
+  const p = procesosCurrentProyecto;
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+  e.equipos = (e.equipos || []).filter(eq => eq.id !== equipoId);
+  e.confirmada = false;
+  ed.etapas[nombreEtapa] = e;
+  procesosSaveProyecto({ equipos_data: ed });
+  renderProcesosStepContent();
+}
+
+async function procesosStep3SugerirEquipos(nombreEtapa) {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step3-status';
+  const ed0 = (p.equipos_data && p.equipos_data.etapas) || {};
+  const yaTiene = (ed0[nombreEtapa]?.equipos || []).length > 0;
+  if (yaTiene && !confirm(`Ya hay equipos cargados para "${nombreEtapa}". ¿Reemplazarlos con una nueva sugerencia de la IA?`)) return;
+  showMsg(statusId, 'loading', 'Sugiriendo equipos con IA...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const dd = p.diseno_data || {};
+    const h = dd.hojas?.[nombreEtapa] || {};
+    const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+    const referencias = await procesosGetResumenesReferencias();
+    const lecciones = procesosResumenLecciones(await procesosGetLecciones());
+    const prompt = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño calculados para esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nInfo general del cliente/proyecto:\n${procesosResumenCampos(p)}\n${referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : ''}${lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : ''}\nSugerí la lista de equipos necesarios para esta etapa (bombas, sopladores, tableros eléctricos, agitadores, etc. según corresponda al tipo de etapa), basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad, tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. si se puede estimar) y una justificación breve de por qué se eligió esa cantidad/capacidad.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', justificacion: eq.justificacion || '' }));
+
+    const ed = Object.assign({}, p.equipos_data);
+    ed.etapas = Object.assign({}, ed.etapas);
+    const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+    e.equipos = nuevos;
+    e.confirmada = false;
+    ed.etapas[nombreEtapa] = e;
+    await procesosSaveProyecto({ equipos_data: ed });
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+    renderProcesosStepContent();
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
+  }
+}
+
+async function procesosStep3ChatSend(nombreEtapa) {
+  const input = document.getElementById('procesos-step3-chat-input');
+  const msg = (input?.value || '').trim();
+  if (!msg) return;
+  const statusId = 'procesos-step3-chat-status';
+  const p = procesosCurrentProyecto;
+  const edPrev = Object.assign({}, p.equipos_data);
+  edPrev.etapas = Object.assign({}, edPrev.etapas);
+  const ePrev = Object.assign({ equipos: [], chat: [], confirmada: false }, edPrev.etapas[nombreEtapa]);
+  ePrev.chat = (ePrev.chat || []).concat([{ role: 'user', content: msg }]);
+  edPrev.etapas[nombreEtapa] = ePrev;
+  p.equipos_data = edPrev;
+  input.value = '';
+  renderProcesosStepContent();
+  showMsg(statusId, 'loading', 'Pensando...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const listado = (ePrev.equipos || []).map(e => `id ${e.id}: ${e.cantidad}x ${e.tipo}${e.especificacion ? ' — ' + e.especificacion : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n') || '(sin equipos cargados todavía)';
+    const historialPrevio = (ePrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+    const dd = p.diseno_data || {};
+    const h = dd.hojas?.[nombreEtapa] || {};
+    const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+    const prompt = `Estás ayudando a definir los equipos de la etapa/unidad "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nEquipos actualmente cargados para esta etapa:\n${listado}\n\n${historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+
+    let equipos = (ePrev.equipos || []).slice();
+    (parsed.acciones || []).forEach(a => {
+      try {
+        if (a.tipo === 'agregar' && a.equipo) {
+          equipos.push({ id: procesosNuevoId(), tipo: a.equipo.tipo || '', cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1, especificacion: a.equipo.especificacion || '', justificacion: a.equipo.justificacion || '' });
+        } else if (a.tipo === 'editar' && a.id) {
+          equipos = equipos.map(eq => eq.id === a.id ? Object.assign({}, eq, a.cambios || {}) : eq);
+        } else if (a.tipo === 'eliminar' && a.id) {
+          equipos = equipos.filter(eq => eq.id !== a.id);
+        }
+      } catch (_e) { /* acción individual inválida, seguir con las demás */ }
+    });
+
+    const ed = Object.assign({}, procesosCurrentProyecto.equipos_data);
+    ed.etapas = Object.assign({}, ed.etapas);
+    const e = Object.assign({}, ed.etapas[nombreEtapa], ePrev, { equipos, confirmada: false });
+    e.chat = ePrev.chat.concat([{ role: 'assistant', content: parsed.reply || '(sin respuesta)' }]);
+    ed.etapas[nombreEtapa] = e;
+    await procesosSaveProyecto({ equipos_data: ed });
+
+    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+    renderProcesosStepContent();
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+async function procesosStep3ConfirmarEtapa(nombreEtapa) {
+  const p = procesosCurrentProyecto;
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+  e.confirmada = true;
+  e.confirmada_at = new Date().toISOString();
+  ed.etapas[nombreEtapa] = e;
+  try {
+    await procesosSaveProyecto({ equipos_data: ed });
+    renderProcesosStepContent();
+    showMsg('procesos-step3-guardar-status', 'success', '✓ Guardado correctamente.');
+  } catch (err) {
+    showMsg('procesos-step3-guardar-status', 'error', '✕ No se pudo guardar: ' + err.message);
+  }
+}
+
 function procesosResumenDiseno(p) {
   const dd = p.diseno_data || {};
   const orden = dd.orden && dd.orden.length ? dd.orden : Object.keys(dd.hojas || {});
@@ -6499,7 +6794,8 @@ function procesosResumenDiseno(p) {
   return ctx;
 }
 
-// ── Pasos 2-4: diseño, etapas y equipos, propuesta (patrón genérico) ──
+// ── Paso 4: propuesta (patrón genérico, texto libre — se va a reemplazar por
+// un flujo basado en la plantilla .docx en la próxima iteración) ──
 function procesosStepGenericHtml(p, step) {
   const field = PROCESOS_STEP_FIELD[step];
   const value = p[field] || '';
@@ -6541,7 +6837,7 @@ function procesosBuildContexto(hastaStep) {
   const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
   if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
-  if (hastaStep > 3 && p.etapas_equipos) ctx += `Etapas y equipos definidos:\n${p.etapas_equipos}\n\n`;
+  if (hastaStep > 3) { const equipos = procesosResumenEquipos(p); if (equipos) ctx += `Equipos definidos por etapa:\n${equipos}\n\n`; }
   return ctx;
 }
 
@@ -6556,30 +6852,13 @@ async function procesosGenerarPaso(step) {
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(step);
     const instrucciones = {
-      2: 'Diseñá el proyecto: enfoque técnico, componentes principales, criterios de dimensionamiento, y cualquier definición necesaria antes de armar etapas y equipos. Si hay planillas de cálculo o información general adjuntas, usalas como referencia concreta para proponer valores/parámetros reales, no solo genéricos.',
-      3: 'Definí las etapas del proyecto (con una breve descripción de cada una) y el equipo/roles necesarios para ejecutarlo.',
       4: 'Redactá la propuesta final para el cliente (oferta técnica y comercial), en el tono y formato habitual de una propuesta profesional de ingeniería/servicios, integrando todo lo definido en los pasos anteriores.'
     }[step];
     const prompt = `${contexto}\n${instrucciones}${userPrompt ? '\n\nIndicaciones adicionales del usuario: '+userPrompt : ''}`;
 
-    const contentBlocks = [];
-    if (step === 2) {
-      showMsg(statusId,'loading','Buscando documentos de referencia...');
-      const docsRef = await procesosGetDocumentosPorCategoria(['planilla_calculo','informacion_general']);
-      if (docsRef.length) {
-        const token = await getMsToken();
-        for (const doc of docsRef) {
-          showMsg(statusId,'loading',`Adjuntando ${doc.nombre}...`);
-          const block = await procesosDocAsContentBlock(token, doc);
-          if (block) contentBlocks.push(block);
-        }
-      }
-      showMsg(statusId,'loading','Generando con IA...');
-    }
-
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[...contentBlocks, {type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:4000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     const data = await resp.json();
