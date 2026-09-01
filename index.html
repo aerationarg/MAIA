@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2598,33 +2598,35 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
   showMsg(statusId,'loading','Moviendo comprobante...');
   try {
     const camposOrigen = getRendFields().filter(f=>f.name.trim());
-    const camposDestinoRaw = await rendFieldsDeOtraEmpresa(destino);
-    const camposDestino = (camposDestinoRaw || camposOrigen).filter(f=>f.name.trim());
-
     const copia = { __archivo__: r['__archivo__'], __fecha_analisis__: r['__fecha_analisis__'] };
     if (r.__comprobante_num__) { copia.__comprobante_num__ = r.__comprobante_num__; copia.__comprobante_total__ = r.__comprobante_total__; }
 
-    const nombresDestino = new Set(camposDestino.map(f=>f.name));
-    const mismosNombres = camposOrigen.length === camposDestino.length && camposOrigen.every((f,i) => f.name === camposDestino[i].name);
     const mapeoFijo = currentEmpresa === 'AA' && destino === 'AS' ? REND_MAPEO_CAMPOS_AA_AS
       : currentEmpresa === 'AS' && destino === 'AA' ? REND_MAPEO_CAMPOS_AS_AA
       : null;
-    if (mismosNombres) {
-      // Los dos entornos tienen los mismos campos configurados — copia directa.
-      camposDestino.forEach(f => { copia[f.name] = r[f.name] ?? null; });
-    } else if (mapeoFijo) {
-      // Traducción ya confirmada a mano — sin llamar a la IA. Solo se aplican
-      // las correspondencias cuyo campo destino sigue configurado hoy; el
-      // resto de los campos del destino quedan en null.
+
+    if (mapeoFijo) {
+      // Traducción ya confirmada a mano — sin llamar a la IA NI depender de
+      // traer los campos del otro entorno desde Supabase (ya sabemos cuáles
+      // son, están en la tabla). Los campos de destino sin correspondencia en
+      // la tabla quedan en null.
+      Object.values(mapeoFijo).forEach(nombreDestino => { copia[nombreDestino] = null; });
       camposOrigen.forEach(f => {
         const destinoNombre = mapeoFijo[f.name];
-        if (destinoNombre && nombresDestino.has(destinoNombre)) copia[destinoNombre] = r[f.name] ?? null;
+        if (destinoNombre) copia[destinoNombre] = r[f.name] ?? null;
       });
-      camposDestino.forEach(f => { if (!(f.name in copia)) copia[f.name] = null; });
     } else {
-      // Combinación de entornos sin traducción fija conocida (o campos que ya
-      // no coinciden con la tabla) — se le pide a la IA que traduzca los
-      // valores ya extraídos, en vez de perderlos o volver a analizar la imagen.
+      // Combinación de entornos sin traducción fija conocida — se consultan
+      // los campos reales del destino y, si no coinciden con el origen, se le
+      // pide a la IA que traduzca los valores ya extraídos, en vez de
+      // perderlos o volver a analizar la imagen.
+      const camposDestinoRaw = await rendFieldsDeOtraEmpresa(destino);
+      const camposDestino = (camposDestinoRaw || camposOrigen).filter(f=>f.name.trim());
+      const mismosNombres = camposOrigen.length === camposDestino.length && camposOrigen.every((f,i) => f.name === camposDestino[i].name);
+      if (mismosNombres) {
+        camposDestino.forEach(f => { copia[f.name] = r[f.name] ?? null; });
+        showMsg(statusId,'loading','Guardando en el otro entorno...');
+      } else {
       showMsg(statusId,'loading','Traduciendo campos al otro entorno...');
       const apiKey = getApiKey();
       if (!apiKey) throw new Error('API key no disponible.');
@@ -2640,6 +2642,7 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
       const text = data.content?.find(c=>c.type==='text')?.text || '{}';
       const mapeado = JSON.parse(text.replace(/```json|```/g,'').trim());
       camposDestino.forEach(f => { copia[f.name] = mapeado[f.name] ?? null; });
+      }
     }
 
     showMsg(statusId,'loading','Guardando en el otro entorno...');
