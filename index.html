@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2226,6 +2226,18 @@ async function fileToBase64(file) {
 }
 
 // ── Analysis (Rendiciones) ─────────────────────────────
+function rendAgregarAdvertencia(extracted, texto) {
+  extracted['__advertencia__'] = extracted['__advertencia__'] ? extracted['__advertencia__'] + ' · ' + texto : texto;
+}
+// Clave "natural" de un comprobante argentino, para detectar duplicados — CUIT
+// del emisor + número de comprobante. Si el usuario renombró esos campos en
+// Cfg Rendiciones, no los va a encontrar (limitación conocida).
+function rendClaveComprobante(r) {
+  const cuit = String(r['CUIT emisor'] ?? '').replace(/\D/g,'').trim();
+  const nro = String(r['Nro. comprobante'] ?? '').trim().toLowerCase();
+  if (!cuit || !nro) return null;
+  return cuit + '|' + nro;
+}
 async function analyzeAll() {
   const apiKey = getApiKey();
   if (!apiKey) { alert('Error de configuración. Contactá al administrador.'); return; }
@@ -2261,7 +2273,7 @@ async function analyzeAll() {
         headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-5', max_tokens: 2000,
-          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}. Si no encontrás un valor usá null.`,
+          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__". Si no encontrás un valor usá null. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si no aparece ninguna de las dos razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
           messages: [{ role:'user', content:[
             isPdf ? {type:'document',source:{type:'base64',media_type:mediaType,data:b64}} : {type:'image',source:{type:'base64',media_type:mediaType,data:b64}},
             {type:'text',text:`Extraé estos campos para cada comprobante distinto que encuentres en el archivo:\n${fieldPrompt}\nRespondé solo con el array JSON.`}
@@ -2282,6 +2294,36 @@ async function analyzeAll() {
       if (extractedList.length > 1) {
         extractedList.forEach((e,i) => { e['__comprobante_num__'] = i+1; e['__comprobante_total__'] = extractedList.length; });
       }
+
+      // Advertencia 1: el comprobante parece estar dirigido a la OTRA empresa
+      // (AA/AS) distinta de la que está seleccionada arriba en MAIA ahora.
+      extractedList.forEach(extracted => {
+        const receptora = extracted['__empresa_receptora__'];
+        if (receptora && (receptora === 'AA' || receptora === 'AS') && receptora !== currentEmpresa) {
+          const nombreReceptora = receptora === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
+          const nombreActual = currentEmpresa === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
+          rendAgregarAdvertencia(extracted, `⚠ Este comprobante parece ser de ${nombreReceptora} (${receptora}), pero estás cargando en ${nombreActual} (${currentEmpresa}).`);
+        }
+      });
+
+      // Advertencia 2: mismo comprobante (CUIT emisor + Nro. comprobante) ya
+      // cargado antes — en otro archivo ya analizado, o en otro comprobante de
+      // este mismo archivo (ej. una foto duplicada dentro de un PDF).
+      const otrosResultados = results.filter(r => r['__archivo__'] !== item.file.name);
+      extractedList.forEach((extracted, idx) => {
+        const clave = rendClaveComprobante(extracted);
+        if (!clave) return;
+        const dupEnOtroArchivo = otrosResultados.find(r => rendClaveComprobante(r) === clave);
+        if (dupEnOtroArchivo) {
+          rendAgregarAdvertencia(extracted, `⚠ Parece un comprobante ya cargado antes, en "${dupEnOtroArchivo['__archivo__']}".`);
+          return;
+        }
+        const dupEnEsteArchivo = extractedList.find((e2, idx2) => idx2 !== idx && rendClaveComprobante(e2) === clave);
+        if (dupEnEsteArchivo) {
+          rendAgregarAdvertencia(extracted, `⚠ Parece un comprobante duplicado dentro de este mismo archivo.`);
+        }
+      });
+
       item.status = 'done';
       item.error = null;
       // Puede haber más de un comprobante por archivo: se reemplazan todos los resultados
@@ -2424,10 +2466,12 @@ function renderRendResults() {
       </div>`;
     }).join('');
     const convNote = r.__conv_note__ ? `<div class="hint" style="color:var(--blue);margin-bottom:8px">🔁 ${esc(r.__conv_note__)}</div>` : '';
+    const advertencia = r.__advertencia__ ? `<div class="hint" style="color:var(--red);font-weight:600;margin-bottom:8px">${esc(r.__advertencia__)}</div>` : '';
     const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
     return `
-      <div class="result-card">
+      <div class="result-card"${r.__advertencia__ ? ' style="border-color:var(--red)"' : ''}>
         <div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
+        ${advertencia}
         ${convNote}
         ${manualRows}
         ${fieldRows}
@@ -2501,6 +2545,12 @@ function rendComboPick(comboId, value) {
 
 // Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
 // campos manuales lo son solo si se marcó "Obligatorio" en Cfg Rendiciones.
+function rendConfirmarAdvertencias() {
+  const conAdvertencia = results.filter(r => r.__advertencia__);
+  if (!conAdvertencia.length) return true;
+  const lista = conAdvertencia.map(r => `• ${r['__archivo__']}: ${r.__advertencia__}`).join('\n');
+  return confirm(`Hay ${conAdvertencia.length} comprobante(s) con advertencias:\n\n${lista}\n\n¿Querés continuar igual?`);
+}
 function rendValidateRequiredFields() {
   if (currentEmpresa === 'AS' && rendPersonaOverrideEnabled && !rendPersonaOverrideValue) {
     return 'Falta elegir la persona.';
@@ -2676,6 +2726,7 @@ async function rendInsertarUltima() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
+  if (!rendConfirmarAdvertencias()) return;
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
@@ -2725,6 +2776,7 @@ async function rendGenerarNueva() {
   if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
+  if (!rendConfirmarAdvertencias()) return;
   const doneFiles = files.filter(f => f.status === 'done');
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
