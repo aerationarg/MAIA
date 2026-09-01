@@ -343,7 +343,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -400,7 +400,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2238,6 +2238,45 @@ function rendClaveComprobante(r) {
   if (!cuit || !nro) return null;
   return cuit + '|' + nro;
 }
+
+// Consulta el historial COMPARTIDO de comprobantes (rendiciones_comprobantes,
+// Supabase) por los CUIT que aparecen en este lote — para detectar duplicados
+// entre dispositivos, personas o sesiones distintas, no solo dentro de esta
+// pantalla. Se registra ahí recién cuando se confirma una rendición, no al
+// analizar (ver rendRegistrarHistorialCompartido).
+async function rendBuscarDuplicadosCompartidos(cuits) {
+  if (!cuits.length) return [];
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token) return [];
+  try {
+    const res = await supaFetch(`/rest/v1/rendiciones_comprobantes?select=cuit_emisor,nro_comprobante,archivo,cargado_por_nombre,created_at&empresa=eq.${currentEmpresa}&cuit_emisor=in.(${cuits.map(c=>encodeURIComponent(c)).join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) return [];
+    return await res.json();
+  } catch(e) { return []; }
+}
+
+// Registra en el historial compartido cada comprobante de "results" que tenga
+// CUIT + número — se llama al confirmar una rendición (Generar nueva /
+// Insertar en última), no al analizar, para no contar comprobantes que se
+// analizaron pero nunca se terminaron de cargar. Ignora los que ya estaban
+// (mismo empresa+cuit+número), gracias al índice único de la tabla.
+async function rendRegistrarHistorialCompartido() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token) return;
+  const filas = results.map(r => {
+    const cuit = String(r['CUIT emisor'] ?? '').replace(/\D/g,'').trim();
+    const nro = String(r['Nro. comprobante'] ?? '').trim().toLowerCase();
+    if (!cuit || !nro) return null;
+    return { empresa: currentEmpresa, cuit_emisor: cuit, nro_comprobante: nro, archivo: r['__archivo__']||null, cargado_por_nombre: currentUser?.nombre || currentUser?.email || null };
+  }).filter(Boolean);
+  if (!filas.length) return;
+  try {
+    await supaFetch('/rest/v1/rendiciones_comprobantes', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'resolution=ignore-duplicates'},
+      body: JSON.stringify(filas)
+    });
+  } catch(e) { console.warn('No se pudo registrar el historial compartido de comprobantes:', e.message); }
+}
 async function analyzeAll() {
   const apiKey = getApiKey();
   if (!apiKey) { alert('Error de configuración. Contactá al administrador.'); return; }
@@ -2323,6 +2362,23 @@ async function analyzeAll() {
           rendAgregarAdvertencia(extracted, `⚠ Parece un comprobante duplicado dentro de este mismo archivo.`);
         }
       });
+
+      // Advertencia 2b: mismo chequeo pero contra el historial COMPARTIDO
+      // (otros dispositivos, personas o sesiones anteriores ya confirmadas).
+      const cuitsDelArchivo = [...new Set(extractedList.map(e => String(e['CUIT emisor'] ?? '').replace(/\D/g,'').trim()).filter(Boolean))];
+      if (cuitsDelArchivo.length) {
+        const historial = await rendBuscarDuplicadosCompartidos(cuitsDelArchivo);
+        extractedList.forEach(extracted => {
+          const cuit = String(extracted['CUIT emisor'] ?? '').replace(/\D/g,'').trim();
+          const nro = String(extracted['Nro. comprobante'] ?? '').trim().toLowerCase();
+          if (!cuit || !nro) return;
+          const match = historial.find(h => String(h.cuit_emisor).replace(/\D/g,'') === cuit && String(h.nro_comprobante).trim().toLowerCase() === nro);
+          if (match) {
+            const cuando = match.created_at ? new Date(match.created_at).toLocaleDateString('es-AR') : '';
+            rendAgregarAdvertencia(extracted, `⚠ Ya se cargó antes en una rendición confirmada${match.cargado_por_nombre?' ('+match.cargado_por_nombre+(cuando?', '+cuando:'')+')':(cuando?' ('+cuando+')':'')}${match.archivo?', archivo "'+match.archivo+'"':''}.`);
+          }
+        });
+      }
 
       item.status = 'done';
       item.error = null;
@@ -2761,6 +2817,7 @@ async function rendInsertarUltima() {
 
     showMsg(statusId,'loading','Subiendo comprobantes...');
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
+    await rendRegistrarHistorialCompartido();
 
     rendManualValues = {};
     rendPersonaOverrideEnabled = false;
@@ -2856,6 +2913,7 @@ async function rendGenerarNueva() {
 
     showMsg(statusId,'loading','Subiendo comprobantes...');
     await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
+    await rendRegistrarHistorialCompartido();
 
     rendManualValues = {};
     rendPersonaOverrideEnabled = false;
