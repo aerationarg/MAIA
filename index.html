@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.11</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.11</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -667,10 +667,23 @@
         </div>
         <div id="cotiz-hist-form" style="display:none"></div>
       </div>
+      <div class="card">
+        <div class="card-label">Armar cotización</div>
+        <p class="hint" style="margin-bottom:10px">Completá los datos, agregá ítems buscando en el historial/catálogo o a mano, y generá el Excel con la plantilla real.</p>
+        <div id="cotiz-armado-body"></div>
+      </div>
     </div>
 
     <!-- ═══ PANEL: Cfg Cotizaciones ═══ -->
     <div class="panel" id="panel-cfg-cotizaciones">
+      <div class="card">
+        <div class="card-label">Plantilla de cotización</div>
+        <p class="hint" style="margin-bottom:10px">Excel base (F-COM-04) que se usa para generar cada cotización nueva — se completa un archivo aparte cada vez, este no se modifica.</p>
+        <div class="sp-selected">
+          <span id="cotiz-plantilla-label" style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Sin vincular</span>
+          <button class="sp-browse-btn" onclick="cotizPlantillaSelect()">Vincular archivo</button>
+        </div>
+      </div>
       <div class="card">
         <div class="card-label">Catálogo de productos</div>
         <p class="hint" style="margin-bottom:10px">Marca/modelo/descripción estándar de lo que vende la empresa — se usa como referencia al cargar una venta o armar una cotización, para no reescribir la descripción cada vez.</p>
@@ -1897,8 +1910,8 @@ function switchPanel(name) {
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
   if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
-  if (name === 'cotizaciones') cotizHistorialRender();
-  if (name === 'cfg-cotizaciones') cotizCatalogoRender();
+  if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); }
+  if (name === 'cfg-cotizaciones') { cotizCatalogoRender(); cotizPlantillaRender(); }
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -8410,6 +8423,12 @@ async function fbSelectFile(item, relativePath) {
     try {
       await supaConfigSet('rend_q_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
     } catch(e) { alert('No se pudo guardar el Excel de Q: ' + e.message); }
+  } else if (fbTarget === 'cotiz-plantilla') {
+    document.getElementById('cotiz-plantilla-label').textContent = item.name;
+    fbClose();
+    try {
+      await supaConfigSet(COTIZ_TEMPLATE_KEY(), JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+    } catch(e) { alert('No se pudo guardar la plantilla: ' + e.message); }
   } else {
     saveSpDefaults(spDefaults);
     fbClose();
@@ -11624,6 +11643,280 @@ async function cotizHistorialGuardar() {
     cotizHistorialRender();
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo guardar: ' + e.message);
+  }
+}
+
+// ── Generador de cotizaciones ──────────────────────────
+// Arma el Excel real (plantilla F-COM-04, hoja "Modelo AA") completando los
+// campos fijos del encabezado/condiciones y las filas de ítems, usando
+// SheetJS (ya cargado para Procesos IA) — todo en el navegador, sobre una
+// copia en memoria de la plantilla, nunca se toca el archivo de SharePoint.
+// La plantilla trae 14 filas de ítems ya armadas (12 a 25); por ahora el
+// generador no agrega filas de más si hacen falta — si esto se vuelve un
+// problema frecuente, se puede sumar en una próxima vuelta (mismo mecanismo
+// que ya usa Notas de Pedido para insertar filas en un Excel real).
+const COTIZ_MAX_ITEMS = 14;
+const COTIZ_DEFAULT_GARANTIA = 'Para el caso de los motores eléctricos la garantía  es 12 meses y la misma esta supeditada a la verificación de la instalación eléctrica y protecciones de la planta (**Este servicio será cotizado a pedido del cliente). ';
+const COTIZ_DEFAULT_OBSERVACIONES = `Las facturas deberán ser efectivamente canceladas dentro de los 10 días de su presentación. Tipo de Cambio: Pagadero en pesos al tipo de cambio Dólar/Euro billete vendedor según cotización del Banco de la Nación Argentina al día previo al de efectivo pago. Se emitirá Nota de Crédito/Débito según corresponda, por la diferencia que pudiera generarse.
+Los plazos de entrega quedaran sujetos a la recepción de O.C, cobro de anticipo y aprobación de documentación técnica por el cliente
+Equipos importados:
+Los precios han sido calculados en base a impuestos, tasas y derechos de importación vigentes a la fecha de la presente propuesta. En caso de producirse cambios, los mismos se trasladarán a los precios en la proporción que corresponda.
+Las condiciones comerciales quedarán sujetas a la recepción de la orden de compra, cobro de anticipo y aprobación técnica por parte del cliente.
+La aceptación de la OC quedará supeditada a la posibilidad de acceder, en el momento de la recepción de la OC, al Mercado Único y Libre de cambios (MULC) utilizado para realizar las importaciones.`;
+
+function COTIZ_TEMPLATE_KEY() { return 'cotiz_template_' + currentEmpresa; }
+function cotizPlantillaSelect() { fbOpen('file', 'cotiz-plantilla'); }
+async function cotizPlantillaRender() {
+  const el = document.getElementById('cotiz-plantilla-label');
+  if (!el) return;
+  try {
+    const raw = await supaConfigGet(COTIZ_TEMPLATE_KEY());
+    const tmpl = raw ? JSON.parse(raw) : null;
+    el.textContent = tmpl ? tmpl.label : 'Sin vincular';
+  } catch(e) { el.textContent = 'Sin vincular'; }
+}
+
+let cotizArmado = null;
+function cotizArmadoInit() {
+  if (cotizArmado) return cotizArmado;
+  cotizArmado = {
+    cliente:'', atencion:'', telefono:'', celular:'', email:'', q_numero:'',
+    fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
+    forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
+    garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
+    firmante_nombre: currentUser?.nombre || '',
+    items: [],
+  };
+  return cotizArmado;
+}
+
+function cotizArmadoRender() {
+  const el = document.getElementById('cotiz-armado-body');
+  if (!el) return;
+  const st = cotizArmadoInit();
+  const campo = (nombre, label, tipo) => `
+    <div><label style="font-size:12px">${esc(label)}</label>
+    <input ${tipo?`type="${tipo}"`:''} value="${esc(st[nombre]||'')}" oninput="cotizArmadoSetCampo('${nombre}',this.value)" /></div>`;
+  const totalGeneral = st.items.reduce((acc,it) => acc + (Number(it.cantidad)||0) * (Number(it.precio_unitario)||0), 0);
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      ${campo('cliente','Cliente')}
+      ${campo('q_numero','Nº de cotización (Q)')}
+      ${campo('atencion','Atención')}
+      ${campo('fecha','Fecha','date')}
+      ${campo('telefono','Teléfono')}
+      ${campo('celular','Celular')}
+      ${campo('email','E-mail')}
+      <div><label style="font-size:12px">Moneda</label><select onchange="cotizArmadoSetCampo('moneda',this.value)">
+        <option ${st.moneda==='Dólar'?'selected':''}>Dólar</option><option ${st.moneda==='Peso'?'selected':''}>Peso</option>
+      </select></div>
+      ${campo('forma_pago','Forma de pago')}
+      ${campo('forma_cancelacion','Forma de cancelación')}
+      ${campo('plazo_entrega','Plazo de entrega')}
+      ${campo('lugar_entrega','Lugar de entrega')}
+      ${campo('validez_oferta','Validez de la oferta')}
+      ${campo('firmante_nombre','Firma — Ingeniero/a')}
+    </div>
+    <label>Garantía</label>
+    <textarea rows="2" oninput="cotizArmadoSetCampo('garantia',this.value)">${esc(st.garantia)}</textarea>
+    <label style="margin-top:8px">Observaciones</label>
+    <textarea rows="4" oninput="cotizArmadoSetCampo('observaciones',this.value)">${esc(st.observaciones)}</textarea>
+
+    <div class="gap"></div>
+    <label>Buscar y agregar ítems</label>
+    <input id="cotiz-armado-buscar" placeholder="Buscar por ítem, marca, modelo..." oninput="cotizArmadoBuscarItemsDebounced()" />
+    <div id="cotiz-armado-sugerencias"></div>
+    <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="cotizArmadoAgregarManual()">+ Agregar ítem manual</button>
+
+    <div class="gap"></div>
+    <label>Ítems de la cotización (${st.items.length}/${COTIZ_MAX_ITEMS})</label>
+    ${st.items.length > COTIZ_MAX_ITEMS ? `<p class="hint" style="color:var(--red)">La plantilla solo tiene lugar para ${COTIZ_MAX_ITEMS} ítems — sacá alguno antes de generar.</p>` : ''}
+    ${st.items.length ? st.items.map(it => `
+      <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
+        <input value="${esc(String(it.cantidad))}" placeholder="Cant." style="width:56px" onchange="cotizArmadoSetItemCampo('${it.id}','cantidad',this.value)" />
+        <input value="${esc(it.descripcion)}" placeholder="Descripción" style="flex:2;min-width:220px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)" />
+        <input value="${esc(String(it.precio_unitario))}" placeholder="Precio unitario" style="width:120px" onchange="cotizArmadoSetItemCampo('${it.id}','precio_unitario',this.value)" />
+        <span style="width:100px;font-size:13px;align-self:center">${procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0))}</span>
+        <button class="btn btn-secondary btn-sm" onclick="cotizArmadoEliminarItem('${it.id}')">✕</button>
+      </div>`).join('') : '<p class="hint">Todavía no agregaste ítems.</p>'}
+    ${st.items.length ? `<div style="text-align:right;margin-top:6px;font-weight:600">Subtotal: ${procesosFormatearNumero(totalGeneral)}</div>` : ''}
+
+    <div class="gap"></div>
+    <button class="btn btn-green" onclick="cotizArmadoGenerar()">⬇ Generar y descargar cotización (Excel)</button>
+    <div id="cotiz-armado-status"></div>
+    <div id="cotiz-armado-vendida-wrap" style="display:none;margin-top:10px">
+      <button class="btn btn-primary btn-sm" onclick="cotizArmadoMarcarVendida()">✓ Esta cotización se vendió — agregar al historial</button>
+    </div>
+  `;
+}
+
+function cotizArmadoSetCampo(campo, val) {
+  const st = cotizArmadoInit();
+  st[campo] = val;
+}
+function cotizArmadoAgregarManual() {
+  const st = cotizArmadoInit();
+  st.items.push({ id: procesosNuevoId(), descripcion:'', cantidad:1, precio_unitario:0 });
+  cotizArmadoRender();
+}
+function cotizArmadoEliminarItem(id) {
+  const st = cotizArmadoInit();
+  st.items = st.items.filter(it => it.id !== id);
+  cotizArmadoRender();
+}
+function cotizArmadoSetItemCampo(id, campo, val) {
+  const st = cotizArmadoInit();
+  st.items = st.items.map(it => it.id===id ? Object.assign({}, it, { [campo]: campo==='descripcion' ? val : (val===''?'':Number(val)) }) : it);
+  cotizArmadoRender();
+}
+
+let _cotizBuscarItemsTimeout = null;
+let _cotizUltimaBusqueda = { hist: [], cat: [] };
+function cotizArmadoBuscarItemsDebounced() {
+  clearTimeout(_cotizBuscarItemsTimeout);
+  _cotizBuscarItemsTimeout = setTimeout(cotizArmadoBuscarItems, 400);
+}
+async function cotizArmadoBuscarItems() {
+  const texto = (document.getElementById('cotiz-armado-buscar')?.value || '').trim();
+  const el = document.getElementById('cotiz-armado-sugerencias');
+  if (!el) return;
+  if (!texto) { el.innerHTML = ''; return; }
+  el.innerHTML = 'Buscando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const q = encodeURIComponent(texto);
+    const [histRes, catRes] = await Promise.all([
+      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)&order=marca&limit=5`, {headers:{Authorization:'Bearer '+session.token}}),
+    ]);
+    const hist = histRes.ok ? await histRes.json() : [];
+    const cat = catRes.ok ? await catRes.json() : [];
+    _cotizUltimaBusqueda = { hist, cat };
+    let html = '';
+    if (hist.length) {
+      html += '<p class="hint" style="margin:6px 0 4px">Vendido antes:</p>' + hist.map(r => `
+        <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('hist','${r.id}')">
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
+          <span class="result-val" style="background:var(--surface2);border:none">${esc(r.moneda)} ${procesosFormatearNumero(r.precio_unitario)}</span>
+        </div>`).join('');
+    }
+    if (cat.length) {
+      html += '<p class="hint" style="margin:6px 0 4px">Catálogo (precio de lista):</p>' + cat.map(r => `
+        <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('cat','${r.id}')">
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))}<br><span style="color:var(--text2);font-weight:400">${esc((r.descripcion||'').slice(0,80))}</span></span>
+          <span class="result-val" style="background:var(--surface2);border:none">${r.precio_lista!=null?esc(r.moneda_lista||'USD')+' '+procesosFormatearNumero(r.precio_lista):'—'}</span>
+        </div>`).join('');
+    }
+    el.innerHTML = html || '<p class="hint">Sin resultados.</p>';
+  } catch(e) { el.innerHTML = '<p class="hint">Error al buscar.</p>'; }
+}
+function cotizArmadoAgregarDesde(origen, id) {
+  const st = cotizArmadoInit();
+  const row = (origen==='hist' ? _cotizUltimaBusqueda.hist : _cotizUltimaBusqueda.cat).find(r => r.id === id);
+  if (!row) return;
+  const descripcion = row.descripcion || [row.marca,row.modelo].filter(Boolean).join(' ');
+  const precio = origen === 'hist' ? row.precio_unitario : (row.precio_lista || 0);
+  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio });
+  const buscarEl = document.getElementById('cotiz-armado-buscar');
+  if (buscarEl) buscarEl.value = '';
+  cotizArmadoRender();
+}
+
+function cotizFormatFechaDDMMYYYY(iso) {
+  if (!iso) return '';
+  const [y,m,d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+}
+function cotizSetCell(ws, addr, valor, tipo) {
+  const cell = ws[addr] || {};
+  if (tipo === 'f') { cell.f = valor; cell.t = 'n'; delete cell.v; }
+  else { cell.v = valor; cell.t = tipo || 's'; delete cell.f; }
+  ws[addr] = cell;
+}
+async function cotizArmadoGenerar() {
+  const statusId = 'cotiz-armado-status';
+  const st = cotizArmadoInit();
+  if (!st.cliente.trim()) { showMsg(statusId,'error','✕ Completá al menos el cliente.'); return; }
+  if (!st.items.length) { showMsg(statusId,'error','✕ Agregá al menos un ítem.'); return; }
+  if (st.items.length > COTIZ_MAX_ITEMS) { showMsg(statusId,'error',`✕ Hay ${st.items.length} ítems y la plantilla solo tiene lugar para ${COTIZ_MAX_ITEMS} — sacá alguno antes de generar.`); return; }
+  showMsg(statusId, 'loading', 'Generando el Excel...');
+  try {
+    const raw = await supaConfigGet(COTIZ_TEMPLATE_KEY());
+    if (!raw) throw new Error('No hay ninguna plantilla de cotización vinculada — andá a Cfg Cotizaciones y vinculala.');
+    const tmpl = JSON.parse(raw);
+    const token = await getMsToken();
+    const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/content`, { headers: { Authorization: 'Bearer '+token } });
+    if (!resp.ok) throw new Error('No se pudo descargar la plantilla de SharePoint (HTTP '+resp.status+').');
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type:'array', cellStyles:true, cellDates:true });
+    const sheetName = wb.SheetNames.find(n => n.toLowerCase().includes('modelo')) || wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+
+    cotizSetCell(ws, 'C1', `CLIENTE: ${st.cliente}`);
+    cotizSetCell(ws, 'E1', st.q_numero || '');
+    cotizSetCell(ws, 'C3', `Atención: ${st.atencion || ''}`);
+    cotizSetCell(ws, 'C4', `Teléfono: ${st.telefono || ''}`);
+    cotizSetCell(ws, 'E4', cotizFormatFechaDDMMYYYY(st.fecha));
+    cotizSetCell(ws, 'C5', `Celular: ${st.celular || ''}`);
+    cotizSetCell(ws, 'C6', `e-mail: ${st.email || ''}`);
+    cotizSetCell(ws, 'E6', st.moneda || 'Dólar');
+    cotizSetCell(ws, 'C30', st.forma_pago || '');
+    cotizSetCell(ws, 'C32', st.forma_cancelacion || '');
+    cotizSetCell(ws, 'C34', st.plazo_entrega || '');
+    cotizSetCell(ws, 'C36', st.lugar_entrega || '');
+    cotizSetCell(ws, 'B38', st.garantia || '');
+    cotizSetCell(ws, 'C41', st.validez_oferta || '');
+    cotizSetCell(ws, 'A44', st.observaciones || '');
+    cotizSetCell(ws, 'D49', `Ing. ${st.firmante_nombre || ''}`);
+
+    st.items.forEach((it, idx) => {
+      const row = 12 + idx;
+      cotizSetCell(ws, `A${row}`, idx + 1, 'n');
+      cotizSetCell(ws, `B${row}`, Number(it.cantidad)||0, 'n');
+      cotizSetCell(ws, `C${row}`, it.descripcion || '');
+      cotizSetCell(ws, `D${row}`, Number(it.precio_unitario)||0, 'n');
+      cotizSetCell(ws, `E${row}`, `B${row}*D${row}`, 'f');
+    });
+
+    const out = XLSX.write(wb, { type:'array', bookType:'xlsx', cellStyles:true });
+    const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showMsg(statusId, 'success', '✓ Cotización generada y descargada.');
+    const vendidaWrap = document.getElementById('cotiz-armado-vendida-wrap');
+    if (vendidaWrap) vendidaWrap.style.display = 'block';
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo generar: ' + e.message);
+  }
+}
+async function cotizArmadoMarcarVendida() {
+  const st = cotizArmadoInit();
+  if (!confirm(`¿Confirmás que esta cotización a "${st.cliente}" se vendió? Se van a agregar sus ${st.items.length} ítem(s) al historial de ventas.`)) return;
+  const statusId = 'cotiz-armado-status';
+  showMsg(statusId, 'loading', 'Guardando en el historial...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const moneda3 = st.moneda === 'Dólar' ? 'USD' : (st.moneda === 'Peso' ? 'ARS' : (st.moneda||'USD'));
+    const rows = st.items.map(it => ({
+      empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, q_numero: st.q_numero || null,
+      vendedor_nombre: currentUser?.nombre || currentUser?.email || null,
+      descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
+      moneda: moneda3, creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+    }));
+    const res = await supaFetch('/rest/v1/cotizaciones_historial_ventas', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify(rows)
+    });
+    if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+    showMsg(statusId, 'success', '✓ Se agregó al historial de ventas.');
+    const vendidaWrap = document.getElementById('cotiz-armado-vendida-wrap');
+    if (vendidaWrap) vendidaWrap.style.display = 'none';
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo guardar en el historial: ' + e.message);
   }
 }
 
