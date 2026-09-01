@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.12</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.13</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.12</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.13</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5169,6 +5169,7 @@ function renderProcesosStepContent() {
   const el = document.getElementById('procesos-step-content');
   el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStep4Html(p);
   if (step === 2) procesosStep2AfterRender();
+  if (step === 3) procesosStep3DiagramaRender();
 }
 
 // Descarga hasta 50 archivos de una carpeta de SharePoint (convirtiendo a PDF si
@@ -6619,7 +6620,125 @@ function procesosStep3Html(p) {
     <div class="gap"></div>
     <button class="btn btn-primary" ${!todasConfirmadas ? 'disabled' : ''} onclick="procesosAvanzarPaso(4)">Continuar al Paso 4 →</button>
     ${!todasConfirmadas ? '<p class="hint" style="margin-top:6px">Definí y guardá los equipos de cada etapa para continuar.</p>' : ''}
+    <div class="gap"></div>
+    <label>Diagrama de flujo</label>
+    <p class="hint" style="margin-bottom:6px">Diagrama esquemático (no a escala) armado con las etapas y equipos ya definidos.</p>
+    <div id="procesos-step3-diagrama"></div>
   `;
+}
+
+// ── Diagrama de flujo de proceso (PFD) — esquemático, generado a partir de
+// las etapas confirmadas (Paso 2) y los equipos definidos (Paso 3). No es un
+// plano a escala: es un diagrama de cajas y flechas, como cualquier PFD de
+// ingeniería de procesos.
+function procesosDiagramaFlujoDatos(p) {
+  const dd = p.diseno_data || {};
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const etapas = procesosStep3EtapasConfirmadas(p);
+  return etapas.map(nombre => {
+    const h = dd.hojas?.[nombre] || {};
+    const valores = h.valoresConEtiqueta || {};
+    const caudalEntry = Object.entries(valores).find(([k]) => k.toLowerCase().includes('caudal'));
+    let caudal = null;
+    if (caudalEntry) {
+      const unidad = (caudalEntry[0].match(/\(([^)]+)\)/) || [])[1] || '';
+      caudal = `${procesosFormatearNumero(caudalEntry[1])}${unidad ? ' ' + unidad : ''}`;
+    }
+    const equipos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => `${eq.cantidad || 1}x ${eq.tipo || '(sin tipo)'}`);
+    return { nombre, caudal, equipos };
+  });
+}
+function procesosDiagramaSvgEsc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function procesosDiagramaWrapTexto(texto, maxChars) {
+  const palabras = String(texto).split(' ');
+  const lineas = []; let actual = '';
+  palabras.forEach(w => {
+    if ((actual + ' ' + w).trim().length > maxChars) { if (actual) lineas.push(actual.trim()); actual = w; }
+    else actual = (actual + ' ' + w).trim();
+  });
+  if (actual) lineas.push(actual);
+  return lineas;
+}
+// Los colores se resuelven a valores concretos (no var(--...)) porque el SVG
+// se exporta a PNG en un contexto aislado (blob/Image) donde las variables
+// CSS del documento no están disponibles — así queda igual en pantalla y en
+// la imagen descargada.
+function procesosDiagramaColores() {
+  const cs = getComputedStyle(document.documentElement);
+  const get = (nombre, fallback) => (cs.getPropertyValue(nombre) || '').trim() || fallback;
+  return {
+    surface2: get('--surface2', '#f0efeb'), border: get('--border', '#e0dfd8'),
+    text: get('--text', '#1a1a18'), text2: get('--text2', '#6b6b67'), surface: get('--surface', '#ffffff'),
+  };
+}
+function procesosDiagramaFlujoSvg(p) {
+  const etapas = procesosDiagramaFlujoDatos(p);
+  if (!etapas.length) return '';
+  const c = procesosDiagramaColores();
+  const boxW = 200, boxH = 132, gapX = 90, padTop = 26, padSides = 20;
+  const totalW = etapas.length * boxW + (etapas.length - 1) * gapX + padSides * 2;
+  const totalH = boxH + padTop * 2;
+  let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagrama de flujo del proceso" style="max-width:100%;height:auto;background:${c.surface}">`;
+  svg += `<defs><marker id="pfd-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c.text2}"/></marker></defs>`;
+  etapas.forEach((et, i) => {
+    const x = padSides + i * (boxW + gapX);
+    const y = padTop;
+    svg += `<rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="8" fill="${c.surface2}" stroke="${c.border}" stroke-width="1.5"/>`;
+    svg += `<text x="${x + boxW/2}" y="${y + 22}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
+    svg += `<line x1="${x+12}" y1="${y+30}" x2="${x+boxW-12}" y2="${y+30}" stroke="${c.border}"/>`;
+    let ty = y + 48;
+    if (et.equipos.length) {
+      et.equipos.slice(0, 4).forEach(eqTxt => {
+        procesosDiagramaWrapTexto(eqTxt, 28).forEach(linea => {
+          svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">${procesosDiagramaSvgEsc(linea)}</text>`;
+          ty += 14;
+        });
+      });
+      if (et.equipos.length > 4) svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">+${et.equipos.length - 4} más</text>`;
+    } else {
+      svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
+    }
+    if (i < etapas.length - 1) {
+      const ax1 = x + boxW, ax2 = x + boxW + gapX, ay = y + boxH/2;
+      svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${c.text2}" stroke-width="1.5" marker-end="url(#pfd-arrow)"/>`;
+      if (et.caudal) svg += `<text x="${(ax1+ax2)/2}" y="${ay-8}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.caudal)}</text>`;
+    }
+  });
+  svg += `</svg>`;
+  return svg;
+}
+function procesosStep3DiagramaRender() {
+  const el = document.getElementById('procesos-step3-diagrama');
+  if (!el) return;
+  const svg = procesosDiagramaFlujoSvg(procesosCurrentProyecto);
+  if (!svg) { el.innerHTML = '<p class="hint">Confirmá al menos una etapa para ver el diagrama.</p>'; return; }
+  el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>`;
+}
+function procesosStep3DiagramaDescargar() {
+  const svgEl = document.querySelector('#procesos-step3-diagrama svg');
+  if (!svgEl) return;
+  const svgStr = new XMLSerializer().serializeToString(svgEl);
+  const url = URL.createObjectURL(new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    const vb = svgEl.viewBox.baseVal;
+    canvas.width = (vb.width || img.width) * scale;
+    canvas.height = (vb.height || img.height) * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0, vb.width || img.width, vb.height || img.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob(blob => {
+      const p = procesosCurrentProyecto;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `Diagrama de flujo - ${p.nombre}.png`;
+      a.click();
+    });
+  };
+  img.src = url;
 }
 
 function procesosStep3AbrirEtapa(nombre) {
