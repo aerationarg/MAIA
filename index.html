@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.25</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.26</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.25</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.26</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12013,8 +12013,16 @@ async function cotizHistorialRender() {
 async function cotizHistorialEliminar(id) {
   if (!confirm('¿Eliminar esta venta del historial? No se puede deshacer.')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  // Prefer: return=representation trae de vuelta la fila borrada — así, si
+  // estaba vinculada a un producto de Stock (catalogo_id), se puede reponer
+  // esa cantidad sin tener que hacer otra consulta aparte.
+  const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'} });
   if (!res.ok) { alert('No se pudo eliminar.'); return; }
+  const deleted = (await res.json().catch(()=>[]))[0];
+  if (deleted && deleted.catalogo_id) {
+    try { await cotizCotizacionAjustarStock([{ catalogo_id: deleted.catalogo_id, cantidad: deleted.cantidad }], session, 1); }
+    catch(e) { console.warn('No se pudo reponer el stock:', e.message); }
+  }
   cotizHistorialRender();
 }
 
@@ -12384,14 +12392,14 @@ async function cotizArmadoBuscarItems() {
     if (hist.length) {
       html += '<p class="hint" style="margin:6px 0 4px">Vendido antes:</p>' + hist.map(r => `
         <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('hist','${r.id}')">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}${r.catalogo_id?' <span style="color:var(--blue)">· Producto de Stock</span>':''}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
           <span class="result-val" style="background:var(--surface2);border:none">${esc(r.moneda)} ${procesosFormatearNumero(r.precio_unitario)}</span>
         </div>`).join('');
     }
     if (cat.length) {
-      html += '<p class="hint" style="margin:6px 0 4px">Catálogo (precio de lista):</p>' + cat.map(r => `
+      html += '<p class="hint" style="margin:6px 0 4px">Stock (precio de lista):</p>' + cat.map(r => `
         <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('cat','${r.id}')">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))}<br><span style="color:var(--text2);font-weight:400">${esc((r.descripcion||'').slice(0,80))}</span></span>
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))} <span style="color:var(--text2)">· En stock: ${esc(String(r.cantidad_stock??0))}</span><br><span style="color:var(--text2);font-weight:400">${esc((r.descripcion||'').slice(0,80))}</span></span>
           <span class="result-val" style="background:var(--surface2);border:none">${r.precio_lista!=null?esc(r.moneda_lista||'USD')+' '+procesosFormatearNumero(r.precio_lista):'—'}</span>
         </div>`).join('');
     }
@@ -12641,7 +12649,7 @@ async function cotizCotizacionesRender() {
             <td style="padding:4px 6px;white-space:nowrap">${esc(r.fecha||'')}</td>
             <td style="padding:4px 6px">${esc(r.cliente||'')}</td>
             <td style="padding:4px 6px">${r.q_numero?esc(r.q_numero):''}</td>
-            <td style="padding:4px 6px;text-align:right">${(r.items||[]).length}</td>
+            <td style="padding:4px 6px;text-align:right" title="${esc((r.items||[]).map(it=>`${it.cantidad||1}x ${it.descripcion||'(sin descripción)'}`).join('\n'))}">${(r.items||[]).length}</td>
             <td style="padding:4px 6px;text-align:right">${procesosFormatearNumero(total)}</td>
             <td style="padding:4px 6px">${esc(monedaCorta)}</td>
             <td style="padding:4px 6px;color:${estadoColor};font-weight:600;white-space:nowrap">${estadoLabel}</td>
@@ -12650,9 +12658,11 @@ async function cotizCotizacionesRender() {
             <td style="padding:4px 6px;max-width:180px" title="${esc(r.motivo||'')}">${esc(r.motivo||'')}</td>
             <td style="padding:4px 6px">
               <div style="display:flex;gap:4px;flex-wrap:wrap">
-                ${r.estado!=='vendida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','vendida')" title="Marcar vendida">✓</button>`:''}
-                ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','perdida')" title="Marcar perdida">✕</button>`:''}
-                ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVolverAPendiente('${r.id}')" title="Volver a pendiente">↺</button>`:''}
+                ${r.estado==='vendida' ? '' : `
+                  <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','vendida')" title="Marcar vendida">✓</button>
+                  ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','perdida')" title="Marcar perdida">✕</button>`:''}
+                  ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVolverAPendiente('${r.id}')" title="Volver a pendiente">↺</button>`:''}
+                `}
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionDescargar('${r.id}')" title="Descargar de nuevo">⬇</button>
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEliminar('${r.id}')" title="Eliminar">🗑</button>
               </div>
@@ -12715,7 +12725,7 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
       const rows = (row.items||[]).map(it => ({
         empresa: currentEmpresa, fecha: row.fecha, cliente: row.cliente, q_numero: row.q_numero || null,
         vendedor_nombre: row.vendedor_nombre || null,
-        marca: it.marca || null, modelo: it.modelo || null,
+        marca: it.marca || null, modelo: it.modelo || null, catalogo_id: it.catalogo_id || null,
         descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
         moneda: moneda3, tipo_venta: row.tipo_venta || null, motivo_triunfo: motivo || null,
         creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
@@ -12725,24 +12735,17 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
         if (!res2.ok) throw new Error('Se marcó como vendida pero no se pudo cargar al historial de ventas (HTTP '+res2.status+').');
       }
       _cotizOpcionesHistorial = null; // el motivo/tipo usado puede ser nuevo — se vuelve a armar la lista la próxima vez
-    }
-    // Stock (solo ítems con catalogo_id, o sea los que vinieron de Stock):
-    // se descuenta al entrar en "vendida" y se repone al salir de "vendida"
-    // (a pendiente o a perdida) — así revertir una venta no deja el stock
-    // descuadrado. Si en el medio se marca vendida de nuevo, se descuenta
-    // de nuevo (correcto: se repuso al salir, así que es un descuento más,
-    // no uno duplicado).
-    let stockDescontado = row.stock_descontado;
-    if (estado === 'vendida' && !row.stock_descontado) {
-      const avisos = await cotizCotizacionAjustarStock(row.items, session, -1);
-      stockDescontado = true;
-      if (avisos.length) alert('Se descontó el stock. Ojo, quedó negativo en:\n' + avisos.join('\n'));
-    } else if (estado !== 'vendida' && row.stock_descontado) {
-      await cotizCotizacionAjustarStock(row.items, session, 1);
-      stockDescontado = false;
-    }
-    if (stockDescontado !== row.stock_descontado) {
-      await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_descontado: stockDescontado }) });
+      // Stock (solo ítems con catalogo_id, o sea los que vinieron de Stock):
+      // se descuenta al marcar vendida. "Vendida" es terminal (no se puede
+      // revertir desde acá, no hay botones) — la única forma de reponer
+      // stock es eliminando la fila correspondiente del historial de
+      // ventas (ver cotizHistorialEliminar), que ahora sabe a qué producto
+      // de Stock corresponde gracias al catalogo_id que se guardó arriba.
+      if (!row.stock_descontado) {
+        const avisos = await cotizCotizacionAjustarStock(row.items, session, -1);
+        await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_descontado: true }) });
+        if (avisos.length) alert('Se descontó el stock. Ojo, quedó negativo en:\n' + avisos.join('\n'));
+      }
     }
     cotizCotizacionesRender();
   } catch(e) { alert('No se pudo actualizar: ' + e.message); }
