@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.22</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.23</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.22</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.23</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12084,6 +12084,38 @@ async function cotizHistorialGuardar() {
   }
 }
 
+// Opciones de "Tipo de venta" y "Motivo" para los desplegables — se arman
+// solas mirando qué valores ya existen en el historial de ventas (algunos
+// vienen del CRM combinados con coma, ej. "Equipo,Repuesto"; se separan y
+// se juntan como valores sueltos). Un caso especial "Otro..." deja escribir
+// uno nuevo si hiciera falta, sin bloquear casos que todavía no aparecieron.
+let _cotizOpcionesHistorial = null; // { tipos:[...], motivos:[...] }
+async function cotizObtenerOpcionesHistorial() {
+  if (_cotizOpcionesHistorial) return _cotizOpcionesHistorial;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=tipo_venta,motivo_triunfo&empresa=eq.${currentEmpresa}&limit=2000`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = res.ok ? await res.json() : [];
+    const tipos = new Set(), motivos = new Set();
+    rows.forEach(r => {
+      String(r.tipo_venta||'').split(',').map(s=>s.trim()).filter(Boolean).forEach(v=>tipos.add(v));
+      String(r.motivo_triunfo||'').split(',').map(s=>s.trim().replace(/\.$/,'')).filter(Boolean).forEach(v=>motivos.add(v));
+    });
+    _cotizOpcionesHistorial = { tipos: Array.from(tipos).sort((a,b)=>a.localeCompare(b)), motivos: Array.from(motivos).sort((a,b)=>a.localeCompare(b)) };
+  } catch(e) { _cotizOpcionesHistorial = { tipos: [], motivos: [] }; }
+  return _cotizOpcionesHistorial;
+}
+// Nota: es un desplegable cerrado a lo que ya hay en el historial de ventas
+// (a propósito — para agregar una categoría nueva, se carga primero una
+// venta con "Cargar venta", que sí queda en texto libre, y de ahí en
+// adelante ya aparece acá como opción).
+function cotizSelectOpciones(opciones, valorActual, onchange, id) {
+  return `<select ${id?`id="${id}"`:''} onchange="${onchange}">
+    <option value="">— Ninguno —</option>
+    ${opciones.map(o => `<option value="${esc(o)}" ${o===valorActual?'selected':''}>${esc(o)}</option>`).join('')}
+  </select>`;
+}
+
 // ── Generador de cotizaciones ──────────────────────────
 // Arma el Excel real (plantilla F-COM-04, hoja "Modelo AA") completando los
 // campos fijos del encabezado/condiciones y las filas de ítems.
@@ -12140,6 +12172,9 @@ function cotizArmadoInit() {
   cotizArmadoObtenerProximoQNumero().then(num => {
     if (num && cotizArmado && !cotizArmado.q_numero) { cotizArmado.q_numero = num; cotizArmadoRender(); }
   });
+  // Idem con las opciones de Tipo de venta del desplegable — se completan
+  // en cuanto resuelven, sin bloquear el primer render.
+  cotizObtenerOpcionesHistorial().then(() => { if (cotizArmado) cotizArmadoRender(); });
   return cotizArmado;
 }
 function cotizArmadoNueva() {
@@ -12189,7 +12224,9 @@ function cotizArmadoRender() {
       </div>
       ${campo('q_numero','Nº de cotización (Q)')}
       ${campo('referencia','Referencia')}
-      ${campo('tipo_venta','Tipo de venta (Equipo, Repuesto...)')}
+      <div><label style="font-size:12px">Tipo de venta</label>
+        ${cotizSelectOpciones((_cotizOpcionesHistorial&&_cotizOpcionesHistorial.tipos)||[], st.tipo_venta, "cotizArmadoSetCampo('tipo_venta',this.value)")}
+      </div>
       <div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
           <label style="font-size:12px">Atención</label>
@@ -12587,6 +12624,7 @@ async function cotizCotizacionesRender() {
       return { r, total, estadoLabel, estadoColor, monedaCorta };
     });
     const th = label => `<th style="text-align:left;padding:4px 6px;color:var(--text2);font-weight:600;white-space:nowrap">${esc(label)}</th>`;
+    const opcionesMotivo = (await cotizObtenerOpcionesHistorial()).motivos;
     el.innerHTML = `
       <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -12610,30 +12648,58 @@ async function cotizCotizacionesRender() {
             <td style="padding:4px 6px;max-width:180px" title="${esc(r.motivo||'')}">${esc(r.motivo||'')}</td>
             <td style="padding:4px 6px">
               <div style="display:flex;gap:4px;flex-wrap:wrap">
-                ${r.estado!=='vendida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','vendida')" title="Marcar vendida">✓</button>`:''}
-                ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','perdida')" title="Marcar perdida">✕</button>`:''}
-                ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','pendiente')" title="Volver a pendiente">↺</button>`:''}
+                ${r.estado!=='vendida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','vendida')" title="Marcar vendida">✓</button>`:''}
+                ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','perdida')" title="Marcar perdida">✕</button>`:''}
+                ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVolverAPendiente('${r.id}')" title="Volver a pendiente">↺</button>`:''}
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionDescargar('${r.id}')" title="Descargar de nuevo">⬇</button>
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEliminar('${r.id}')" title="Eliminar">🗑</button>
               </div>
             </td>
-          </tr>`).join('')}
+          </tr>
+          ${_cotizCotizacionMarcarPendiente && _cotizCotizacionMarcarPendiente.id === r.id ? `
+          <tr style="border-bottom:1px solid var(--border);background:var(--surface2)">
+            <td colspan="11" style="padding:8px 6px">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <span style="font-size:12px">Motivo de ${_cotizCotizacionMarcarPendiente.estado==='vendida'?'triunfo':'pérdida'}:</span>
+                ${cotizSelectOpciones(opcionesMotivo, r.motivo||'', '', 'cotiz-cotiz-motivo-select')}
+                <button class="btn btn-primary btn-sm" onclick="cotizCotizacionConfirmarMarcar()">Confirmar</button>
+                <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionCancelarMarcar()">Cancelar</button>
+              </div>
+            </td>
+          </tr>` : ''}`).join('')}
         </tbody>
       </table>
       </div>
     `;
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el historial de cotizaciones.</p>'; }
 }
-async function cotizCotizacionMarcar(id, estado) {
+// "Vendida"/"perdida" piden motivo — se elige de un desplegable, así que no
+// puede resolverse con un simple prompt() (no soporta combos). Se abre una
+// fila mini-formulario debajo de la cotización, y recién al confirmar se
+// aplica el cambio.
+let _cotizCotizacionMarcarPendiente = null; // { id, estado }
+function cotizCotizacionIniciarMarcar(id, estado) {
+  _cotizCotizacionMarcarPendiente = { id, estado };
+  cotizCotizacionesRender();
+}
+function cotizCotizacionCancelarMarcar() {
+  _cotizCotizacionMarcarPendiente = null;
+  cotizCotizacionesRender();
+}
+async function cotizCotizacionConfirmarMarcar() {
+  if (!_cotizCotizacionMarcarPendiente) return;
+  const { id, estado } = _cotizCotizacionMarcarPendiente;
+  const motivo = document.getElementById('cotiz-cotiz-motivo-select')?.value || '';
+  _cotizCotizacionMarcarPendiente = null;
+  await cotizCotizacionAplicarEstado(id, estado, motivo);
+}
+// "Volver a pendiente" no pide motivo — va directo.
+async function cotizCotizacionVolverAPendiente(id) {
+  await cotizCotizacionAplicarEstado(id, 'pendiente', '');
+}
+async function cotizCotizacionAplicarEstado(id, estado, motivo) {
   const row = _cotizCotizacionesCache.find(r => r.id === id);
   if (!row) return;
-  let motivo = row.motivo || '';
-  if (estado === 'vendida' || estado === 'perdida') {
-    const etiqueta = estado === 'vendida' ? 'triunfo' : 'pérdida';
-    const respuesta = prompt(`Motivo de ${etiqueta} (opcional):`, motivo);
-    if (respuesta === null) return; // canceló el prompt
-    motivo = respuesta.trim();
-  }
   if (estado === 'vendida' && !confirm(`¿Marcar como vendida? Se van a agregar sus ${(row.items||[]).length} ítem(s) al historial de ventas.`)) return;
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -12656,6 +12722,7 @@ async function cotizCotizacionMarcar(id, estado) {
         const res2 = await supaFetch('/rest/v1/cotizaciones_historial_ventas', { method:'POST', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(rows) });
         if (!res2.ok) throw new Error('Se marcó como vendida pero no se pudo cargar al historial de ventas (HTTP '+res2.status+').');
       }
+      _cotizOpcionesHistorial = null; // el motivo/tipo usado puede ser nuevo — se vuelve a armar la lista la próxima vez
     }
     cotizCotizacionesRender();
   } catch(e) { alert('No se pudo actualizar: ' + e.message); }
