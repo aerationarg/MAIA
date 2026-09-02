@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.14</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.15</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.14</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.15</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12072,14 +12072,44 @@ let cotizArmado = null;
 function cotizArmadoInit() {
   if (cotizArmado) return cotizArmado;
   cotizArmado = {
-    cliente:'', atencion:'', telefono:'', celular:'', email:'', q_numero:'',
+    cliente:'', cliente_id:null, contacto_id:null, _contactos:[],
+    atencion:'', telefono:'', celular:'', email:'', q_numero:'',
     fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
     forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
     firmante_nombre: currentUser?.nombre || '',
     items: [],
   };
+  // El Nº de Q se completa solo (siguiente al último del Excel de Q de
+  // Imputación) — no bloquea el render, se agrega cuando resuelve.
+  cotizArmadoObtenerProximoQNumero().then(num => {
+    if (num && cotizArmado && !cotizArmado.q_numero) { cotizArmado.q_numero = num; cotizArmadoRender(); }
+  });
   return cotizArmado;
+}
+function cotizArmadoNueva() {
+  if (!confirm('¿Empezar una cotización nueva? Se van a borrar los datos actuales del armador (lo ya generado y guardado en el historial no se toca).')) return;
+  cotizArmado = null;
+  cotizArmadoInit();
+  cotizArmadoRender();
+}
+// Busca en la hoja "Q-" del Excel de Q (Cfg Imputación) el mayor número de
+// Q cargado (columna E) y devuelve el siguiente, como string.
+async function cotizArmadoObtenerProximoQNumero() {
+  try {
+    const raw = await supaConfigGet('rend_q_excel');
+    if (!raw) return null;
+    const ref = JSON.parse(raw);
+    const token = await getMsToken();
+    const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
+    if (!rows || rows.length < 2) return null;
+    let max = 0;
+    rows.slice(1).forEach(r => {
+      const m = String(r[4] ?? '').trim().match(/\d+/);
+      if (m) { const n = parseInt(m[0], 10); if (n > max) max = n; }
+    });
+    return max > 0 ? String(max + 1) : null;
+  } catch(e) { console.warn('No se pudo calcular el próximo Nº de Q:', e.message); return null; }
 }
 
 function cotizArmadoRender() {
@@ -12092,8 +12122,16 @@ function cotizArmadoRender() {
   const totalGeneral = st.items.reduce((acc,it) => acc + (Number(it.cantidad)||0) * (Number(it.precio_unitario)||0), 0);
 
   el.innerHTML = `
+    <button class="btn btn-secondary btn-sm" style="margin-bottom:10px" onclick="cotizArmadoNueva()">↻ Nueva cotización</button>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-      ${campo('cliente','Cliente')}
+      <div style="position:relative">
+        <label style="font-size:12px">Cliente</label>
+        <input id="cotiz-armado-cliente-input" value="${esc(st.cliente||'')}" placeholder="Escribí para buscar..." autocomplete="off"
+          oninput="cotizArmadoSetCampo('cliente',this.value); cotizArmadoClienteBuscarDebounced(this.value)"
+          onfocus="cotizArmadoClienteBuscarDebounced(this.value)"
+          onblur="setTimeout(()=>{const el=document.getElementById('cotiz-armado-cliente-sugerencias'); if(el) el.style.display='none';},200)" />
+        <div id="cotiz-armado-cliente-sugerencias" style="position:absolute;z-index:20;left:0;right:0;top:100%;margin-top:2px;max-height:220px;overflow-y:auto;display:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px"></div>
+      </div>
       ${campo('q_numero','Nº de cotización (Q)')}
       ${campo('atencion','Atención')}
       ${campo('fecha','Fecha','date')}
@@ -12110,6 +12148,14 @@ function cotizArmadoRender() {
       ${campo('validez_oferta','Validez de la oferta')}
       ${campo('firmante_nombre','Firma — Ingeniero/a')}
     </div>
+    ${(st._contactos||[]).length > 1 ? `
+    <div style="margin:-4px 0 10px">
+      <label style="font-size:12px">Contacto de ${esc(st.cliente)}</label>
+      <select onchange="cotizArmadoSeleccionarContacto(this.value)">
+        <option value="">— Elegir contacto —</option>
+        ${st._contactos.map(ct => `<option value="${ct.id}" ${ct.id===st.contacto_id?'selected':''}>${esc([ct.nombre,ct.apellido].filter(Boolean).join(' ')||'(sin nombre)')}${ct.cargo?' — '+esc(ct.cargo):''}</option>`).join('')}
+      </select>
+    </div>` : ''}
     <label>Garantía</label>
     <textarea rows="2" oninput="cotizArmadoSetCampo('garantia',this.value)">${esc(st.garantia)}</textarea>
     <label style="margin-top:8px">Observaciones</label>
@@ -12143,6 +12189,63 @@ function cotizArmadoRender() {
 function cotizArmadoSetCampo(campo, val) {
   const st = cotizArmadoInit();
   st[campo] = val;
+}
+
+// ── Cliente (autocompletar contra la sección Clientes) + su(s) contacto(s) ──
+let _cotizArmadoClienteBuscarTimeout = null;
+let _cotizArmadoClienteSugerencias = [];
+function cotizArmadoClienteBuscarDebounced(texto) {
+  clearTimeout(_cotizArmadoClienteBuscarTimeout);
+  _cotizArmadoClienteBuscarTimeout = setTimeout(() => cotizArmadoClienteBuscar(texto), 300);
+}
+async function cotizArmadoClienteBuscar(texto) {
+  const el = document.getElementById('cotiz-armado-cliente-sugerencias');
+  if (!el) return;
+  const t = (texto || '').trim();
+  if (!t) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/clientes?select=id,nombre_empresa,rubro&nombre_empresa=ilike.*${encodeURIComponent(t)}*&order=nombre_empresa&limit=8`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = res.ok ? await res.json() : [];
+    _cotizArmadoClienteSugerencias = rows;
+    if (!rows.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.innerHTML = rows.map(c => `<div style="padding:6px 8px;cursor:pointer;font-size:13px;border-radius:4px" onmousedown="cotizArmadoClienteSeleccionar('${c.id}')">${esc(c.nombre_empresa)}${c.rubro?' <span style="color:var(--text2);font-size:11px">— '+esc(c.rubro)+'</span>':''}</div>`).join('');
+    el.style.display = 'block';
+  } catch(e) { el.style.display = 'none'; }
+}
+// onmousedown (no onclick) para que dispare antes que el onblur del input,
+// si no el blur cierra el desplegable antes de poder tocar la sugerencia.
+async function cotizArmadoClienteSeleccionar(clienteId) {
+  const cliente = _cotizArmadoClienteSugerencias.find(c => c.id === clienteId);
+  if (!cliente) return;
+  const st = cotizArmadoInit();
+  st.cliente = cliente.nombre_empresa;
+  st.cliente_id = clienteId;
+  st.contacto_id = null;
+  st._contactos = [];
+  const sugEl = document.getElementById('cotiz-armado-cliente-sugerencias');
+  if (sugEl) { sugEl.style.display = 'none'; sugEl.innerHTML = ''; }
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/clientes_contactos?select=*&cliente_id=eq.${clienteId}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const contactos = res.ok ? await res.json() : [];
+    st._contactos = contactos;
+    if (contactos.length === 1) cotizArmadoAplicarContacto(contactos[0]);
+  } catch(e) { st._contactos = []; }
+  cotizArmadoRender();
+}
+function cotizArmadoAplicarContacto(ct) {
+  const st = cotizArmadoInit();
+  st.contacto_id = ct.id;
+  st.atencion = [ct.nombre, ct.apellido].filter(Boolean).join(' ');
+  st.celular = ct.celular || '';
+  st.email = ct.email || '';
+}
+function cotizArmadoSeleccionarContacto(contactoId) {
+  const st = cotizArmadoInit();
+  const ct = (st._contactos || []).find(c => c.id === contactoId);
+  if (ct) cotizArmadoAplicarContacto(ct); else st.contacto_id = null;
+  cotizArmadoRender();
 }
 function cotizArmadoAgregarManual() {
   const st = cotizArmadoInit();
