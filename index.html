@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.13</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.14</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.13</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.14</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -645,6 +645,22 @@
           </div>
           <div id="procesos-chat-status"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Clientes ═══ -->
+    <div class="panel" id="panel-clientes">
+      <div class="card">
+        <div class="card-label">Clientes</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <input id="clientes-buscar" placeholder="Buscar por empresa o rubro..." style="flex:1;min-width:180px" oninput="clientesBuscarDebounced()" />
+          <button class="btn btn-primary" onclick="clientesAdd()">+ Nuevo cliente</button>
+          <button class="btn btn-secondary" onclick="clientesImportarAbrir()">Importar desde Excel</button>
+        </div>
+        <div id="clientes-import-wrap" style="display:none;margin-bottom:12px">
+          <div class="card" id="clientes-import-body"></div>
+        </div>
+        <div id="clientes-list" class="empty">Cargando...</div>
       </div>
     </div>
 
@@ -1917,6 +1933,7 @@ function switchPanel(name) {
   if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'cfg-cotizaciones') { cotizCatalogoRender(); cotizPlantillaRender(); }
+  if (name === 'clientes') clientesRender();
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -11613,6 +11630,248 @@ function tmplRenderCellMap(pfx) {
 // (already called via switchPanel -> npCfgRender, extend it)
 // npCfgRender override removed - merged into original
 
+// ── Clientes (Comercial) ───────────────────────────────
+// Ficha de cliente (rubro, descripción, tamaño, responsable) + contactos.
+// El responsable se puede asignar como usuario real de MAIA (dropdown de
+// "profiles", igual que la gestión de usuarios de Admin) — el valor que
+// venga importado del Excel de Clientes (Imputación) queda guardado aparte
+// como referencia, por si no coincide con ningún usuario real.
+let _clientesCache = [];
+let _clientesAbierto = null;
+let _clientesBuscarTimeout = null;
+let _clientesProfilesCache = null;
+
+function clientesBuscarDebounced() {
+  clearTimeout(_clientesBuscarTimeout);
+  _clientesBuscarTimeout = setTimeout(clientesRender, 400);
+}
+async function clientesGetProfiles() {
+  if (_clientesProfilesCache) return _clientesProfilesCache;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch('/rest/v1/profiles?select=id,nombre,email&order=nombre', {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    _clientesProfilesCache = (res.ok && Array.isArray(rows)) ? rows : [];
+  } catch(e) { _clientesProfilesCache = []; }
+  return _clientesProfilesCache;
+}
+
+async function clientesRender() {
+  const el = document.getElementById('clientes-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const texto = (document.getElementById('clientes-buscar')?.value || '').trim();
+    let url = '/rest/v1/clientes?select=*,clientes_contactos(*)&order=nombre_empresa';
+    if (texto) url += `&or=(nombre_empresa.ilike.*${encodeURIComponent(texto)}*,rubro.ilike.*${encodeURIComponent(texto)}*)`;
+    const [res, profiles] = await Promise.all([
+      supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
+      clientesGetProfiles(),
+    ]);
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar la lista de clientes.</p>'; return; }
+    _clientesCache = rows;
+    if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay clientes cargados.</p>'; return; }
+    el.innerHTML = rows.map(c => {
+      const esAbierto = _clientesAbierto === c.id;
+      const contactos = c.clientes_contactos || [];
+      return `
+      <div class="field-row" style="padding:8px 0">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span style="font-size:13px;color:var(--text)"><b>${esc(c.nombre_empresa)}</b>${c.rubro?' <span style="color:var(--text2)">— '+esc(c.rubro)+'</span>':''}${contactos.length?' <span style="color:var(--text2)">· '+contactos.length+' contacto'+(contactos.length===1?'':'s')+'</span>':''}</span>
+          <button class="btn btn-secondary btn-sm" onclick="clientesToggle('${c.id}')">${esAbierto?'Cerrar':'Ver / editar →'}</button>
+        </div>
+        ${esAbierto ? clientesPanelHtml(c, profiles) : ''}
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar clientes.</p>'; }
+}
+function clientesPanelHtml(c, profiles) {
+  const contactos = c.clientes_contactos || [];
+  const respOptions = profiles.map(p => `<option value="${p.id}" ${p.id===c.responsable_user_id?'selected':''}>${esc(p.nombre||p.email)}</option>`).join('');
+  return `
+    <div class="card" style="margin-top:8px">
+      <label>Nombre de la empresa</label>
+      <input value="${esc(c.nombre_empresa||'')}" oninput="clientesUpdate('${c.id}','nombre_empresa',this.value)" style="margin-bottom:8px" />
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div><label style="font-size:12px">Rubro</label><input value="${esc(c.rubro||'')}" oninput="clientesUpdate('${c.id}','rubro',this.value)" /></div>
+        <div><label style="font-size:12px">Tamaño</label><input value="${esc(c.tamano||'')}" oninput="clientesUpdate('${c.id}','tamano',this.value)" /></div>
+      </div>
+      <label>Descripción</label>
+      <textarea rows="2" oninput="clientesUpdate('${c.id}','descripcion',this.value)">${esc(c.descripcion||'')}</textarea>
+      <label style="margin-top:8px">Responsable</label>
+      <select onchange="clientesUpdate('${c.id}','responsable_user_id',this.value||null)">
+        <option value="">— Sin asignar —</option>
+        ${respOptions}
+      </select>
+      ${c.excel_responsable_valor ? `<p class="hint" style="margin-top:4px">Valor importado del Excel: "${esc(c.excel_responsable_valor)}"</p>` : ''}
+
+      <div class="gap"></div>
+      <label>Contactos</label>
+      ${contactos.length ? `
+      <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2);flex-wrap:wrap">
+        <span style="width:120px">Nombre</span><span style="width:120px">Apellido</span><span style="width:140px">Cargo</span><span style="width:180px">E-mail</span><span style="width:130px">Celular</span>
+      </div>
+      ${contactos.map(ct => `
+        <div class="field-row" style="padding:4px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <input value="${esc(ct.nombre||'')}" placeholder="Nombre" style="width:120px" onchange="clientesContactoUpdate('${ct.id}','nombre',this.value)" />
+          <input value="${esc(ct.apellido||'')}" placeholder="Apellido" style="width:120px" onchange="clientesContactoUpdate('${ct.id}','apellido',this.value)" />
+          <input value="${esc(ct.cargo||'')}" placeholder="Cargo" style="width:140px" onchange="clientesContactoUpdate('${ct.id}','cargo',this.value)" />
+          <input value="${esc(ct.email||'')}" placeholder="E-mail" style="width:180px" onchange="clientesContactoUpdate('${ct.id}','email',this.value)" />
+          <input value="${esc(ct.celular||'')}" placeholder="Celular" style="width:130px" onchange="clientesContactoUpdate('${ct.id}','celular',this.value)" />
+          <button class="btn btn-secondary btn-sm" onclick="clientesContactoEliminar('${ct.id}')">✕</button>
+        </div>`).join('')}
+      ` : '<p class="hint">Sin contactos todavía.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesContactoAdd('${c.id}')">+ Agregar contacto</button>
+
+      <div class="gap"></div>
+      <button class="btn btn-secondary btn-sm" onclick="clientesEliminar('${c.id}')" style="color:var(--red)">Eliminar cliente</button>
+    </div>`;
+}
+function clientesToggle(id) { _clientesAbierto = (_clientesAbierto === id) ? null : id; clientesRender(); }
+async function clientesUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val, updated_at: new Date().toISOString() })
+  });
+  const c = _clientesCache.find(x => x.id === id);
+  if (c) c[field] = val;
+}
+async function clientesAdd() {
+  const nombre = prompt('Nombre de la empresa:');
+  if (!nombre || !nombre.trim()) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/clientes', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ nombre_empresa: nombre.trim() })
+  });
+  if (!res.ok) { alert('No se pudo crear el cliente.'); return; }
+  clientesRender();
+}
+async function clientesEliminar(id) {
+  if (!confirm('¿Eliminar este cliente y sus contactos?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  clientesRender();
+}
+async function clientesContactoAdd(clienteId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/clientes_contactos', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ cliente_id: clienteId })
+  });
+  if (!res.ok) { alert('No se pudo agregar el contacto.'); return; }
+  clientesRender();
+}
+async function clientesContactoUpdate(id, field, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_contactos?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function clientesContactoEliminar(id) {
+  if (!confirm('¿Eliminar este contacto?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_contactos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  clientesRender();
+}
+
+// ── Importar clientes desde el Excel de Clientes (mismo que usa Imputación,
+// Cfg Imputación > Excel de Clientes) — como no sabemos de antemano en qué
+// columna está cada dato, se muestra una vista previa y el usuario confirma
+// (una sola vez; después queda recordado) qué columna es cada cosa.
+let _clientesImportPreview = null;
+async function clientesImportarAbrir() {
+  const wrap = document.getElementById('clientes-import-wrap');
+  const el = document.getElementById('clientes-import-body');
+  if (!wrap || !el) return;
+  wrap.style.display = 'block';
+  el.innerHTML = 'Cargando el Excel de Clientes (Cfg Imputación)...';
+  try {
+    const raw = await supaConfigGet('rend_clientes_excel');
+    if (!raw) throw new Error('No hay ningún Excel de Clientes vinculado — andá a Cfg Imputación y vinculalo primero.');
+    const ref = JSON.parse(raw);
+    const token = await getMsToken();
+    const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Hoja1');
+    if (!rows || !rows.length) throw new Error('El Excel está vacío.');
+    const headers = rows[0].map(h => String(h ?? '').trim());
+    const dataRows = rows.slice(1).filter(r => r.some(c => c != null && String(c).trim() !== ''));
+    _clientesImportPreview = { headers, rows: dataRows };
+
+    const savedMapRaw = await supaConfigGet('clientes_excel_mapping');
+    const savedMap = savedMapRaw ? JSON.parse(savedMapRaw) : {};
+    const adivinar = patrones => { const i = headers.findIndex(h => patrones.some(p => h.toLowerCase().includes(p))); return i >= 0 ? i : 0; };
+    const idGuess = savedMap.idCol ?? adivinar(['id']);
+    const respGuess = savedMap.respCol ?? adivinar(['responsable','user','vendedor']);
+    const nombreGuess = savedMap.nombreCol ?? (headers.length > 2 ? 2 : adivinar(['cliente','empresa','nombre']));
+    const colOptions = sel => headers.map((h,i) => `<option value="${i}" ${i===sel?'selected':''}>${String.fromCharCode(65+i)} — ${esc(h||'(sin encabezado)')}</option>`).join('');
+
+    el.innerHTML = `
+      <p class="hint" style="margin-bottom:8px">Encontré ${dataRows.length} filas. Confirmá qué columna es cada cosa (se recuerda para la próxima):</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+        <div><label style="font-size:12px">Columna ID</label><select id="clientes-import-col-id">${colOptions(idGuess)}</select></div>
+        <div><label style="font-size:12px">Columna Responsable</label><select id="clientes-import-col-resp">${colOptions(respGuess)}</select></div>
+        <div><label style="font-size:12px">Columna Nombre de empresa</label><select id="clientes-import-col-nombre">${colOptions(nombreGuess)}</select></div>
+      </div>
+      <div style="overflow-x:auto;max-height:200px;margin-bottom:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr>${headers.map((h,i)=>`<th style="text-align:left;padding:4px;border-bottom:1px solid var(--border)">${String.fromCharCode(65+i)}: ${esc(h)}</th>`).join('')}</tr>
+          ${dataRows.slice(0,5).map(r => `<tr>${headers.map((h,i)=>`<td style="padding:4px;border-bottom:1px solid var(--border)">${esc(r[i]??'')}</td>`).join('')}</tr>`).join('')}
+        </table>
+      </div>
+      <button class="btn btn-primary" onclick="clientesImportarConfirmar()">Importar ${dataRows.length} clientes</button>
+      <button class="btn btn-secondary" onclick="clientesImportarCerrar()">Cancelar</button>
+      <div id="clientes-import-status"></div>
+    `;
+  } catch(e) {
+    el.innerHTML = `<p class="hint" style="color:var(--red)">✕ ${esc(e.message)}</p><button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesImportarCerrar()">Cerrar</button>`;
+  }
+}
+function clientesImportarCerrar() {
+  const wrap = document.getElementById('clientes-import-wrap');
+  if (wrap) wrap.style.display = 'none';
+  const el = document.getElementById('clientes-import-body');
+  if (el) el.innerHTML = '';
+  _clientesImportPreview = null;
+}
+async function clientesImportarConfirmar() {
+  if (!_clientesImportPreview) return;
+  const statusId = 'clientes-import-status';
+  const idCol = Number(document.getElementById('clientes-import-col-id').value);
+  const respCol = Number(document.getElementById('clientes-import-col-resp').value);
+  const nombreCol = Number(document.getElementById('clientes-import-col-nombre').value);
+  showMsg(statusId, 'loading', 'Importando...');
+  try {
+    await supaConfigSet('clientes_excel_mapping', JSON.stringify({ idCol, respCol, nombreCol }));
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const filas = _clientesImportPreview.rows.map(r => ({
+      excel_id: String(r[idCol] ?? '').trim(),
+      excel_responsable_valor: String(r[respCol] ?? '').trim() || null,
+      nombre_empresa: String(r[nombreCol] ?? '').trim(),
+    })).filter(f => f.excel_id && f.nombre_empresa);
+    if (!filas.length) throw new Error('Ninguna fila tiene ID y Nombre de empresa a la vez — revisá las columnas elegidas.');
+    const LOTE = 200;
+    let importados = 0;
+    for (let i = 0; i < filas.length; i += LOTE) {
+      const lote = filas.slice(i, i + LOTE);
+      const res = await supaFetch('/rest/v1/clientes?on_conflict=excel_id', {
+        method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'resolution=merge-duplicates'},
+        body: JSON.stringify(lote)
+      });
+      if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+      importados += lote.length;
+    }
+    showMsg(statusId, 'success', `✓ Importados/actualizados ${importados} clientes.`);
+    clientesRender();
+    setTimeout(clientesImportarCerrar, 1500);
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ No se pudo importar: ' + e.message);
+  }
+}
+
 // ── Cotizaciones (Comercial) ───────────────────────────
 // Primera parte: catálogo de productos + historial de ventas efectivamente
 // cerradas, buscable por ítem/cliente. El generador de cotizaciones (arma el
@@ -12181,6 +12440,7 @@ const NAV_SECTIONS = [
   { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
   { id:'np-loc',    label:'NP Local',         area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
   { id:'np-int',    label:'NP Internacional', area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
+  { id:'clientes',  label:'Clientes',         area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
   { id:'cotizaciones', label:'Cotizaciones',   area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>' },
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
 ];
@@ -12244,10 +12504,10 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','cotizaciones','cfg-rend','cfg-clientes','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-procesos','cfg-cotizaciones','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','clientes','cotizaciones','cfg-rend','cfg-clientes','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-procesos','cfg-cotizaciones','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-clientes','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
-  'Comercial':         ['rend','viajes','hallazgos','cotizaciones','cfg-cotizaciones'],
+  'Comercial':         ['rend','viajes','hallazgos','clientes','cotizaciones','cfg-cotizaciones'],
   'Compras y Comex':   ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
@@ -12458,6 +12718,7 @@ const PANEL_TITLES = {
   'cfg-np-int': 'Configuración — NP Internacional',
   'procesos': 'Procesos IA',
   'cfg-procesos': 'Configuración — Procesos IA',
+  'clientes': 'Clientes',
   'cotizaciones': 'Cotizaciones',
   'cfg-cotizaciones': 'Configuración — Cotizaciones',
   'admin': 'Administración',
