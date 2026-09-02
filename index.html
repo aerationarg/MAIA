@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.15</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.16</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.15</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.16</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12073,7 +12073,7 @@ function cotizArmadoInit() {
   if (cotizArmado) return cotizArmado;
   cotizArmado = {
     cliente:'', cliente_id:null, contacto_id:null, _contactos:[],
-    atencion:'', telefono:'', celular:'', email:'', q_numero:'',
+    atencion:'', telefono:'', celular:'', email:'', q_numero:'', referencia:'',
     fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
     forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
@@ -12133,6 +12133,7 @@ function cotizArmadoRender() {
         <div id="cotiz-armado-cliente-sugerencias" style="position:absolute;z-index:20;left:0;right:0;top:100%;margin-top:2px;max-height:220px;overflow-y:auto;display:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px"></div>
       </div>
       ${campo('q_numero','Nº de cotización (Q)')}
+      ${campo('referencia','Referencia')}
       ${campo('atencion','Atención')}
       ${campo('fecha','Fecha','date')}
       ${campo('telefono','Teléfono')}
@@ -12427,6 +12428,32 @@ function cotizDescargarBlob(blob, nombreArchivo) {
   URL.revokeObjectURL(url);
 }
 
+// Iniciales para la fila del Excel de Q (ej. "Federico Cherny" → "FC").
+function cotizArmadoIniciales(nombreCompleto) {
+  const partes = String(nombreCompleto||'').trim().split(/\s+/).filter(Boolean);
+  if (!partes.length) return '';
+  if (partes.length === 1) return partes[0].slice(0,2).toUpperCase();
+  return (partes[0][0] + partes[partes.length-1][0]).toUpperCase();
+}
+// Agrega una fila al final de la hoja "Q-" del Excel de Q (Cfg Imputación):
+// A=fecha, B=iniciales del usuario, C=cliente, D=referencia, E=Nº de Q.
+// No es fatal si falla (la cotización ya se generó y guardó igual) — el
+// error se le muestra al usuario para que lo cargue a mano si hace falta.
+async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
+  const raw = await supaConfigGet('rend_q_excel');
+  if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
+  const ref = JSON.parse(raw);
+  const token = await getMsToken();
+  const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
+  const nextRow = (rows?.length || 1) + 1;
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${ref.siteId}/drive/items/${ref.id}/workbook/worksheets('Q-')/`;
+  const resp = await fetch(excelBase + `range(address='A${nextRow}:E${nextRow}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ values: [[cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre||currentUser?.email||''), st.cliente||'', st.referencia||'', qNumeroCompleto]] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+}
+
 async function cotizArmadoGenerar() {
   const statusId = 'cotiz-armado-status';
   const st = cotizArmadoInit();
@@ -12445,6 +12472,7 @@ async function cotizArmadoGenerar() {
       body: JSON.stringify({
         empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
         telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
+        referencia: st.referencia||null,
         moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
         plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
         garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
@@ -12454,7 +12482,18 @@ async function cotizArmadoGenerar() {
       })
     });
     if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
-    showMsg(statusId, 'success', '✓ Cotización generada, descargada y guardada en el historial de cotizaciones — marcala como vendida o perdida ahí cuando se resuelva.');
+
+    let avisoQ = '';
+    if (st.q_numero) {
+      showMsg(statusId, 'loading', 'Registrando en el Excel de Q...');
+      try {
+        const qCompleto = /^q-/i.test(st.q_numero) ? st.q_numero : 'Q-' + st.q_numero;
+        await cotizArmadoRegistrarEnExcelQ(st, qCompleto);
+      } catch(eQ) {
+        avisoQ = ' (ojo: no se pudo registrar en el Excel de Q — ' + eQ.message + ', cargalo a mano ahí)';
+      }
+    }
+    showMsg(statusId, 'success', '✓ Cotización generada, descargada y guardada en el historial de cotizaciones' + avisoQ + '.');
     cotizCotizacionesRender();
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo generar: ' + e.message);
