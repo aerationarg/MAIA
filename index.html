@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.21</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.22</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.21</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.22</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12128,7 +12128,7 @@ function cotizArmadoInit() {
   if (cotizArmado) return cotizArmado;
   cotizArmado = {
     cliente:'', cliente_id:null, contacto_id:null, _contactos:[],
-    atencion:'', telefono:'', celular:'', email:'', q_numero:'', referencia:'',
+    atencion:'', telefono:'', celular:'', email:'', q_numero:'', referencia:'', tipo_venta:'',
     fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
     forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
@@ -12189,6 +12189,7 @@ function cotizArmadoRender() {
       </div>
       ${campo('q_numero','Nº de cotización (Q)')}
       ${campo('referencia','Referencia')}
+      ${campo('tipo_venta','Tipo de venta (Equipo, Repuesto...)')}
       <div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
           <label style="font-size:12px">Atención</label>
@@ -12366,7 +12367,10 @@ function cotizArmadoAgregarDesde(origen, id) {
   if (!row) return;
   const descripcion = row.descripcion || [row.marca,row.modelo].filter(Boolean).join(' ');
   const precio = origen === 'hist' ? row.precio_unitario : (row.precio_lista || 0);
-  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio });
+  // Se guarda marca/modelo aunque no se muestren en el armador — así, si esta
+  // cotización se marca como vendida más adelante, viajan al historial de
+  // ventas en vez de quedar vacíos.
+  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null });
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
   cotizArmadoRender();
@@ -12534,7 +12538,7 @@ async function cotizArmadoGenerar() {
       body: JSON.stringify({
         empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
         telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
-        referencia: st.referencia||null,
+        referencia: st.referencia||null, tipo_venta: st.tipo_venta||null,
         moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
         plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
         garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
@@ -12590,7 +12594,7 @@ async function cotizCotizacionesRender() {
           ${th('Fecha')}${th('Cliente')}${th('Q')}
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Ítems</th>
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Total</th>
-          ${th('Moneda')}${th('Estado')}${th('Vendedor')}${th('Acciones')}
+          ${th('Moneda')}${th('Estado')}${th('Vendedor')}${th('Tipo')}${th('Motivo')}${th('Acciones')}
         </tr></thead>
         <tbody>
           ${rowsData.map(({r,total,estadoLabel,estadoColor,monedaCorta}) => `<tr style="border-bottom:1px solid var(--border)">
@@ -12602,6 +12606,8 @@ async function cotizCotizacionesRender() {
             <td style="padding:4px 6px">${esc(monedaCorta)}</td>
             <td style="padding:4px 6px;color:${estadoColor};font-weight:600;white-space:nowrap">${estadoLabel}</td>
             <td style="padding:4px 6px">${esc(r.vendedor_nombre||'')}</td>
+            <td style="padding:4px 6px">${esc(r.tipo_venta||'')}</td>
+            <td style="padding:4px 6px;max-width:180px" title="${esc(r.motivo||'')}">${esc(r.motivo||'')}</td>
             <td style="padding:4px 6px">
               <div style="display:flex;gap:4px;flex-wrap:wrap">
                 ${r.estado!=='vendida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionMarcar('${r.id}','vendida')" title="Marcar vendida">✓</button>`:''}
@@ -12621,12 +12627,19 @@ async function cotizCotizacionesRender() {
 async function cotizCotizacionMarcar(id, estado) {
   const row = _cotizCotizacionesCache.find(r => r.id === id);
   if (!row) return;
+  let motivo = row.motivo || '';
+  if (estado === 'vendida' || estado === 'perdida') {
+    const etiqueta = estado === 'vendida' ? 'triunfo' : 'pérdida';
+    const respuesta = prompt(`Motivo de ${etiqueta} (opcional):`, motivo);
+    if (respuesta === null) return; // canceló el prompt
+    motivo = respuesta.trim();
+  }
   if (estado === 'vendida' && !confirm(`¿Marcar como vendida? Se van a agregar sus ${(row.items||[]).length} ítem(s) al historial de ventas.`)) return;
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-      body: JSON.stringify({ estado, updated_at: new Date().toISOString() })
+      body: JSON.stringify({ estado, motivo: motivo || null, updated_at: new Date().toISOString() })
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (estado === 'vendida') {
@@ -12634,8 +12647,10 @@ async function cotizCotizacionMarcar(id, estado) {
       const rows = (row.items||[]).map(it => ({
         empresa: currentEmpresa, fecha: row.fecha, cliente: row.cliente, q_numero: row.q_numero || null,
         vendedor_nombre: row.vendedor_nombre || null,
+        marca: it.marca || null, modelo: it.modelo || null,
         descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
-        moneda: moneda3, creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+        moneda: moneda3, tipo_venta: row.tipo_venta || null, motivo_triunfo: motivo || null,
+        creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
       }));
       if (rows.length) {
         const res2 = await supaFetch('/rest/v1/cotizaciones_historial_ventas', { method:'POST', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(rows) });
