@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.23</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.24</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.23</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.24</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12406,8 +12406,10 @@ function cotizArmadoAgregarDesde(origen, id) {
   const precio = origen === 'hist' ? row.precio_unitario : (row.precio_lista || 0);
   // Se guarda marca/modelo aunque no se muestren en el armador — así, si esta
   // cotización se marca como vendida más adelante, viajan al historial de
-  // ventas en vez de quedar vacíos.
-  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null });
+  // ventas en vez de quedar vacíos. catalogo_id solo se guarda cuando el
+  // ítem vino de Stock (no del historial ni cargado a mano) — es lo que
+  // permite descontar stock automáticamente al marcar vendida.
+  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null });
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
   cotizArmadoRender();
@@ -12723,9 +12725,45 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
         if (!res2.ok) throw new Error('Se marcó como vendida pero no se pudo cargar al historial de ventas (HTTP '+res2.status+').');
       }
       _cotizOpcionesHistorial = null; // el motivo/tipo usado puede ser nuevo — se vuelve a armar la lista la próxima vez
+      // Descuenta stock — solo una vez por cotización, aunque se marque
+      // vendida más de una vez (ej. si se revirtió a pendiente y se volvió
+      // a marcar). Solo afecta los ítems que vinieron de Stock (tienen
+      // catalogo_id) — los del historial de ventas o cargados a mano no.
+      if (!row.stock_descontado) {
+        const avisos = await cotizCotizacionDescontarStock(row.items, session);
+        await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_descontado: true }) });
+        if (avisos.length) alert('Se descontó el stock. Ojo, quedó negativo en:\n' + avisos.join('\n'));
+      }
     }
     cotizCotizacionesRender();
   } catch(e) { alert('No se pudo actualizar: ' + e.message); }
+}
+// Resta la cantidad vendida del "Stock" (cantidad_stock) de cada producto de
+// Stock que haya sido parte de la cotización — junta por catalogo_id primero
+// (puede haber más de un ítem apuntando al mismo producto). Devuelve avisos
+// de los que quedaron en negativo (no bloquea, solo informa).
+async function cotizCotizacionDescontarStock(items, session) {
+  const conCatalogo = (items||[]).filter(it => it.catalogo_id);
+  if (!conCatalogo.length) return [];
+  const ids = [...new Set(conCatalogo.map(it => it.catalogo_id))];
+  const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=id,marca,modelo,cantidad_stock&id=in.(${ids.join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
+  const catalogoRows = res.ok ? await res.json() : [];
+  const porId = {};
+  catalogoRows.forEach(c => { porId[c.id] = c; });
+  const totalPorId = {};
+  conCatalogo.forEach(it => { totalPorId[it.catalogo_id] = (totalPorId[it.catalogo_id]||0) + (Number(it.cantidad)||0); });
+  const avisos = [];
+  for (const catId of Object.keys(totalPorId)) {
+    const cat = porId[catId];
+    if (!cat) continue; // el producto pudo haberse borrado del catálogo desde entonces
+    const nuevoStock = (Number(cat.cantidad_stock)||0) - totalPorId[catId];
+    await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${catId}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ cantidad_stock: nuevoStock })
+    });
+    if (nuevoStock < 0) avisos.push(`${[cat.marca,cat.modelo].filter(Boolean).join(' ')||catId}: quedó en ${nuevoStock}`);
+  }
+  return avisos;
 }
 async function cotizCotizacionDescargar(id) {
   const row = _cotizCotizacionesCache.find(r => r.id === id);
