@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.29</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.30</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.29</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.30</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12163,7 +12163,7 @@ async function cotizHistorialEliminar(id) {
   if (!res.ok) { alert('No se pudo eliminar.'); return; }
   const deleted = (await res.json().catch(()=>[]))[0];
   if (deleted && deleted.catalogo_id) {
-    try { await cotizCotizacionAjustarStock([{ catalogo_id: deleted.catalogo_id, cantidad: deleted.cantidad }], session, 1); }
+    try { await cotizAjustarCantidadCatalogo([{ catalogo_id: deleted.catalogo_id, cantidad: deleted.cantidad }], session, 'cantidad_stock', 1); }
     catch(e) { console.warn('No se pudo reponer el stock:', e.message); }
   }
   cotizHistorialRender();
@@ -12724,7 +12724,7 @@ async function cotizArmadoGenerar() {
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch('/rest/v1/cotizaciones', {
-      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
       body: JSON.stringify({
         empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
         telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
@@ -12738,6 +12738,19 @@ async function cotizArmadoGenerar() {
       })
     });
     if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+    const nuevaCotizacion = (await res.json().catch(()=>[]))[0];
+
+    // Ítems de Stock (tienen catalogo_id): se reservan apenas se genera la
+    // cotización (stock -X, reserva +X) — no hace falta esperar a que se
+    // marque vendida. Ver cotizCotizacionAplicarEstado para cómo se resuelve
+    // la reserva después (vendida/perdida).
+    const itemsDeStock = (st.items||[]).filter(it => it.catalogo_id);
+    if (itemsDeStock.length && nuevaCotizacion?.id) {
+      showMsg(statusId, 'loading', 'Reservando stock...');
+      const avisosReserva = await cotizCotizacionReservarStock(itemsDeStock, session);
+      await supaFetch(`/rest/v1/cotizaciones?id=eq.${nuevaCotizacion.id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: true }) });
+      if (avisosReserva.length) alert('Se reservó stock. Ojo, quedó negativo en:\n' + avisosReserva.join('\n'));
+    }
 
     let avisoQ = '';
     if (st.q_numero) {
@@ -12878,31 +12891,39 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
         if (!res2.ok) throw new Error('Se marcó como vendida pero no se pudo cargar al historial de ventas (HTTP '+res2.status+').');
       }
       _cotizOpcionesHistorial = null; // el motivo/tipo usado puede ser nuevo — se vuelve a armar la lista la próxima vez
-      // Stock (solo ítems con catalogo_id, o sea los que vinieron de Stock):
-      // se descuenta al marcar vendida. "Vendida" es terminal (no se puede
-      // revertir desde acá, no hay botones) — la única forma de reponer
-      // stock es eliminando la fila correspondiente del historial de
-      // ventas (ver cotizHistorialEliminar), que ahora sabe a qué producto
-      // de Stock corresponde gracias al catalogo_id que se guardó arriba.
-      if (!row.stock_descontado) {
-        const avisos = await cotizCotizacionAjustarStock(row.items, session, -1);
-        await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_descontado: true }) });
+      // Stock: si esta cotización tenía una reserva activa (se hizo al
+      // generarla — ver cotizArmadoGenerar), se descuenta de la RESERVA, no
+      // del stock (el stock ya se había descontado al reservar). Si por lo
+      // que sea no había reserva activa (ej. venía de "perdida", que ya la
+      // había liberado), se descuenta del stock directo, como una venta
+      // nueva. "Vendida" es terminal — la única forma de revertir esto es
+      // eliminando la fila del historial de ventas (repone cantidad_stock,
+      // ver cotizHistorialEliminar).
+      if (row.stock_reservado) {
+        await cotizCotizacionLiberarReserva(row.items, session, false);
+        await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: false }) });
+      } else {
+        const avisos = await cotizAjustarCantidadCatalogo(row.items, session, 'cantidad_stock', -1);
         if (avisos.length) alert('Se descontó el stock. Ojo, quedó negativo en:\n' + avisos.join('\n'));
       }
+    } else if (estado === 'perdida' && row.stock_reservado) {
+      // Se libera la reserva Y se repone el stock (a diferencia de "vendida").
+      await cotizCotizacionLiberarReserva(row.items, session, true);
+      await supaFetch(`/rest/v1/cotizaciones?id=eq.${id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: false }) });
     }
     cotizCotizacionesRender();
   } catch(e) { alert('No se pudo actualizar: ' + e.message); }
 }
-// Suma factor*cantidad a "Stock" (cantidad_stock) de cada producto de Stock
-// que haya sido parte de la cotización (factor -1 = descontar al vender,
-// +1 = reponer al revertir) — junta por catalogo_id primero (puede haber
-// más de un ítem apuntando al mismo producto). Devuelve avisos de los que
-// quedaron en negativo al descontar (no bloquea, solo informa).
-async function cotizCotizacionAjustarStock(items, session, factor) {
+// Suma factor*cantidad a la columna de cantidad indicada (cantidad_stock,
+// cantidad_reserva, etc.) de cada producto de Stock que haya sido parte de
+// la cotización — junta por catalogo_id primero (puede haber más de un
+// ítem apuntando al mismo producto). Devuelve avisos de los que quedaron en
+// negativo al restar (no bloquea, solo informa).
+async function cotizAjustarCantidadCatalogo(items, session, campo, factor) {
   const conCatalogo = (items||[]).filter(it => it.catalogo_id);
   if (!conCatalogo.length) return [];
   const ids = [...new Set(conCatalogo.map(it => it.catalogo_id))];
-  const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=id,marca,modelo,cantidad_stock&id=in.(${ids.join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
+  const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=id,marca,modelo,${campo}&id=in.(${ids.join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
   const catalogoRows = res.ok ? await res.json() : [];
   const porId = {};
   catalogoRows.forEach(c => { porId[c.id] = c; });
@@ -12912,14 +12933,29 @@ async function cotizCotizacionAjustarStock(items, session, factor) {
   for (const catId of Object.keys(totalPorId)) {
     const cat = porId[catId];
     if (!cat) continue; // el producto pudo haberse borrado del catálogo desde entonces
-    const nuevoStock = (Number(cat.cantidad_stock)||0) + factor * totalPorId[catId];
+    const nuevoValor = (Number(cat[campo])||0) + factor * totalPorId[catId];
     await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${catId}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-      body: JSON.stringify({ cantidad_stock: nuevoStock })
+      body: JSON.stringify({ [campo]: nuevoValor })
     });
-    if (factor < 0 && nuevoStock < 0) avisos.push(`${[cat.marca,cat.modelo].filter(Boolean).join(' ')||catId}: quedó en ${nuevoStock}`);
+    if (factor < 0 && nuevoValor < 0) avisos.push(`${[cat.marca,cat.modelo].filter(Boolean).join(' ')||catId} (${campo}): quedó en ${nuevoValor}`);
   }
   return avisos;
+}
+// Al GENERAR una cotización con ítems de Stock: se descuenta cantidad_stock y
+// se suma lo mismo a cantidad_reserva — queda "reservado" hasta que se
+// resuelva (vendida/perdida). Devuelve avisos de stock negativo.
+async function cotizCotizacionReservarStock(items, session) {
+  const avisos = await cotizAjustarCantidadCatalogo(items, session, 'cantidad_stock', -1);
+  await cotizAjustarCantidadCatalogo(items, session, 'cantidad_reserva', 1);
+  return avisos;
+}
+// Libera una reserva activa: siempre resta de cantidad_reserva; si aStock es
+// true (se perdió la venta) también repone cantidad_stock — si es false (se
+// vendió) el stock queda como está, porque ya se había descontado al reservar.
+async function cotizCotizacionLiberarReserva(items, session, aStock) {
+  await cotizAjustarCantidadCatalogo(items, session, 'cantidad_reserva', -1);
+  if (aStock) await cotizAjustarCantidadCatalogo(items, session, 'cantidad_stock', 1);
 }
 async function cotizCotizacionDescargar(id) {
   const row = _cotizCotizacionesCache.find(r => r.id === id);
