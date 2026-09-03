@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.26</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.27</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.26</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.27</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2298,6 +2298,88 @@ async function fileToBase64(file) {
 function rendAgregarAdvertencia(extracted, texto) {
   extracted['__advertencia__'] = extracted['__advertencia__'] ? extracted['__advertencia__'] + ' · ' + texto : texto;
 }
+
+// ── Autocontrol de extracción: consistencia entre comprobantes y aritmética ──
+// Los nombres de campo son configurables por empresa (ver REND_MAPEO_CAMPOS_AA_AS
+// más abajo) — acá se los busca por rol probando ambas variantes conocidas
+// (AA y AS). Si se los renombró a algo distinto de las dos, el chequeo
+// correspondiente simplemente no encuentra el campo y no se ejecuta (misma
+// limitación ya conocida de rendClaveComprobante).
+const REND_ROLE_NAMES = {
+  proveedor: ['Proveedor'],
+  cuit: ['Nro CUIT Proveedor', 'CUIT emisor'],
+  neto: ['Monto sin iva', 'Neto gravado'],
+  iva: ['IVA'],
+  total: ['Monto final', 'Total'],
+};
+function rendValorPorRol(extracted, rol) {
+  for (const nombre of REND_ROLE_NAMES[rol] || []) {
+    if (extracted[nombre] != null && extracted[nombre] !== '') return { nombre, valor: extracted[nombre] };
+  }
+  return null;
+}
+function rendNombreNormalizado(s) {
+  return String(s||'').trim().toLowerCase().replace(/\s+/g,' ').replace(/[.,]/g,'');
+}
+// Convierte un monto extraído (puede venir "12345.67", "12345,67" o
+// "$ 12.345,67") a número. Si tiene coma y punto, el último que aparece es
+// el separador decimal; si solo tiene uno de los dos, se asume decimal.
+function rendParseMonto(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return isNaN(v) ? null : v;
+  let s = String(v).trim().replace(/[^\d.,-]/g, '');
+  if (!s) return null;
+  const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.');
+  if (lastComma > -1 && lastDot > -1) {
+    s = lastComma > lastDot ? s.replace(/\./g,'').replace(',', '.') : s.replace(/,/g,'');
+  } else if (lastComma > -1) {
+    s = s.replace(',', '.');
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+// Chequeo 1: mismo proveedor (por nombre) pero CUIT distinto entre
+// comprobantes ya extraídos — típico de un CUIT mal leído por estar borroso
+// en uno de los tickets, cuando en otros del mismo proveedor sí se leyó
+// bien. Avisa en AMBOS comprobantes (el nuevo y el que ya estaba), para
+// poder comparar y corregir el que esté mal.
+function rendChequearConsistenciaProveedor(extracted, otrosResultados) {
+  const proveedor = rendValorPorRol(extracted, 'proveedor');
+  const cuit = rendValorPorRol(extracted, 'cuit');
+  if (!proveedor?.valor || !cuit?.valor) return;
+  const provNorm = rendNombreNormalizado(proveedor.valor);
+  const cuitNorm = String(cuit.valor).replace(/\D/g,'');
+  if (!provNorm || !cuitNorm) return;
+  const conflicto = otrosResultados.find(r => {
+    if (r === extracted) return false;
+    const p2 = rendValorPorRol(r, 'proveedor');
+    const c2 = rendValorPorRol(r, 'cuit');
+    if (!p2?.valor || !c2?.valor) return false;
+    return rendNombreNormalizado(p2.valor) === provNorm && String(c2.valor).replace(/\D/g,'') !== cuitNorm;
+  });
+  if (!conflicto) return;
+  const cuitConflicto = rendValorPorRol(conflicto, 'cuit').valor;
+  rendAgregarAdvertencia(extracted, `⚠ El CUIT (${cuit.valor}) no coincide con el de otro comprobante del mismo proveedor "${proveedor.valor}" (ahí dice ${cuitConflicto}) — revisá cuál está bien.`);
+  const yaAvisado = String(conflicto['__advertencia__']||'').includes('no coincide con el de otro comprobante');
+  if (!yaAvisado) rendAgregarAdvertencia(conflicto, `⚠ El CUIT (${cuitConflicto}) no coincide con el de otro comprobante del mismo proveedor "${proveedor.valor}" (ahí dice ${cuit.valor}) — revisá cuál está bien.`);
+}
+// Chequeo 2: autocontrol aritmético — neto + IVA debería dar el total. Si la
+// extracción de cada campo fue independiente (sin que la IA haga la cuenta),
+// esto detecta un campo mal leído aunque los tres valores "parezcan" válidos
+// por separado.
+function rendChequearAritmetica(extracted) {
+  const neto = rendValorPorRol(extracted, 'neto');
+  const iva = rendValorPorRol(extracted, 'iva');
+  const total = rendValorPorRol(extracted, 'total');
+  if (!neto || !iva || !total) return;
+  const netoNum = rendParseMonto(neto.valor), ivaNum = rendParseMonto(iva.valor), totalNum = rendParseMonto(total.valor);
+  if (netoNum == null || ivaNum == null || totalNum == null) return;
+  const esperado = netoNum + ivaNum;
+  const tolerancia = Math.max(1, Math.abs(totalNum) * 0.005); // redondeo, hasta 0.5%
+  if (Math.abs(esperado - totalNum) > tolerancia) {
+    rendAgregarAdvertencia(extracted, `⚠ "${neto.nombre}" (${netoNum}) + "${iva.nombre}" (${ivaNum}) = ${esperado.toFixed(2)}, pero "${total.nombre}" dice ${totalNum} — revisá los montos.`);
+  }
+}
 // Clave "natural" de un comprobante argentino, para detectar duplicados — CUIT
 // del emisor + número de comprobante. Si el usuario renombró esos campos en
 // Cfg Rendiciones, no los va a encontrar (limitación conocida).
@@ -2449,6 +2531,14 @@ async function analyzeAll() {
           }
         });
       }
+
+      // Advertencia 3: mismo proveedor con CUIT distinto entre comprobantes
+      // (posible error de lectura en uno de los dos — ver rendChequearConsistenciaProveedor).
+      const otrosResultadosParaConsistencia = results.concat(extractedList);
+      extractedList.forEach(extracted => rendChequearConsistenciaProveedor(extracted, otrosResultadosParaConsistencia));
+
+      // Advertencia 4: autocontrol aritmético neto + IVA = total.
+      extractedList.forEach(extracted => rendChequearAritmetica(extracted));
 
       item.status = 'done';
       item.error = null;
