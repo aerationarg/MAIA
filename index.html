@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.28</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.28</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2338,11 +2338,20 @@ function rendParseMonto(v) {
   const n = parseFloat(s);
   return isNaN(n) ? null : n;
 }
+// Guarda una corrección sugerida y accionable (botón "Aplicar" en la
+// tarjeta, ver renderRendResults/rendAplicarSugerencia) — no reemplaza el
+// texto de advertencia, lo complementa.
+function rendAgregarSugerencia(extracted, campo, valorSugerido, motivo) {
+  if (!extracted['__sugerencias__']) extracted['__sugerencias__'] = [];
+  if (extracted['__sugerencias__'].some(s => s.campo === campo)) return; // ya hay una sugerencia para ese campo
+  extracted['__sugerencias__'].push({ campo, valorSugerido, motivo });
+}
 // Chequeo 1: mismo proveedor (por nombre) pero CUIT distinto entre
 // comprobantes ya extraídos — típico de un CUIT mal leído por estar borroso
 // en uno de los tickets, cuando en otros del mismo proveedor sí se leyó
-// bien. Avisa en AMBOS comprobantes (el nuevo y el que ya estaba), para
-// poder comparar y corregir el que esté mal.
+// bien. Compara este comprobante contra el resto de comprobantes del mismo
+// proveedor: si hay un CUIT que aparece más veces entre los OTROS que el de
+// este, sugiere corregir este para que coincida (mayoría = más confiable).
 function rendChequearConsistenciaProveedor(extracted, otrosResultados) {
   const proveedor = rendValorPorRol(extracted, 'proveedor');
   const cuit = rendValorPorRol(extracted, 'cuit');
@@ -2350,23 +2359,35 @@ function rendChequearConsistenciaProveedor(extracted, otrosResultados) {
   const provNorm = rendNombreNormalizado(proveedor.valor);
   const cuitNorm = String(cuit.valor).replace(/\D/g,'');
   if (!provNorm || !cuitNorm) return;
-  const conflicto = otrosResultados.find(r => {
+  const otros = otrosResultados.filter(r => {
     if (r === extracted) return false;
     const p2 = rendValorPorRol(r, 'proveedor');
     const c2 = rendValorPorRol(r, 'cuit');
-    if (!p2?.valor || !c2?.valor) return false;
-    return rendNombreNormalizado(p2.valor) === provNorm && String(c2.valor).replace(/\D/g,'') !== cuitNorm;
+    if (!p2?.valor || !c2?.valor || rendNombreNormalizado(p2.valor) !== provNorm) return false;
+    return !!String(c2.valor).replace(/\D/g,'');
   });
-  if (!conflicto) return;
-  const cuitConflicto = rendValorPorRol(conflicto, 'cuit').valor;
-  rendAgregarAdvertencia(extracted, `⚠ El CUIT (${cuit.valor}) no coincide con el de otro comprobante del mismo proveedor "${proveedor.valor}" (ahí dice ${cuitConflicto}) — revisá cuál está bien.`);
-  const yaAvisado = String(conflicto['__advertencia__']||'').includes('no coincide con el de otro comprobante');
-  if (!yaAvisado) rendAgregarAdvertencia(conflicto, `⚠ El CUIT (${cuitConflicto}) no coincide con el de otro comprobante del mismo proveedor "${proveedor.valor}" (ahí dice ${cuit.valor}) — revisá cuál está bien.`);
+  if (!otros.length) return;
+  const hayConflicto = otros.some(r => String(rendValorPorRol(r,'cuit').valor).replace(/\D/g,'') !== cuitNorm);
+  if (!hayConflicto) return;
+  const conteo = {};
+  otros.forEach(r => {
+    const c2 = rendValorPorRol(r, 'cuit');
+    const n = String(c2.valor).replace(/\D/g,'');
+    (conteo[n] = conteo[n] || { count: 0, valorOriginal: c2.valor }).count++;
+  });
+  const masFrecuente = Object.keys(conteo).sort((a,b) => conteo[b].count - conteo[a].count)[0];
+  if (masFrecuente === cuitNorm) return; // este ya es (parte de) la mayoría — el que difiere se avisa solo cuando le toque a él
+  const sugerido = conteo[masFrecuente];
+  const plural = sugerido.count > 1;
+  rendAgregarAdvertencia(extracted, `⚠ El CUIT (${cuit.valor}) no coincide con el de otro${plural?'s '+sugerido.count:''} comprobante${plural?'s':''} del mismo proveedor "${proveedor.valor}" (dice${plural?'n':''} ${sugerido.valorOriginal}) — revisá cuál está bien.`);
+  rendAgregarSugerencia(extracted, cuit.nombre, sugerido.valorOriginal, `Coincide con ${plural?'otros '+sugerido.count+' comprobantes':'otro comprobante'} de "${proveedor.valor}"`);
 }
 // Chequeo 2: autocontrol aritmético — neto + IVA debería dar el total. Si la
 // extracción de cada campo fue independiente (sin que la IA haga la cuenta),
 // esto detecta un campo mal leído aunque los tres valores "parezcan" válidos
-// por separado.
+// por separado. Sugiere corregir el Total (es el único de los tres que se
+// puede recalcular sin ambigüedad — no hay forma de saber si en cambio es el
+// neto o el IVA el que está mal, así que esos quedan para revisión manual).
 function rendChequearAritmetica(extracted) {
   const neto = rendValorPorRol(extracted, 'neto');
   const iva = rendValorPorRol(extracted, 'iva');
@@ -2374,10 +2395,11 @@ function rendChequearAritmetica(extracted) {
   if (!neto || !iva || !total) return;
   const netoNum = rendParseMonto(neto.valor), ivaNum = rendParseMonto(iva.valor), totalNum = rendParseMonto(total.valor);
   if (netoNum == null || ivaNum == null || totalNum == null) return;
-  const esperado = netoNum + ivaNum;
+  const esperado = Math.round((netoNum + ivaNum) * 100) / 100;
   const tolerancia = Math.max(1, Math.abs(totalNum) * 0.005); // redondeo, hasta 0.5%
   if (Math.abs(esperado - totalNum) > tolerancia) {
-    rendAgregarAdvertencia(extracted, `⚠ "${neto.nombre}" (${netoNum}) + "${iva.nombre}" (${ivaNum}) = ${esperado.toFixed(2)}, pero "${total.nombre}" dice ${totalNum} — revisá los montos.`);
+    rendAgregarAdvertencia(extracted, `⚠ "${neto.nombre}" (${netoNum}) + "${iva.nombre}" (${ivaNum}) = ${esperado}, pero "${total.nombre}" dice ${totalNum} — revisá los montos.`);
+    rendAgregarSugerencia(extracted, total.nombre, esperado, `${neto.nombre} + ${iva.nombre}`);
   }
 }
 // Clave "natural" de un comprobante argentino, para detectar duplicados — CUIT
@@ -2683,6 +2705,15 @@ function renderRendResults() {
     }).join('');
     const convNote = r.__conv_note__ ? `<div class="hint" style="color:var(--blue);margin-bottom:8px">🔁 ${esc(r.__conv_note__)}</div>` : '';
     const advertencia = r.__advertencia__ ? `<div class="hint" style="color:var(--red);font-weight:600;margin-bottom:8px">${esc(r.__advertencia__)}</div>` : '';
+    const sugerencias = (r.__sugerencias__||[]).map(s => {
+      const campoEsc = s.campo.replace(/'/g,"\\'");
+      const valorEsc = String(s.valorSugerido).replace(/'/g,"\\'");
+      return `
+      <div class="hint" style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--surface2);border-radius:6px;padding:6px 8px;margin-bottom:6px">
+        <span>💡 <b>${esc(s.campo)}</b> → ${esc(String(s.valorSugerido))} <span style="color:var(--text2)">(${esc(s.motivo)})</span></span>
+        <button class="btn btn-primary btn-sm" onclick="rendAplicarSugerencia(${ri}, '${campoEsc}', '${valorEsc}')">✓ Aplicar</button>
+      </div>`;
+    }).join('');
     const nombreEmpresaIncorrecta = r.__empresa_incorrecta__ === 'AA' ? 'Aeration Argentina (AA)' : r.__empresa_incorrecta__ === 'AS' ? 'Aeration Servicios (AS)' : '';
     const botonMover = nombreEmpresaIncorrecta ? `<button class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="rendMoverComprobanteAOtraEmpresa(${ri})">↪ Pasar a ${nombreEmpresaIncorrecta}</button>` : '';
     const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
@@ -2690,6 +2721,7 @@ function renderRendResults() {
       <div class="result-card"${r.__advertencia__ ? ' style="border-color:var(--red)"' : ''}>
         <div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
         ${advertencia}
+        ${sugerencias}
         ${botonMover}
         ${convNote}
         ${manualRows}
@@ -2746,6 +2778,18 @@ async function rendFieldsDeOtraEmpresa(empresa) {
   } catch(e) { return null; }
 }
 
+// Aplica una corrección sugerida (ver rendChequearAritmetica/
+// rendChequearConsistenciaProveedor) con un clic, sin tener que borrar y
+// reescribir el campo. Solo saca esa sugerencia puntual de la lista (si
+// había más de una para el mismo comprobante, las demás quedan) — el texto
+// de advertencia no se borra solo, igual que al editar un campo a mano.
+function rendAplicarSugerencia(ri, campo, valor) {
+  if (!results[ri]) return;
+  results[ri][campo] = valor;
+  results[ri]['__sugerencias__'] = (results[ri]['__sugerencias__']||[]).filter(s => s.campo !== campo);
+  saveResults();
+  renderRendResults();
+}
 async function rendMoverComprobanteAOtraEmpresa(ri) {
   const r = results[ri];
   if (!r) return;
