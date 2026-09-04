@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.30</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.31</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.30</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.31</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4640,7 +4640,13 @@ function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1)
 function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f); renderProcesosIAFields(); }
 
 // ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
-const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', propuesta_base:'Propuesta base', otro:'Otro' };
+// El paso de cada categoría (dónde se adjunta sola a la IA) queda documentado
+// acá mismo, junto al nombre — así no hay que ir a buscarlo en otro lado:
+// normativa/informacion_general → Paso 1; planilla_calculo/informacion_general
+// → Paso 2 (además criterios_seleccion se usa en el chat de diseño del Paso 2);
+// equipos → Paso 3; ofertas y propuesta_base → Paso 4 (propuesta_base es la
+// plantilla .docx en sí, no bibliografía).
+const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', equipos:'Equipos (Paso 3)', ofertas:'Ofertas (Paso 4)', propuesta_base:'Propuesta base', otro:'Otro' };
 let _procesosDocTarget = null;
 
 async function renderProcesosDocumentos() {
@@ -6713,6 +6719,22 @@ function procesosStep3ResetIfNeeded(p) {
 }
 function procesosNuevoId() { return 'eq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
+// Documentos de referencia categoría "Equipos" (Cfg Procesos IA) — catálogos,
+// fichas técnicas, etc. Se adjuntan solos a la IA de este paso (sugerencia y
+// chat), igual que "Criterios de selección" se adjunta en el Paso 2. Se
+// cachean por proyecto para no volver a descargarlos en cada mensaje del chat.
+async function procesosStep3GetEquiposBlocks() {
+  const st = procesosStep3State;
+  if (st.equiposBlocks !== undefined) return st.equiposBlocks;
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['equipos']);
+    if (!docs.length) { st.equiposBlocks = []; return []; }
+    const token = await getMsToken();
+    st.equiposBlocks = await procesosDocsToContentBlocks(token, docs);
+  } catch (e) { console.warn('No se pudo cargar la bibliografía de equipos:', e.message); st.equiposBlocks = []; }
+  return st.equiposBlocks;
+}
+
 function procesosStep3EtapasConfirmadas(p) {
   const dd = p.diseno_data || {};
   return (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada && dd.hojas[n]?.confirmada);
@@ -7013,10 +7035,11 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
     const referencias = await procesosGetResumenesReferencias();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
-    const prompt = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño calculados para esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nInfo general del cliente/proyecto:\n${procesosResumenCampos(p)}\n${referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : ''}${lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : ''}\nSugerí la lista de equipos necesarios para esta etapa (bombas, sopladores, tableros eléctricos, agitadores, etc. según corresponda al tipo de etapa), basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad, tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. si se puede estimar) y una justificación breve de por qué se eligió esa cantidad/capacidad.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
+    const equiposBlocks = await procesosStep3GetEquiposBlocks();
+    const prompt = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño calculados para esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nInfo general del cliente/proyecto:\n${procesosResumenCampos(p)}\n${referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : ''}${lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : ''}${equiposBlocks.length ? '\nAdjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala para proponer marcas/modelos/capacidades reales cuando aplique.\n' : ''}\nSugerí la lista de equipos necesarios para esta etapa (bombas, sopladores, tableros eléctricos, agitadores, etc. según corresponda al tipo de etapa), basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad, tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. si se puede estimar) y una justificación breve de por qué se eligió esa cantidad/capacidad.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2500, messages: [{ role: 'user', content: [...equiposBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -7061,10 +7084,11 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
-    const prompt = `Estás ayudando a definir los equipos de la etapa/unidad "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nEquipos actualmente cargados para esta etapa:\n${listado}\n\n${historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
+    const equiposBlocks = await procesosStep3GetEquiposBlocks();
+    const prompt = `Estás ayudando a definir los equipos de la etapa/unidad "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nEquipos actualmente cargados para esta etapa:\n${listado}\n\n${historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : ''}${equiposBlocks.length ? 'Adjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala si aplica.\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [...equiposBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -7524,6 +7548,21 @@ let procesosStep4State = { proyectoId: null, seccionAbierta: null };
 function procesosStep4ResetIfNeeded(p) {
   if (procesosStep4State.proyectoId !== p.id) procesosStep4State = { proyectoId: p.id, seccionAbierta: null };
 }
+// Documentos de referencia categoría "Ofertas" (Cfg Procesos IA) — propuestas
+// u ofertas anteriores tomadas como modelo de redacción/estructura. Se
+// adjuntan solas a la IA de este paso (generación y chat por sección), igual
+// que "Equipos" en el Paso 3. Se cachean por proyecto.
+async function procesosStep4GetOfertasBlocks() {
+  const st = procesosStep4State;
+  if (st.ofertasBlocks !== undefined) return st.ofertasBlocks;
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['ofertas']);
+    if (!docs.length) { st.ofertasBlocks = []; return []; }
+    const token = await getMsToken();
+    st.ofertasBlocks = await procesosDocsToContentBlocks(token, docs);
+  } catch (e) { console.warn('No se pudo cargar la bibliografía de ofertas:', e.message); st.ofertasBlocks = []; }
+  return st.ofertasBlocks;
+}
 const PROCESOS_PROPUESTA_CAMPOS_CARATULA = [
   ['destinatario_empresa','Empresa destinataria'], ['destinatario_at','Contacto (At:)'],
   ['destinatario_email','E-mail'], ['destinatario_telefono','Teléfono'],
@@ -7682,10 +7721,11 @@ async function procesosStep4GenerarConIA() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(4);
-    const prompt = `${contexto}\nRedactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
+    const ofertasBlocks = await procesosStep4GetOfertasBlocks();
+    const prompt = `${contexto}\n${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia de redacción y estructura.\n\n' : ''}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...ofertasBlocks.map(x=>x.block), {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -7726,10 +7766,11 @@ async function procesosStep4SeccionChatSend(key) {
     const contexto = procesosBuildContexto(4);
     const historialPrevio = (sec.chat||[]).slice(0,-1).map(m=>`${m.role==='user'?'Usuario':'Asistente'}: ${m.content}`).join('\n');
     const formatoTxt = meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
-    const prompt = `${contexto}\nEstás ayudando a redactar la sección "${meta.label}" de una propuesta técnica de Aeration Argentina (formato: ${formatoTxt}).\n\nTexto actual de la sección:\n"""\n${sec.texto || '(vacío)'}\n"""\n\n${historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : ''}Pedido del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
+    const ofertasBlocks = await procesosStep4GetOfertasBlocks();
+    const prompt = `${contexto}\nEstás ayudando a redactar la sección "${meta.label}" de una propuesta técnica de Aeration Argentina (formato: ${formatoTxt}).\n\nTexto actual de la sección:\n"""\n${sec.texto || '(vacío)'}\n"""\n\n${historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : ''}${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia.\n\n' : ''}Pedido del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...ofertasBlocks.map(x=>x.block), {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
