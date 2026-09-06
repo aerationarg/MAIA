@@ -344,7 +344,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.32</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +401,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.32</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4674,6 +4674,12 @@ async function renderProcesosDocumentos() {
           <button class="sp-browse-btn" onclick="procesosDocSelectFile('${d.id}')">Vincular archivo</button>
           <button class="sp-browse-btn" onclick="procesosDocSelectFolder('${d.id}')">Vincular carpeta</button>
         </div>
+        ${d.item_id && d.site_id ? `
+        <div class="sp-selected" style="margin-top:6px">
+          <span style="font-size:12px">${procesosDocResumenEstado(d)}</span>
+          <button class="sp-browse-btn" onclick="procesosDocGenerarResumen('${d.id}')">${d.tipo==='carpeta' ? 'Procesar pendientes' : 'Generar resumen'}</button>
+        </div>
+        <div id="procesos-doc-status-${d.id}" class="status-msg" style="display:none"></div>` : ''}
       </div>`).join('');
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; }
 }
@@ -4725,6 +4731,49 @@ async function procesosDocSaveFolder(id, path, itemId, siteId) {
   });
   if (!res.ok) { const e = await res.json().catch(()=>({})); alert('No se pudo vincular la carpeta: ' + (e.message || res.status)); }
   renderProcesosDocumentos();
+}
+
+// Texto corto de estado para la fila de un documento — cuántos archivos ya
+// tienen resumen generado (carpeta) o si el archivo suelto ya lo tiene.
+function procesosDocResumenEstado(d) {
+  if (d.tipo === 'carpeta') {
+    const archivos = d.archivos_cache || [];
+    if (!archivos.length) return 'Sin procesar todavía.';
+    const conResumen = archivos.filter(a => a.resumen).length;
+    return `${archivos.length} archivo(s) en caché (${conResumen} con resumen).`;
+  }
+  return d.resumen_ia ? `Resumen generado${d.resumen_ia_at ? ' el ' + new Date(d.resumen_ia_at).toLocaleDateString('es-AR') : ''}.` : 'Sin resumen todavía.';
+}
+
+// Botón manual "Generar resumen" (archivo suelto) / "Procesar pendientes"
+// (carpeta) de un documento de referencia — dispara la misma extracción+resumen
+// con caché que ya se usa al analizar un proyecto, pero desde acá se puede
+// dejar todo preprocesado de antemano (para "cientos de documentos") en vez de
+// esperar a que un análisis real los vaya pidiendo de a uno.
+async function procesosDocGenerarResumen(id) {
+  const statusId = 'procesos-doc-status-' + id;
+  showMsg(statusId, 'loading', 'Buscando el documento...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc) throw new Error('No se encontró el documento.');
+    const token = await getMsToken();
+    if (doc.tipo === 'carpeta') {
+      showMsg(statusId, 'loading', 'Listando archivos de la carpeta...');
+      const resultado = await procesosDocGetTextosCarpeta(doc, token, 'procesos_documentos', nombre => showMsg(statusId, 'loading', `Procesando "${nombre}"...`));
+      showMsg(statusId, 'success', `✓ Listo — ${resultado.length} archivo(s) en caché.`);
+    } else {
+      showMsg(statusId, 'loading', 'Extrayendo texto y generando resumen...');
+      const texto = await procesosDocGetTexto(doc, token);
+      if (!texto) throw new Error('No se pudo extraer el texto del documento.');
+      showMsg(statusId, 'success', '✓ Resumen generado.');
+    }
+    setTimeout(renderProcesosDocumentos, 1500);
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
 }
 
 async function procesosGetDocumentosPorCategoria(categorias) {
@@ -4802,9 +4851,32 @@ async function procesosExtraerTextoDeContentBlock(block, nombre) {
   } catch(e) { console.warn(`No se pudo extraer texto de "${nombre}":`, e.message); return null; }
 }
 
+// Resumen corto (con IA) de UN documento ya extraído — se guarda junto al
+// texto completo (nunca lo reemplaza). Pensado para decidir relevancia sin
+// tener que mandar el documento entero: prioriza que queden los datos
+// concretos (números, modelos, límites, tecnologías) que hacen falta para
+// juzgar si ESTE documento aplica a un proyecto puntual — no hace falta que
+// el detalle esté completo ahí, para eso se usa el texto completo después.
+async function procesosResumirTexto(texto, nombreArchivo) {
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey || !texto) return null;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5', max_tokens: 300,
+        messages: [{ role: 'user', content: [{ type: 'text', text: `Resumí en 3-5 líneas el siguiente documento ("${nombreArchivo}"), pensando que este resumen se va a usar para decidir SI EL DOCUMENTO APLICA a un proyecto puntual (no para el detalle final — eso se saca del documento completo después). Priorizá mencionar de qué trata específicamente (marca/modelo si es un equipo, tecnología, jurisdicción/tipo de vuelco si es normativa, cliente/rubro si es una oferta anterior, etc.), no hace falta el detalle numérico. Respondé solo con el resumen, sin encabezados.\n\nDocumento:\n${texto.slice(0, 15000)}` }] }]
+      })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.content?.find(c=>c.type==='text')?.text?.trim() || null;
+  } catch(e) { console.warn(`No se pudo resumir "${nombreArchivo}":`, e.message); return null; }
+}
+
 // Texto cacheado de un documento vinculado como archivo suelto (procesos_documentos,
 // tipo:'archivo') — lo (re)extrae solo si cambió (por fecha de modificación real
-// en SharePoint) o si todavía no tiene caché.
+// en SharePoint) o si todavía no tiene caché. De paso (re)genera el resumen.
 async function procesosDocGetTexto(doc, token) {
   try {
     const metaResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${doc.item_id}?$select=lastModifiedDateTime`, {headers:{Authorization:'Bearer '+token}});
@@ -4816,31 +4888,48 @@ async function procesosDocGetTexto(doc, token) {
     if (!block) return doc.texto_extraido || null;
     const texto = await procesosExtraerTextoDeContentBlock(block, doc.nombre);
     if (!texto) return doc.texto_extraido || null;
+    const resumen = await procesosResumirTexto(texto, doc.nombre);
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     await supaFetch(`/rest/v1/procesos_documentos?id=eq.${doc.id}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-      body: JSON.stringify({ texto_extraido: texto, texto_extraido_at: new Date().toISOString() })
+      body: JSON.stringify({ texto_extraido: texto, texto_extraido_at: new Date().toISOString(), resumen_ia: resumen, resumen_ia_at: resumen ? new Date().toISOString() : doc.resumen_ia_at })
     });
     doc.texto_extraido = texto;
+    if (resumen) doc.resumen_ia = resumen;
     return texto;
   } catch(e) { console.warn(`No se pudo actualizar la caché de "${doc.nombre}":`, e.message); return doc.texto_extraido || null; }
 }
 
+// Lista TODOS los archivos de una carpeta de SharePoint, siguiendo la
+// paginación de Graph (@odata.nextLink) — antes se cortaba en los primeros
+// 50, lo que dejaba afuera la mayoría de una carpeta con cientos de archivos.
+async function procesosListarArchivosCarpeta(siteId, itemId, token) {
+  const archivos = [];
+  let url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children?$top=200&$select=id,name,file,lastModifiedDateTime`;
+  while (url) {
+    const resp = await fetch(url, { headers: { Authorization: 'Bearer '+token } });
+    if (!resp.ok) throw new Error('HTTP '+resp.status);
+    const data = await resp.json();
+    archivos.push(...(data.value || []).filter(f => f.file));
+    url = data['@odata.nextLink'] || null;
+  }
+  return archivos;
+}
+
 // Núcleo compartido: descarga y extrae (con caché por archivo, comparando id y
 // fecha de modificación real en SharePoint) el texto de todos los archivos de
-// una carpeta. El llamador decide dónde persistir el resultado — lo usan tanto
-// documentos de referencia/catálogo (procesosDocGetTextosCarpeta) como la
-// carpeta propia del cliente de cada proyecto (procesosClienteGetTextosCarpeta).
-async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token) {
+// una carpeta — y de paso, el resumen de cada uno nuevo o cambiado. El
+// llamador decide dónde persistir el resultado — lo usan tanto documentos de
+// referencia/catálogo (procesosDocGetTextosCarpeta) como la carpeta propia
+// del cliente de cada proyecto (procesosClienteGetTextosCarpeta).
+async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token, onProgreso) {
   const cachePorId = {}; (cacheActual || []).forEach(f => { cachePorId[f.item_id] = f; });
   let children;
   try {
-    const childrenResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children`, {headers:{Authorization:'Bearer '+token}});
-    if (!childrenResp.ok) throw new Error('HTTP '+childrenResp.status);
-    children = ((await childrenResp.json()).value || []).filter(f => f.file).slice(0, 50);
+    children = await procesosListarArchivosCarpeta(siteId, itemId, token);
   } catch(e) {
     console.warn('No se pudo listar la carpeta, usando caché existente:', e.message);
-    return { resultado: (cacheActual || []).map(f => ({ nombre: f.nombre, texto: f.texto })), cachePorId, cambios: false };
+    return { resultado: (cacheActual || []).map(f => ({ nombre: f.nombre, texto: f.texto, resumen: f.resumen })), cachePorId, cambios: false };
   }
 
   const resultado = [];
@@ -4848,9 +4937,10 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
   for (const f of children) {
     const cacheado = cachePorId[f.id];
     if (cacheado && cacheado.modificado === f.lastModifiedDateTime) {
-      resultado.push({ nombre: f.name, texto: cacheado.texto });
+      resultado.push({ nombre: f.name, texto: cacheado.texto, resumen: cacheado.resumen });
       continue;
     }
+    if (onProgreso) onProgreso(f.name);
     try {
       const isPdf = /\.pdf$/i.test(f.name);
       const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
@@ -4873,8 +4963,9 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
       }
       const texto = await procesosExtraerTextoDeContentBlock(block, f.name);
       if (texto) {
-        resultado.push({ nombre: f.name, texto });
-        cachePorId[f.id] = { item_id: f.id, nombre: f.name, modificado: f.lastModifiedDateTime, texto };
+        const resumen = await procesosResumirTexto(texto, f.name);
+        resultado.push({ nombre: f.name, texto, resumen });
+        cachePorId[f.id] = { item_id: f.id, nombre: f.name, modificado: f.lastModifiedDateTime, texto, resumen };
         cambios = true;
       }
     } catch(e) { console.warn(`No se pudo extraer "${f.name}":`, e.message); }
@@ -4883,12 +4974,14 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
 }
 
 // Igual que procesosDocGetTexto pero para un documento vinculado como carpeta —
-// cachea el texto POR ARCHIVO adentro (archivos_cache), así solo reprocesa los
-// que son nuevos o cambiaron, no toda la carpeta de nuevo cada vez. Sirve tanto
-// para procesos_documentos como para procesos_catalogo (pasando `tabla`).
-async function procesosDocGetTextosCarpeta(doc, token, tabla) {
+// cachea el texto Y el resumen POR ARCHIVO adentro (archivos_cache), así solo
+// reprocesa los que son nuevos o cambiaron, no toda la carpeta de nuevo cada
+// vez. Sirve tanto para procesos_documentos como para procesos_catalogo
+// (pasando `tabla`). `onProgreso(nombreArchivo)` es opcional, para mostrar
+// progreso en un procesamiento manual de una carpeta grande.
+async function procesosDocGetTextosCarpeta(doc, token, tabla, onProgreso) {
   tabla = tabla || 'procesos_documentos';
-  const { resultado, cachePorId, cambios } = await procesosExtraerTextosDeCarpeta(doc.site_id, doc.item_id, doc.archivos_cache, token);
+  const { resultado, cachePorId, cambios } = await procesosExtraerTextosDeCarpeta(doc.site_id, doc.item_id, doc.archivos_cache, token, onProgreso);
   if (cambios) {
     const nuevoCache = Object.values(cachePorId);
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -4935,6 +5028,64 @@ async function procesosDocsToContentBlocks(token, docs) {
     }
   }
   return items;
+}
+
+// Trae bibliografía como content blocks, pero filtrando primero por
+// RELEVANCIA (con el resumen de cada documento/archivo) antes de mandar el
+// contenido completo — así no se le manda a la IA una carpeta entera con
+// cientos de fichas de equipos o normativas que no tienen nada que ver con
+// este proyecto puntual, y de paso el análisis final sigue usando el
+// documento COMPLETO (nunca el resumen) para no perder un dato exacto.
+// Si hay pocos candidatos (<=3) no vale la pena filtrar, se usan todos.
+async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto) {
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(categorias);
+    if (!docs.length) return [];
+    const token = await getMsToken();
+    // candidatos: uno por archivo (carpetas se expanden) o uno por documento suelto
+    const candidatos = [];
+    for (const doc of docs) {
+      if (doc.tipo === 'carpeta') {
+        const archivos = await procesosDocGetTextosCarpeta(doc, token);
+        archivos.forEach(a => candidatos.push({ nombre: a.nombre, resumen: a.resumen || null, texto: a.texto || null }));
+      } else {
+        const texto = await procesosDocGetTexto(doc, token);
+        candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: texto || null });
+      }
+    }
+    const conTexto = candidatos.filter(c => c.texto);
+    if (!conTexto.length) return [];
+    const UMBRAL = 3;
+    let seleccionados;
+    if (conTexto.length <= UMBRAL) {
+      seleccionados = conTexto;
+    } else {
+      const conResumen = conTexto.filter(c => c.resumen);
+      const sinResumen = conTexto.filter(c => !c.resumen); // no se puede juzgar relevancia sin resumen — se incluyen igual, mejor pecar de más
+      if (!conResumen.length) {
+        seleccionados = conTexto; // ninguno tiene resumen todavía (recién agregados) — se mandan todos
+      } else {
+        const apiKey = getApiKey();
+        const listado = conResumen.map((c,i) => `${i+1}. ${c.nombre}: ${c.resumen}`).join('\n');
+        const prompt = `Contexto del proyecto:\n${contextoTexto}\n\nDocumentos de referencia disponibles (con un resumen breve de cada uno):\n${listado}\n\n¿Cuáles de estos documentos son realmente relevantes/aplicables para ESTE proyecto puntual? Elegí solo los que aporten algo específico y aplicable — no los que sean de una tecnología, tipo de equipo, jurisdicción o rubro que no tiene nada que ver. Respondé SOLO con JSON (sin backticks): {"relevantes":[1,3]} (los números de la lista, en cualquier cantidad). Si ninguno aplica, {"relevantes":[]}. Ante la duda, incluilo (mejor pasarse que quedarse corto).`;
+        try {
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+            body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+          });
+          const data = await resp.json();
+          const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+          const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+          const idx = new Set(parsed.relevantes || []);
+          seleccionados = sinResumen.concat(conResumen.filter((c,i) => idx.has(i+1)));
+        } catch(e) {
+          console.warn('No se pudo filtrar bibliografía por relevancia, se usa todo:', e.message);
+          seleccionados = conTexto;
+        }
+      }
+    }
+    return seleccionados.map(c => ({ block: {type:'text', text:`Documento: ${c.nombre}\n\n${c.texto}`}, nombre: c.nombre }));
+  } catch(e) { console.warn('No se pudo obtener la bibliografía:', e.message); return []; }
 }
 
 // Genera (y cachea) un resumen breve de un proyecto del catálogo a partir de los
@@ -5575,13 +5726,17 @@ async function procesosStep1Analizar() {
     }
     if (!contentItems.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
-    // Documentos de referencia que se adjuntan solos en este paso: Normativa + Información general
+    // Documentos de referencia que se adjuntan solos en este paso: Normativa + Información general.
+    // Se filtran por relevancia (ver procesosObtenerBibliografiaRelevante) contra lo poco que
+    // se sabe del proyecto en este punto (todavía no se extrajeron parámetros) — nombre del
+    // cliente/proyecto y los nombres de los archivos subidos, que suelen delatar ubicación/rubro
+    // (ej. "Res_ACUMAR.pdf", "Planilla_Cliente_Neuquén.xlsx").
     showMsg(statusId,'loading','Buscando documentos de referencia...');
-    const docsRef = await procesosGetDocumentosPorCategoria(['normativa','informacion_general']);
+    const contextoStep1 = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nArchivos del cliente/proyecto ya adjuntados: ${contentItems.map(c=>c.nombre).join(', ') || '(ninguno)'}`;
+    const docsRef = await procesosObtenerBibliografiaRelevante(['normativa','informacion_general'], contextoStep1);
     if (docsRef.length) {
-      token = token || await getMsToken();
       showMsg(statusId,'loading','Adjuntando documentos de referencia...');
-      contentItems.push(...await procesosDocsToContentBlocks(token, docsRef));
+      contentItems.push(...docsRef.map(d => ({ nombre: d.nombre, block: d.block })));
     }
 
     const textoFields = iaFields.filter(f => f.tipo !== 'parametro');
@@ -6016,16 +6171,8 @@ function procesosStep2GetHF(nombreHoja) {
 // los criterios de cuándo se necesita cada etapa y los rangos de eficiencia de
 // remoción por etapa y por parámetro, para que la IA los use tanto al sugerir
 // qué hojas aplican como al iterar valores en el chat de diseño.
-async function procesosStep2GetCriteriosBlocks() {
-  const st = procesosStep2State;
-  if (st.criteriosBlocks !== undefined) return st.criteriosBlocks;
-  try {
-    const docs = await procesosGetDocumentosPorCategoria(['criterios_seleccion']);
-    if (!docs.length) { st.criteriosBlocks = []; return []; }
-    const token = await getMsToken();
-    st.criteriosBlocks = await procesosDocsToContentBlocks(token, docs);
-  } catch (e) { console.warn('No se pudo cargar el documento de criterios:', e.message); st.criteriosBlocks = []; }
-  return st.criteriosBlocks;
+async function procesosStep2GetCriteriosBlocks(contextoTexto) {
+  return await procesosObtenerBibliografiaRelevante(['criterios_seleccion'], contextoTexto);
 }
 
 // Recalcula, en orden, cada hoja del tren de tratamiento hasta (e incluyendo)
@@ -6244,7 +6391,7 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
             const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
             return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
           }).join('\n');
-          const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
+          const criteriosBlocks = await procesosStep2GetCriteriosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n${procesosResumenCampos(p)}\n\nHojas/etapas candidatas: ${firmas}`);
           const lecciones = procesosResumenLecciones(await procesosGetLecciones());
           const prompt = `Este es el resumen del cliente/proyecto:\n${procesosResumenCampos(p)}\n\nEsta es la lista de hojas de la planilla de diseño, cada una es una posible unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n${firmas}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican:\n' + lecciones + '\n\n' : ''}Devolvé SOLO un JSON válido (sin backticks ni texto extra) con qué hojas aplican a este proyecto según la info del cliente (y, si está adjunto, según el documento de criterios), y en qué orden típico de tren de tratamiento deberían ir las que incluyas: {"hojas":[{"nombre":"...","incluir":true,"motivo":"razón en 5-8 palabras, no más"}],"orden":["NombreHoja1","NombreHoja2"]}. Incluí todas las hojas de la lista en "hojas", cada una con incluir true o false. En "orden" poné solo las que tengan incluir true, en la secuencia lógica del tratamiento (de la primera etapa a la última). Importante: en "nombre" de "hojas" y en "orden" usá SIEMPRE el nombre EXACTO de la hoja tal como aparece en la lista de arriba (aunque sea una sigla, ej. "EQ") — nunca lo traduzcas ni pongas un alias distinto (ej. "Ecualizador"), incluso si en "motivo" lo explicás con el nombre completo. Y sé consistente entre "hojas" y "orden": una hoja que marcaste incluir:false no puede aparecer en "orden". Mantené "motivo" bien corto en cada hoja — con muchas hojas la respuesta se puede cortar si te extendés.`;
           const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -6560,7 +6707,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}${extra ? ' | ' + extra : ''}`;
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const criteriosBlocks = await procesosStep2GetCriteriosBlocks();
+    const criteriosBlocks = await procesosStep2GetCriteriosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
     const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -6720,19 +6867,14 @@ function procesosStep3ResetIfNeeded(p) {
 function procesosNuevoId() { return 'eq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
 // Documentos de referencia categoría "Equipos" (Cfg Procesos IA) — catálogos,
-// fichas técnicas, etc. Se adjuntan solos a la IA de este paso (sugerencia y
-// chat), igual que "Criterios de selección" se adjunta en el Paso 2. Se
-// cachean por proyecto para no volver a descargarlos en cada mensaje del chat.
-async function procesosStep3GetEquiposBlocks() {
-  const st = procesosStep3State;
-  if (st.equiposBlocks !== undefined) return st.equiposBlocks;
-  try {
-    const docs = await procesosGetDocumentosPorCategoria(['equipos']);
-    if (!docs.length) { st.equiposBlocks = []; return []; }
-    const token = await getMsToken();
-    st.equiposBlocks = await procesosDocsToContentBlocks(token, docs);
-  } catch (e) { console.warn('No se pudo cargar la bibliografía de equipos:', e.message); st.equiposBlocks = []; }
-  return st.equiposBlocks;
+// fichas técnicas, etc. Se filtran por relevancia contra `contextoTexto` (el
+// resumen de cada uno decide si aplica a ESTA etapa puntual) antes de mandar
+// el contenido completo — ver procesosObtenerBibliografiaRelevante. No se
+// cachea acá: la relevancia cambia según la etapa, así que conviene
+// recalcularla cada vez (el texto/resumen de cada archivo sí queda cacheado
+// en archivos_cache, eso no se vuelve a bajar de SharePoint).
+async function procesosStep3GetEquiposBlocks(contextoTexto) {
+  return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto);
 }
 
 function procesosStep3EtapasConfirmadas(p) {
@@ -7035,7 +7177,7 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
     const referencias = await procesosGetResumenesReferencias();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
-    const equiposBlocks = await procesosStep3GetEquiposBlocks();
+    const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`);
     const prompt = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño calculados para esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nInfo general del cliente/proyecto:\n${procesosResumenCampos(p)}\n${referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : ''}${lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : ''}${equiposBlocks.length ? '\nAdjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala para proponer marcas/modelos/capacidades reales cuando aplique.\n' : ''}\nSugerí la lista de equipos necesarios para esta etapa (bombas, sopladores, tableros eléctricos, agitadores, etc. según corresponda al tipo de etapa), basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad, tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. si se puede estimar) y una justificación breve de por qué se eligió esa cantidad/capacidad.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
@@ -7084,7 +7226,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
-    const equiposBlocks = await procesosStep3GetEquiposBlocks();
+    const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
     const prompt = `Estás ayudando a definir los equipos de la etapa/unidad "${nombreEtapa}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\n\nEquipos actualmente cargados para esta etapa:\n${listado}\n\n${historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : ''}${equiposBlocks.length ? 'Adjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala si aplica.\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
@@ -7550,18 +7692,11 @@ function procesosStep4ResetIfNeeded(p) {
 }
 // Documentos de referencia categoría "Ofertas" (Cfg Procesos IA) — propuestas
 // u ofertas anteriores tomadas como modelo de redacción/estructura. Se
-// adjuntan solas a la IA de este paso (generación y chat por sección), igual
-// que "Equipos" en el Paso 3. Se cachean por proyecto.
-async function procesosStep4GetOfertasBlocks() {
-  const st = procesosStep4State;
-  if (st.ofertasBlocks !== undefined) return st.ofertasBlocks;
-  try {
-    const docs = await procesosGetDocumentosPorCategoria(['ofertas']);
-    if (!docs.length) { st.ofertasBlocks = []; return []; }
-    const token = await getMsToken();
-    st.ofertasBlocks = await procesosDocsToContentBlocks(token, docs);
-  } catch (e) { console.warn('No se pudo cargar la bibliografía de ofertas:', e.message); st.ofertasBlocks = []; }
-  return st.ofertasBlocks;
+// filtran por relevancia contra el contexto del proyecto (ver
+// procesosObtenerBibliografiaRelevante) y solo las relevantes se adjuntan
+// completas a la IA de este paso (generación y chat por sección).
+async function procesosStep4GetOfertasBlocks(contextoTexto) {
+  return await procesosObtenerBibliografiaRelevante(['ofertas'], contextoTexto);
 }
 const PROCESOS_PROPUESTA_CAMPOS_CARATULA = [
   ['destinatario_empresa','Empresa destinataria'], ['destinatario_at','Contacto (At:)'],
@@ -7721,7 +7856,7 @@ async function procesosStep4GenerarConIA() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = procesosBuildContexto(4);
-    const ofertasBlocks = await procesosStep4GetOfertasBlocks();
+    const ofertasBlocks = await procesosStep4GetOfertasBlocks(contexto);
     const prompt = `${contexto}\n${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia de redacción y estructura.\n\n' : ''}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -7766,7 +7901,7 @@ async function procesosStep4SeccionChatSend(key) {
     const contexto = procesosBuildContexto(4);
     const historialPrevio = (sec.chat||[]).slice(0,-1).map(m=>`${m.role==='user'?'Usuario':'Asistente'}: ${m.content}`).join('\n');
     const formatoTxt = meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
-    const ofertasBlocks = await procesosStep4GetOfertasBlocks();
+    const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const prompt = `${contexto}\nEstás ayudando a redactar la sección "${meta.label}" de una propuesta técnica de Aeration Argentina (formato: ${formatoTxt}).\n\nTexto actual de la sección:\n"""\n${sec.texto || '(vacío)'}\n"""\n\n${historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : ''}${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia.\n\n' : ''}Pedido del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
