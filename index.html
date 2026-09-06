@@ -181,6 +181,20 @@
     .result-val { font-size: 14px; font-weight: 500; text-align: right; word-break: break-word; flex: 1; background: transparent; border: none; color: var(--text); font-family: inherit; outline: none; cursor: text; padding: 2px 6px; border-radius: 4px; }
     .result-val:focus { background: var(--blue-bg); }
 
+    /* Grilla de "Datos de la hoja" del Paso 2 (Procesos IA) — a diferencia de
+       .result-field (flex, ancho de columna distinto por fila según el
+       contenido), acá cada fila es un ítem "display:contents" dentro de un
+       único grid compartido (.ps2-grid), así las 3 columnas (etiqueta, valor,
+       extra) quedan siempre alineadas entre filas sin importar el largo del
+       texto de cada una. */
+    .ps2-grid { display: grid; grid-template-columns: minmax(0,1fr) 130px minmax(0,170px); align-items: center; column-gap: 12px; }
+    .ps2-row { display: contents; }
+    .ps2-key { font-size: 13px; color: var(--text2); padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: break-word; }
+    .ps2-val { font-size: 14px; font-weight: 500; text-align: right; word-break: break-word; width: 100%; box-sizing: border-box; background: transparent; border: none; color: var(--text); font-family: inherit; outline: none; cursor: text; padding: 8px 6px; border-radius: 4px; border-bottom: 1px solid var(--border); }
+    .ps2-val:focus { background: var(--blue-bg); }
+    .ps2-extra { font-size: 11px; color: var(--text2); padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: break-word; white-space: normal; }
+    .ps2-row:last-child > .ps2-key, .ps2-row:last-child > .ps2-val, .ps2-row:last-child > .ps2-extra { border-bottom: none; padding-bottom: 0; }
+
     /* Step indicator */
     .step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--surface2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--text2); flex-shrink: 0; }
     .step-num.active { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
@@ -344,7 +358,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.32</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.33</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -401,7 +415,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.32</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.33</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4770,6 +4784,7 @@ async function procesosDocGenerarResumen(id) {
       if (!texto) throw new Error('No se pudo extraer el texto del documento.');
       showMsg(statusId, 'success', '✓ Resumen generado.');
     }
+    procesosBibliografiaCacheReset();
     setTimeout(renderProcesosDocumentos, 1500);
   } catch(e) {
     showMsg(statusId, 'error', '✕ ' + e.message);
@@ -5000,15 +5015,15 @@ async function procesosDocGetTextosCarpeta(doc, token, tabla, onProgreso) {
 // específica de este proyecto, no se comparte entre proyectos distintos; pero
 // dentro del mismo proyecto se reusa entre re-consultas del chat en vez de
 // volver a descargar y procesar los documentos originales cada vez.
-async function procesosClienteGetTextosCarpeta(token) {
-  const p = procesosCurrentProyecto;
+async function procesosClienteGetTextosCarpeta(token, proyecto) {
+  const p = proyecto || procesosCurrentProyecto;
   const carpeta = p.info_cliente?.carpeta_cliente;
   if (!carpeta) return [];
   const { resultado, cachePorId, cambios } = await procesosExtraerTextosDeCarpeta(carpeta.siteId, carpeta.itemId, carpeta.archivos_cache, token);
   if (cambios) {
     const info = Object.assign({}, p.info_cliente);
     info.carpeta_cliente = Object.assign({}, carpeta, { archivos_cache: Object.values(cachePorId) });
-    await procesosSaveProyecto({ info_cliente: info });
+    await procesosSaveProyecto({ info_cliente: info }, p);
   }
   return resultado;
 }
@@ -5037,13 +5052,28 @@ async function procesosDocsToContentBlocks(token, docs) {
 // este proyecto puntual, y de paso el análisis final sigue usando el
 // documento COMPLETO (nunca el resumen) para no perder un dato exacto.
 // Si hay pocos candidatos (<=3) no vale la pena filtrar, se usan todos.
-async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto) {
-  try {
-    const docs = await procesosGetDocumentosPorCategoria(categorias);
-    if (!docs.length) return [];
+//
+// La parte cara de esto (listar documentos, chequear si cambiaron en
+// SharePoint, extraer/resumir lo nuevo) se cachea EN MEMORIA por proyecto y
+// categoría en `_procesosBibliografiaCache` — si no, cada mensaje de chat
+// (Paso 1 a 4) volvía a listar carpetas enteras de SharePoint y a chequear la
+// fecha de modificación de cada archivo, aunque el contenido ya estuviera
+// cacheado en la base — se sentía "como si tuviera que analizar todo de
+// nuevo" cada vez, sobre todo con carpetas de cientos de archivos. Se
+// refresca sola al abrir OTRO proyecto (procesosAbrirProyecto la limpia) o al
+// usar "Generar resumen"/"Procesar pendientes" en Cfg Procesos IA.
+let _procesosBibliografiaCache = { proyectoId: null, porCategoria: {} };
+function procesosBibliografiaCacheReset() { _procesosBibliografiaCache = { proyectoId: null, porCategoria: {} }; }
+async function procesosObtenerCandidatosBibliografia(categorias) {
+  const pid = procesosCurrentProyecto?.id || null;
+  if (_procesosBibliografiaCache.proyectoId !== pid) _procesosBibliografiaCache = { proyectoId: pid, porCategoria: {} };
+  const key = categorias.slice().sort().join(',');
+  if (_procesosBibliografiaCache.porCategoria[key]) return _procesosBibliografiaCache.porCategoria[key];
+  const docs = await procesosGetDocumentosPorCategoria(categorias);
+  let candidatos = [];
+  if (docs.length) {
     const token = await getMsToken();
     // candidatos: uno por archivo (carpetas se expanden) o uno por documento suelto
-    const candidatos = [];
     for (const doc of docs) {
       if (doc.tipo === 'carpeta') {
         const archivos = await procesosDocGetTextosCarpeta(doc, token);
@@ -5053,6 +5083,13 @@ async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto) {
         candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: texto || null });
       }
     }
+  }
+  _procesosBibliografiaCache.porCategoria[key] = candidatos;
+  return candidatos;
+}
+async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto) {
+  try {
+    const candidatos = await procesosObtenerCandidatosBibliografia(categorias);
     const conTexto = candidatos.filter(c => c.texto);
     if (!conTexto.length) return [];
     const UMBRAL = 3;
@@ -5339,7 +5376,7 @@ function procesosStep1QuitarCarpeta() {
   const p = procesosCurrentProyecto;
   if (p.info_cliente?.carpeta_cliente) {
     const info = Object.assign({}, p.info_cliente, { carpeta_cliente: null });
-    procesosSaveProyectoDebounced({ info_cliente: info });
+    procesosSaveProyectoDebounced({ info_cliente: info }, p);
   }
   renderProcesosStepContent();
 }
@@ -5430,6 +5467,7 @@ async function procesosAbrirProyecto(id) {
   procesosStep1Files = [];
   procesosStep1SpFolder = rows[0].info_cliente?.carpeta_cliente || null;
   procesosStep1PendingRetry = null;
+  procesosBibliografiaCacheReset();
   document.getElementById('procesos-list-view').style.display = 'none';
   document.getElementById('procesos-proyecto-view').style.display = '';
   renderProcesosStepsNav();
@@ -5444,21 +5482,39 @@ function procesosVolverALista() {
   renderProcesosList();
 }
 
-async function procesosSaveProyecto(fields) {
-  Object.assign(procesosCurrentProyecto, fields);
+// IMPORTANTE: recibe explícitamente a qué proyecto guardar (segundo parámetro,
+// por defecto el proyecto actualmente abierto) — NUNCA hay que asumir que
+// "procesosCurrentProyecto" sigue siendo el mismo proyecto para el que se iba
+// a guardar, porque el usuario puede haber navegado a OTRO proyecto mientras
+// una llamada a la IA (u otra operación async) todavía estaba en curso. Si
+// eso pasa y se guarda contra el global sin más, el resultado de una acción
+// del proyecto A termina pisando/mezclándose en el proyecto B (bug real:
+// una pregunta del chat general de un proyecto apareciendo en otro). Todo
+// llamador que ya tenga una referencia local al proyecto (ej. `const p =
+// procesosCurrentProyecto` capturada ANTES de un await) debe pasarla acá.
+async function procesosSaveProyecto(fields, proyecto) {
+  const target = proyecto || procesosCurrentProyecto;
+  Object.assign(target, fields);
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${procesosCurrentProyecto.id}`, {
+  await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${target.id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
     body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
   });
 }
 
-function procesosSaveProyectoDebounced(fields) {
-  Object.assign(procesosCurrentProyecto, fields);
+// Mismo cuidado que procesosSaveProyecto (ver comentario ahí) pero además acá
+// el guardado real recién sale 800ms después, en un setTimeout — si para
+// entonces el usuario ya cambió de proyecto, sin este parámetro explícito
+// terminaría guardando (y aplicando localmente) los datos viejos sobre el
+// proyecto NUEVO. Se captura `target` en el momento del llamado, no del disparo
+// del timeout.
+function procesosSaveProyectoDebounced(fields, proyecto) {
+  const target = proyecto || procesosCurrentProyecto;
+  Object.assign(target, fields);
   clearTimeout(_procesosSaveTimeout);
   _procesosSaveTimeout = setTimeout(() => {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    supaFetch(`/rest/v1/procesos_proyectos?id=eq.${procesosCurrentProyecto.id}`, {
+    supaFetch(`/rest/v1/procesos_proyectos?id=eq.${target.id}`, {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
       body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
     });
@@ -5647,7 +5703,7 @@ function procesosUpdateCampoCliente(fieldName, val) {
   const p = procesosCurrentProyecto;
   const info = Object.assign({}, p.info_cliente);
   info.campos = Object.assign({}, info.campos, { [fieldName]: val });
-  procesosSaveProyectoDebounced({ info_cliente: info });
+  procesosSaveProyectoDebounced({ info_cliente: info }, p);
 }
 
 function procesosUpdateCorrienteNombre(idx, nombre) {
@@ -5656,7 +5712,7 @@ function procesosUpdateCorrienteNombre(idx, nombre) {
   const corrientes = (info.corrientes || []).slice();
   corrientes[idx] = Object.assign({}, corrientes[idx], { nombre });
   info.corrientes = corrientes;
-  procesosSaveProyectoDebounced({ info_cliente: info });
+  procesosSaveProyectoDebounced({ info_cliente: info }, p);
 }
 
 function procesosUpdateCampoCorriente(idx, fieldName, subkey, val) {
@@ -5672,7 +5728,7 @@ function procesosUpdateCampoCorriente(idx, fieldName, subkey, val) {
   c.campos = campos;
   corrientes[idx] = c;
   info.corrientes = corrientes;
-  procesosSaveProyectoDebounced({ info_cliente: info });
+  procesosSaveProyectoDebounced({ info_cliente: info }, p);
 }
 
 function procesosAgregarCorriente() {
@@ -5681,7 +5737,7 @@ function procesosAgregarCorriente() {
   const corrientes = (info.corrientes || []).slice();
   corrientes.push({ nombre: 'Nueva corriente', campos: {} });
   info.corrientes = corrientes;
-  procesosSaveProyecto({ info_cliente: info }).then(renderProcesosStepContent);
+  procesosSaveProyecto({ info_cliente: info }, p).then(() => { if (procesosCurrentProyecto === p) renderProcesosStepContent(); });
 }
 
 function procesosEliminarCorriente(idx) {
@@ -5691,7 +5747,7 @@ function procesosEliminarCorriente(idx) {
   const corrientes = (info.corrientes || []).slice();
   corrientes.splice(idx, 1);
   info.corrientes = corrientes;
-  procesosSaveProyecto({ info_cliente: info }).then(renderProcesosStepContent);
+  procesosSaveProyecto({ info_cliente: info }, p).then(() => { if (procesosCurrentProyecto === p) renderProcesosStepContent(); });
 }
 
 // Cuando un intento de análisis choca con el límite de 100 páginas de PDF (por
@@ -5792,12 +5848,14 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt) {
       throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar) — probá analizar de nuevo. Si vuelve a pasar seguido, puede ser que haya demasiados campos configurados en Cfg Procesos IA para lo que entra en una sola respuesta.');
     }
 
-    await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } });
-    showMsg(statusId,'success','✓ Análisis completo.');
-    renderProcesosStepContent();
-    procesosDetectarSimilares();
+    await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } }, p);
+    if (procesosCurrentProyecto === p) {
+      showMsg(statusId,'success','✓ Análisis completo.');
+      renderProcesosStepContent();
+      procesosDetectarSimilares();
+    }
   } catch(e) {
-    showMsg(statusId,'error','✕ '+e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
   }
 }
 
@@ -5880,25 +5938,28 @@ async function procesosDetectarSimilares() {
       return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, incluido: true } : null;
     }).filter(Boolean);
 
-    await procesosSaveProyecto({ proyectos_referencia: sugeridos });
-    renderProcesosStepContent();
+    await procesosSaveProyecto({ proyectos_referencia: sugeridos }, p);
+    if (procesosCurrentProyecto === p) renderProcesosStepContent();
   } catch(e) {
     console.warn('No se pudo detectar proyectos similares:', e.message);
-    if (hasEl) showMsg(statusId,'error','No se pudo detectar automáticamente: '+e.message);
+    if (hasEl && procesosCurrentProyecto === p) showMsg(statusId,'error','No se pudo detectar automáticamente: '+e.message);
   }
 }
 
 function procesosToggleReferencia(idx) {
   const p = procesosCurrentProyecto;
   p.proyectos_referencia[idx].incluido = !p.proyectos_referencia[idx].incluido;
-  procesosSaveProyecto({ proyectos_referencia: p.proyectos_referencia });
+  procesosSaveProyecto({ proyectos_referencia: p.proyectos_referencia }, p);
 }
 
 async function procesosAvanzarPaso(step) {
-  await procesosSaveProyecto({ paso_actual: Math.max(procesosCurrentProyecto.paso_actual, step) });
-  procesosCurrentProyecto._viewingStep = step;
-  renderProcesosStepsNav();
-  renderProcesosStepContent();
+  const p = procesosCurrentProyecto;
+  await procesosSaveProyecto({ paso_actual: Math.max(p.paso_actual, step) }, p);
+  if (procesosCurrentProyecto === p) {
+    p._viewingStep = step;
+    renderProcesosStepsNav();
+    renderProcesosStepContent();
+  }
 }
 
 // ── Paso 2: diseñar el proyecto con la planilla de cálculo (Excel con una hoja
@@ -6348,11 +6409,13 @@ async function procesosStep2SugerirMapeos() {
       }).filter(m => m.celda && m.fuentes.length);
     });
     dd.mapeos = mapeos;
-    await procesosSaveProyecto({ diseno_data: dd });
-    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-    renderProcesosStepContent();
+    await procesosSaveProyecto({ diseno_data: dd }, p);
+    if (procesosCurrentProyecto === p) {
+      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+      renderProcesosStepContent();
+    }
   } catch (e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
   }
 }
 
@@ -6419,14 +6482,14 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
       }
       workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }; });
       if (!dd.orden) dd.orden = workbook.SheetNames.filter(n => dd.hojas[n]?.seleccionada);
-      await procesosSaveProyecto({ diseno_data: dd });
+      await procesosSaveProyecto({ diseno_data: dd }, p);
     }
 
     st.loading = false; st.loadingMsg = '';
-    renderProcesosStepContent();
+    if (procesosCurrentProyecto === p) renderProcesosStepContent();
   } catch (e) {
     st.loading = false; st.error = e.message;
-    renderProcesosStepContent();
+    if (procesosCurrentProyecto === p) renderProcesosStepContent();
   }
 }
 
@@ -6451,9 +6514,8 @@ function procesosStep2ToggleHoja(nombre, checked) {
   if (checked) { if (!orden.includes(nombre)) orden.push(nombre); }
   else { orden = orden.filter(n => n !== nombre); }
   dd.orden = orden;
-  procesosSaveProyecto({ diseno_data: dd }).then(() => {
-    renderProcesosStepContent();
-    if (orden.length) procesosStep2SugerirMapeosDebounced();
+  procesosSaveProyecto({ diseno_data: dd }, p).then(() => {
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); if (orden.length) procesosStep2SugerirMapeosDebounced(); }
   });
 }
 
@@ -6467,9 +6529,8 @@ function procesosStep2ReorderHoja(nombre, dir) {
   if (newIdx < 0 || newIdx >= orden.length) return;
   const tmp = orden[idx]; orden[idx] = orden[newIdx]; orden[newIdx] = tmp;
   dd.orden = orden;
-  procesosSaveProyecto({ diseno_data: dd }).then(() => {
-    renderProcesosStepContent();
-    procesosStep2SugerirMapeosDebounced();
+  procesosSaveProyecto({ diseno_data: dd }, p).then(() => {
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
   });
 }
 
@@ -6559,15 +6620,14 @@ function procesosStep2RenderHojaPanel() {
     const origenTxt = fuentes.length ? fuentes.map(f => f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : f.hoja).join(fuentes.length > 1 ? ' + ' : '') + (fuentes.length > 1 ? ' (ponderado por caudal)' : '') : '';
     const rangoTxt = [c.rango ? 'Rango: '+c.rango : '', c.rango_limite ? 'Límite: '+c.rango_limite : ''].filter(Boolean).join(' · ');
     const formulaTxt = c.isFormula ? String(model.grid[c.row][c.col] || '') : '';
+    const extraTxt = mapeo ? `🔗 ${esc(origenTxt)}` : ((c.unidad && !c.isFormula) ? esc(c.unidad) : '');
     return `
-    <div class="result-field">
-      <span class="result-key"><span style="font-family:monospace;font-size:11px;font-weight:600;color:var(--text2);background:var(--surface2);border-radius:4px;padding:0 4px;margin-right:5px">${esc(c.ref)}</span>${esc(c.label)}${rangoTxt ? `<br><span style="font-size:11px;font-weight:400;color:var(--text2)">${esc(rangoTxt)}</span>` : ''}${formulaTxt ? `<br><span style="font-size:11px;font-weight:400;color:var(--text2);font-family:monospace">ƒ ${esc(formulaTxt)}</span>` : ''}</span>
+    <div class="ps2-row">
+      <span class="ps2-key"><span style="font-family:monospace;font-size:11px;font-weight:600;color:var(--text2);background:var(--surface2);border-radius:4px;padding:0 4px;margin-right:5px">${esc(c.ref)}</span>${esc(c.label)}${rangoTxt ? `<br><span style="font-size:11px;font-weight:400;color:var(--text2)">${esc(rangoTxt)}</span>` : ''}${formulaTxt ? `<br><span style="font-size:11px;font-weight:400;color:var(--text2);font-family:monospace">ƒ ${esc(formulaTxt)}</span>` : ''}</span>
       ${(c.isFormula || mapeo)
-        ? `<span class="result-val" style="background:var(--surface2);border:none;display:flex;align-items:center" title="${esc(origenTxt)}">${valTxt!=null?esc(valTxt):''}${c.unidad?' '+esc(c.unidad):''}</span>`
-        : `<input class="result-val" value="${valTxt!=null?esc(valTxt):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
-      ${mapeo
-        ? `<span style="font-size:11px;color:var(--text2);align-self:center;margin-left:6px">🔗 ${esc(origenTxt)}</span>`
-        : ((c.unidad && !c.isFormula) ? `<span style="font-size:12px;color:var(--text2);align-self:center;margin-left:6px">${esc(c.unidad)}</span>` : '')}
+        ? `<span class="ps2-val" style="background:var(--surface2)" title="${esc(origenTxt)}">${valTxt!=null?esc(valTxt):''}${c.unidad?' '+esc(c.unidad):''}</span>`
+        : `<input class="ps2-val" value="${valTxt!=null?esc(valTxt):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
+      <span class="ps2-extra">${extraTxt}</span>
     </div>`;
   };
 
@@ -6584,7 +6644,7 @@ function procesosStep2RenderHojaPanel() {
       </div>
       ` : ''}
       <label>Datos de la hoja (en el orden del Excel)</label>
-      ${model.cells.length ? model.cells.map(rowHtml).join('') : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
+      ${model.cells.length ? `<div class="ps2-grid">${model.cells.map(rowHtml).join('')}</div>` : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
       <div class="gap"></div>
       <button class="btn btn-secondary btn-sm" onclick="procesosStep2RevisarYCompletar('${safe}', false)">↻ Revisar y completar automáticamente</button>
       <label style="margin-top:10px">Chat de diseño de esta unidad</label>
@@ -6653,8 +6713,8 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   // Guardado directo (no debounced): así no queda ningún guardado viejo
   // pendiente que pueda llegar después y pisar este con datos desactualizados.
   clearTimeout(_procesosSaveTimeout);
-  await procesosSaveProyecto({ diseno_data: dd });
-  procesosStep2RenderHojaPanel();
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel();
 }
 
 // Búsqueda numérica (bisección) del valor de una celda editable que hace que una
@@ -6679,11 +6739,16 @@ function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) 
   evalAt(mid);
 }
 
+const _procesosStep2ChatEnviando = {};
 async function procesosStep2ChatSend(nombre, msgOverride) {
   const input = document.getElementById('procesos-step2-chat-input');
   const msg = msgOverride != null ? msgOverride.trim() : (input?.value || '').trim();
   if (!msg) return;
   const statusId = 'procesos-step2-chat-status';
+  // Evita mandar dos mensajes en simultáneo a la misma hoja — si se solapan,
+  // el guardado de uno puede pisar al del otro y se pierde un mensaje.
+  if (_procesosStep2ChatEnviando[nombre]) { showMsg(statusId, 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
+  _procesosStep2ChatEnviando[nombre] = true;
   const p = procesosCurrentProyecto;
   const ddPrev = Object.assign({}, p.diseno_data);
   ddPrev.hojas = Object.assign({}, ddPrev.hojas);
@@ -6694,6 +6759,10 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
   if (input) input.value = '';
   procesosStep2RenderHojaPanel();
   showMsg(statusId, 'loading', 'Pensando...');
+  // Guarda el mensaje del usuario ya, antes de esperar la respuesta de la IA
+  // (ver mismo comentario en procesosChatSend) — así no se pierde si la IA
+  // tarda/falla o el usuario cambia de proyecto mientras tanto.
+  procesosSaveProyecto({ diseno_data: ddPrev }, p).catch(()=>{});
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
@@ -6747,21 +6816,30 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     model.cells.filter(c => !c.isFormula).forEach(c => { nuevosValores[c.ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
     celdasForzadas.forEach(ref => { const c = cellByRef(ref); if (c) nuevosValores[ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
 
-    const dd = Object.assign({}, procesosCurrentProyecto.diseno_data);
+    // Se re-lee diseno_data de `p` (el proyecto capturado al empezar, NUNCA del
+    // global procesosCurrentProyecto) por si el usuario ya se fue a otro
+    // proyecto mientras se esperaba la respuesta de la IA — así el guardado
+    // siempre cae en el proyecto correcto y nunca se mezcla con otro.
+    const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, confirmada: false });
     h.chat = hPrev.chat.concat([{ role: 'assistant', content: parsed.reply || '(sin respuesta)' }]);
     dd.hojas[nombre] = h;
-    await procesosSaveProyecto({ diseno_data: dd });
+    await procesosSaveProyecto({ diseno_data: dd }, p);
 
-    document.getElementById(statusId) && (document.getElementById(statusId).innerHTML = '');
-    procesosStep2RenderHojaPanel();
+    if (procesosCurrentProyecto === p) {
+      document.getElementById(statusId) && (document.getElementById(statusId).innerHTML = '');
+      procesosStep2RenderHojaPanel();
+    }
   } catch (e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    _procesosStep2ChatEnviando[nombre] = false;
   }
 }
 
 async function procesosStep2GuardarHoja(nombre) {
+  const p = procesosCurrentProyecto;
   try {
     const ponderacionesNuevas = procesosStep2PropagarCadena(nombre);
     const model = procesosStep2State.hojaModels[nombre];
@@ -6771,7 +6849,6 @@ async function procesosStep2GuardarHoja(nombre) {
       const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
       valoresConEtiqueta[c.label + (c.unidad ? ' (' + c.unidad + ')' : '')] = v;
     });
-    const p = procesosCurrentProyecto;
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({ seleccionada: true, valores: {}, chat: [] }, dd.hojas[nombre]);
@@ -6788,14 +6865,16 @@ async function procesosStep2GuardarHoja(nombre) {
     if (orden.length && nombre === orden[orden.length - 1]) {
       showMsg('procesos-step2-status', 'loading', 'Verificando cumplimiento vs. límites de vuelco...');
       dd.cumplimiento = await procesosStep2ChequearCumplimiento(model, hf);
-      const st = document.getElementById('procesos-step2-status'); if (st) st.innerHTML = '';
+      if (procesosCurrentProyecto === p) { const st = document.getElementById('procesos-step2-status'); if (st) st.innerHTML = ''; }
     }
 
-    await procesosSaveProyecto({ diseno_data: dd });
-    renderProcesosStepContent();
-    showMsg('procesos-step2-guardar-status', 'success', '✓ Guardado correctamente.');
+    await procesosSaveProyecto({ diseno_data: dd }, p);
+    if (procesosCurrentProyecto === p) {
+      renderProcesosStepContent();
+      showMsg('procesos-step2-guardar-status', 'success', '✓ Guardado correctamente.');
+    }
   } catch (e) {
-    showMsg('procesos-step2-guardar-status', 'error', '✕ No se pudo guardar: ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg('procesos-step2-guardar-status', 'error', '✕ No se pudo guardar: ' + e.message);
   }
 }
 
@@ -7134,7 +7213,7 @@ function procesosStep3SetEquipoCampo(nombreEtapa, equipoId, campo, valor) {
   e.equipos = (e.equipos || []).map(eq => eq.id === equipoId ? Object.assign({}, eq, { [campo]: campo === 'cantidad' ? (valor === '' ? '' : Number(valor)) : valor }) : eq);
   e.confirmada = false;
   ed.etapas[nombreEtapa] = e;
-  procesosSaveProyecto({ equipos_data: ed });
+  procesosSaveProyecto({ equipos_data: ed }, p);
   renderProcesosStepContent();
 }
 
@@ -7146,7 +7225,7 @@ function procesosStep3AgregarEquipo(nombreEtapa) {
   e.equipos = (e.equipos || []).concat([{ id: procesosNuevoId(), tipo: '', cantidad: 1, especificacion: '', justificacion: '' }]);
   e.confirmada = false;
   ed.etapas[nombreEtapa] = e;
-  procesosSaveProyecto({ equipos_data: ed });
+  procesosSaveProyecto({ equipos_data: ed }, p);
   renderProcesosStepContent();
 }
 
@@ -7158,7 +7237,7 @@ function procesosStep3EliminarEquipo(nombreEtapa, equipoId) {
   e.equipos = (e.equipos || []).filter(eq => eq.id !== equipoId);
   e.confirmada = false;
   ed.etapas[nombreEtapa] = e;
-  procesosSaveProyecto({ equipos_data: ed });
+  procesosSaveProyecto({ equipos_data: ed }, p);
   renderProcesosStepContent();
 }
 
@@ -7195,19 +7274,26 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
     e.equipos = nuevos;
     e.confirmada = false;
     ed.etapas[nombreEtapa] = e;
-    await procesosSaveProyecto({ equipos_data: ed });
-    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-    renderProcesosStepContent();
+    await procesosSaveProyecto({ equipos_data: ed }, p);
+    if (procesosCurrentProyecto === p) {
+      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+      renderProcesosStepContent();
+    }
   } catch (e) {
-    showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
   }
 }
 
+const _procesosStep3ChatEnviando = {};
 async function procesosStep3ChatSend(nombreEtapa) {
   const input = document.getElementById('procesos-step3-chat-input');
   const msg = (input?.value || '').trim();
   if (!msg) return;
   const statusId = 'procesos-step3-chat-status';
+  // Evita mandar dos mensajes en simultáneo a la misma etapa (ver mismo
+  // comentario en procesosStep2ChatSend).
+  if (_procesosStep3ChatEnviando[nombreEtapa]) { showMsg(statusId, 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
+  _procesosStep3ChatEnviando[nombreEtapa] = true;
   const p = procesosCurrentProyecto;
   const edPrev = Object.assign({}, p.equipos_data);
   edPrev.etapas = Object.assign({}, edPrev.etapas);
@@ -7218,6 +7304,10 @@ async function procesosStep3ChatSend(nombreEtapa) {
   input.value = '';
   renderProcesosStepContent();
   showMsg(statusId, 'loading', 'Pensando...');
+  // Guarda el mensaje del usuario ya, antes de esperar la respuesta de la IA
+  // (ver mismo comentario en procesosChatSend) — así no se pierde si la IA
+  // tarda/falla o el usuario cambia de proyecto mientras tanto.
+  procesosSaveProyecto({ equipos_data: edPrev }, p).catch(()=>{});
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
@@ -7250,17 +7340,25 @@ async function procesosStep3ChatSend(nombreEtapa) {
       } catch (_e) { /* acción individual inválida, seguir con las demás */ }
     });
 
-    const ed = Object.assign({}, procesosCurrentProyecto.equipos_data);
+    // Igual que en el chat de diseño del Paso 2: se re-lee equipos_data de `p`
+    // (el proyecto capturado al empezar), nunca del global
+    // procesosCurrentProyecto, por si el usuario ya cambió de proyecto
+    // mientras se esperaba la respuesta de la IA.
+    const ed = Object.assign({}, p.equipos_data);
     ed.etapas = Object.assign({}, ed.etapas);
     const e = Object.assign({}, ed.etapas[nombreEtapa], ePrev, { equipos, confirmada: false });
     e.chat = ePrev.chat.concat([{ role: 'assistant', content: parsed.reply || '(sin respuesta)' }]);
     ed.etapas[nombreEtapa] = e;
-    await procesosSaveProyecto({ equipos_data: ed });
+    await procesosSaveProyecto({ equipos_data: ed }, p);
 
-    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-    renderProcesosStepContent();
+    if (procesosCurrentProyecto === p) {
+      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+      renderProcesosStepContent();
+    }
   } catch (e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    _procesosStep3ChatEnviando[nombreEtapa] = false;
   }
 }
 
@@ -7273,11 +7371,13 @@ async function procesosStep3ConfirmarEtapa(nombreEtapa) {
   e.confirmada_at = new Date().toISOString();
   ed.etapas[nombreEtapa] = e;
   try {
-    await procesosSaveProyecto({ equipos_data: ed });
-    renderProcesosStepContent();
-    showMsg('procesos-step3-guardar-status', 'success', '✓ Guardado correctamente.');
+    await procesosSaveProyecto({ equipos_data: ed }, p);
+    if (procesosCurrentProyecto === p) {
+      renderProcesosStepContent();
+      showMsg('procesos-step3-guardar-status', 'success', '✓ Guardado correctamente.');
+    }
   } catch (err) {
-    showMsg('procesos-step3-guardar-status', 'error', '✕ No se pudo guardar: ' + err.message);
+    if (procesosCurrentProyecto === p) showMsg('procesos-step3-guardar-status', 'error', '✕ No se pudo guardar: ' + err.message);
   }
 }
 
@@ -7815,25 +7915,25 @@ function procesosStep4SetSeccionTexto(key, val) {
   const pd = Object.assign({}, p.propuesta_data);
   pd.secciones = Object.assign({}, pd.secciones);
   pd.secciones[key] = Object.assign({ texto:'', chat:[] }, pd.secciones[key], { texto: val });
-  procesosSaveProyectoDebounced({ propuesta_data: pd });
+  procesosSaveProyectoDebounced({ propuesta_data: pd }, p);
 }
 function procesosStep4SetCaratula(campo, val) {
   const p = procesosCurrentProyecto;
   const pd = Object.assign({}, p.propuesta_data);
   pd.caratula = Object.assign({}, pd.caratula, { [campo]: val });
-  procesosSaveProyectoDebounced({ propuesta_data: pd });
+  procesosSaveProyectoDebounced({ propuesta_data: pd }, p);
 }
 function procesosStep4SetCondicion(campo, val) {
   const p = procesosCurrentProyecto;
   const pd = Object.assign({}, p.propuesta_data);
   pd.condiciones_comerciales = Object.assign({}, pd.condiciones_comerciales, { [campo]: val });
-  procesosSaveProyectoDebounced({ propuesta_data: pd });
+  procesosSaveProyectoDebounced({ propuesta_data: pd }, p);
 }
 function procesosStep4SetItemCampo(id, campo, val) {
   const p = procesosCurrentProyecto;
   const pd = Object.assign({}, p.propuesta_data);
   pd.comercial_items = (pd.comercial_items||[]).map(it => it.id===id ? Object.assign({}, it, { [campo]: campo==='descripcion' ? val : (val===''?'':Number(val)) }) : it);
-  procesosSaveProyecto({ propuesta_data: pd });
+  procesosSaveProyecto({ propuesta_data: pd }, p);
   renderProcesosStepContent();
 }
 function procesosStep4RecargarItemsDesdeEquipos() {
@@ -7842,7 +7942,7 @@ function procesosStep4RecargarItemsDesdeEquipos() {
   const preciosAnteriores = {};
   (pd.comercial_items||[]).forEach(it => { preciosAnteriores[it.etapa+'|'+it.descripcion] = it.precio_unitario; });
   pd.comercial_items = procesosPropuestaItemsDesdeEquipos(p).map(it => Object.assign({}, it, { precio_unitario: preciosAnteriores[it.etapa+'|'+it.descripcion] ?? null }));
-  procesosSaveProyecto({ propuesta_data: pd });
+  procesosSaveProyecto({ propuesta_data: pd }, p);
   renderProcesosStepContent();
 }
 
@@ -7871,18 +7971,26 @@ async function procesosStep4GenerarConIA() {
     pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
     pd.secciones = Object.assign({}, pd.secciones);
     Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
-    await procesosSaveProyecto({ propuesta_data: pd });
-    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-    renderProcesosStepContent();
+    await procesosSaveProyecto({ propuesta_data: pd }, p);
+    if (procesosCurrentProyecto === p) {
+      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+      renderProcesosStepContent();
+    }
   } catch(e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
   }
 }
 
+const _procesosStep4ChatEnviando = {};
 async function procesosStep4SeccionChatSend(key) {
   const input = document.getElementById('procesos-step4-chat-input-'+key);
   const msg = (input?.value || '').trim();
   if (!msg) return;
+  const statusId = 'procesos-step4-chat-status-'+key;
+  // Evita mandar dos mensajes en simultáneo a la misma sección (ver mismo
+  // comentario en procesosStep2ChatSend).
+  if (_procesosStep4ChatEnviando[key]) { showMsg(statusId, 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
+  _procesosStep4ChatEnviando[key] = true;
   const meta = PROCESOS_PROPUESTA_SECCIONES.find(s => s.key === key);
   const p = procesosCurrentProyecto;
   const pd = Object.assign({}, p.propuesta_data);
@@ -7893,8 +8001,10 @@ async function procesosStep4SeccionChatSend(key) {
   p.propuesta_data = pd;
   if (input) input.value = '';
   renderProcesosStepContent();
-  const statusId = 'procesos-step4-chat-status-'+key;
   showMsg(statusId, 'loading', 'Pensando...');
+  // Guarda el mensaje del usuario ya, antes de esperar la respuesta de la IA
+  // (ver mismo comentario en procesosChatSend).
+  procesosSaveProyecto({ propuesta_data: pd }, p).catch(()=>{});
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
@@ -7912,17 +8022,24 @@ async function procesosStep4SeccionChatSend(key) {
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
 
-    const pd2 = Object.assign({}, procesosCurrentProyecto.propuesta_data);
+    // Se re-lee propuesta_data de `p` (el proyecto capturado al empezar), no
+    // del global procesosCurrentProyecto (ver mismo comentario en
+    // procesosStep2ChatSend).
+    const pd2 = Object.assign({}, p.propuesta_data);
     pd2.secciones = Object.assign({}, pd2.secciones);
     const sec2 = Object.assign({}, pd2.secciones[key], sec, { texto: parsed.texto_nuevo != null ? parsed.texto_nuevo : sec.texto });
     sec2.chat = sec.chat.concat([{role:'assistant', content: parsed.reply || '(sin respuesta)'}]);
     pd2.secciones[key] = sec2;
-    await procesosSaveProyecto({ propuesta_data: pd2 });
+    await procesosSaveProyecto({ propuesta_data: pd2 }, p);
 
-    const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-    renderProcesosStepContent();
+    if (procesosCurrentProyecto === p) {
+      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+      renderProcesosStepContent();
+    }
   } catch(e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    _procesosStep4ChatEnviando[key] = false;
   }
 }
 
@@ -7991,10 +8108,17 @@ function renderProcesosChat() {
   el.scrollTop = el.scrollHeight;
 }
 
+let _procesosChatEnviando = false;
 async function procesosChatSend() {
   const input = document.getElementById('procesos-chat-input');
   const msg = input.value.trim();
   if (!msg) return;
+  // Evita mandar dos mensajes en simultáneo: si el segundo termina antes o
+  // después que el primero de forma solapada, uno de los dos guardados
+  // termina pisando al otro (se pierde un mensaje). Con la respuesta anterior
+  // todavía en curso, hay que esperarla.
+  if (_procesosChatEnviando) { showMsg('procesos-chat-status', 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
+  _procesosChatEnviando = true;
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-chat-status';
   p.chat_historial = p.chat_historial || [];
@@ -8002,6 +8126,11 @@ async function procesosChatSend() {
   input.value = '';
   renderProcesosChat();
   showMsg(statusId,'loading','Pensando...');
+  // Guarda el mensaje del usuario YA, antes de esperar la respuesta de la IA —
+  // así, si la IA tarda/falla o el usuario cambia de proyecto mientras tanto,
+  // el mensaje no se pierde (antes solo se guardaba junto con la respuesta,
+  // al final).
+  procesosSaveProyecto({ chat_historial: p.chat_historial }, p).catch(()=>{});
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
@@ -8035,7 +8164,7 @@ async function procesosChatSend() {
       // Texto cacheado por archivo (info_cliente.carpeta_cliente.archivos_cache) —
       // solo reprocesa lo nuevo/cambiado, no vuelve a mandar los PDF/imágenes
       // originales cada vez que hace falta reconsultar algo en este proyecto.
-      const textos = await procesosClienteGetTextosCarpeta(token);
+      const textos = await procesosClienteGetTextosCarpeta(token, p);
       const contentBlocks = textos.map(t => ({type:'text', text:`Documento: ${t.nombre}\n\n${t.texto}`}));
       const messages2 = messages.concat([
         { role:'assistant', content: raw },
@@ -8070,11 +8199,12 @@ async function procesosChatSend() {
       }
       fieldsToSave.info_cliente = info;
     }
-    await procesosSaveProyecto(fieldsToSave);
-    renderProcesosChat();
-    document.getElementById(statusId).innerHTML = '';
+    await procesosSaveProyecto(fieldsToSave, p);
+    if (procesosCurrentProyecto === p) { renderProcesosChat(); document.getElementById(statusId).innerHTML = ''; }
   } catch(e) {
-    showMsg(statusId,'error','✕ '+e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
+  } finally {
+    _procesosChatEnviando = false;
   }
 }
 
