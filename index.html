@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.54</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.55</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.54</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.55</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6400,7 +6400,7 @@ function procesosStep1Html(p) {
       <button class="sp-browse-btn" onclick="procesosStep1SelectFolder()">Seleccionar carpeta</button>
       ${procesosStep1SpFolder ? `<button class="sp-browse-btn" onclick="procesosStep1QuitarCarpeta()">Quitar carpeta</button>` : ''}
     </div>
-    <p class="hint" style="margin-bottom:10px">También se suma sola la "Información general" cargada en Cfg Procesos IA. La normativa se resuelve aparte, después del análisis: MAIA propone un documento puntual y pide tu confirmación antes de usarlo.</p>
+    <p class="hint" style="margin-bottom:10px">También se suman solos los documentos de "Normativa" e "Información general" cargados en Cfg Procesos IA. Si algún límite igual queda sin resolver, MAIA propone después un documento de normativa puntual y pide tu confirmación antes de usarlo.</p>
 
     <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ ${tieneAnalisis?'Volver a analizar':'Analizar'} con IA</button>
     <div id="procesos-step1-status"></div>
@@ -6783,14 +6783,19 @@ async function procesosStep1Analizar() {
 
     // Documentos de referencia que se adjuntan solos en este paso: Información
     // general (bibliografía general de la empresa). Normativa YA NO se
-    // adjunta acá — si el cliente trajo su propio límite normativo en sus
-    // documentos, ese sigue prevaleciendo (se lo sigue pidiendo en el prompt
-    // de abajo); si falta, se resuelve DESPUÉS con procesosStep1NormativaVerificar,
-    // que elige (con aprobación del usuario) un único documento puntual de
-    // normativa en vez de adjuntarlos todos de entrada.
+    // Se vuelve a adjuntar normativa acá (relevante por ubicación/tipo de
+    // vuelco) — se había sacado para que la eligiera un paso aparte con
+    // aprobación, pero eso le restaba a la IA el contexto real de la
+    // normativa DURANTE la misma lectura del documento del cliente, y se
+    // notó una caída real en calidad de extracción/justificación. Ahora
+    // vuelve a leer todo junto en una sola pasada (mejor resultado, como
+    // antes) — procesosStep1NormativaVerificar queda como red de contención
+    // para lo que igual quede sin límite después de esto (normativa no
+    // relevante-filtrada acá, casos ambiguos, etc.), no como el camino
+    // principal.
     showMsg(statusId,'loading','Buscando documentos de referencia...');
     const contextoStep1 = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nArchivos del cliente/proyecto ya adjuntados: ${contentItems.map(c=>c.nombre).join(', ') || '(ninguno)'}`;
-    const docsRef = await procesosObtenerBibliografiaRelevante(['informacion_general'], contextoStep1);
+    const docsRef = await procesosObtenerBibliografiaRelevante(['normativa','informacion_general'], contextoStep1);
     if (docsRef.length) {
       showMsg(statusId,'loading','Adjuntando documentos de referencia...');
       contentItems.push(...docsRef.map(d => ({ nombre: d.nombre, block: d.block })));
@@ -6800,7 +6805,7 @@ async function procesosStep1Analizar() {
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluida la información general de la empresa, si está adjunta).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": fijate SOLO si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece). Si el cliente adjuntó una TABLA de límites, revisala fila por fila con cuidado — no te quedes solo con los primeros parámetros que veas, recorré la tabla completa hasta el final aunque tenga muchas filas. IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en el documento, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Si no está en los documentos del cliente, dejalo null por ahora — no inventes un valor de memoria, y no hace falta buscarlo en ningún otro lado: eso se resuelve en un paso aparte, con un documento de normativa puntual que el sistema va a proponer y el usuario va a confirmar. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras). Si no está ahí, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto (lo que quede sin resolver acá se vuelve a intentar después, en un paso aparte que propone y confirma un documento de normativa puntual). IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en la fuente que sea, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
 
     await procesosStep1EjecutarAnalisis(contentItems, prompt);
   } catch(e) {
