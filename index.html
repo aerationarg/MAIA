@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.49</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.50</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.49</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.50</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4708,39 +4708,125 @@ function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',d
 const PROCESOS_DOC_CATEGORIAS = { normativa:'Normativa', planilla_calculo:'Planilla de cálculo', informacion_general:'Información general', criterios_seleccion:'Criterios de selección / eficiencias', plantas_compactas:'Plantas compactas', equipos:'Equipos (Paso 3)', ofertas:'Ofertas (Paso 4)', propuesta_base:'Propuesta base', otro:'Otro' };
 let _procesosDocTarget = null;
 
+// Mismo criterio que el catálogo de proyectos (procesosCatalogoRenderLista):
+// con varias categorías y carpetas grandes esto puede crecer bastante, así
+// que no se muestra nada expandido hasta que se busca o se elige uno del
+// desplegable — la lista liviana (sin archivos_cache/texto_extraido, que
+// pueden pesar mucho) se trae una sola vez, y el detalle completo de UN
+// documento se trae recién al expandirlo.
+let _procesosDocumentosState = { rows: null, filtro: '', expandedId: null, expandedDetalle: null };
+
 async function renderProcesosDocumentos() {
   const el = document.getElementById('procesos-documentos-list');
   if (!el) return;
+  const filtroPrevio = _procesosDocumentosState.filtro || '';
+  const expandedPrevio = _procesosDocumentosState.expandedId || null;
+  const buscandoPrevio = _procesosDocumentosState._buscando;
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_documentos?select=*&empresa=eq.${currentEmpresa}&order=categoria,nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const res = await supaFetch(`/rest/v1/procesos_documentos?select=id,nombre,categoria,tipo,path,item_id,site_id&empresa=eq.${currentEmpresa}&order=categoria,nombre`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
-    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay documentos de referencia cargados.</p>'; return; }
-    el.innerHTML = rows.map(d => `
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; return; }
+    _procesosDocumentosState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio, expandedDetalle: null, _buscando: buscandoPrevio };
+    procesosDocumentosRenderLista();
+    if (expandedPrevio) procesosDocExpandir(expandedPrevio);
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; }
+}
+
+function procesosDocumentosRenderLista() {
+  const el = document.getElementById('procesos-documentos-list');
+  if (!el) return;
+  const { rows, filtro, expandedId, expandedDetalle } = _procesosDocumentosState;
+  if (!rows) return;
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? rows.filter(d => [d.nombre, PROCESOS_DOC_CATEGORIAS[d.categoria]||d.categoria].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(d => d.id === expandedId) : []);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-doc-buscar" placeholder="Buscar por nombre o categoría..." value="${esc(filtro)}" oninput="procesosDocFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="if(this.value) procesosDocExpandir(this.value); this.value=''" style="max-width:240px">
+        <option value="">Ver todos (${rows.length})...</option>
+        ${rows.map(d => `<option value="${d.id}">${esc(d.nombre)} — ${esc(PROCESOS_DOC_CATEGORIAS[d.categoria]||d.categoria||'')}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${rows.length} documento${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay documentos de referencia cargados.</p>'; return; }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí uno del desplegable para verlo.</p>';
+    procesosDocRestaurarFoco();
+    return;
+  }
+  const LIMITE = 50;
+  el.innerHTML = header + filtrados.slice(0, LIMITE).map(d => {
+    const abierto = expandedId === d.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosDocExpandir('${d.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span><b>${esc(d.nombre)}</b> <span style="color:var(--text2)">· ${esc(PROCESOS_DOC_CATEGORIAS[d.categoria]||d.categoria||'')}</span></span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosDocEliminar('${d.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    const det = (expandedDetalle && expandedDetalle.id === d.id) ? expandedDetalle : d;
+    return `
       <div class="field-row">
         <div class="field-row-top">
-          <input value="${esc(d.nombre)}" placeholder="Nombre" oninput="procesosDocUpdate('${d.id}','nombre',this.value)" />
+          <input value="${esc(det.nombre)}" placeholder="Nombre" oninput="procesosDocUpdate('${d.id}','nombre',this.value)" />
           <button class="remove-btn" onclick="procesosDocEliminar('${d.id}')">&#x2715;</button>
         </div>
         <div class="field-row-type-wrap">
           <select class="type-select" onchange="procesosDocUpdate('${d.id}','categoria',this.value)">
-            ${Object.entries(PROCESOS_DOC_CATEGORIAS).map(([val,label])=>`<option value="${val}" ${d.categoria===val?'selected':''}>${esc(label)}</option>`).join('')}
+            ${Object.entries(PROCESOS_DOC_CATEGORIAS).map(([val,label])=>`<option value="${val}" ${det.categoria===val?'selected':''}>${esc(label)}</option>`).join('')}
           </select>
         </div>
         <div class="sp-selected" style="margin-top:6px">
-          <span style="font-size:12px">${esc(d.path || 'Sin vincular')}${d.tipo==='carpeta' ? ' <b>(carpeta — trae todos los archivos)</b>' : ''}</span>
+          <span style="font-size:12px">${esc(det.path || 'Sin vincular')}${det.tipo==='carpeta' ? ' <b>(carpeta — trae todos los archivos)</b>' : ''}</span>
           <button class="sp-browse-btn" onclick="procesosDocSelectFile('${d.id}')">Vincular archivo</button>
           <button class="sp-browse-btn" onclick="procesosDocSelectFolder('${d.id}')">Vincular carpeta</button>
         </div>
-        ${d.item_id && d.site_id ? `
+        ${det.item_id && det.site_id ? `
         <div class="sp-selected" style="margin-top:6px">
-          <span style="font-size:12px">${procesosDocResumenEstado(d)}</span>
-          <button class="sp-browse-btn" onclick="procesosDocGenerarResumen('${d.id}')">${d.tipo==='carpeta' ? 'Procesar pendientes' : 'Generar resumen'}</button>
+          <span style="font-size:12px">${expandedDetalle ? procesosDocResumenEstado(expandedDetalle) : 'Cargando estado...'}</span>
+          <button class="sp-browse-btn" onclick="procesosDocGenerarResumen('${d.id}')">${det.tipo==='carpeta' ? 'Procesar pendientes' : 'Generar resumen'}</button>
         </div>
         <div id="procesos-doc-status-${d.id}" class="status-msg" style="display:none"></div>` : ''}
-      </div>`).join('');
-  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar documentos.</p>'; }
+        <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosDocExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('') + (filtrados.length > LIMITE ? `<p class="hint">Mostrando ${LIMITE} de ${filtrados.length} — afiná la búsqueda.</p>` : '');
+  procesosDocRestaurarFoco();
+}
+
+function procesosDocRestaurarFoco() {
+  const inp = document.getElementById('procesos-doc-buscar');
+  if (!inp || !_procesosDocumentosState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+
+function procesosDocFiltrar(v) {
+  _procesosDocumentosState.filtro = v;
+  _procesosDocumentosState._buscando = true;
+  procesosDocumentosRenderLista();
+}
+
+// Trae el detalle COMPLETO de un documento (incluido archivos_cache, que no
+// viene en la lista liviana) recién al expandirlo.
+async function procesosDocExpandir(id) {
+  _procesosDocumentosState.expandedId = id;
+  _procesosDocumentosState.expandedDetalle = null;
+  procesosDocumentosRenderLista();
+  if (!id) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+  const rows = await res.json();
+  if (res.ok && rows[0] && _procesosDocumentosState.expandedId === id) {
+    _procesosDocumentosState.expandedDetalle = rows[0];
+    procesosDocumentosRenderLista();
+  }
 }
 
 async function procesosDocAdd() {
@@ -4750,9 +4836,15 @@ async function procesosDocAdd() {
     body: JSON.stringify({ empresa: currentEmpresa, nombre: 'Nuevo documento', categoria: 'otro' })
   });
   if (!res.ok) { alert('No se pudo agregar.'); return; }
+  const data = await res.json().catch(()=>null);
+  _procesosDocumentosState.filtro = '';
+  _procesosDocumentosState.expandedId = data && data[0] ? data[0].id : null;
   renderProcesosDocumentos();
 }
 async function procesosDocUpdate(id, field, val) {
+  const row = (_procesosDocumentosState.rows||[]).find(r => r.id === id);
+  if (row) row[field] = val;
+  if (_procesosDocumentosState.expandedDetalle && _procesosDocumentosState.expandedDetalle.id === id) _procesosDocumentosState.expandedDetalle[field] = val;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
@@ -4763,6 +4855,7 @@ async function procesosDocEliminar(id) {
   if (!confirm('¿Eliminar este documento de referencia?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosDocumentosState.expandedId === id) _procesosDocumentosState.expandedId = null;
   renderProcesosDocumentos();
 }
 function procesosDocSelectFile(id) {
@@ -5459,25 +5552,99 @@ async function procesosCatalogoEliminar(id) {
 }
 
 // ── Lecciones aprendidas (Cfg Procesos IA) ──────────────
+// Mismo criterio que documentos/catálogo: con la sincronización de
+// SharePoint esto puede crecer a cientos — no se muestra nada expandido
+// hasta que se busca o se elige una del desplegable.
+let _procesosLeccionesState = { rows: null, filtro: '', expandedId: null };
+
 async function renderProcesosLecciones() {
   const el = document.getElementById('procesos-lecciones-list');
   if (!el) return;
+  const filtroPrevio = _procesosLeccionesState.filtro || '';
+  const expandedPrevio = _procesosLeccionesState.expandedId || null;
+  const buscandoPrevio = _procesosLeccionesState._buscando;
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/procesos_lecciones?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
-    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay lecciones cargadas.</p>'; return; }
-    el.innerHTML = rows.map(l => `
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; return; }
+    _procesosLeccionesState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio, _buscando: buscandoPrevio };
+    procesosLeccionesRenderLista();
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; }
+}
+
+function procesosLeccionEtiqueta(l) {
+  const txt = (l.texto||'').replace(/\s+/g,' ').trim();
+  const corto = txt.length > 70 ? txt.slice(0,70)+'…' : txt;
+  return `${l.categoria ? '['+l.categoria+'] ' : ''}${corto || '(sin texto)'}`;
+}
+
+function procesosLeccionesRenderLista() {
+  const el = document.getElementById('procesos-lecciones-list');
+  if (!el) return;
+  const { rows, filtro, expandedId } = _procesosLeccionesState;
+  if (!rows) return;
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? rows.filter(l => [l.texto, l.categoria, l.origen_proyecto_nombre].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(l => l.id === expandedId) : []);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-leccion-buscar" placeholder="Buscar por texto, categoría o proyecto..." value="${esc(filtro)}" oninput="procesosLeccionFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="if(this.value) procesosLeccionExpandir(this.value); this.value=''" style="max-width:260px">
+        <option value="">Ver todas (${rows.length})...</option>
+        ${rows.map(l => `<option value="${l.id}">${esc(procesosLeccionEtiqueta(l))}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${rows.length} lección${rows.length===1?'':'es'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay lecciones cargadas.</p>'; return; }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí una del desplegable para verla.</p>';
+    procesosLeccionRestaurarFoco();
+    return;
+  }
+  const LIMITE = 50;
+  el.innerHTML = header + filtrados.slice(0, LIMITE).map(l => {
+    const abierto = expandedId === l.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosLeccionExpandir('${l.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>${esc(procesosLeccionEtiqueta(l))}</span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosLeccionEliminar('${l.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    return `
       <div class="field-row">
         <div class="field-row-top">
           <input value="${esc(l.categoria||'')}" placeholder="Categoría (ej. Ecualizador, General)" style="max-width:220px" oninput="procesosLeccionUpdate('${l.id}','categoria',this.value)" />
           <button class="remove-btn" onclick="procesosLeccionEliminar('${l.id}')">&#x2715;</button>
         </div>
         <textarea rows="2" placeholder="Lección aprendida" oninput="procesosLeccionUpdate('${l.id}','texto',this.value)" style="margin-bottom:4px">${esc(l.texto||'')}</textarea>
-        <p class="hint" style="margin:0">${l.origen_proyecto_nombre?'De: '+esc(l.origen_proyecto_nombre)+' · ':''}${esc(l.creado_por_nombre||'')} · ${new Date(l.created_at).toLocaleDateString('es-AR')}</p>
-      </div>`).join('');
-  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; }
+        <p class="hint" style="margin:0 0 6px">${l.origen_proyecto_nombre?'De: '+esc(l.origen_proyecto_nombre)+' · ':''}${esc(l.creado_por_nombre||'')} · ${new Date(l.created_at).toLocaleDateString('es-AR')}</p>
+        <button class="btn btn-secondary btn-sm" onclick="procesosLeccionExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('') + (filtrados.length > LIMITE ? `<p class="hint">Mostrando ${LIMITE} de ${filtrados.length} — afiná la búsqueda.</p>` : '');
+  procesosLeccionRestaurarFoco();
+}
+
+function procesosLeccionRestaurarFoco() {
+  const inp = document.getElementById('procesos-leccion-buscar');
+  if (!inp || !_procesosLeccionesState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+function procesosLeccionFiltrar(v) {
+  _procesosLeccionesState.filtro = v;
+  _procesosLeccionesState._buscando = true;
+  procesosLeccionesRenderLista();
+}
+function procesosLeccionExpandir(id) {
+  _procesosLeccionesState.expandedId = id;
+  procesosLeccionesRenderLista();
 }
 
 async function procesosLeccionAdd() {
@@ -5485,13 +5652,18 @@ async function procesosLeccionAdd() {
   if (!texto || !texto.trim()) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const res = await supaFetch('/rest/v1/procesos_lecciones', {
-    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
     body: JSON.stringify({ empresa: currentEmpresa, texto: texto.trim(), creado_por_nombre: currentUser.nombre||currentUser.email })
   });
   if (!res.ok) { alert('No se pudo agregar la lección.'); return; }
+  const data = await res.json().catch(()=>null);
+  _procesosLeccionesState.filtro = '';
+  _procesosLeccionesState.expandedId = data && data[0] ? data[0].id : null;
   renderProcesosLecciones();
 }
 async function procesosLeccionUpdate(id, field, val) {
+  const row = (_procesosLeccionesState.rows||[]).find(r => r.id === id);
+  if (row) row[field] = val;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_lecciones?id=eq.${id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
@@ -5502,6 +5674,7 @@ async function procesosLeccionEliminar(id) {
   if (!confirm('¿Eliminar esta lección?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_lecciones?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosLeccionesState.expandedId === id) _procesosLeccionesState.expandedId = null;
   renderProcesosLecciones();
 }
 
