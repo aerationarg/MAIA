@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.50</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.51</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.50</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.51</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4670,30 +4670,132 @@ let _procesosSaveTimeout = null;
 const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:'Definir etapas y equipos', 4:'Generar la propuesta' };
 
 // ── Campos IA — qué extrae el análisis del cliente (Cfg Procesos IA) ──
+// Igual criterio que Documentos/Lecciones (buscar o elegir del desplegable
+// en vez de mostrar todo), pero acá SÍ hay una opción "Ver todos" en el
+// desplegable — a diferencia de esos dos, el orden de los campos importa
+// (se usan en ese orden para el prompt de extracción), así que hace falta
+// una vista con las flechas de reordenar visibles, no solo un campo suelto.
+let _procesosIAFieldsState = { filtro: '', modo: 'oculto', expandedIdx: null }; // modo: 'oculto' | 'todos' | 'buscando'
+
 function renderProcesosIAFields() {
   const fields = getProcesosIAFields();
   const el = document.getElementById('procesos-ia-field-list');
   if (!el) return;
-  el.innerHTML = fields.map((f, i) => `
-    <div class="field-row">
-      <div class="field-row-top">
-        <div class="reorder-btns">
-          <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},-1)" ${i===0?'disabled':''}>&#9650;</button>
-          <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},1)" ${i===fields.length-1?'disabled':''}>&#9660;</button>
+  const { filtro, modo, expandedIdx } = _procesosIAFieldsState;
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-ia-buscar" placeholder="Buscar por nombre..." value="${esc(filtro)}" oninput="procesosIAFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="procesosIASeleccionDropdown(this.value)" style="max-width:260px">
+        <option value="">Elegir...</option>
+        <option value="__todos__">Ver todos (${fields.length}) — reordenar</option>
+        ${fields.map((f,i) => `<option value="${i}">${esc(f.name||'(sin nombre)')}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${fields.length} campo${fields.length===1?'':'s'}</span>
+    </div>`;
+
+  if (!fields.length) { el.innerHTML = header + '<p class="hint">Todavía no hay campos configurados.</p>'; return; }
+
+  if (modo === 'todos') {
+    el.innerHTML = header + fields.map((f, i) => `
+      <div class="field-row">
+        <div class="field-row-top">
+          <div class="reorder-btns">
+            <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},-1)" ${i===0?'disabled':''}>&#9650;</button>
+            <button class="reorder-btn" onclick="reorderField('procesos-ia',${i},1)" ${i===fields.length-1?'disabled':''}>&#9660;</button>
+          </div>
+          <input value="${esc(f.name)}" placeholder="Nombre del campo" oninput="procesosIAUpdateField(${i},'name',this.value)" />
+          <select class="type-select" onchange="procesosIAUpdateField(${i},'tipo',this.value)">
+            <option value="texto" ${f.tipo!=='parametro'?'selected':''}>Texto</option>
+            <option value="parametro" ${f.tipo==='parametro'?'selected':''}>Parámetro (valor + unidad)</option>
+          </select>
+          <button class="remove-btn" onclick="procesosIARemoveField(${i})">&#x2715;</button>
         </div>
-        <input value="${esc(f.name)}" placeholder="Nombre del campo" oninput="procesosIAUpdateField(${i},'name',this.value)" />
-        <select class="type-select" onchange="procesosIAUpdateField(${i},'tipo',this.value)">
-          <option value="texto" ${f.tipo!=='parametro'?'selected':''}>Texto</option>
-          <option value="parametro" ${f.tipo==='parametro'?'selected':''}>Parámetro (valor + unidad)</option>
-        </select>
-        <button class="remove-btn" onclick="procesosIARemoveField(${i})">&#x2715;</button>
-      </div>
-      <input class="desc-input" value="${esc(f.desc)}" placeholder="Descripción / instrucción para la IA" oninput="procesosIAUpdateField(${i},'desc',this.value)" />
-    </div>`).join('');
+        <input class="desc-input" value="${esc(f.desc)}" placeholder="Descripción / instrucción para la IA" oninput="procesosIAUpdateField(${i},'desc',this.value)" />
+      </div>`).join('');
+    return;
+  }
+
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? fields.map((fld,i) => ({fld,i})).filter(({fld}) => (fld.name||'').toLowerCase().includes(f))
+    : (expandedIdx != null && fields[expandedIdx] ? [{fld: fields[expandedIdx], i: expandedIdx}] : []);
+  if (!f && expandedIdx == null) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí "Ver todos" para ver la lista completa con el orden.</p>';
+    procesosIARestaurarFoco();
+    return;
+  }
+  el.innerHTML = header + filtrados.map(({fld, i}) => {
+    const abierto = expandedIdx === i;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosIAExpandir(${i})">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span><b>${esc(fld.name||'(sin nombre)')}</b> <span style="color:var(--text2)">· ${fld.tipo==='parametro'?'Parámetro':'Texto'}</span></span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosIARemoveField(${i})">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    return `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(fld.name)}" placeholder="Nombre del campo" oninput="procesosIAUpdateField(${i},'name',this.value)" />
+          <select class="type-select" onchange="procesosIAUpdateField(${i},'tipo',this.value)">
+            <option value="texto" ${fld.tipo!=='parametro'?'selected':''}>Texto</option>
+            <option value="parametro" ${fld.tipo==='parametro'?'selected':''}>Parámetro (valor + unidad)</option>
+          </select>
+          <button class="remove-btn" onclick="procesosIARemoveField(${i})">&#x2715;</button>
+        </div>
+        <input class="desc-input" value="${esc(fld.desc)}" placeholder="Descripción / instrucción para la IA" oninput="procesosIAUpdateField(${i},'desc',this.value)" />
+        <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosIAExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('');
+  procesosIARestaurarFoco();
 }
+
+function procesosIARestaurarFoco() {
+  const inp = document.getElementById('procesos-ia-buscar');
+  if (!inp || !_procesosIAFieldsState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+function procesosIAFiltrar(v) {
+  _procesosIAFieldsState.filtro = v;
+  _procesosIAFieldsState.modo = 'buscando';
+  _procesosIAFieldsState._buscando = true;
+  renderProcesosIAFields();
+}
+function procesosIASeleccionDropdown(val) {
+  if (val === '__todos__') {
+    _procesosIAFieldsState.modo = 'todos';
+    _procesosIAFieldsState.filtro = '';
+    _procesosIAFieldsState.expandedIdx = null;
+  } else if (val !== '') {
+    _procesosIAFieldsState.modo = 'buscando';
+    _procesosIAFieldsState.filtro = '';
+    _procesosIAFieldsState.expandedIdx = Number(val);
+  }
+  renderProcesosIAFields();
+}
+function procesosIAExpandir(i) {
+  _procesosIAFieldsState.modo = 'buscando';
+  _procesosIAFieldsState.expandedIdx = i;
+  renderProcesosIAFields();
+}
+
 function procesosIAUpdateField(i, key, val) { const f=getProcesosIAFields(); f[i][key]=val; saveProcesosIAFields(f); }
-function procesosIARemoveField(i) { const f=getProcesosIAFields(); f.splice(i,1); saveProcesosIAFields(f); renderProcesosIAFields(); }
-function procesosIAAddField() { const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f); renderProcesosIAFields(); }
+function procesosIARemoveField(i) {
+  const f=getProcesosIAFields(); f.splice(i,1); saveProcesosIAFields(f);
+  if (_procesosIAFieldsState.expandedIdx === i) _procesosIAFieldsState.expandedIdx = null;
+  renderProcesosIAFields();
+}
+function procesosIAAddField() {
+  const f=getProcesosIAFields(); f.push({name:'',desc:'',tipo:'texto'}); saveProcesosIAFields(f);
+  _procesosIAFieldsState.modo = 'buscando';
+  _procesosIAFieldsState.filtro = '';
+  _procesosIAFieldsState.expandedIdx = f.length - 1;
+  renderProcesosIAFields();
+}
 
 // ── Documentos de referencia (normativa, planillas de cálculo, info general) ──
 // El paso de cada categoría (dónde se adjunta sola a la IA) queda documentado
