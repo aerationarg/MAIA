@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.40</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.41</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.40</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.41</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4988,14 +4988,25 @@ async function procesosListarArchivosCarpeta(siteId, itemId, token, rutaBase) {
   return archivos;
 }
 
-// Núcleo compartido: descarga y extrae (con caché por archivo, comparando id y
-// fecha de modificación real en SharePoint) el texto de todos los archivos de
-// una carpeta — y de paso, el resumen de cada uno nuevo o cambiado. El
-// llamador decide dónde persistir el resultado — lo usan tanto documentos de
-// referencia/catálogo (procesosDocGetTextosCarpeta) como la carpeta propia
-// del cliente de cada proyecto (procesosClienteGetTextosCarpeta).
+// Clave de caché por archivo: carpeta+nombre en vez de item_id de Graph.
+// SharePoint no permite dos archivos con el mismo nombre en la misma
+// carpeta, así que esto identifica un archivo con la misma confiabilidad
+// que el ID — pero con la ventaja de que se puede precargar un resumen a
+// mano (ej. analizado en otra conversación) sin necesitar el ID real de
+// Graph, alcanza con saber la carpeta y el nombre tal cual figuran en
+// SharePoint. La contra: si el archivo se RENOMBRA en SharePoint, se trata
+// como uno nuevo (se reprocesa) en vez de reconocerlo — trade-off aceptado.
+function procesosClaveArchivoCache(carpeta, nombre) { return (carpeta || '') + ' ' + nombre; }
+
+// Núcleo compartido: descarga y extrae (con caché por archivo, comparando
+// carpeta+nombre y fecha de modificación real en SharePoint) el texto de
+// todos los archivos de una carpeta — y de paso, el resumen de cada uno
+// nuevo o cambiado. El llamador decide dónde persistir el resultado — lo
+// usan tanto documentos de referencia/catálogo (procesosDocGetTextosCarpeta)
+// como la carpeta propia del cliente de cada proyecto
+// (procesosClienteGetTextosCarpeta).
 async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token, onProgreso) {
-  const cachePorId = {}; (cacheActual || []).forEach(f => { cachePorId[f.item_id] = f; });
+  const cachePorId = {}; (cacheActual || []).forEach(f => { cachePorId[procesosClaveArchivoCache(f.carpeta, f.nombre)] = f; });
   let children;
   try {
     children = await procesosListarArchivosCarpeta(siteId, itemId, token);
@@ -5007,12 +5018,8 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
   const resultado = [];
   let cambios = false;
   for (const f of children) {
-    const cacheado = cachePorId[f.id];
-    // Si además de no haber cambiado el archivo tampoco cambió de carpeta, se
-    // reusa el caché tal cual; si se movió de subcarpeta (mismo archivo, otra
-    // ruta) se reprocesa el resumen — la carpeta es justo la pista que puede
-    // identificar marca/obra, así que si cambió conviene revisarlo de nuevo.
-    if (cacheado && cacheado.modificado === f.lastModifiedDateTime && (cacheado.carpeta || '') === (f.carpeta || '')) {
+    const cacheado = cachePorId[procesosClaveArchivoCache(f.carpeta, f.name)];
+    if (cacheado && cacheado.modificado === f.lastModifiedDateTime) {
       resultado.push({ nombre: f.name, carpeta: cacheado.carpeta || '', texto: cacheado.texto, resumen: cacheado.resumen });
       continue;
     }
@@ -5041,7 +5048,7 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
       if (texto) {
         const resumen = await procesosResumirTexto(texto, f.name, f.carpeta);
         resultado.push({ nombre: f.name, carpeta: f.carpeta || '', texto, resumen });
-        cachePorId[f.id] = { item_id: f.id, nombre: f.name, carpeta: f.carpeta || '', modificado: f.lastModifiedDateTime, texto, resumen };
+        cachePorId[procesosClaveArchivoCache(f.carpeta, f.name)] = { item_id: f.id, nombre: f.name, carpeta: f.carpeta || '', modificado: f.lastModifiedDateTime, texto, resumen };
         cambios = true;
       }
     } catch(e) { console.warn(`No se pudo extraer "${f.name}":`, e.message); }
