@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.46</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.47</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.46</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.47</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5697,6 +5697,7 @@ async function procesosAbrirProyecto(id) {
   procesosStep1Files = [];
   procesosStep1SpFolder = rows[0].info_cliente?.carpeta_cliente || null;
   procesosStep1PendingRetry = null;
+  procesosStep1PendingNormativa = null;
   // OJO: acá NO se llama a procesosBibliografiaCacheReset() a propósito —
   // esa caché ya se invalida sola cuando cambia el id de proyecto (ver
   // procesosObtenerCandidatosBibliografia), así que si el usuario vuelve a
@@ -5880,11 +5881,13 @@ function procesosStep1Html(p) {
       <button class="sp-browse-btn" onclick="procesosStep1SelectFolder()">Seleccionar carpeta</button>
       ${procesosStep1SpFolder ? `<button class="sp-browse-btn" onclick="procesosStep1QuitarCarpeta()">Quitar carpeta</button>` : ''}
     </div>
-    <p class="hint" style="margin-bottom:10px">También se suman solos los documentos de "Normativa" e "Información general" cargados en Cfg Procesos IA.</p>
+    <p class="hint" style="margin-bottom:10px">También se suma sola la "Información general" cargada en Cfg Procesos IA. La normativa se resuelve aparte, después del análisis: MAIA propone un documento puntual y pide tu confirmación antes de usarlo.</p>
 
     <button class="btn btn-primary" onclick="procesosStep1Analizar()">✦ ${tieneAnalisis?'Volver a analizar':'Analizar'} con IA</button>
     <div id="procesos-step1-status"></div>
     ${procesosStep1PendingRetry ? procesosStep1ChooserHtml() : ''}
+    ${procesosStep1PendingNormativa ? procesosStep1NormativaCardHtml() : ''}
+    <div id="procesos-step1-normativa-status"></div>
 
     ${tieneAnalisis ? `
       <div class="gap"></div>
@@ -5992,10 +5995,229 @@ function procesosEliminarCorriente(idx) {
 // elija a mano qué sacar, en vez de que MAIA decida solo.
 let procesosStep1PendingRetry = null; // { contentItems, prompt, sugeridos: Set<string> }
 
+// Selección de normativa con aprobación del usuario — ver
+// procesosStep1NormativaVerificar. Guarda { faltantes, candidatos, sugerencia }
+// mientras se espera que el usuario confirme o elija manualmente.
+let procesosStep1PendingNormativa = null;
+
+// Lista SOLO los nombres (y carpeta/subcarpeta) de los documentos de la
+// categoría "normativa" — sin bajar ni analizar ningún contenido todavía.
+// Es la base para que la IA pueda proponer cuál aplica, y para que el
+// usuario elija manualmente entre las mismas opciones si la propuesta no le
+// sirve.
+async function procesosNormativaListarCandidatos() {
+  const candidatos = [];
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['normativa']);
+    if (!docs.length) return candidatos;
+    const token = await getMsToken();
+    for (const doc of docs) {
+      if (doc.tipo === 'carpeta') {
+        const archivos = await procesosListarArchivosCarpeta(doc.site_id, doc.item_id, token);
+        archivos.forEach(a => candidatos.push({ docId: doc.id, nombre: a.name, carpeta: a.carpeta || '' }));
+      } else {
+        candidatos.push({ docId: doc.id, nombre: doc.nombre, carpeta: '' });
+      }
+    }
+  } catch(e) { console.warn('No se pudo listar la normativa disponible:', e.message); }
+  return candidatos;
+}
+
+// Le pide a la IA que elija, SOLO por nombre/ruta (sin contenido todavía),
+// qué documento de normativa aplica a este proyecto — barato y rápido,
+// pensado para carpetas con muchos documentos de distintas jurisdicciones.
+async function procesosNormativaSugerir(contextoTexto, candidatos) {
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey || !candidatos.length) return null;
+    const listado = candidatos.map((c,i) => `${i+1}. ${c.carpeta ? c.carpeta+'/' : ''}${c.nombre}`).join('\n');
+    const prompt = `Contexto del proyecto:\n${contextoTexto}\n\nDocumentos de normativa disponibles (por ahora solo se ven los nombres/rutas, todavía no el contenido):\n${listado}\n\n¿Cuál de estos documentos de normativa aplica a este proyecto, a juzgar por la ubicación y/o el tipo de vuelco que se pueda inferir del nombre/ruta y del contexto del proyecto? Elegí UNO solo, el más específico/aplicable. Respondé SOLO con JSON (sin backticks): {"elegido": <número o null>, "motivo": "..."}. Si no podés determinarlo con una confianza razonable, poné "elegido": null y explicá por qué en "motivo".`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:300, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const idx = parsed.elegido;
+    if (idx == null || !candidatos[idx-1]) return { candidato: null, motivo: parsed.motivo || '' };
+    return { candidato: candidatos[idx-1], motivo: parsed.motivo || '' };
+  } catch(e) { console.warn('No se pudo sugerir normativa:', e.message); return null; }
+}
+
+// Después de un análisis de Paso 1: si quedaron parámetros sin límite
+// normativo (porque no estaba en los documentos del cliente), busca qué
+// documento de normativa podría aplicar y le pide confirmación al usuario
+// antes de usarlo — nunca lo aplica solo.
+async function procesosStep1NormativaVerificar(p) {
+  const corrientes = p.info_cliente?.corrientes || [];
+  const faltantes = [];
+  corrientes.forEach(c => Object.entries(c.campos||{}).forEach(([k,v]) => {
+    if (v && typeof v === 'object' && v.valor != null && v.valor !== '' && v.limite_normativo == null) faltantes.push(`${c.nombre}: ${k}`);
+  }));
+  if (!faltantes.length) return; // no falta ningún límite, no hace falta buscar nada
+  const candidatos = await procesosNormativaListarCandidatos();
+  if (!candidatos.length || procesosCurrentProyecto !== p) return; // no hay normativa configurada, o el usuario ya se fue del proyecto
+  const contexto = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n${procesosResumenCampos(p)}\nParámetros sin límite normativo todavía: ${faltantes.join('; ')}`;
+  const sugerencia = await procesosNormativaSugerir(contexto, candidatos);
+  if (procesosCurrentProyecto !== p) return;
+  procesosStep1PendingNormativa = { faltantes, candidatos, sugerencia };
+  renderProcesosStepContent();
+}
+
+function procesosStep1NormativaCardHtml() {
+  const { candidatos, sugerencia } = procesosStep1PendingNormativa;
+  const nombreSugerido = c => `${c.carpeta ? c.carpeta+'/' : ''}${c.nombre}`;
+  return `
+    <div class="card" style="margin-top:8px;border-color:var(--blue)">
+      <div class="card-label">📋 Faltan límites normativos</div>
+      ${sugerencia && sugerencia.candidato ? `
+        <p class="hint" style="margin-bottom:8px">MAIA propone usar <b>${esc(nombreSugerido(sugerencia.candidato))}</b> para completar los límites que faltan.${sugerencia.motivo ? ' '+esc(sugerencia.motivo) : ''}</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="btn btn-primary btn-sm" onclick="procesosStep1NormativaAplicar(procesosStep1PendingNormativa.sugerencia.candidato)">✓ Confirmar y usar</button>
+          <button class="btn btn-secondary btn-sm" onclick="procesosStep1NormativaMostrarSelector()">No, elegir yo</button>
+        </div>
+      ` : `
+        <p class="hint" style="margin-bottom:8px">MAIA no pudo determinar sola qué documento de normativa aplica${sugerencia && sugerencia.motivo ? ' ('+esc(sugerencia.motivo)+')' : ''} — elegilo vos de la lista.</p>
+      `}
+      <div id="procesos-step1-normativa-selector" ${sugerencia && sugerencia.candidato ? 'style="display:none"' : ''}>
+        <select id="procesos-step1-normativa-select">
+          <option value="">Elegir documento de normativa...</option>
+          ${candidatos.map((c,i) => `<option value="${i}">${esc(nombreSugerido(c))}</option>`).join('')}
+        </select>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-primary btn-sm" onclick="const i=document.getElementById('procesos-step1-normativa-select').value; if(i!=='') procesosStep1NormativaAplicar(procesosStep1PendingNormativa.candidatos[Number(i)])">Usar este</button>
+          <button class="btn btn-secondary btn-sm" onclick="procesosStep1NormativaDescartar()">Ninguno / omitir por ahora</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function procesosStep1NormativaMostrarSelector() {
+  const el = document.getElementById('procesos-step1-normativa-selector');
+  if (el) el.style.display = '';
+}
+
+function procesosStep1NormativaDescartar() {
+  procesosStep1PendingNormativa = null;
+  renderProcesosStepContent();
+}
+
+// Extrae el texto de UN solo archivo puntual de normativa — si el documento
+// es tipo carpeta, no procesa toda la carpeta, solo el archivo elegido
+// (reusa la caché de esa carpeta si ya lo tenía, y si no, lo agrega sin
+// tocar el resto de la caché existente).
+async function procesosNormativaExtraerTexto(candidato, token) {
+  const docs = await procesosGetDocumentosPorCategoria(['normativa']);
+  const doc = docs.find(d => d.id === candidato.docId);
+  if (!doc) return null;
+  if (doc.tipo !== 'carpeta') return await procesosDocGetTexto(doc, token);
+
+  const archivos = await procesosListarArchivosCarpeta(doc.site_id, doc.item_id, token);
+  const real = archivos.find(a => a.name === candidato.nombre && (a.carpeta||'') === (candidato.carpeta||''));
+  if (!real) return null;
+  const cacheActual = doc.archivos_cache || [];
+  const clave = procesosClaveArchivoCache(real.carpeta, real.name);
+  const cacheado = cacheActual.find(a => procesosClaveArchivoCache(a.carpeta, a.nombre) === clave);
+  if (cacheado && cacheado.modificado && new Date(real.lastModifiedDateTime) <= new Date(cacheado.modificado)) {
+    return cacheado.texto;
+  }
+  const isPdf = /\.pdf$/i.test(real.name);
+  const isImg = /\.(jpg|jpeg|png)$/i.test(real.name);
+  const needsConvert = !isPdf && !isImg;
+  const dlUrl = needsConvert
+    ? `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${real.id}/content?format=pdf`
+    : `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${real.id}/content`;
+  const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
+  if (!dlResp.ok) return null;
+  const buf = await dlResp.arrayBuffer();
+  let binary = ''; const bytes = new Uint8Array(buf);
+  for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  let block;
+  if (needsConvert || isPdf) {
+    if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${real.name}" por superar las 100 páginas.`); return null; }
+    block = {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}};
+  } else {
+    const mt = /\.png$/i.test(real.name) ? 'image/png' : 'image/jpeg';
+    block = {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}};
+  }
+  const texto = await procesosExtraerTextoDeContentBlock(block, real.name);
+  if (!texto) return null;
+  const resumen = await procesosResumirTexto(texto, real.name, real.carpeta);
+  const nuevoCache = cacheActual.filter(a => procesosClaveArchivoCache(a.carpeta, a.nombre) !== clave);
+  nuevoCache.push({ item_id: real.id, nombre: real.name, carpeta: real.carpeta||'', modificado: real.lastModifiedDateTime, texto, resumen });
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_documentos?id=eq.${doc.id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ archivos_cache: nuevoCache })
+  });
+  doc.archivos_cache = nuevoCache;
+  return texto;
+}
+
+// El usuario confirmó (o eligió a mano) un documento de normativa puntual —
+// se extrae su texto completo (una sola vez, después queda cacheado) y se le
+// pide a la IA que saque de ahí los límites de los parámetros que faltaban,
+// nada más — nunca reemplaza un límite que ya vino de los documentos del
+// cliente (esos no están en la lista de "faltantes").
+async function procesosStep1NormativaAplicar(candidato) {
+  if (!candidato) return;
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step1-normativa-status';
+  const faltantes = procesosStep1PendingNormativa ? procesosStep1PendingNormativa.faltantes : [];
+  const nombreMostrado = `${candidato.carpeta ? candidato.carpeta+'/' : ''}${candidato.nombre}`;
+  showMsg(statusId, 'loading', `Extrayendo "${nombreMostrado}"...`);
+  try {
+    const token = await getMsToken();
+    const texto = await procesosNormativaExtraerTexto(candidato, token);
+    if (!texto) throw new Error('No se pudo extraer el texto de ese documento.');
+    if (procesosCurrentProyecto !== p) return;
+    showMsg(statusId, 'loading', 'Extrayendo límites aplicables...');
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const prompt = `Este es un documento de normativa de vuelco/descarga de efluentes ("${nombreMostrado}").\n\nEl proyecto tiene estos parámetros sin límite normativo definido todavía (formato "Corriente: Parámetro"): ${faltantes.join('; ')}.\n\nPara cada uno, si este documento establece un límite aplicable, extraelo (valor numérico y unidad). Si el documento no cubre ese parámetro puntual, o no aplica, dejalo afuera de la respuesta — no lo inventes.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta, usando como clave EXACTAMENTE "Corriente|Parametro" (con esas comillas y separador, tal como aparecen arriba pero con "|" en vez de ": "): {"Corriente|Parametro":{"limite_normativo":<número>,"unidad":"<unidad>"}}\n\nDocumento:\n${texto.slice(0,40000)}`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+
+    const info = Object.assign({}, p.info_cliente);
+    const corrientes = (info.corrientes||[]).map(c => Object.assign({}, c, { campos: Object.assign({}, c.campos) }));
+    let aplicados = 0;
+    Object.entries(parsed).forEach(([clave, val]) => {
+      const sep = clave.indexOf('|');
+      if (sep < 0 || val.limite_normativo == null) return;
+      const nombreCorriente = clave.slice(0, sep), nombreParam = clave.slice(sep+1);
+      const c = corrientes.find(x => x.nombre === nombreCorriente);
+      if (!c || !c.campos[nombreParam]) return;
+      const actual = c.campos[nombreParam];
+      c.campos[nombreParam] = Object.assign({}, actual, {
+        limite_normativo: val.limite_normativo,
+        fuente: (actual.fuente ? actual.fuente + ' · ' : '') + `Límite normativo: ${nombreMostrado}`
+      });
+      aplicados++;
+    });
+    info.corrientes = corrientes;
+    await procesosSaveProyecto({ info_cliente: info }, p);
+    if (procesosCurrentProyecto !== p) return;
+    procesosStep1PendingNormativa = null;
+    showMsg(statusId, 'success', aplicados ? `✓ Se cargaron ${aplicados} límite(s) desde "${nombreMostrado}".` : `El documento no cubría ninguno de los parámetros que faltaban.`);
+    renderProcesosStepContent();
+  } catch(e) {
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
 async function procesosStep1Analizar() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-status';
   procesosStep1PendingRetry = null;
+  procesosStep1PendingNormativa = null;
   showMsg(statusId,'loading','Preparando archivos...');
   try {
     const iaFields = getProcesosIAFields().filter(f=>f.name.trim());
@@ -6019,14 +6241,16 @@ async function procesosStep1Analizar() {
     }
     if (!contentItems.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
-    // Documentos de referencia que se adjuntan solos en este paso: Normativa + Información general.
-    // Se filtran por relevancia (ver procesosObtenerBibliografiaRelevante) contra lo poco que
-    // se sabe del proyecto en este punto (todavía no se extrajeron parámetros) — nombre del
-    // cliente/proyecto y los nombres de los archivos subidos, que suelen delatar ubicación/rubro
-    // (ej. "Res_ACUMAR.pdf", "Planilla_Cliente_Neuquén.xlsx").
+    // Documentos de referencia que se adjuntan solos en este paso: Información
+    // general (bibliografía general de la empresa). Normativa YA NO se
+    // adjunta acá — si el cliente trajo su propio límite normativo en sus
+    // documentos, ese sigue prevaleciendo (se lo sigue pidiendo en el prompt
+    // de abajo); si falta, se resuelve DESPUÉS con procesosStep1NormativaVerificar,
+    // que elige (con aprobación del usuario) un único documento puntual de
+    // normativa en vez de adjuntarlos todos de entrada.
     showMsg(statusId,'loading','Buscando documentos de referencia...');
     const contextoStep1 = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nArchivos del cliente/proyecto ya adjuntados: ${contentItems.map(c=>c.nombre).join(', ') || '(ninguno)'}`;
-    const docsRef = await procesosObtenerBibliografiaRelevante(['normativa','informacion_general'], contextoStep1);
+    const docsRef = await procesosObtenerBibliografiaRelevante(['informacion_general'], contextoStep1);
     if (docsRef.length) {
       showMsg(statusId,'loading','Adjuntando documentos de referencia...');
       contentItems.push(...docsRef.map(d => ({ nombre: d.nombre, block: d.block })));
@@ -6036,7 +6260,7 @@ async function procesosStep1Analizar() {
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente; si no está, buscalo en los documentos de normativa adjuntos (si hay más de uno, elegí el que corresponda según la ubicación y el tipo de vuelco de ESA corriente) y aplicá el valor que ese documento establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluida la información general de la empresa, si está adjunta).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<número o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": fijate SOLO si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece). Si no está en los documentos del cliente, dejalo null por ahora — no inventes un valor de memoria, y no hace falta buscarlo en ningún otro lado: eso se resuelve en un paso aparte, con un documento de normativa puntual que el sistema va a proponer y el usuario va a confirmar. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
 
     await procesosStep1EjecutarAnalisis(contentItems, prompt);
   } catch(e) {
@@ -6090,6 +6314,7 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt) {
       showMsg(statusId,'success','✓ Análisis completo.');
       renderProcesosStepContent();
       procesosDetectarSimilares();
+      procesosStep1NormativaVerificar(p);
     }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
