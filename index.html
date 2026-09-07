@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.42</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.43</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.42</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.43</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5251,16 +5251,66 @@ fbSelectFile = async function(item, relativePath) {
 };
 
 // ── Catálogo de proyectos anteriores (Cfg Procesos IA) ──
+// Con cientos de proyectos (carga masiva por carpeta), mostrar todo expandido
+// de una es inusable — se trae la lista liviana (sin archivos_cache, que puede
+// pesar mucho) UNA vez y de ahí en más se filtra/expande en memoria, sin
+// volver a pedirle nada al servidor por cada letra tipeada.
+let _procesosCatalogoState = { rows: null, filtro: '', expandedId: null };
+
 async function renderProcesosCatalogo() {
   const el = document.getElementById('procesos-catalogo-list');
   if (!el) return;
+  const filtroPrevio = _procesosCatalogoState.filtro || '';
+  const expandedPrevio = _procesosCatalogoState.expandedId || null;
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=*&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_path,carpeta_item_id&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
-    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<p class="hint">Todavía no hay proyectos cargados en el catálogo.</p>'; return; }
-    el.innerHTML = rows.map(p => `
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; return; }
+    _procesosCatalogoState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
+    procesosCatalogoRenderLista();
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
+}
+
+function procesosCatalogoRenderLista() {
+  const el = document.getElementById('procesos-catalogo-list');
+  if (!el) return;
+  const { rows, filtro, expandedId } = _procesosCatalogoState;
+  if (!rows) return;
+  const f = (filtro || '').trim().toLowerCase();
+  // Sin búsqueda pero con un proyecto abierto (ej. recién creado, o volviendo
+  // de "Vincular carpeta"): mostrar solo ESE, no los 185 sin filtrar.
+  const filtrados = f
+    ? rows.filter(p => [p.nombre, p.cliente, p.rubro, p.tags].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(p => p.id === expandedId) : rows);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <input id="procesos-catalogo-buscar" placeholder="Buscar por nombre, cliente, rubro o tag..." value="${esc(filtro)}" oninput="procesosCatalogoFiltrar(this.value)" style="flex:1" />
+      <span class="hint" style="white-space:nowrap">${rows.length} proyecto${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) {
+    el.innerHTML = header + '<p class="hint">Todavía no hay proyectos cargados en el catálogo.</p>';
+    return;
+  }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar un proyecto del catálogo (por nombre, cliente, rubro o tag).</p>';
+    procesosCatalogoRestaurarFoco();
+    return;
+  }
+  const LIMITE = 50;
+  el.innerHTML = header + filtrados.slice(0, LIMITE).map(p => {
+    const abierto = expandedId === p.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosCatalogoExpandir('${p.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span><b>${esc(p.nombre)}</b>${p.cliente?' — '+esc(p.cliente):''}${p.rubro?' <span style="color:var(--text2)">· '+esc(p.rubro)+'</span>':''}</span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosCatalogoEliminar('${p.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    return `
       <div class="field-row">
         <div class="field-row-top">
           <input value="${esc(p.nombre)}" placeholder="Nombre del proyecto" oninput="procesosCatalogoUpdate('${p.id}','nombre',this.value)" />
@@ -5276,8 +5326,30 @@ async function renderProcesosCatalogo() {
           <button class="sp-browse-btn" onclick="procesosCatalogoSelectFolder('${p.id}')">Vincular carpeta</button>
           ${p.carpeta_item_id ? `<button class="sp-browse-btn" onclick="procesosCatalogoRegenerarResumen('${p.id}')">${p.resumen_ia?'↻ Regenerar':'✦ Generar'} resumen con IA</button>` : ''}
         </div>
-      </div>`).join('');
-  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
+        <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosCatalogoExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('') + (filtrados.length > LIMITE ? `<p class="hint">Mostrando ${LIMITE} de ${filtrados.length} — afiná la búsqueda para ver el resto.</p>` : '');
+  procesosCatalogoRestaurarFoco();
+}
+
+// Reemplazar el innerHTML del contenedor destruye el <input> de búsqueda y
+// crea uno nuevo — sin esto, cada letra tipeada le hace perder el foco.
+function procesosCatalogoRestaurarFoco() {
+  const inp = document.getElementById('procesos-catalogo-buscar');
+  if (!inp || !_procesosCatalogoState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+
+function procesosCatalogoFiltrar(v) {
+  _procesosCatalogoState.filtro = v;
+  _procesosCatalogoState._buscando = true;
+  procesosCatalogoRenderLista();
+}
+function procesosCatalogoExpandir(id) {
+  _procesosCatalogoState.expandedId = id;
+  procesosCatalogoRenderLista();
 }
 
 async function procesosCatalogoAdd() {
@@ -5287,10 +5359,17 @@ async function procesosCatalogoAdd() {
     body: JSON.stringify({ empresa: currentEmpresa, nombre: 'Nuevo proyecto' })
   });
   if (!res.ok) { alert('No se pudo agregar el proyecto.'); return; }
+  const data = await res.json().catch(()=>null);
+  // Abre directo el nuevo proyecto (buscándolo por nombre, ya que "Nuevo
+  // proyecto" es el único que va a matchear salvo que ya haya otro igual).
+  _procesosCatalogoState.filtro = '';
+  _procesosCatalogoState.expandedId = data && data[0] ? data[0].id : null;
   renderProcesosCatalogo();
 }
 
 async function procesosCatalogoUpdate(id, field, val) {
+  const row = (_procesosCatalogoState.rows || []).find(r => r.id === id);
+  if (row) row[field] = val;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
@@ -5302,6 +5381,7 @@ async function procesosCatalogoEliminar(id) {
   if (!confirm('¿Eliminar este proyecto del catálogo?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosCatalogoState.expandedId === id) _procesosCatalogoState.expandedId = null;
   renderProcesosCatalogo();
 }
 
