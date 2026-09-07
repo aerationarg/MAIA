@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.39</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.40</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.39</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.40</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4910,15 +4910,20 @@ async function procesosExtraerTextoDeContentBlock(block, nombre) {
 // concretos (números, modelos, límites, tecnologías) que hacen falta para
 // juzgar si ESTE documento aplica a un proyecto puntual — no hace falta que
 // el detalle esté completo ahí, para eso se usa el texto completo después.
-async function procesosResumirTexto(texto, nombreArchivo) {
+async function procesosResumirTexto(texto, nombreArchivo, carpeta) {
   try {
     const apiKey = getApiKey();
     if (!apiKey || !texto) return null;
+    // Si el archivo está dentro de una subcarpeta (ej. "Grundfos/Bombas
+    // sumergibles"), se lo decimos a la IA — suele ser justo la pista que
+    // identifica marca/tecnología (en Equipos) o cliente/obra (en Ofertas),
+    // y a veces no está mencionada dentro del documento en sí.
+    const carpetaTxt = carpeta ? `\nEstá guardado dentro de la carpeta "${carpeta}" — si eso indica la marca, tecnología, cliente u obra a la que corresponde, mencionalo en el resumen.` : '';
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5', max_tokens: 300,
-        messages: [{ role: 'user', content: [{ type: 'text', text: `Resumí en 3-5 líneas el siguiente documento ("${nombreArchivo}"), pensando que este resumen se va a usar para decidir SI EL DOCUMENTO APLICA a un proyecto puntual (no para el detalle final — eso se saca del documento completo después). Priorizá mencionar de qué trata específicamente (marca/modelo si es un equipo, tecnología, jurisdicción/tipo de vuelco si es normativa, cliente/rubro si es una oferta anterior, etc.), no hace falta el detalle numérico. Respondé solo con el resumen, sin encabezados.\n\nDocumento:\n${texto.slice(0, 15000)}` }] }]
+        messages: [{ role: 'user', content: [{ type: 'text', text: `Resumí en 3-5 líneas el siguiente documento ("${nombreArchivo}"), pensando que este resumen se va a usar para decidir SI EL DOCUMENTO APLICA a un proyecto puntual (no para el detalle final — eso se saca del documento completo después). Priorizá mencionar de qué trata específicamente (marca/modelo si es un equipo, tecnología, jurisdicción/tipo de vuelco si es normativa, cliente/rubro si es una oferta anterior, etc.), no hace falta el detalle numérico.${carpetaTxt} Respondé solo con el resumen, sin encabezados.\n\nDocumento:\n${texto.slice(0, 15000)}` }] }]
       })
     });
     if (!resp.ok) return null;
@@ -4956,15 +4961,29 @@ async function procesosDocGetTexto(doc, token) {
 // Lista TODOS los archivos de una carpeta de SharePoint, siguiendo la
 // paginación de Graph (@odata.nextLink) — antes se cortaba en los primeros
 // 50, lo que dejaba afuera la mayoría de una carpeta con cientos de archivos.
-async function procesosListarArchivosCarpeta(siteId, itemId, token) {
+// Además entra RECURSIVAMENTE a las subcarpetas (antes solo traía los
+// archivos sueltos del primer nivel, ignorando todo lo que estuviera
+// organizado en subcarpetas) — y a cada archivo le agrega `carpeta`, la ruta
+// relativa (ej. "Grundfos/Bombas sumergibles") a la carpeta vinculada, vacía
+// para los archivos sueltos del primer nivel.
+async function procesosListarArchivosCarpeta(siteId, itemId, token, rutaBase) {
+  rutaBase = rutaBase || '';
   const archivos = [];
-  let url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children?$top=200&$select=id,name,file,lastModifiedDateTime`;
+  const subcarpetas = [];
+  let url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/children?$top=200&$select=id,name,file,folder,lastModifiedDateTime`;
   while (url) {
     const resp = await fetch(url, { headers: { Authorization: 'Bearer '+token } });
     if (!resp.ok) throw new Error('HTTP '+resp.status);
     const data = await resp.json();
-    archivos.push(...(data.value || []).filter(f => f.file));
+    (data.value || []).forEach(item => {
+      if (item.file) archivos.push(Object.assign({}, item, { carpeta: rutaBase }));
+      else if (item.folder) subcarpetas.push(item);
+    });
     url = data['@odata.nextLink'] || null;
+  }
+  for (const sub of subcarpetas) {
+    const rutaHija = rutaBase ? `${rutaBase}/${sub.name}` : sub.name;
+    archivos.push(...await procesosListarArchivosCarpeta(siteId, sub.id, token, rutaHija));
   }
   return archivos;
 }
@@ -4982,18 +5001,22 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
     children = await procesosListarArchivosCarpeta(siteId, itemId, token);
   } catch(e) {
     console.warn('No se pudo listar la carpeta, usando caché existente:', e.message);
-    return { resultado: (cacheActual || []).map(f => ({ nombre: f.nombre, texto: f.texto, resumen: f.resumen })), cachePorId, cambios: false };
+    return { resultado: (cacheActual || []).map(f => ({ nombre: f.nombre, carpeta: f.carpeta || '', texto: f.texto, resumen: f.resumen })), cachePorId, cambios: false };
   }
 
   const resultado = [];
   let cambios = false;
   for (const f of children) {
     const cacheado = cachePorId[f.id];
-    if (cacheado && cacheado.modificado === f.lastModifiedDateTime) {
-      resultado.push({ nombre: f.name, texto: cacheado.texto, resumen: cacheado.resumen });
+    // Si además de no haber cambiado el archivo tampoco cambió de carpeta, se
+    // reusa el caché tal cual; si se movió de subcarpeta (mismo archivo, otra
+    // ruta) se reprocesa el resumen — la carpeta es justo la pista que puede
+    // identificar marca/obra, así que si cambió conviene revisarlo de nuevo.
+    if (cacheado && cacheado.modificado === f.lastModifiedDateTime && (cacheado.carpeta || '') === (f.carpeta || '')) {
+      resultado.push({ nombre: f.name, carpeta: cacheado.carpeta || '', texto: cacheado.texto, resumen: cacheado.resumen });
       continue;
     }
-    if (onProgreso) onProgreso(f.name);
+    if (onProgreso) onProgreso(f.carpeta ? `${f.carpeta}/${f.name}` : f.name);
     try {
       const isPdf = /\.pdf$/i.test(f.name);
       const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
@@ -5016,9 +5039,9 @@ async function procesosExtraerTextosDeCarpeta(siteId, itemId, cacheActual, token
       }
       const texto = await procesosExtraerTextoDeContentBlock(block, f.name);
       if (texto) {
-        const resumen = await procesosResumirTexto(texto, f.name);
-        resultado.push({ nombre: f.name, texto, resumen });
-        cachePorId[f.id] = { item_id: f.id, nombre: f.name, modificado: f.lastModifiedDateTime, texto, resumen };
+        const resumen = await procesosResumirTexto(texto, f.name, f.carpeta);
+        resultado.push({ nombre: f.name, carpeta: f.carpeta || '', texto, resumen });
+        cachePorId[f.id] = { item_id: f.id, nombre: f.name, carpeta: f.carpeta || '', modificado: f.lastModifiedDateTime, texto, resumen };
         cambios = true;
       }
     } catch(e) { console.warn(`No se pudo extraer "${f.name}":`, e.message); }
@@ -5066,6 +5089,13 @@ async function procesosClienteGetTextosCarpeta(token, proyecto) {
   return resultado;
 }
 
+// Nombre de archivo con su ruta de subcarpeta adelante (ej. "Grundfos/Bombas
+// sumergibles/ficha.pdf") — se le manda así a la IA para que la carpeta
+// (marca, obra, etc.) quede visible como contexto, no solo el nombre suelto.
+function procesosNombreConCarpeta(nombre, carpeta) {
+  return carpeta ? `${carpeta}/${nombre}` : nombre;
+}
+
 // Devuelve [{block, nombre}] — cada documento como un content block de TEXTO
 // (cacheado, no PDF/imagen crudo cada vez) junto con el nombre del archivo, para
 // poder avisar cuál se omitió si hace falta.
@@ -5074,7 +5104,7 @@ async function procesosDocsToContentBlocks(token, docs) {
   for (const doc of docs) {
     if (doc.tipo === 'carpeta') {
       const textos = await procesosDocGetTextosCarpeta(doc, token);
-      textos.forEach(t => items.push({ block: {type:'text', text:`Documento: ${t.nombre}\n\n${t.texto}`}, nombre: t.nombre }));
+      textos.forEach(t => { const nombreCompleto = procesosNombreConCarpeta(t.nombre, t.carpeta); items.push({ block: {type:'text', text:`Documento: ${nombreCompleto}\n\n${t.texto}`}, nombre: nombreCompleto }); });
     } else {
       const texto = await procesosDocGetTexto(doc, token);
       if (texto) items.push({ block: {type:'text', text:`Documento: ${doc.nombre}\n\n${texto}`}, nombre: doc.nombre });
@@ -5115,7 +5145,7 @@ async function procesosObtenerCandidatosBibliografia(categorias) {
     for (const doc of docs) {
       if (doc.tipo === 'carpeta') {
         const archivos = await procesosDocGetTextosCarpeta(doc, token);
-        archivos.forEach(a => candidatos.push({ nombre: a.nombre, resumen: a.resumen || null, texto: a.texto || null }));
+        archivos.forEach(a => candidatos.push({ nombre: procesosNombreConCarpeta(a.nombre, a.carpeta), resumen: a.resumen || null, texto: a.texto || null }));
       } else {
         const texto = await procesosDocGetTexto(doc, token);
         candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: texto || null });
@@ -5175,7 +5205,7 @@ async function procesosCatalogoGenerarResumen(entry, token) {
   if (!textos.length) return null;
   const apiKey = getApiKey();
   if (!apiKey) return null;
-  const combinado = textos.map(t => `Documento: ${t.nombre}\n${t.texto}`).join('\n\n---\n\n');
+  const combinado = textos.map(t => `Documento: ${procesosNombreConCarpeta(t.nombre, t.carpeta)}\n${t.texto}`).join('\n\n---\n\n');
   const prompt = `Este es el contenido de los documentos del proyecto anterior "${entry.nombre}":\n\n${combinado}\n\nRedactá un resumen breve (3-5 líneas, en español) para usar como referencia al comparar con proyectos nuevos: rubro/industria del cliente, tipo de efluente, caudal y parámetros clave si figuran, y tecnología/etapas de tratamiento usadas. Respondé solo con el resumen, sin encabezados ni JSON.`;
   try {
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -8217,7 +8247,7 @@ async function procesosChatSend() {
       // solo reprocesa lo nuevo/cambiado, no vuelve a mandar los PDF/imágenes
       // originales cada vez que hace falta reconsultar algo en este proyecto.
       const textos = await procesosClienteGetTextosCarpeta(token, p);
-      const contentBlocks = textos.map(t => ({type:'text', text:`Documento: ${t.nombre}\n\n${t.texto}`}));
+      const contentBlocks = textos.map(t => ({type:'text', text:`Documento: ${procesosNombreConCarpeta(t.nombre, t.carpeta)}\n\n${t.texto}`}));
       const messages2 = messages.concat([
         { role:'assistant', content: raw },
         { role:'user', content: [...contentBlocks, {type:'text', text:'Ahí tenés los documentos originales del cliente. Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y "actualizaciones" si corresponde).'}] }
