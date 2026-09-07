@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.38</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.39</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.38</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.39</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1963,6 +1963,41 @@ function procesosFormatearNumero(v) {
   return Number(v.toFixed(2)).toString();
 }
 function today() { const d=new Date(); return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); }
+
+// Convierte un string "DD/MM/YYYY" (o D/M/YYYY, con "/" o "-") al número de
+// serie de fecha de Excel, para escribirlo directo en una celda vía Graph API
+// SIN mandarle un string que Excel tenga que interpretar solo. Bug real que
+// esto evita: al escribir un string tipo "08/11/2026" en una celda vía la API,
+// Excel decide solo si es DD/MM o MM/DD — con el día ≤12 la ambigüedad a veces
+// se resuelve al revés (queda invertido día/mes, ej. "8 de noviembre" en vez de
+// "11 de agosto"), y con el día >12 a veces ni siquiera lo convierte y lo deja
+// como texto plano. Mandando ya el número de serie no hay nada que adivinar.
+function rendFechaASerial(str) {
+  if (typeof str !== 'string') return null;
+  const m = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/.exec(str.trim());
+  if (!m) return null;
+  let d = Number(m[1]), mo = Number(m[2]), y = Number(m[3]);
+  if (y < 100) y += 2000;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return Math.round((Date.UTC(y, mo - 1, d) - Date.UTC(1899, 11, 30)) / 86400000);
+}
+// Post-procesa una fila ya armada para escribir en Excel: convierte las
+// columnas cuyo encabezado dice "fecha" (pero no "fecha de análisis", que es
+// un timestamp de texto para uso humano, no la fecha del comprobante) de
+// string DD/MM/YYYY a número de serie — devuelve los índices de columna
+// convertidos, para después fijarles un formato de visualización fijo
+// (dd/mm/yyyy) y que no queden inconsistentes entre filas.
+function rendConvertirFechasEnFila(newRow, headers) {
+  const cols = [];
+  headers.forEach((h, i) => {
+    if (!h) return;
+    const hl = String(h).toLowerCase();
+    if (!hl.includes('fecha') || hl.includes('anal')) return;
+    const serial = rendFechaASerial(newRow[i]);
+    if (serial != null) { newRow[i] = serial; cols.push(i); }
+  });
+  return cols;
+}
 
 function showMsg(id, type, msg) {
   const el = document.getElementById(id);
@@ -8424,6 +8459,11 @@ async function spConfirm() {
     const siteId = await getSiteId(token);
     const fields = getRendFields().filter(f => f.name.trim());
     const doneFiles = files.filter(f => f.status === 'done');
+    // Filas cuyo PATCH de valores a Excel falló (antes se ignoraba en silencio:
+    // el comprobante quedaba "bien" en MAIA pero la fila nunca llegaba al
+    // Excel — bug real reportado). Se juntan acá y se avisan al final, sin
+    // frenar el resto ni dejar de subir los comprobantes ya procesados.
+    const filasFallidas = [];
 
     if (spMode === 'existing') {
       btn.textContent = '⏳ Actualizando Excel...';
@@ -8463,6 +8503,7 @@ async function spConfirm() {
 
       // Build rows to write
       const newRows = [];
+      const colsFechaPorFila = [];
       results.forEach(r => {
         let newRow;
         if (useMapping && headers.length > 0) {
@@ -8480,6 +8521,7 @@ async function spConfirm() {
             if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
           });
         }
+        colsFechaPorFila.push(rendConvertirFechasEnFila(newRow, headers));
         newRows.push(newRow);
       });
       // Write via Graph Excel API — preserves all formatting
@@ -8497,12 +8539,28 @@ async function spConfirm() {
           rowNum = firstEmptyRendRow + ri;
         }
         const lastColRend = String.fromCharCode(64 + Math.max(newRows[ri].length, 1));
-        await fetch(
+        const patchResp = await fetch(
           rendExcelBase + `range(address='A${rowNum}:${lastColRend}${rowNum}')`,
           { method:'PATCH',
             headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
             body: JSON.stringify({values:[newRows[ri]]}) }
         );
+        if (!patchResp.ok) {
+          const errBody = await patchResp.json().catch(()=>({}));
+          filasFallidas.push({ archivo: results[ri]?.__archivo__ || `fila ${rowNum}`, motivo: errBody.error?.message || `HTTP ${patchResp.status}` });
+        } else {
+          // Fecha ya va como número de serie (rendConvertirFechasEnFila) — acá
+          // se le fija además un formato de visualización fijo, así todas las
+          // filas quedan iguales (antes salía "13-ago" en unas y "26/08/2026"
+          // en otras según lo que Excel hubiera decidido solo al escribir).
+          for (const ci of colsFechaPorFila[ri]) {
+            const colLetter = String.fromCharCode(65 + ci);
+            await fetch(rendExcelBase + `range(address='${colLetter}${rowNum}:${colLetter}${rowNum}')`, {
+              method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+              body: JSON.stringify({ numberFormat: [['dd/mm/yyyy']] })
+            }).catch(()=>{}); // el formato es cosmético, no vale la pena frenar la rendición si esto falla
+          }
+        }
         if (totalRowNum && totalOrigFormulas) {
           await spUpdateTotalFormulas(token, rendExcelBase, totalRowNum, totalRowWidth, totalOrigFormulas, rowNum);
         }
@@ -8591,6 +8649,7 @@ async function spConfirm() {
             if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
           });
         }
+        const colsFechaTmpl = rendConvertirFechasEnFila(newRow, tmplHeaders);
         let rowNum;
         if (totalRowNumTmpl) {
           await spInsertRowAt(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl);
@@ -8600,10 +8659,22 @@ async function spConfirm() {
           rowNum = 2 + ri;
         }
         const lastCol = String.fromCharCode(64 + Math.max(newRow.length, 1));
-        await fetch(
+        const patchRespTmpl = await fetch(
           excelBaseRendTmpl + `range(address='A${rowNum}:${lastCol}${rowNum}')`,
           { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]}) }
         );
+        if (!patchRespTmpl.ok) {
+          const errBodyTmpl = await patchRespTmpl.json().catch(()=>({}));
+          filasFallidas.push({ archivo: r?.__archivo__ || `fila ${rowNum}`, motivo: errBodyTmpl.error?.message || `HTTP ${patchRespTmpl.status}` });
+        } else {
+          for (const ci of colsFechaTmpl) {
+            const colLetter = String.fromCharCode(65 + ci);
+            await fetch(excelBaseRendTmpl + `range(address='${colLetter}${rowNum}:${colLetter}${rowNum}')`, {
+              method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+              body: JSON.stringify({ numberFormat: [['dd/mm/yyyy']] })
+            }).catch(()=>{});
+          }
+        }
         if (totalRowNumTmpl && totalOrigFormulasTmpl) {
           await spUpdateTotalFormulas(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl, totalOrigFormulasTmpl, rowNum);
         }
@@ -8614,8 +8685,18 @@ async function spConfirm() {
     }
 
     spModalClose();
-    const excelMsg = spMode === 'template' ? '\n• Plantilla duplicada e info insertada' : '\n• Datos actualizados en Excel';
-    alert('✅ Listo!\n• ' + doneFiles.length + ' comprobante(s) guardados en SharePoint' + excelMsg);
+    if (filasFallidas.length) {
+      // Los comprobantes SÍ se subieron a SharePoint (eso no depende de esto) —
+      // lo que falló es la escritura de esas filas puntuales en el Excel, así
+      // que hay que avisar bien claro cuáles, para que se carguen a mano
+      // (antes esto quedaba en silencio: la fila no se escribía y no había
+      // ningún aviso — "en MAIA aparecía bien" pero nunca llegaba al Excel).
+      alert('⚠️ Comprobantes guardados en SharePoint, pero ' + filasFallidas.length + ' fila(s) NO se pudieron escribir en el Excel — cargalas a mano:\n\n' +
+        filasFallidas.map(f => '• ' + f.archivo + ' — ' + f.motivo).join('\n'));
+    } else {
+      const excelMsg = spMode === 'template' ? '\n• Plantilla duplicada e info insertada' : '\n• Datos actualizados en Excel';
+      alert('✅ Listo!\n• ' + doneFiles.length + ' comprobante(s) guardados en SharePoint' + excelMsg);
+    }
   } catch(e) {
     alert('❌ Error: ' + e.message);
   } finally {
