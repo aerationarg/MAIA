@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.48</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.49</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.48</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.49</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5567,7 +5567,46 @@ async function renderProcesosLeccionesSp() {
       <input id="procesos-lecciones-sp-sitepath" placeholder="Ruta del sitio (ej: cpm)" style="max-width:200px" />
       <button class="btn btn-secondary btn-sm" onclick="procesosLeccionesSpBuscarListas()">Buscar listas</button>
     </div>
+    <p class="hint" style="margin:6px 0 0">¿No aparece la que buscás? Poné el nombre EXACTO acá (tal cual figura en "Contenido del sitio") y buscala directo:</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
+      <input id="procesos-lecciones-sp-nombreexacto" placeholder="Nombre exacto de la lista" style="max-width:260px" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosLeccionesSpBuscarPorNombre()">Buscar por nombre</button>
+    </div>
     <div id="procesos-lecciones-sp-listas"></div>`;
+}
+
+// Respaldo cuando GET /sites/{id}/lists no trae la lista buscada (puede
+// pasar por permisos parciales en esa consulta general) — la busca directo
+// por nombre exacto con $filter, que sí la suele encontrar.
+async function procesosLeccionesSpBuscarPorNombre() {
+  const sitePath = (document.getElementById('procesos-lecciones-sp-sitepath')?.value || '').trim();
+  const nombre = (document.getElementById('procesos-lecciones-sp-nombreexacto')?.value || '').trim();
+  if (!sitePath || !nombre) return;
+  const cont = document.getElementById('procesos-lecciones-sp-listas');
+  cont.innerHTML = '<p class="hint">Buscando...</p>';
+  try {
+    const token = await getMsToken();
+    const siteResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${SHAREPOINT_HOST}:/sites/${encodeURIComponent(sitePath)}`, { headers: { Authorization: 'Bearer '+token } });
+    if (!siteResp.ok) throw new Error(`No se encontró el sitio "${sitePath}" (HTTP ${siteResp.status}).`);
+    const site = await siteResp.json();
+    const nombreEsc = nombre.replace(/'/g, "''");
+    const filtro = encodeURIComponent(`displayName eq '${nombreEsc}'`);
+    const listaResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${site.id}/lists?$select=id,displayName&$filter=${filtro}`, { headers: { Authorization: 'Bearer '+token } });
+    if (!listaResp.ok) throw new Error('No se pudo buscar la lista (HTTP '+listaResp.status+').');
+    const data = await listaResp.json();
+    const listas = (data.value||[]).filter(l => l.displayName);
+    if (!listas.length) { cont.innerHTML = '<p class="hint">No se encontró ninguna lista con ese nombre exacto en este sitio.</p>'; return; }
+    _leccionesSpBusqueda = { siteId: site.id, sitePath, listas };
+    cont.innerHTML = `
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <select id="procesos-lecciones-sp-select">
+          ${listas.map((l,i) => `<option value="${i}">${esc(l.displayName)}</option>`).join('')}
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="procesosLeccionesSpVincular()">Vincular</button>
+      </div>`;
+  } catch(e) {
+    cont.innerHTML = `<p class="hint" style="color:var(--red)">✕ ${esc(e.message)}</p>`;
+  }
 }
 
 // Resultado de la última búsqueda de listas — se guarda en memoria (no en
