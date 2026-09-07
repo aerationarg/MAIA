@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.56</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.56</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4906,6 +4906,7 @@ function procesosDocumentosRenderLista() {
         <div class="sp-selected" style="margin-top:6px">
           <span style="font-size:12px">${expandedDetalle ? procesosDocResumenEstado(expandedDetalle) : 'Cargando estado...'}</span>
           <button class="sp-browse-btn" onclick="procesosDocGenerarResumen('${d.id}')">${det.tipo==='carpeta' ? 'Procesar pendientes' : 'Generar resumen'}</button>
+          ${det.tipo!=='carpeta' ? `<button class="sp-browse-btn" onclick="procesosDocForzarReanalisis('${d.id}')" title="Descarta el texto/resumen ya guardado y lo vuelve a transcribir de cero (por si la transcripción original quedó mal)">🔄 Forzar reanálisis</button>` : ''}
         </div>
         <div id="procesos-doc-status-${d.id}" class="status-msg" style="display:none"></div>` : ''}
         <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosDocExpandir(null)">✕ Cerrar</button>
@@ -5110,6 +5111,43 @@ async function procesosDocGenerarResumen(id) {
   }
 }
 
+// A diferencia de "Generar resumen" (que respeta la caché si el archivo no
+// cambió en SharePoint), esto descarta el texto/resumen ya guardados y
+// obliga a transcribir de cero — para cuando la transcripción original
+// quedó mal (ej. se comió una columna de una tabla con varios tipos de
+// vuelco) y el archivo en SharePoint no cambió, así que nunca se
+// reprocesaría solo. Solo para documentos de archivo suelto — para una
+// carpeta, forzar el reanálisis de TODOS sus archivos de una sería carísimo;
+// para un archivo puntual dentro de una carpeta, se resuelve con un UPDATE
+// puntual en archivos_cache (SQL).
+async function procesosDocForzarReanalisis(id) {
+  const statusId = 'procesos-doc-status-' + id;
+  if (!confirm('¿Descartar el texto/resumen ya guardado y volver a transcribir este documento de cero con IA?')) return;
+  showMsg(statusId, 'loading', 'Descartando la versión anterior...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc) throw new Error('No se encontró el documento.');
+    if (doc.tipo === 'carpeta') throw new Error('Para una carpeta esto no está disponible — pedime que fuerce un archivo puntual, o usá "Procesar pendientes" si el archivo cambió en SharePoint.');
+    await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ texto_extraido: null, texto_extraido_at: null, resumen_ia: null, resumen_ia_at: null })
+    });
+    doc.texto_extraido = null; doc.texto_extraido_at = null; doc.resumen_ia = null; doc.resumen_ia_at = null;
+    showMsg(statusId, 'loading', 'Transcribiendo de cero con IA...');
+    const token = await getMsToken();
+    const texto = await procesosDocGetTexto(doc, token);
+    if (!texto) throw new Error('No se pudo volver a extraer el texto.');
+    procesosBibliografiaCacheReset();
+    showMsg(statusId, 'success', '✓ Reanalizado desde cero.');
+    setTimeout(renderProcesosDocumentos, 1500);
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
 async function procesosGetDocumentosPorCategoria(categorias) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const res = await supaFetch(`/rest/v1/procesos_documentos?select=*&empresa=eq.${currentEmpresa}&categoria=in.(${categorias.join(',')})`, {headers:{Authorization:'Bearer '+session.token}});
@@ -5173,7 +5211,7 @@ async function procesosFetchConReintento(url, opts, intentos) {
 async function procesosExtraerTextoDeContentBlock(block, nombre) {
   const apiKey = getApiKey();
   if (!apiKey) return null;
-  const prompt = `Transcribí TODO el contenido de este documento ("${nombre}") a texto plano, preservando la estructura (títulos, secciones) y toda la información — tablas como tablas en formato markdown, y si hay gráficos o diagramas relevantes para diseño de tratamiento de efluentes, describilos en palabras. No resumas ni omitas datos, parámetros, rangos ni tablas: este texto va a reemplazar al documento original de acá en adelante.`;
+  const prompt = `Transcribí TODO el contenido de este documento ("${nombre}") a texto plano, preservando la estructura (títulos, secciones) y toda la información — tablas como tablas en formato markdown, y si hay gráficos o diagramas relevantes para diseño de tratamiento de efluentes, describilos en palabras. No resumas ni omitas datos, parámetros, rangos ni tablas: este texto va a reemplazar al documento original de acá en adelante.\n\nATENCIÓN especial con tablas de límites normativos que tengan MÁS DE UNA columna de valores según categoría (ej. distintos límites según tipo de vuelco — "cuerpo receptor superficial" / "colector cloacal" / "absorción por terreno" / etc., o según cuenca/jurisdicción): preservá el encabezado EXACTO de cada columna tal cual aparece, y no aplanes la tabla de forma que se pierda o quede ambigua a qué categoría corresponde cada valor — es un error crítico mezclar el límite de una categoría con el de otra.`;
   try {
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
