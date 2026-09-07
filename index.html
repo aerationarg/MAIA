@@ -198,6 +198,19 @@
     .ps2-formula { font-size: 11px; color: var(--text2); font-family: monospace; padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: break-word; white-space: normal; }
     .ps2-row:last-child > .ps2-key, .ps2-row:last-child > .ps2-val, .ps2-row:last-child > .ps2-unidad, .ps2-row:last-child > .ps2-info, .ps2-row:last-child > .ps2-formula { border-bottom: none; padding-bottom: 0; }
 
+    /* Misma idea que .ps2-grid, para la tabla de corrientes/parámetros del
+       Paso 1 — encabezado real (para no confundirlo con placeholders vacíos
+       que "parecen" encabezado) y la fuente de cada dato como fila propia
+       que ocupa las 4 columnas, pegada a SU fila (no ambigua entre la de
+       arriba y la de abajo). */
+    .ps1-grid { display: grid; grid-template-columns: minmax(0,1fr) 100px 70px 110px; align-items: center; column-gap: 10px; }
+    .ps1-row { display: contents; }
+    .ps1-head { font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .02em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .ps1-key { font-size: 14px; font-weight: 600; color: var(--text); padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: break-word; }
+    .ps1-val { font-size: 14px; font-weight: 500; text-align: right; width: 100%; box-sizing: border-box; background: transparent; border: none; color: var(--text); font-family: inherit; outline: none; cursor: text; padding: 8px 6px; border-radius: 4px; border-bottom: 1px solid var(--border); }
+    .ps1-val:focus { background: var(--blue-bg); }
+    .ps1-fuente { grid-column: 1 / -1; font-size: 11px; color: var(--text2); padding: 0 0 8px; margin-top: -4px; }
+
     /* Step indicator */
     .step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--surface2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--text2); flex-shrink: 0; }
     .step-num.active { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
@@ -361,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.52</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.53</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.52</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.53</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5413,32 +5426,50 @@ async function procesosDocsToContentBlocks(token, docs) {
 // usar "Generar resumen"/"Procesar pendientes" en Cfg Procesos IA.
 let _procesosBibliografiaCache = { proyectoId: null, porCategoria: {} };
 function procesosBibliografiaCacheReset() { _procesosBibliografiaCache = { proyectoId: null, porCategoria: {} }; }
-async function procesosObtenerCandidatosBibliografia(categorias) {
+// soloCache=true: NUNCA dispara una extracción nueva (eso es lo que hacían
+// procesosDocGetTextosCarpeta/procesosDocGetTexto cuando encontraban un
+// archivo sin procesar todavía — bajarlo y transcribirlo con IA ahí mismo,
+// lo cual en una carpeta grande sin "Procesar pendientes" corrido antes
+// podía tardar minutos y dejaba una consulta de chat colgada sin avisar).
+// Con soloCache se usa nada más lo que ya esté en la base — pensado para
+// usos "de paso"/informativos (ej. mencionar plantas compactas en el chat),
+// no para los pasos que realmente dependen de esa bibliografía.
+async function procesosObtenerCandidatosBibliografia(categorias, soloCache) {
   const pid = procesosCurrentProyecto?.id || null;
   if (_procesosBibliografiaCache.proyectoId !== pid) _procesosBibliografiaCache = { proyectoId: pid, porCategoria: {} };
-  const key = categorias.slice().sort().join(',');
+  const key = categorias.slice().sort().join(',') + (soloCache ? '|solo-cache' : '');
   if (_procesosBibliografiaCache.porCategoria[key]) return _procesosBibliografiaCache.porCategoria[key];
   const docs = await procesosGetDocumentosPorCategoria(categorias);
   let candidatos = [];
   if (docs.length) {
-    const token = await getMsToken();
-    // candidatos: uno por archivo (carpetas se expanden) o uno por documento suelto
-    for (const doc of docs) {
-      if (doc.tipo === 'carpeta') {
-        const archivos = await procesosDocGetTextosCarpeta(doc, token);
-        archivos.forEach(a => candidatos.push({ nombre: procesosNombreConCarpeta(a.nombre, a.carpeta), resumen: a.resumen || null, texto: a.texto || null }));
-      } else {
-        const texto = await procesosDocGetTexto(doc, token);
-        candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: texto || null });
+    if (soloCache) {
+      docs.forEach(doc => {
+        if (doc.tipo === 'carpeta') {
+          (doc.archivos_cache || []).forEach(a => { if (a.texto) candidatos.push({ nombre: procesosNombreConCarpeta(a.nombre, a.carpeta), resumen: a.resumen || null, texto: a.texto }); });
+        } else if (doc.texto_extraido) {
+          candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: doc.texto_extraido });
+        }
+      });
+    } else {
+      const token = await getMsToken();
+      // candidatos: uno por archivo (carpetas se expanden) o uno por documento suelto
+      for (const doc of docs) {
+        if (doc.tipo === 'carpeta') {
+          const archivos = await procesosDocGetTextosCarpeta(doc, token);
+          archivos.forEach(a => candidatos.push({ nombre: procesosNombreConCarpeta(a.nombre, a.carpeta), resumen: a.resumen || null, texto: a.texto || null }));
+        } else {
+          const texto = await procesosDocGetTexto(doc, token);
+          candidatos.push({ nombre: doc.nombre, resumen: doc.resumen_ia || null, texto: texto || null });
+        }
       }
     }
   }
   _procesosBibliografiaCache.porCategoria[key] = candidatos;
   return candidatos;
 }
-async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto) {
+async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto, soloCache) {
   try {
-    const candidatos = await procesosObtenerCandidatosBibliografia(categorias);
+    const candidatos = await procesosObtenerCandidatosBibliografia(categorias, soloCache);
     const conTexto = candidatos.filter(c => c.texto);
     if (!conTexto.length) return [];
     const UMBRAL = 3;
@@ -6395,20 +6426,26 @@ function procesosStep1Html(p) {
             <input value="${esc(c.nombre||'')}" placeholder="Nombre de la corriente" style="flex:1;font-weight:600" oninput="procesosUpdateCorrienteNombre(${ci},this.value)" />
             <button class="remove-btn" onclick="procesosEliminarCorriente(${ci})">&#x2715;</button>
           </div>
-          ${paramFields.map(f => {
-            const fKey = f.name.replace(/'/g,"\\'");
-            const v = (c.campos && c.campos[f.name] && typeof c.campos[f.name]==='object') ? c.campos[f.name] : {valor:'', unidad:'', limite_normativo:'', fuente:''};
-            return `
-          <div class="result-field">
-            <span class="result-key">${esc(f.name)}</span>
-            <div style="display:flex;gap:6px;flex:1">
-              <input class="result-val" style="flex:2" placeholder="Valor" value="${esc(v.valor!=null?procesosFormatearNumero(v.valor):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','valor',this.value)" />
-              <input class="result-val" style="flex:1" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','unidad',this.value)" />
-              <input class="result-val" style="flex:2" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?procesosFormatearNumero(v.limite_normativo):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','limite_normativo',this.value)" />
+          <div class="ps1-grid">
+            <div class="ps1-row">
+              <span class="ps1-head">Parámetro</span>
+              <span class="ps1-head" style="text-align:right">Valor</span>
+              <span class="ps1-head">Unidad</span>
+              <span class="ps1-head" style="text-align:right">Límite normativo</span>
             </div>
+            ${paramFields.map(f => {
+              const fKey = f.name.replace(/'/g,"\\'");
+              const v = (c.campos && c.campos[f.name] && typeof c.campos[f.name]==='object') ? c.campos[f.name] : {valor:'', unidad:'', limite_normativo:'', fuente:''};
+              return `
+            <div class="ps1-row">
+              <span class="ps1-key">${esc(f.name)}</span>
+              <input class="ps1-val" placeholder="Valor" value="${esc(v.valor!=null?procesosFormatearNumero(v.valor):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','valor',this.value)" />
+              <input class="ps1-val" style="text-align:left" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','unidad',this.value)" />
+              <input class="ps1-val" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?procesosFormatearNumero(v.limite_normativo):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','limite_normativo',this.value)" />
+              ${v.fuente ? `<span class="ps1-fuente" title="Para verificar — no es una fuente confirmada, revisala si es un dato crítico">📎 ${esc(v.fuente)}</span>` : ''}
+            </div>`;
+            }).join('')}
           </div>
-          ${v.fuente ? `<p class="hint" style="margin:-6px 0 8px;font-size:11px" title="Para verificar — no es una fuente confirmada, revisala si es un dato crítico">📎 ${esc(v.fuente)}</p>` : ''}`;
-          }).join('')}
         </div>`).join('')}
       <button class="btn btn-secondary btn-sm" onclick="procesosAgregarCorriente()">+ Agregar corriente</button>
 
@@ -6540,9 +6577,13 @@ async function procesosNormativaSugerir(contextoTexto, candidatos) {
 // antes de usarlo — nunca lo aplica solo.
 async function procesosStep1NormativaVerificar(p) {
   const corrientes = p.info_cliente?.corrientes || [];
-  const faltantes = [];
+  const faltantes = []; // strings para mostrar/mandar en el prompt
+  const faltantesClaves = []; // "Corriente|Parametro" exactas — único whitelist de lo que se puede tocar
   corrientes.forEach(c => Object.entries(c.campos||{}).forEach(([k,v]) => {
-    if (v && typeof v === 'object' && v.valor != null && v.valor !== '' && v.limite_normativo == null) faltantes.push(`${c.nombre}: ${k}`);
+    if (v && typeof v === 'object' && v.valor != null && v.valor !== '' && v.limite_normativo == null) {
+      faltantes.push(`${c.nombre}: ${k}`);
+      faltantesClaves.push(`${c.nombre}|${k}`);
+    }
   }));
   if (!faltantes.length) return; // no falta ningún límite, no hace falta buscar nada
   const candidatos = await procesosNormativaListarCandidatos();
@@ -6550,7 +6591,7 @@ async function procesosStep1NormativaVerificar(p) {
   const contexto = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n${procesosResumenCampos(p)}\nParámetros sin límite normativo todavía: ${faltantes.join('; ')}`;
   const sugerencia = await procesosNormativaSugerir(contexto, candidatos);
   if (procesosCurrentProyecto !== p) return;
-  procesosStep1PendingNormativa = { faltantes, candidatos, sugerencia };
+  procesosStep1PendingNormativa = { faltantes, faltantesClaves, candidatos, sugerencia };
   renderProcesosStepContent();
 }
 
@@ -6599,12 +6640,16 @@ function procesosStep1NormativaDescartar() {
 async function procesosNormativaExtraerTexto(candidato, token) {
   const docs = await procesosGetDocumentosPorCategoria(['normativa']);
   const doc = docs.find(d => d.id === candidato.docId);
-  if (!doc) return null;
-  if (doc.tipo !== 'carpeta') return await procesosDocGetTexto(doc, token);
+  if (!doc) throw new Error('Ese documento de normativa ya no está configurado (¿se borró de Cfg Procesos IA?).');
+  if (doc.tipo !== 'carpeta') {
+    const texto = await procesosDocGetTexto(doc, token);
+    if (!texto) throw new Error('No se pudo descargar/leer el archivo vinculado.');
+    return texto;
+  }
 
   const archivos = await procesosListarArchivosCarpeta(doc.site_id, doc.item_id, token);
   const real = archivos.find(a => a.name === candidato.nombre && (a.carpeta||'') === (candidato.carpeta||''));
-  if (!real) return null;
+  if (!real) throw new Error(`No se encontró "${candidato.nombre}" en la carpeta de normativa (¿se movió o renombró en SharePoint?).`);
   const cacheActual = doc.archivos_cache || [];
   const clave = procesosClaveArchivoCache(real.carpeta, real.name);
   const cacheado = cacheActual.find(a => procesosClaveArchivoCache(a.carpeta, a.nombre) === clave);
@@ -6618,20 +6663,20 @@ async function procesosNormativaExtraerTexto(candidato, token) {
     ? `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${real.id}/content?format=pdf`
     : `https://graph.microsoft.com/v1.0/sites/${doc.site_id}/drive/items/${real.id}/content`;
   const dlResp = await fetch(dlUrl, {headers:{Authorization:'Bearer '+token}});
-  if (!dlResp.ok) return null;
+  if (!dlResp.ok) throw new Error(`No se pudo descargar "${real.name}" de SharePoint (HTTP ${dlResp.status}).`);
   const buf = await dlResp.arrayBuffer();
   let binary = ''; const bytes = new Uint8Array(buf);
   for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   let block;
   if (needsConvert || isPdf) {
-    if (procesosContarPaginasPdfAprox(binary) > 100) { console.warn(`Se omitió "${real.name}" por superar las 100 páginas.`); return null; }
+    if (procesosContarPaginasPdfAprox(binary) > 100) throw new Error(`"${real.name}" supera las 100 páginas — el límite de Claude por documento.`);
     block = {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}};
   } else {
     const mt = /\.png$/i.test(real.name) ? 'image/png' : 'image/jpeg';
     block = {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}};
   }
   const texto = await procesosExtraerTextoDeContentBlock(block, real.name);
-  if (!texto) return null;
+  if (!texto) throw new Error(`La IA no pudo transcribir "${real.name}" (puede ser un escaneo de baja calidad, o falló el pedido — probá de nuevo).`);
   const resumen = await procesosResumirTexto(texto, real.name, real.carpeta);
   const nuevoCache = cacheActual.filter(a => procesosClaveArchivoCache(a.carpeta, a.nombre) !== clave);
   nuevoCache.push({ item_id: real.id, nombre: real.name, carpeta: real.carpeta||'', modificado: real.lastModifiedDateTime, texto, resumen });
@@ -6654,12 +6699,12 @@ async function procesosStep1NormativaAplicar(candidato) {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-normativa-status';
   const faltantes = procesosStep1PendingNormativa ? procesosStep1PendingNormativa.faltantes : [];
+  const faltantesSet = new Set(procesosStep1PendingNormativa ? procesosStep1PendingNormativa.faltantesClaves : []);
   const nombreMostrado = `${candidato.carpeta ? candidato.carpeta+'/' : ''}${candidato.nombre}`;
   showMsg(statusId, 'loading', `Extrayendo "${nombreMostrado}"...`);
   try {
     const token = await getMsToken();
     const texto = await procesosNormativaExtraerTexto(candidato, token);
-    if (!texto) throw new Error('No se pudo extraer el texto de ese documento.');
     if (procesosCurrentProyecto !== p) return;
     showMsg(statusId, 'loading', 'Extrayendo límites aplicables...');
     const apiKey = getApiKey();
@@ -6680,10 +6725,17 @@ async function procesosStep1NormativaAplicar(candidato) {
     Object.entries(parsed).forEach(([clave, val]) => {
       const sep = clave.indexOf('|');
       if (sep < 0 || val.limite_normativo == null) return;
+      // Whitelist estricta: NUNCA tocar un parámetro que no estaba en la
+      // lista de "faltantes" que se le mandó a la IA — aunque la IA
+      // devuelva de más (ej. porque "reconoció" el mismo parámetro en el
+      // documento de normativa), un límite que el cliente ya trajo en sus
+      // propios documentos no se pisa jamás.
+      if (!faltantesSet.has(clave)) return;
       const nombreCorriente = clave.slice(0, sep), nombreParam = clave.slice(sep+1);
       const c = corrientes.find(x => x.nombre === nombreCorriente);
       if (!c || !c.campos[nombreParam]) return;
       const actual = c.campos[nombreParam];
+      if (actual.limite_normativo != null) return; // defensa extra: ya tiene límite, no tocar
       c.campos[nombreParam] = Object.assign({}, actual, {
         limite_normativo: val.limite_normativo,
         fuente: (actual.fuente ? actual.fuente + ' · ' : '') + `Límite normativo: ${nombreMostrado}`
@@ -7855,7 +7907,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
-    const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
+    const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`, true);
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
     const prompt = `Estás ayudando a diseñar la unidad/etapa "${nombre}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n${estadoActual}\n\nInfo del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n${criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : ''}${plantasCompactasBlocks.length ? 'Adjunto documentos de referencia de plantas compactas (modelos ya fabricados, con capacidad/volumen ya definidos) — si el usuario pregunta por esa alternativa, o te parece que aplica razonablemente para esta etapa según el caudal, mencionalo en "reply" (todavía no hay una acción automática para fijar los valores del modelo, eso el usuario lo tiene que hacer a mano por ahora).\n\n' : ''}${lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : ''}${historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : ''}Mensaje del usuario: "${msg}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -9222,7 +9274,7 @@ async function procesosChatSend() {
     // definida) — disponible en el chat general para que la IA la mencione si
     // el usuario pregunta, o si le parece que aplica como alternativa a
     // construir en hormigón in situ dado el caudal del proyecto.
-    const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], contexto);
+    const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], contexto, true);
     const plantasCompactasTxt = plantasCompactasBlocks.length
       ? `\n\nDocumentos de referencia de plantas compactas disponibles (modelos ya fabricados, con capacidad/volumen ya definidos — alternativa a diseñar y construir en hormigón in situ):\n${plantasCompactasBlocks.map(b=>b.block.text).join('\n\n---\n\n')}\n\nSi el usuario pregunta por opciones de planta compacta, o si te parece que aplica como alternativa razonable para este proyecto según su caudal, mencionalo en "respuesta".`
       : '';
