@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.45</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.46</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.45</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.46</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4805,6 +4805,48 @@ function procesosDocResumenEstado(d) {
 // con caché que ya se usa al analizar un proyecto, pero desde acá se puede
 // dejar todo preprocesado de antemano (para "cientos de documentos") en vez de
 // esperar a que un análisis real los vaya pidiendo de a uno.
+// Nombres de hoja de la planilla de cálculo actual (categoría
+// planilla_calculo) — se usan como vocabulario para que la IA sepa a qué
+// etapa/unidad real corresponde cada parte de un modelo de planta compacta.
+// Se cachea en memoria (no cambia dentro de la misma sesión del navegador).
+let _procesosHojasPlanillaCache = null;
+async function procesosObtenerHojasPlanilla() {
+  if (_procesosHojasPlanillaCache) return _procesosHojasPlanillaCache;
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['planilla_calculo']);
+    if (!docs.length) return [];
+    const token = await getMsToken();
+    const dlResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${docs[0].site_id}/drive/items/${docs[0].item_id}/content`, { headers: { Authorization: 'Bearer '+token } });
+    if (!dlResp.ok) return [];
+    const buf = await dlResp.arrayBuffer();
+    const workbook = XLSX.read(buf, { type: 'array' });
+    _procesosHojasPlanillaCache = workbook.SheetNames || [];
+    return _procesosHojasPlanillaCache;
+  } catch(e) { console.warn('No se pudieron obtener las hojas de la planilla:', e.message); return []; }
+}
+
+// Le pide a la IA que, de la ficha de UN modelo de planta compacta, extraiga
+// las dimensiones (largo/ancho/altura/volumen/superficie) de las etapas que
+// reconozca — usando como vocabulario los nombres reales de hoja de la
+// planilla de cálculo actual, para que después se puedan aplicar directo a
+// esa hoja en el Paso 2. Nunca inventa: lo que no está en el documento queda
+// null, y lo revisa/completa el usuario en Cfg Procesos IA.
+async function procesosPlantaCompactaExtraerDimensiones(texto, nombreArchivo, hojas) {
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey || !texto || !hojas || !hojas.length) return null;
+    const prompt = `Este documento describe un modelo de planta compacta de tratamiento de efluentes ya fabricado ("${nombreArchivo}"). Las etapas/unidades de la planilla de cálculo actual de la empresa son (nombres EXACTOS de hoja): ${hojas.join(', ')}.\n\nPara cada una de esas etapas que reconozcas mencionada o equivalente en el documento (ej. "tanque de aireación" corresponde a la etapa "Aireación" si existe en la lista), extraé sus dimensiones si están indicadas: largo, ancho, altura (o altura/profundidad útil), volumen (útil, en m3) y superficie (en m2). Si una etapa del documento no tiene un nombre EXACTO en la lista de arriba, no la incluyas — no inventes ni la aproximes a otra. Si un valor puntual no está indicado en el texto, dejalo null — no lo calcules ni lo inventes.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta, usando como claves los nombres EXACTOS de hoja de la lista: {"NombreDeHojaExacto":{"largo":<número o null>,"ancho":<número o null>,"altura":<número o null>,"volumen":<número o null>,"superficie":<número o null>}}. Si no se puede extraer nada de ninguna etapa, respondé {}.\n\nDocumento:\n${texto.slice(0,15000)}`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:800, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    return JSON.parse(text.replace(/```json|```/g,'').trim());
+  } catch(e) { console.warn(`No se pudieron extraer dimensiones de "${nombreArchivo}":`, e.message); return null; }
+}
+
 async function procesosDocGenerarResumen(id) {
   const statusId = 'procesos-doc-status-' + id;
   showMsg(statusId, 'loading', 'Buscando el documento...');
@@ -4818,6 +4860,30 @@ async function procesosDocGenerarResumen(id) {
     if (doc.tipo === 'carpeta') {
       showMsg(statusId, 'loading', 'Listando archivos de la carpeta...');
       const resultado = await procesosDocGetTextosCarpeta(doc, token, 'procesos_documentos', nombre => showMsg(statusId, 'loading', `Procesando "${nombre}"...`));
+      // Plantas compactas: además del texto/resumen de siempre, a cada archivo
+      // nuevo se le extraen las dimensiones por hoja (una sola vez — si ya
+      // las tiene, se respetan tal cual quedaron, aunque el usuario las haya
+      // corregido a mano).
+      if (doc.categoria === 'plantas_compactas') {
+        const hojas = await procesosObtenerHojasPlanilla();
+        if (hojas.length) {
+          const cacheActual = doc.archivos_cache || [];
+          let cambios = false;
+          for (const entry of cacheActual) {
+            if (entry.texto && !entry.dimensiones) {
+              showMsg(statusId, 'loading', `Extrayendo dimensiones de "${entry.nombre}"...`);
+              entry.dimensiones = await procesosPlantaCompactaExtraerDimensiones(entry.texto, entry.nombre, hojas) || {};
+              cambios = true;
+            }
+          }
+          if (cambios) {
+            await supaFetch(`/rest/v1/procesos_documentos?id=eq.${doc.id}`, {
+              method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+              body: JSON.stringify({ archivos_cache: cacheActual })
+            });
+          }
+        }
+      }
       showMsg(statusId, 'success', `✓ Listo — ${resultado.length} archivo(s) en caché.`);
     } else {
       showMsg(statusId, 'loading', 'Extrayendo texto y generando resumen...');
@@ -6794,8 +6860,10 @@ function procesosStep2RenderHojaPanel() {
     // Unidad, origen/rango y fórmula van cada uno en su propia columna a la
     // derecha del valor (no apilados) — así se pueden leer las dos cosas de
     // una fila que tenga fórmula Y rango a la vez, sin que una tape a la otra.
+    const enPlantaCompacta = h.plantaCompacta && (h.plantaCompacta.celdas||[]).includes(c.ref);
     const infoLineas = [];
     if (mapeo) infoLineas.push(`🔗 ${esc(origenTxt)}`);
+    if (enPlantaCompacta) infoLineas.push(`🏭 ${esc(h.plantaCompacta.modelo)}`);
     if (rangoTxt) infoLineas.push(esc(rangoTxt));
     return `
     <div class="ps2-row">
@@ -6823,6 +6891,7 @@ function procesosStep2RenderHojaPanel() {
       ` : ''}
       <label>Datos de la hoja (en el orden del Excel)</label>
       ${model.cells.length ? `<div class="ps2-grid">${model.cells.map(rowHtml).join('')}</div>` : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
+      <div id="procesos-step2-pc-selector"></div>
       <div class="gap"></div>
       <button class="btn btn-secondary btn-sm" onclick="procesosStep2RevisarYCompletar('${safe}', false)">↻ Revisar y completar automáticamente</button>
       <label style="margin-top:10px">Chat de diseño de esta unidad</label>
@@ -6843,6 +6912,124 @@ function procesosStep2RenderHojaPanel() {
         : `<button class="btn btn-green" onclick="procesosStep2GuardarHoja('${safe}')">✓ Guardar valores de esta unidad</button>`}
     </div>
   `;
+  procesosStep2RenderPlantaCompactaSelector(nombre);
+}
+
+// Modelos de planta compacta disponibles (documentos de referencia,
+// categoría plantas_compactas) con dimensiones ya extraídas — cacheado por
+// proyecto, igual criterio que _procesosBibliografiaCache.
+let _procesosModelosPlantaCompactaCache = { proyectoId: null, modelos: null };
+async function procesosObtenerModelosPlantaCompacta() {
+  const pid = procesosCurrentProyecto?.id || null;
+  if (_procesosModelosPlantaCompactaCache.proyectoId === pid && _procesosModelosPlantaCompactaCache.modelos) return _procesosModelosPlantaCompactaCache.modelos;
+  const modelos = [];
+  try {
+    const docs = await procesosGetDocumentosPorCategoria(['plantas_compactas']);
+    docs.forEach(doc => {
+      if (doc.tipo !== 'carpeta') return; // los archivos sueltos todavía no soportan dimensiones extraídas
+      (doc.archivos_cache || []).forEach(a => {
+        if (a.dimensiones && Object.keys(a.dimensiones).length) modelos.push({ nombre: a.nombre, dimensiones: a.dimensiones });
+      });
+    });
+  } catch(e) { console.warn('No se pudieron obtener los modelos de planta compacta:', e.message); }
+  _procesosModelosPlantaCompactaCache = { proyectoId: pid, modelos };
+  return modelos;
+}
+
+// Panel chico (se llena async, sin bloquear el resto del render) para elegir
+// un modelo de planta compacta con dimensiones ya cargadas para ESTA hoja, o
+// para ver/quitar el que ya se aplicó.
+async function procesosStep2RenderPlantaCompactaSelector(nombre) {
+  const modelos = await procesosObtenerModelosPlantaCompacta();
+  // El usuario puede haber cambiado de hoja mientras se esperaba esto.
+  if (procesosStep2State.hojaAbierta !== nombre) return;
+  const cont = document.getElementById('procesos-step2-pc-selector');
+  if (!cont) return;
+  const p = procesosCurrentProyecto;
+  const h = (p.diseno_data?.hojas?.[nombre]) || {};
+  const safe = nombre.replace(/'/g,"\\'");
+  if (h.plantaCompacta) {
+    cont.innerHTML = `
+      <div class="sp-selected" style="margin-top:6px">
+        <span style="font-size:12px">🏭 Planta compacta aplicada: <b>${esc(h.plantaCompacta.modelo)}</b></span>
+        <button class="sp-browse-btn" onclick="procesosStep2QuitarPlantaCompacta('${safe}')">Quitar</button>
+      </div>`;
+    return;
+  }
+  const disponibles = modelos.filter(m => m.dimensiones[nombre] && Object.values(m.dimensiones[nombre]).some(v => v != null));
+  if (!disponibles.length) { cont.innerHTML = ''; return; }
+  cont.innerHTML = `
+    <div class="sp-selected" style="margin-top:6px">
+      <span style="font-size:12px">🏭 Hay modelo(s) de planta compacta con dimensiones cargadas para esta etapa:</span>
+      <select id="procesos-step2-pc-select">
+        <option value="">Elegir modelo...</option>
+        ${disponibles.map(m => `<option value="${esc(m.nombre)}">${esc(m.nombre)}</option>`).join('')}
+      </select>
+      <button class="sp-browse-btn" onclick="procesosStep2AplicarPlantaCompacta('${safe}', document.getElementById('procesos-step2-pc-select').value)">Aplicar dimensiones</button>
+    </div>`;
+}
+
+// Encuentra, dentro de las celdas EDITABLES (no fórmula) de una hoja, la que
+// mejor corresponde a cada tipo de dimensión — por el texto de su etiqueta.
+// Best-effort: cada hoja de la planilla puede nombrar sus celdas distinto
+// (ej. "Hútil" en vez de "Altura"), así que puede no encontrar match para
+// todas — lo que no matchea, el usuario lo revisa/corrige a mano.
+function procesosStep2MatchCelda(model, tipo) {
+  const patrones = {
+    largo: [/^largo$/i, /largo/i],
+    ancho: [/^ancho$/i, /ancho/i],
+    altura: [/^altura$/i, /^h\s*[uú]til$/i, /h[uú]til/i, /altura/i],
+    volumen: [/^volumen\s*[uú]til$/i, /^volumen$/i, /volumen/i],
+    superficie: [/^superficie$/i, /superficie/i, /[aá]rea/i],
+  };
+  for (const rx of (patrones[tipo] || [])) {
+    const c = model.cells.find(c => !c.isFormula && rx.test((c.label||'').trim()));
+    if (c) return c;
+  }
+  return null;
+}
+
+async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre) {
+  if (!modeloNombre) return;
+  const modelos = await procesosObtenerModelosPlantaCompacta();
+  const modelo = modelos.find(m => m.nombre === modeloNombre);
+  const dims = modelo && modelo.dimensiones && modelo.dimensiones[nombre];
+  if (!dims) return;
+  const model = procesosStep2State.hojaModels[nombre];
+  const hf = procesosStep2GetHF(nombre);
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  const nuevosValores = Object.assign({}, h.valores);
+  const celdasAplicadas = [];
+  ['largo','ancho','altura','volumen','superficie'].forEach(tipo => {
+    const valor = dims[tipo];
+    if (valor == null) return;
+    const c = procesosStep2MatchCelda(model, tipo);
+    if (!c) return;
+    hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(valor)]]);
+    nuevosValores[c.ref] = Number(valor);
+    celdasAplicadas.push(c.ref);
+  });
+  if (!celdasAplicadas.length) { alert('No se pudo hacer coincidir ninguna dimensión de "'+modeloNombre+'" con celdas editables de esta hoja — revisá los nombres de celda en Cfg Procesos IA.'); return; }
+  h.valores = nuevosValores;
+  h.confirmada = false;
+  h.plantaCompacta = { modelo: modeloNombre, celdas: celdasAplicadas };
+  dd.hojas[nombre] = h;
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  procesosStep2RenderHojaPanel();
+}
+
+async function procesosStep2QuitarPlantaCompacta(nombre) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({}, dd.hojas[nombre]);
+  delete h.plantaCompacta;
+  dd.hojas[nombre] = h;
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  procesosStep2RenderHojaPanel();
 }
 
 function procesosStep2LeccionCardHtml() {
