@@ -361,7 +361,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.47</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.48</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -418,7 +418,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.47</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.48</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1018,6 +1018,10 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Reglas o ajustes de diseño que no están en el Excel ni en la bibliografía, aprendidos con la experiencia de proyectos anteriores. La IA las va a tener en cuenta al diseñar, y también puede proponer agregar una nueva sola cuando el chat de diseño detecta algo que valga la pena recordar.</p>
         <div id="procesos-lecciones-list"></div>
         <button class="btn btn-secondary" onclick="procesosLeccionAdd()" style="margin-top:4px">+ Agregar lección</button>
+        <div class="gap"></div>
+        <label>Lista de SharePoint vinculada (opcional)</label>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:8px">Si tenés una lista de "Lessons Learned" en SharePoint, vinculala acá — al sincronizar, cada fila con estado "Aprobado" se agrega arriba como una lección más (se puede volver a sincronizar cuando quieras; no duplica las que ya están).</p>
+        <div id="procesos-lecciones-sp-estado"></div>
       </div>
     </div>
 
@@ -1948,7 +1952,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
 }
@@ -5523,6 +5527,172 @@ async function procesosGuardarLeccion(texto, categoria) {
     method:'POST', headers:{Authorization:'Bearer '+session.token},
     body: JSON.stringify({ empresa: currentEmpresa, texto: texto.trim(), categoria: categoria||null, origen_proyecto_id: p?.id||null, origen_proyecto_nombre: p?.nombre||null, creado_por_nombre: currentUser.nombre||currentUser.email })
   });
+}
+
+// ── Lecciones aprendidas: lista de SharePoint vinculada (opcional) ─────
+// Config global por empresa (site+lista), guardada como el resto de la
+// configuración de MAIA (app_config vía supaConfigGet/Set). Al sincronizar,
+// cada fila de la lista real de SharePoint se copia como una fila más de
+// procesos_lecciones (identificada por origen_sharepoint_item_id, para
+// poder volver a sincronizar sin duplicar — se actualiza en vez de crearse
+// de nuevo si ya existía).
+function LECCIONES_SP_KEY() { return 'procesos_lecciones_sp_' + currentEmpresa; }
+async function getLeccionesSpConfig() {
+  try {
+    const raw = await supaConfigGet(LECCIONES_SP_KEY());
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+async function saveLeccionesSpConfig(cfg) {
+  await supaConfigSet(LECCIONES_SP_KEY(), JSON.stringify(cfg));
+}
+
+async function renderProcesosLeccionesSp() {
+  const el = document.getElementById('procesos-lecciones-sp-estado');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  const cfg = await getLeccionesSpConfig();
+  if (cfg && cfg.siteId && cfg.listId) {
+    el.innerHTML = `
+      <div class="sp-selected">
+        <span style="font-size:12px">📋 ${esc(cfg.listName || 'Lista vinculada')}${cfg.sitePath ? ' — sitio: '+esc(cfg.sitePath) : ''}</span>
+        <button class="sp-browse-btn" onclick="procesosLeccionesSpSincronizar()">↻ Sincronizar ahora</button>
+        <button class="sp-browse-btn" onclick="procesosLeccionesSpDesvincular()">Desvincular</button>
+      </div>
+      <div id="procesos-lecciones-sp-sync-status" class="status-msg" style="display:none;margin-top:4px"></div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id="procesos-lecciones-sp-sitepath" placeholder="Ruta del sitio (ej: cpm)" style="max-width:200px" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosLeccionesSpBuscarListas()">Buscar listas</button>
+    </div>
+    <div id="procesos-lecciones-sp-listas"></div>`;
+}
+
+// Resultado de la última búsqueda de listas — se guarda en memoria (no en
+// el DOM) para que "Vincular" sepa a qué sitio/lista corresponde el índice
+// elegido, sin tener que reserializar objetos en un atributo onclick.
+let _leccionesSpBusqueda = null;
+async function procesosLeccionesSpBuscarListas() {
+  const sitePath = (document.getElementById('procesos-lecciones-sp-sitepath')?.value || '').trim();
+  if (!sitePath) return;
+  const cont = document.getElementById('procesos-lecciones-sp-listas');
+  cont.innerHTML = '<p class="hint">Buscando...</p>';
+  try {
+    const token = await getMsToken();
+    const siteResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${SHAREPOINT_HOST}:/sites/${encodeURIComponent(sitePath)}`, { headers: { Authorization: 'Bearer '+token } });
+    if (!siteResp.ok) throw new Error(`No se encontró el sitio "${sitePath}" (HTTP ${siteResp.status}).`);
+    const site = await siteResp.json();
+    const listasResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${site.id}/lists?$select=id,displayName&$top=200`, { headers: { Authorization: 'Bearer '+token } });
+    if (!listasResp.ok) throw new Error('No se pudieron listar las listas del sitio.');
+    const data = await listasResp.json();
+    const listas = (data.value||[]).filter(l => l.displayName);
+    if (!listas.length) { cont.innerHTML = '<p class="hint">No se encontraron listas en ese sitio.</p>'; return; }
+    _leccionesSpBusqueda = { siteId: site.id, sitePath, listas };
+    cont.innerHTML = `
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <select id="procesos-lecciones-sp-select">
+          ${listas.map((l,i) => `<option value="${i}">${esc(l.displayName)}</option>`).join('')}
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="procesosLeccionesSpVincular()">Vincular</button>
+      </div>`;
+  } catch(e) {
+    cont.innerHTML = `<p class="hint" style="color:var(--red)">✕ ${esc(e.message)}</p>`;
+  }
+}
+
+async function procesosLeccionesSpVincular() {
+  if (!_leccionesSpBusqueda) return;
+  const idx = Number(document.getElementById('procesos-lecciones-sp-select')?.value || 0);
+  const lista = _leccionesSpBusqueda.listas[idx];
+  if (!lista) return;
+  await saveLeccionesSpConfig({ siteId: _leccionesSpBusqueda.siteId, sitePath: _leccionesSpBusqueda.sitePath, listId: lista.id, listName: lista.displayName });
+  _leccionesSpBusqueda = null;
+  renderProcesosLeccionesSp();
+}
+
+async function procesosLeccionesSpDesvincular() {
+  if (!confirm('¿Desvincular la lista de SharePoint? Las lecciones ya sincronizadas quedan como están (no se borran).')) return;
+  await saveLeccionesSpConfig(null);
+  renderProcesosLeccionesSp();
+}
+
+// Trae los nombres INTERNOS de columna de la lista (no siempre coinciden con
+// el nombre visible — ej. "Lección Aprendida" puede ser internamente
+// "Lecci_x00f3_nAprendida") para poder leer item.fields con seguridad.
+async function procesosLeccionesSpColumnas(siteId, listId, token) {
+  try {
+    const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/columns?$select=name,displayName&$top=200`, { headers: { Authorization: 'Bearer '+token } });
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    const map = {};
+    (data.value||[]).forEach(c => { map[c.displayName] = c.name; });
+    return map;
+  } catch(e) { return {}; }
+}
+
+async function procesosLeccionesSpSincronizar() {
+  const statusId = 'procesos-lecciones-sp-sync-status';
+  const cfg = await getLeccionesSpConfig();
+  if (!cfg || !cfg.siteId || !cfg.listId) return;
+  showMsg(statusId, 'loading', 'Sincronizando...');
+  try {
+    const token = await getMsToken();
+    const cols = await procesosLeccionesSpColumnas(cfg.siteId, cfg.listId, token);
+    const campo = (display, fallback) => cols[display] || fallback;
+    const campoSituacion = campo('Situación', 'Situaci_x00f3_n');
+    const campoCausa = campo('Causa', 'Causa');
+    const campoLeccion = campo('Lección Aprendida', 'Lecci_x00f3_nAprendida');
+    const campoCategoria = campo('Categoría de Lección', 'Categor_x00ed_adeLecci_x00f3_n');
+    const campoProyecto = campo('Proyecto', 'Proyecto');
+    const campoEstado = campo('EstadoAprobacion', 'EstadoAprobacion');
+
+    let url = `https://graph.microsoft.com/v1.0/sites/${cfg.siteId}/lists/${cfg.listId}/items?$expand=fields&$top=200`;
+    const items = [];
+    while (url) {
+      const resp = await fetch(url, { headers: { Authorization: 'Bearer '+token } });
+      if (!resp.ok) throw new Error('HTTP '+resp.status+' al leer la lista.');
+      const data = await resp.json();
+      items.push(...(data.value||[]));
+      url = data['@odata.nextLink'] || null;
+    }
+
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const existentesRes = await supaFetch(`/rest/v1/procesos_lecciones?select=id,origen_sharepoint_item_id&empresa=eq.${currentEmpresa}&origen_sharepoint_item_id=not.is.null`, { headers: { Authorization: 'Bearer '+session.token } });
+    const existentesArr = await existentesRes.json();
+    const existentesPorId = {};
+    (Array.isArray(existentesArr) ? existentesArr : []).forEach(e => { existentesPorId[e.origen_sharepoint_item_id] = e.id; });
+
+    let nuevos = 0, actualizados = 0, omitidos = 0;
+    for (const item of items) {
+      const f = item.fields || {};
+      const estado = f[campoEstado];
+      if (estado && !/aprobad/i.test(String(estado))) { omitidos++; continue; }
+      const partes = [];
+      if (f[campoSituacion]) partes.push(`Situación: ${f[campoSituacion]}`);
+      if (f[campoCausa]) partes.push(`Causa: ${f[campoCausa]}`);
+      if (f[campoLeccion]) partes.push(`Lección aprendida: ${f[campoLeccion]}`);
+      if (!partes.length) { omitidos++; continue; }
+      const body = {
+        empresa: currentEmpresa, texto: partes.join(' — '), categoria: f[campoCategoria] || null,
+        origen_proyecto_nombre: f[campoProyecto] || null, origen_sharepoint_item_id: String(item.id),
+        creado_por_nombre: 'Lista de SharePoint',
+      };
+      const existenteId = existentesPorId[String(item.id)];
+      if (existenteId) {
+        await supaFetch(`/rest/v1/procesos_lecciones?id=eq.${existenteId}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(body) });
+        actualizados++;
+      } else {
+        await supaFetch('/rest/v1/procesos_lecciones', { method:'POST', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(body) });
+        nuevos++;
+      }
+    }
+    showMsg(statusId, 'success', `✓ Sincronizado — ${nuevos} nueva(s), ${actualizados} actualizada(s), ${omitidos} omitida(s) (no aprobadas o sin datos).`);
+    renderProcesosLecciones();
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
 }
 
 function procesosCatalogoSelectFolder(id) {
