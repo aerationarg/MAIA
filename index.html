@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.64</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.65</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.64</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.65</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -14055,6 +14055,7 @@ function cotizArmadoInit() {
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
     firmante_nombre: currentUser?.nombre || '',
     items: [],
+    iva: 21, subtotal: 0, total: 0, _subtotalManual: false, _totalManual: false,
   };
   // El Nº de Q se completa solo (siguiente al último del Excel de Q de
   // Imputación) — no bloquea el render, se agrega cuando resuelve.
@@ -14172,7 +14173,23 @@ function cotizArmadoRender() {
         <span style="width:100px;font-size:13px;align-self:center">${procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0))}</span>
         <button class="btn btn-secondary btn-sm" onclick="cotizArmadoEliminarItem('${it.id}')">✕</button>
       </div>`).join('') : '<p class="hint">Todavía no agregaste ítems.</p>'}
-    ${st.items.length ? `<div style="text-align:right;margin-top:6px;font-weight:600">Subtotal: ${procesosFormatearNumero(totalGeneral)}</div>` : ''}
+    ${st.items.length ? `
+    <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:12px">IVA %</label>
+        <input value="${esc(String(st.iva))}" style="width:60px;text-align:right" onchange="cotizArmadoSetCampo('iva',this.value)" />
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:12px">Subtotal</label>
+        <input value="${esc(String(Math.round((Number(st.subtotal)||0)*100)/100))}" style="width:120px;text-align:right" onchange="cotizArmadoSetCampo('subtotal',this.value)" />
+        ${Math.abs((Number(st.subtotal)||0) - totalGeneral) > 0.005 ? `<button class="btn btn-secondary btn-sm" onclick="cotizArmadoSubtotalAuto()" title="Recalcular solo, desde los ítems">↺</button>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:12px;font-weight:600">Total</label>
+        <input value="${esc(String(Math.round((Number(st.total)||0)*100)/100))}" style="width:120px;text-align:right;font-weight:600" onchange="cotizArmadoSetCampo('total',this.value)" />
+        ${Math.abs((Number(st.total)||0) - (Number(st.subtotal)||0)*(1+(Number(st.iva)||0)/100)) > 0.005 ? `<button class="btn btn-secondary btn-sm" onclick="cotizArmadoTotalAuto()" title="Recalcular solo, desde Subtotal + IVA">↺</button>` : ''}
+      </div>
+    </div>` : ''}
 
     <div class="gap"></div>
     <button class="btn btn-green" onclick="cotizArmadoGenerar()" ${_cotizArmadoGenerando?'disabled':''}>${_cotizArmadoGenerando ? '⏳ Generando...' : (st._editandoId ? '💾 Guardar cambios (REV'+((st._revisionAnterior||0)+1)+')' : '⬇ Generar cotización (Excel)')}</button>
@@ -14182,7 +14199,32 @@ function cotizArmadoRender() {
 
 function cotizArmadoSetCampo(campo, val) {
   const st = cotizArmadoInit();
+  if (campo === 'subtotal') { st.subtotal = val===''?0:Number(val); st._subtotalManual = true; cotizArmadoRecalcularTotales(); return; }
+  if (campo === 'total') { st.total = val===''?0:Number(val); st._totalManual = true; return; }
   st[campo] = val;
+  if (campo === 'iva') cotizArmadoRecalcularTotales();
+}
+// Subtotal = suma de los ítems (a menos que se haya pisado a mano). Total =
+// Subtotal + IVA% (a menos que se haya pisado a mano). Se llama cada vez que
+// cambian los ítems o el % de IVA — "↺" en el armador vuelve a modo
+// automático si se había tocado a mano.
+function cotizArmadoRecalcularTotales() {
+  const st = cotizArmadoInit();
+  const sumaItems = (st.items||[]).reduce((a,it) => a + (Number(it.cantidad)||0)*(Number(it.precio_unitario)||0), 0);
+  if (!st._subtotalManual) st.subtotal = sumaItems;
+  if (!st._totalManual) st.total = (Number(st.subtotal)||0) * (1 + (Number(st.iva)||0)/100);
+}
+function cotizArmadoSubtotalAuto() {
+  const st = cotizArmadoInit();
+  st._subtotalManual = false;
+  cotizArmadoRecalcularTotales();
+  cotizArmadoRender();
+}
+function cotizArmadoTotalAuto() {
+  const st = cotizArmadoInit();
+  st._totalManual = false;
+  cotizArmadoRecalcularTotales();
+  cotizArmadoRender();
 }
 
 // ── Cliente (autocompletar contra la sección Clientes) + su(s) contacto(s) ──
@@ -14278,16 +14320,19 @@ function cotizArmadoSeleccionarContacto(contactoId) {
 function cotizArmadoAgregarManual() {
   const st = cotizArmadoInit();
   st.items.push({ id: procesosNuevoId(), descripcion:'', cantidad:1, precio_unitario:0 });
+  cotizArmadoRecalcularTotales();
   cotizArmadoRender();
 }
 function cotizArmadoEliminarItem(id) {
   const st = cotizArmadoInit();
   st.items = st.items.filter(it => it.id !== id);
+  cotizArmadoRecalcularTotales();
   cotizArmadoRender();
 }
 function cotizArmadoSetItemCampo(id, campo, val) {
   const st = cotizArmadoInit();
   st.items = st.items.map(it => it.id===id ? Object.assign({}, it, { [campo]: campo==='descripcion' ? val : (val===''?'':Number(val)) }) : it);
+  cotizArmadoRecalcularTotales();
   cotizArmadoRender();
 }
 
@@ -14358,6 +14403,7 @@ function cotizArmadoAgregarDesde(origen, id) {
   st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null });
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
+  cotizArmadoRecalcularTotales();
   cotizArmadoRender();
 }
 
@@ -14375,6 +14421,12 @@ function cotizXlsxColNum(letra) {
   return n;
 }
 function cotizXlsxBuildCellInner(contenido) {
+  // "f" sin valor cacheado: algunos visores (no Excel de escritorio) no
+  // recalculan al abrir y muestran la celda vacía/0 hasta que alguien la
+  // fuerza a recalcular — por eso los totales van con "fv" (fórmula + <v>
+  // ya calculado): Excel la sigue tratando como fórmula viva, pero cualquier
+  // visor la muestra bien de entrada.
+  if (contenido.type === 'fv') return { attrsExtra: '', inner: `<f>${cotizXlsxEsc(contenido.formula)}</f><v>${contenido.value}</v>` };
   if (contenido.type === 'f') return { attrsExtra: '', inner: `<f>${cotizXlsxEsc(contenido.formula)}</f>` };
   if (contenido.type === 'n') return { attrsExtra: '', inner: `<v>${contenido.value}</v>` };
   return { attrsExtra: ' t="inlineStr"', inner: `<is><t xml:space="preserve">${cotizXlsxEsc(String(contenido.value))}</t></is>` };
@@ -14412,6 +14464,7 @@ function cotizXlsxSetCelda(sheetXml, addr, contenido) {
 const cotizXlsxTexto = valor => ({ type:'s', value: valor });
 const cotizXlsxNumero = valor => ({ type:'n', value: valor });
 const cotizXlsxFormula = formula => ({ type:'f', formula });
+const cotizXlsxFormulaConValor = (formula, valor) => ({ type:'fv', formula, value: Number(valor)||0 });
 
 async function cotizPlantillaObtenerBytes() {
   const raw = await supaConfigGet(COTIZ_TEMPLATE_KEY());
@@ -14450,14 +14503,43 @@ async function cotizGenerarXlsxBlob(st) {
   sheetXml = cotizXlsxSetCelda(sheetXml, 'A44', cotizXlsxTexto(st.observaciones || ''));
   sheetXml = cotizXlsxSetCelda(sheetXml, 'D49', cotizXlsxTexto(`Ing. ${st.firmante_nombre || ''}`));
 
+  let sumaItems = 0;
   (st.items || []).forEach((it, idx) => {
     const fila = 12 + idx;
+    const cantidad = Number(it.cantidad)||0, precio = Number(it.precio_unitario)||0;
+    const totalItem = cantidad * precio;
+    sumaItems += totalItem;
     sheetXml = cotizXlsxSetCelda(sheetXml, `A${fila}`, cotizXlsxNumero(idx + 1));
-    sheetXml = cotizXlsxSetCelda(sheetXml, `B${fila}`, cotizXlsxNumero(Number(it.cantidad)||0));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `B${fila}`, cotizXlsxNumero(cantidad));
     sheetXml = cotizXlsxSetCelda(sheetXml, `C${fila}`, cotizXlsxTexto(it.descripcion || ''));
-    sheetXml = cotizXlsxSetCelda(sheetXml, `D${fila}`, cotizXlsxNumero(Number(it.precio_unitario)||0));
-    sheetXml = cotizXlsxSetCelda(sheetXml, `E${fila}`, cotizXlsxFormula(`B${fila}*D${fila}`));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `D${fila}`, cotizXlsxNumero(precio));
+    // "fv" (fórmula + valor ya calculado): así se ve bien tanto en Excel de
+    // escritorio (formula viva, recalcula si se toca algo) como en
+    // cualquier visor que no fuerce el recálculo al abrir.
+    sheetXml = cotizXlsxSetCelda(sheetXml, `E${fila}`, cotizXlsxFormulaConValor(`B${fila}*D${fila}`, totalItem));
   });
+
+  // Subtotal/IVA/Total: si coinciden con lo que darían los ítems/IVA% (o sea
+  // están en modo automático, no se los pisó a mano), van con fórmula viva +
+  // valor cacheado, igual que los ítems. Si no coinciden (se pisaron a
+  // mano — en el armador o editando el registro guardado), van como número
+  // fijo, así Excel no los pisa de vuelta al recalcular la fórmula
+  // original. Se compara por diferencia (no por la bandera _manual en
+  // memoria, que no viaja al volver a descargar/editar una cotización ya
+  // guardada) para que esto funcione siempre, no solo en la sesión del
+  // armador donde se generó. El monto de IVA siempre sale de Total-Subtotal
+  // (así los tres números siempre cierran entre sí).
+  const EPS = 0.005;
+  const subtotal = st.subtotal != null ? Number(st.subtotal)||0 : sumaItems;
+  const iva = st.iva != null ? Number(st.iva)||0 : 21;
+  const total = st.total != null ? Number(st.total)||0 : subtotal * (1 + iva/100);
+  const montoIva = total - subtotal;
+  const subtotalEsAuto = Math.abs(subtotal - sumaItems) < EPS;
+  const totalEsAuto = Math.abs(total - subtotal*(1+iva/100)) < EPS;
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E26', subtotalEsAuto ? cotizXlsxFormulaConValor('SUM(E12:E25)', subtotal) : cotizXlsxNumero(subtotal));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'D27', cotizXlsxNumero(iva));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E27', cotizXlsxNumero(montoIva));
+  sheetXml = cotizXlsxSetCelda(sheetXml, 'E28', totalEsAuto ? cotizXlsxFormulaConValor('E26+E27', total) : cotizXlsxNumero(total));
 
   zip.file(sheetPath, sheetXml);
   // calcChain queda desactualizado (fórmulas nuevas) — Excel lo reconstruye
@@ -14598,6 +14680,7 @@ async function cotizArmadoGenerar() {
       plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
       garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
       firmante_nombre: st.firmante_nombre||null, items: st.items,
+      iva: Number(st.iva)||0, subtotal: Number(st.subtotal)||0, total: Number(st.total)||0,
     };
 
     let cotizacionId;
@@ -14608,7 +14691,7 @@ async function cotizArmadoGenerar() {
       // para guardar un snapshot del estado anterior en
       // cotizaciones_revisiones ("Ver historial" en el listado lo usa para
       // mostrar qué cambió en cada edición).
-      const camposSnapshot = 'cliente,atencion,telefono,celular,email,q_numero,referencia,tipo_venta,fecha,moneda,forma_pago,forma_cancelacion,plazo_entrega,lugar_entrega,garantia,validez_oferta,observaciones,firmante_nombre,items,revision,stock_reservado';
+      const camposSnapshot = 'cliente,atencion,telefono,celular,email,q_numero,referencia,tipo_venta,fecha,moneda,forma_pago,forma_cancelacion,plazo_entrega,lugar_entrega,garantia,validez_oferta,observaciones,firmante_nombre,items,revision,stock_reservado,iva,subtotal,total';
       const resPrevia = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}&select=${camposSnapshot}`, {headers:{Authorization:'Bearer '+session.token}});
       const filaPrevia = resPrevia.ok ? (await resPrevia.json())[0] : null;
       if (filaPrevia) {
@@ -14790,6 +14873,7 @@ const COTIZ_CAMPOS_HISTORIAL = [
   ['forma_pago','Forma de pago'], ['forma_cancelacion','Forma de cancelación'], ['plazo_entrega','Plazo de entrega'],
   ['lugar_entrega','Lugar de entrega'], ['garantia','Garantía'], ['validez_oferta','Validez de la oferta'],
   ['observaciones','Observaciones'], ['firmante_nombre','Firma'],
+  ['iva','IVA %'], ['subtotal','Subtotal'], ['total','Total'],
 ];
 // Compara dos estados de una cotización (campo por campo + un resumen de
 // ítems) y devuelve las líneas de texto de lo que cambió entre uno y otro.
@@ -14977,7 +15061,14 @@ function cotizCotizacionEditar(id) {
     garantia: row.garantia || COTIZ_DEFAULT_GARANTIA, validez_oferta: row.validez_oferta||'', observaciones: row.observaciones || COTIZ_DEFAULT_OBSERVACIONES,
     firmante_nombre: row.firmante_nombre || currentUser?.nombre || '',
     items: (row.items||[]).map(it => Object.assign({}, it, { id: it.id || procesosNuevoId() })),
+    // Si la cotización se generó antes de que existieran estos campos,
+    // row.iva/subtotal/total vienen null — se recalculan solos abajo.
+    iva: row.iva != null ? row.iva : 21,
+    subtotal: row.subtotal != null ? row.subtotal : 0,
+    total: row.total != null ? row.total : 0,
+    _subtotalManual: false, _totalManual: false,
   };
+  if (row.subtotal == null || row.total == null) cotizArmadoRecalcularTotales();
   cotizArmadoRender();
   document.getElementById('cotiz-armado-body')?.scrollIntoView({behavior:'smooth', block:'start'});
 }
