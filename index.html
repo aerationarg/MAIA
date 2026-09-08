@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4904,7 +4904,7 @@ function procesosDocumentosRenderLista() {
         </div>
         ${det.item_id && det.site_id ? `
         <div class="sp-selected" style="margin-top:6px">
-          <span style="font-size:12px">${expandedDetalle ? procesosDocResumenEstado(expandedDetalle) : 'Cargando estado...'}</span>
+          <span style="font-size:12px">${expandedDetalle ? procesosDocResumenEstado(expandedDetalle, _procesosDocumentosState.expandedTotalArchivos) : 'Cargando estado...'}</span>
           <button class="sp-browse-btn" onclick="procesosDocGenerarResumen('${d.id}')">${det.tipo==='carpeta' ? 'Procesar pendientes' : 'Generar resumen'}</button>
           ${det.tipo!=='carpeta' ? `<button class="sp-browse-btn" onclick="procesosDocForzarReanalisis('${d.id}')" title="Descarta el texto/resumen ya guardado y lo vuelve a transcribir de cero (por si la transcripción original quedó mal)">🔄 Forzar reanálisis</button>` : ''}
         </div>
@@ -4934,6 +4934,7 @@ function procesosDocFiltrar(v) {
 async function procesosDocExpandir(id) {
   _procesosDocumentosState.expandedId = id;
   _procesosDocumentosState.expandedDetalle = null;
+  _procesosDocumentosState.expandedTotalArchivos = null;
   procesosDocumentosRenderLista();
   if (!id) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -4942,6 +4943,20 @@ async function procesosDocExpandir(id) {
   if (res.ok && rows[0] && _procesosDocumentosState.expandedId === id) {
     _procesosDocumentosState.expandedDetalle = rows[0];
     procesosDocumentosRenderLista();
+    // Si es carpeta, traemos el total real de archivos (solo nombres, sin
+    // bajar contenido) para poder mostrar "N de M procesados" — mismo
+    // listado liviano que usa la selección de normativa por nombre.
+    const doc = rows[0];
+    if (doc.tipo === 'carpeta' && doc.item_id && doc.site_id) {
+      try {
+        const token = await getMsToken();
+        const archivos = await procesosListarArchivosCarpeta(doc.site_id, doc.item_id, token);
+        if (_procesosDocumentosState.expandedId === id) {
+          _procesosDocumentosState.expandedTotalArchivos = archivos.length;
+          procesosDocumentosRenderLista();
+        }
+      } catch(e) { console.warn('No se pudo contar los archivos de la carpeta:', e.message); }
+    }
   }
 }
 
@@ -5003,12 +5018,13 @@ async function procesosDocSaveFolder(id, path, itemId, siteId) {
 
 // Texto corto de estado para la fila de un documento — cuántos archivos ya
 // tienen resumen generado (carpeta) o si el archivo suelto ya lo tiene.
-function procesosDocResumenEstado(d) {
+function procesosDocResumenEstado(d, totalArchivos) {
   if (d.tipo === 'carpeta') {
     const archivos = d.archivos_cache || [];
-    if (!archivos.length) return 'Sin procesar todavía.';
+    const totalTxt = (totalArchivos != null) ? ` de ${totalArchivos}` : '';
+    if (!archivos.length) return totalArchivos != null ? `0${totalTxt} archivos procesados.` : 'Sin procesar todavía.';
     const conResumen = archivos.filter(a => a.resumen).length;
-    return `${archivos.length} archivo(s) en caché (${conResumen} con resumen).`;
+    return `${archivos.length}${totalTxt} archivo(s) procesado(s) (${conResumen} con resumen).`;
   }
   return d.resumen_ia ? `Resumen generado${d.resumen_ia_at ? ' el ' + new Date(d.resumen_ia_at).toLocaleDateString('es-AR') : ''}.` : 'Sin resumen todavía.';
 }
