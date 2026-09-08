@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.67</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.68</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.67</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.68</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7023,23 +7023,18 @@ async function procesosDetectarSimilares() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_site_id,carpeta_item_id,archivos_cache&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
-    const catalogo = await res.json();
-    if (!res.ok || !Array.isArray(catalogo) || !catalogo.length) { if(hasEl) showMsg(statusId,'error','No hay proyectos cargados en el catálogo (Cfg Procesos IA).'); return; }
+    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    const catalogoAll = await res.json();
+    if (!res.ok || !Array.isArray(catalogoAll) || !catalogoAll.length) { if(hasEl) showMsg(statusId,'error','No hay proyectos cargados en el catálogo (Cfg Procesos IA).'); return; }
 
-    // Genera el resumen automático (con IA, cacheado) para hasta 3 entradas que
-    // tienen carpeta vinculada pero todavía no tienen ni descripción ni resumen
-    // — de a poco, no todas de golpe, para no disparar un lote grande de costo.
-    const pendientes = catalogo.filter(c => c.carpeta_item_id && !c.descripcion && !c.resumen_ia).slice(0, 3);
-    if (pendientes.length) {
-      if (hasEl) showMsg(statusId,'loading','Generando resúmenes de proyectos sin descripción...');
-      const tokenMs = await getMsToken();
-      for (const entry of pendientes) {
-        const resumen = await procesosCatalogoGenerarResumen(entry, tokenMs);
-        if (resumen) entry.resumen_ia = resumen;
-      }
-      if (hasEl) showMsg(statusId,'loading','Buscando proyectos parecidos...');
-    }
+    // Solo compara contra proyectos que YA tienen descripción o resumen cargado.
+    // Antes generaba automáticamente el resumen (transcribiendo con IA toda la
+    // carpeta) de hasta 3 proyectos sin analizar en cada corrida — con cientos
+    // de filas todavía vacías eso disparaba varios dólares de costo extra por
+    // cada análisis de cliente nuevo. Ahora esos se completan a mano o con el
+    // botón "Generar resumen con IA" de cada proyecto, no automáticamente acá.
+    const catalogo = catalogoAll.filter(c => c.descripcion || c.resumen_ia);
+    if (!catalogo.length) { if(hasEl) showMsg(statusId,'error','Todavía no hay proyectos con descripción/resumen cargados en el catálogo.'); return; }
 
     const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion || c.resumen_ia || ''}`).join('\n');
     const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
