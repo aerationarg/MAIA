@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.60</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.61</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.60</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.61</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -979,6 +979,15 @@
         <div class="sp-selected">
           <span id="cotiz-plantilla-label" style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Sin vincular</span>
           <button class="sp-browse-btn" onclick="cotizPlantillaSelect()">Vincular archivo</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label">Carpeta de cotizaciones (SharePoint)</div>
+        <p class="hint" style="margin-bottom:10px">Si la vinculás, al generar una cotización el Excel ya no se descarga: se guarda solo en SharePoint dentro de "‹esta carpeta›/‹Cliente›/Q-XXXX - ‹Referencia›/". Si la dejás sin vincular, sigue descargándose como antes.</p>
+        <div class="sp-selected">
+          <span id="cotiz-carpeta-label" style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Cargando...</span>
+          <button class="sp-browse-btn" onclick="cotizCarpetaSelect()">Vincular carpeta</button>
+          <button class="sp-browse-btn" onclick="cotizCarpetaQuitar()">Quitar</button>
         </div>
       </div>
     </div>
@@ -13428,12 +13437,21 @@ async function clientesRender() {
     const texto = (document.getElementById('clientes-buscar')?.value || '').trim();
     let url = '/rest/v1/clientes?select=*,clientes_contactos(*)&order=nombre_empresa';
     if (texto) url += `&or=(nombre_empresa.ilike.*${encodeURIComponent(texto)}*,rubro.ilike.*${encodeURIComponent(texto)}*)`;
-    const [res, profiles] = await Promise.all([
+    // Lugares de entrega: consulta aparte (no embebida) — así, si la tabla
+    // todavía no existe (falta correr el SQL), no se rompe el resto de la
+    // lista de clientes, solo se queda sin lugares cargados.
+    const [res, profiles, resLugares] = await Promise.all([
       supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
       clientesGetProfiles(),
+      supaFetch('/rest/v1/clientes_lugares_entrega?select=*', {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null),
     ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar la lista de clientes.</p>'; return; }
+    let lugaresPorCliente = {};
+    if (resLugares && resLugares.ok) {
+      (await resLugares.json()).forEach(l => { (lugaresPorCliente[l.cliente_id] = lugaresPorCliente[l.cliente_id] || []).push(l); });
+    }
+    rows.forEach(c => { c.clientes_lugares_entrega = lugaresPorCliente[c.id] || []; });
     _clientesCache = rows;
     if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay clientes cargados.</p>'; return; }
     el.innerHTML = rows.map(c => {
@@ -13452,6 +13470,7 @@ async function clientesRender() {
 }
 function clientesPanelHtml(c, profiles) {
   const contactos = c.clientes_contactos || [];
+  const lugares = c.clientes_lugares_entrega || [];
   const respOptions = profiles.map(p => `<option value="${p.id}" ${p.id===c.responsable_user_id?'selected':''}>${esc(p.nombre||p.email)}</option>`).join('');
   return `
     <div class="card" style="margin-top:8px">
@@ -13487,6 +13506,16 @@ function clientesPanelHtml(c, profiles) {
         </div>`).join('')}
       ` : '<p class="hint">Sin contactos todavía.</p>'}
       <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesContactoAdd('${c.id}')">+ Agregar contacto</button>
+
+      <div class="gap"></div>
+      <label>Lugares de entrega</label>
+      <p class="hint" style="margin-bottom:6px">Se usan para precargar "Lugar de entrega" al armar una cotización — si hay más de uno, se puede elegir cuál.</p>
+      ${lugares.length ? lugares.map(l => `
+        <div class="field-row" style="padding:4px 0;display:flex;gap:6px;align-items:center">
+          <input value="${esc(l.texto||'')}" placeholder="Ej: Depósito Central, Ruta 8 km 44" style="flex:1" onchange="clientesLugarUpdate('${l.id}',this.value)" />
+          <button class="btn btn-secondary btn-sm" onclick="clientesLugarEliminar('${l.id}')">✕</button>
+        </div>`).join('') : '<p class="hint">Sin lugares de entrega cargados todavía.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesLugarAdd('${c.id}')">+ Agregar lugar de entrega</button>
 
       <div class="gap"></div>
       <button class="btn btn-secondary btn-sm" onclick="clientesEliminar('${c.id}')" style="color:var(--red)">Eliminar cliente</button>
@@ -13539,6 +13568,28 @@ async function clientesContactoEliminar(id) {
   if (!confirm('¿Eliminar este contacto?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/clientes_contactos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  clientesRender();
+}
+async function clientesLugarAdd(clienteId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/clientes_lugares_entrega', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ cliente_id: clienteId, texto: '' })
+  });
+  if (!res.ok) { alert('No se pudo agregar el lugar de entrega — ¿corriste el SQL que crea la tabla "clientes_lugares_entrega"?'); return; }
+  clientesRender();
+}
+async function clientesLugarUpdate(id, texto) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_lugares_entrega?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ texto })
+  });
+}
+async function clientesLugarEliminar(id) {
+  if (!confirm('¿Eliminar este lugar de entrega?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_lugares_entrega?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
   clientesRender();
 }
 
@@ -13649,10 +13700,26 @@ async function cotizCatalogoRender() {
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo`, {headers:{Authorization:'Bearer '+session.token}});
+    const [res, resReservas] = await Promise.all([
+      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/cotizaciones?select=q_numero,cliente,items&empresa=eq.${currentEmpresa}&stock_reservado=eq.true`, {headers:{Authorization:'Bearer '+session.token}}),
+    ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el catálogo.</p>'; return; }
     if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
+    // Mapa catalogo_id → detalle de qué cotizaciones tienen reservado ese
+    // producto (Q + cliente + cantidad), para poder mostrarlo junto al
+    // número de "Reserva" — no reemplaza el número (que sigue siendo
+    // editable a mano), es solo información de a qué corresponde.
+    const reservasPorProducto = {};
+    if (resReservas.ok) {
+      (await resReservas.json()).forEach(cot => {
+        (cot.items||[]).filter(it => it.catalogo_id).forEach(it => {
+          if (!reservasPorProducto[it.catalogo_id]) reservasPorProducto[it.catalogo_id] = [];
+          reservasPorProducto[it.catalogo_id].push({ q: cot.q_numero, cliente: cot.cliente, cantidad: Number(it.cantidad)||0 });
+        });
+      });
+    }
     const inputNum = (r, campo, w) => `<input value="${esc(String(r[campo]||0))}" style="width:${w||52}px;text-align:right" onchange="cotizCatalogoUpdate('${r.id}','${campo}',Number(this.value)||0)" />`;
     el.innerHTML = `
       <div style="overflow-x:auto">
@@ -13683,7 +13750,7 @@ async function cotizCatalogoRender() {
                 <option value="USD" ${r.moneda_lista!=='ARS'?'selected':''}>USD</option>
                 <option value="ARS" ${r.moneda_lista==='ARS'?'selected':''}>ARS</option>
               </select></td>
-              ${COTIZ_STOCK_COLS.map(([campo]) => `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
+              ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
               <td style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
               <td style="padding:2px"><button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
             </tr>`;
@@ -13924,13 +13991,48 @@ async function cotizPlantillaRender() {
     const tmpl = raw ? JSON.parse(raw) : null;
     el.textContent = tmpl ? tmpl.label : 'Sin vincular';
   } catch(e) { el.textContent = 'Sin vincular'; }
+  cotizCarpetaRender();
 }
+
+// ── Carpeta de SharePoint donde se guardan los .xlsx de cotizaciones ──────
+function COTIZ_CARPETA_KEY() { return 'cotiz_carpeta_' + currentEmpresa; }
+function cotizCarpetaSelect() { fbOpen('folder', 'cotiz-carpeta'); }
+async function cotizCarpetaRender() {
+  const el = document.getElementById('cotiz-carpeta-label');
+  if (!el) return;
+  try {
+    const raw = await supaConfigGet(COTIZ_CARPETA_KEY());
+    const cfg = raw ? JSON.parse(raw) : null;
+    el.textContent = cfg ? cfg.label : 'Sin vincular (se descarga localmente)';
+  } catch(e) { el.textContent = 'Sin vincular (se descarga localmente)'; }
+}
+async function cotizCarpetaQuitar() {
+  if (!confirm('¿Quitar la carpeta de cotizaciones? Las próximas cotizaciones van a volver a descargarse en vez de guardarse en SharePoint.')) return;
+  try { await supaConfigSet(COTIZ_CARPETA_KEY(), ''); } catch(e) {}
+  cotizCarpetaRender();
+}
+// Extiende el selector de carpetas compartido para el target propio de Cfg Comercial
+var _origFbSCCotiz = fbSelectCurrent;
+fbSelectCurrent = function() {
+  if (fbTarget === 'cotiz-carpeta') {
+    const btn = document.getElementById('fb-select-btn');
+    const path = btn?.dataset.path;
+    const itemId = btn?.dataset.id;
+    const label = (fbCurrentSiteName||'') + (path ? ' › ' + path.replace(/\//g,' › ') : '');
+    fbClose();
+    supaConfigSet(COTIZ_CARPETA_KEY(), JSON.stringify({ path, itemId, siteId: fbCurrentSiteId, label }))
+      .then(cotizCarpetaRender)
+      .catch(e => alert('No se pudo guardar la carpeta: ' + e.message));
+    return;
+  }
+  _origFbSCCotiz();
+};
 
 let cotizArmado = null;
 function cotizArmadoInit() {
   if (cotizArmado) return cotizArmado;
   cotizArmado = {
-    cliente:'', cliente_id:null, contacto_id:null, _contactos:[],
+    cliente:'', cliente_id:null, contacto_id:null, _contactos:[], _lugares:[],
     atencion:'', telefono:'', celular:'', email:'', q_numero:'', referencia:'', tipo_venta:'',
     fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
     forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
@@ -13984,6 +14086,7 @@ function cotizArmadoRender() {
 
   el.innerHTML = `
     <button class="btn btn-secondary btn-sm" style="margin-bottom:10px" onclick="cotizArmadoNueva()">↻ Nueva cotización</button>
+    ${st._editandoId ? `<p class="hint" style="margin:-4px 0 10px;color:var(--blue)">✎ Editando ${st.q_numero?'Q-'+esc(st.q_numero):'esta cotización'} — al guardar se actualiza y queda como REV${(st._revisionAnterior||0)+1} (usá "↻ Nueva cotización" para salir sin guardar).</p>` : ''}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
       <div style="position:relative">
         <label style="font-size:12px">Cliente</label>
@@ -14018,7 +14121,16 @@ function cotizArmadoRender() {
       ${campo('forma_pago','Forma de pago')}
       ${campo('forma_cancelacion','Forma de cancelación')}
       ${campo('plazo_entrega','Plazo de entrega')}
-      ${campo('lugar_entrega','Lugar de entrega')}
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+          <label style="font-size:12px">Lugar de entrega</label>
+          ${(st._lugares||[]).length > 1 ? `
+          <select style="font-size:11px;padding:1px 4px;max-width:150px;height:auto" onchange="cotizArmadoSeleccionarLugar(this.value)" title="Cambiar de lugar de entrega">
+            ${st._lugares.map(l => `<option value="${l.id}" ${l.texto===st.lugar_entrega?'selected':''}>${esc((l.texto||'(sin texto)').slice(0,30))}</option>`).join('')}
+          </select>` : ''}
+        </div>
+        <input value="${esc(st.lugar_entrega||'')}" oninput="cotizArmadoSetCampo('lugar_entrega',this.value)" />
+      </div>
       ${campo('validez_oferta','Validez de la oferta')}
       ${campo('firmante_nombre','Firma — Ingeniero/a')}
     </div>
@@ -14047,7 +14159,7 @@ function cotizArmadoRender() {
     ${st.items.length ? `<div style="text-align:right;margin-top:6px;font-weight:600">Subtotal: ${procesosFormatearNumero(totalGeneral)}</div>` : ''}
 
     <div class="gap"></div>
-    <button class="btn btn-green" onclick="cotizArmadoGenerar()">⬇ Generar y descargar cotización (Excel)</button>
+    <button class="btn btn-green" onclick="cotizArmadoGenerar()">${st._editandoId ? '💾 Guardar cambios (REV'+((st._revisionAnterior||0)+1)+')' : '⬇ Generar cotización (Excel)'}</button>
     <div id="cotiz-armado-status"></div>
   `;
 }
@@ -14089,15 +14201,45 @@ async function cotizArmadoClienteSeleccionar(clienteId) {
   st.cliente_id = clienteId;
   st.contacto_id = null;
   st._contactos = [];
+  st.lugar_entrega = '';
+  st._lugares = [];
   const sugEl = document.getElementById('cotiz-armado-cliente-sugerencias');
   if (sugEl) { sugEl.style.display = 'none'; sugEl.innerHTML = ''; }
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   try {
-    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/clientes_contactos?select=*&cliente_id=eq.${clienteId}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
     const contactos = res.ok ? await res.json() : [];
     st._contactos = contactos;
     if (contactos.length >= 1) cotizArmadoAplicarContacto(contactos[0]);
   } catch(e) { st._contactos = []; }
+  // Lugares de entrega del cliente (tabla clientes_lugares_entrega) — si hay
+  // uno solo se precarga directo, si hay varios se deja elegir con un
+  // desplegable (mismo patrón que el contacto).
+  try {
+    const res = await supaFetch(`/rest/v1/clientes_lugares_entrega?select=*&cliente_id=eq.${clienteId}&order=texto`, {headers:{Authorization:'Bearer '+session.token}});
+    const lugares = res.ok ? await res.json() : [];
+    st._lugares = lugares;
+    if (lugares.length >= 1) st.lugar_entrega = lugares[0].texto || '';
+  } catch(e) { st._lugares = []; }
+  // Condiciones comerciales de la última cotización hecha a este cliente
+  // (forma de pago/cancelación, plazo de entrega, validez de la oferta) —
+  // se precargan solas para no tener que volver a tipearlas cada vez.
+  try {
+    const res = await supaFetch(`/rest/v1/cotizaciones?select=forma_pago,forma_cancelacion,plazo_entrega,validez_oferta&empresa=eq.${currentEmpresa}&cliente=eq.${encodeURIComponent(cliente.nombre_empresa)}&order=created_at.desc&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
+    const ultima = res.ok ? (await res.json())[0] : null;
+    if (ultima) {
+      if (ultima.forma_pago) st.forma_pago = ultima.forma_pago;
+      if (ultima.forma_cancelacion) st.forma_cancelacion = ultima.forma_cancelacion;
+      if (ultima.plazo_entrega) st.plazo_entrega = ultima.plazo_entrega;
+      if (ultima.validez_oferta) st.validez_oferta = ultima.validez_oferta;
+    }
+  } catch(e) { /* sin última cotización, se dejan las condiciones que ya había */ }
+  cotizArmadoRender();
+}
+function cotizArmadoSeleccionarLugar(lugarId) {
+  const st = cotizArmadoInit();
+  const lug = (st._lugares || []).find(l => l.id === lugarId);
+  st.lugar_entrega = lug ? (lug.texto || '') : '';
   cotizArmadoRender();
 }
 function cotizArmadoAplicarContacto(ct) {
@@ -14144,18 +14286,31 @@ async function cotizArmadoBuscarItems() {
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const q = encodeURIComponent(texto);
-    const [histRes, catRes] = await Promise.all([
-      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}),
-      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)&order=marca&limit=5`, {headers:{Authorization:'Bearer '+session.token}}),
-    ]);
-    const hist = histRes.ok ? await histRes.json() : [];
+    const orFiltro = `or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)`;
+    const st = cotizArmadoInit();
+    const clienteActual = (st.cliente || '').trim();
+    // Si hay un cliente elegido, se trae también lo vendido puntualmente a
+    // ESE cliente (aparte) para mostrarlo primero — más relevante como
+    // referencia de precio que lo vendido a cualquier otro.
+    const queries = [
+      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&${orFiltro}&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&${orFiltro}&order=marca&limit=5`, {headers:{Authorization:'Bearer '+session.token}}),
+    ];
+    if (clienteActual) queries.push(supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&cliente=ilike.*${encodeURIComponent(clienteActual)}*&${orFiltro}&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}));
+    const [histRes, catRes, histClienteRes] = await Promise.all(queries);
+    const histGeneral = histRes.ok ? await histRes.json() : [];
     const cat = catRes.ok ? await catRes.json() : [];
+    const histCliente = histClienteRes && histClienteRes.ok ? await histClienteRes.json() : [];
+    // Del cliente actual primero, después el resto (sin repetir los que ya
+    // salieron en la primera lista), tope de 6 en total para no saturar.
+    const vistos = new Set(histCliente.map(r => r.id));
+    const hist = histCliente.concat(histGeneral.filter(r => !vistos.has(r.id))).slice(0, 6);
     _cotizUltimaBusqueda = { hist, cat };
     let html = '';
     if (hist.length) {
       html += '<p class="hint" style="margin:6px 0 4px">Vendido antes:</p>' + hist.map(r => `
         <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('hist','${r.id}')">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}${r.catalogo_id?' <span style="color:var(--blue)">· Producto de Stock</span>':''}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}${r.catalogo_id?' <span style="color:var(--blue)">· Producto de Stock</span>':''}${clienteActual && r.cliente===clienteActual?' <span style="color:var(--green)">· Este cliente</span>':''}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
           <span class="result-val" style="background:var(--surface2);border:none">${esc(r.moneda)} ${procesosFormatearNumero(r.precio_unitario)}</span>
         </div>`).join('');
     }
@@ -14297,6 +14452,31 @@ function cotizDescargarBlob(blob, nombreArchivo) {
   a.click();
   URL.revokeObjectURL(url);
 }
+// SharePoint no permite \ / : * ? " < > | en nombres de carpeta/archivo.
+function cotizSanitizeNombre(s) {
+  return String(s||'').replace(/[\\/:*?"<>|]/g, '-').trim() || '(sin nombre)';
+}
+// Si hay una carpeta de cotizaciones vinculada (Cfg Comercial), sube el
+// Excel ahí: ‹carpeta base›/‹Cliente›/Q-XXXX - ‹Referencia›/‹archivo› —
+// creando las carpetas que falten (spEnsureFolder ya maneja "ya existe").
+// Devuelve null si no hay carpeta configurada (el caller cae a descarga
+// local); tira error si está configurada pero falla la subida.
+async function cotizGuardarEnSharePoint(st, blob, nombreArchivo) {
+  const raw = await supaConfigGet(COTIZ_CARPETA_KEY());
+  if (!raw) return null;
+  const cfg = JSON.parse(raw);
+  const token = await getMsToken();
+  const clienteFolderId = await spEnsureFolder(token, cfg.siteId, cfg.itemId, cotizSanitizeNombre(st.cliente));
+  const qCompleto = st.q_numero ? (/^q-/i.test(st.q_numero) ? st.q_numero : 'Q-'+st.q_numero) : 'Sin número';
+  const nombreCarpetaQ = cotizSanitizeNombre(`${qCompleto}${st.referencia ? ' - '+st.referencia : ''}`);
+  const qFolderId = await spEnsureFolder(token, cfg.siteId, clienteFolderId, nombreCarpetaQ);
+  const buf = await blob.arrayBuffer();
+  const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${cfg.siteId}/drive/items/${qFolderId}:/${encodeURIComponent(nombreArchivo)}:/content`;
+  const resp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: buf });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('No se pudo subir a SharePoint: ' + (e.error?.message || 'HTTP '+resp.status)); }
+  const item = await resp.json();
+  return { item, ruta: `${cfg.label} › ${cotizSanitizeNombre(st.cliente)} › ${nombreCarpetaQ}` };
+}
 
 // Iniciales para la fila del Excel de Q (ej. "Federico Cherny" → "FC").
 function cotizArmadoIniciales(nombreCompleto) {
@@ -14327,53 +14507,92 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
 async function cotizArmadoGenerar() {
   const statusId = 'cotiz-armado-status';
   const st = cotizArmadoInit();
+  const editando = !!st._editandoId;
   if (!st.cliente.trim()) { showMsg(statusId,'error','✕ Completá al menos el cliente.'); return; }
   if (!st.items.length) { showMsg(statusId,'error','✕ Agregá al menos un ítem.'); return; }
   if (st.items.length > COTIZ_MAX_ITEMS) { showMsg(statusId,'error',`✕ Hay ${st.items.length} ítems y la plantilla solo tiene lugar para ${COTIZ_MAX_ITEMS} — sacá alguno antes de generar.`); return; }
   // Se refresca siempre justo antes de generar — si alguien cargó una
-  // cotización directo en el Excel mientras tanto, no queremos pisarla.
-  try {
-    const proximoQ = await cotizArmadoObtenerProximoQNumero();
-    if (proximoQ && proximoQ !== st.q_numero) { st.q_numero = proximoQ; cotizArmadoRender(); }
-  } catch(e) { /* si falla, se sigue con el número que ya estaba cargado */ }
+  // cotización directo en el Excel mientras tanto, no queremos pisarla. No
+  // aplica al editar una ya existente: el Nº de Q no cambia.
+  if (!editando) {
+    try {
+      const proximoQ = await cotizArmadoObtenerProximoQNumero();
+      if (proximoQ && proximoQ !== st.q_numero) { st.q_numero = proximoQ; cotizArmadoRender(); }
+    } catch(e) { /* si falla, se sigue con el número que ya estaba cargado */ }
+  }
+  const revision = editando ? (st._revisionAnterior||0) + 1 : 0;
   showMsg(statusId, 'loading', 'Generando el Excel...');
   try {
     const blob = await cotizGenerarXlsxBlob(st);
-    cotizDescargarBlob(blob, `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}.xlsx`);
-    showMsg(statusId, 'loading', 'Guardando en el historial de cotizaciones...');
+    const nombreArchivo = `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}${revision?' REV'+revision:''}.xlsx`;
+    let guardadoSp = null, avisoSp = '';
+    try {
+      guardadoSp = await cotizGuardarEnSharePoint(st, blob, nombreArchivo);
+    } catch(eSp) {
+      // No se pudo subir a SharePoint — no se pierde el trabajo, cae a
+      // descarga local y se avisa (no corta el guardado en el historial).
+      avisoSp = ` (ojo: no se pudo guardar en SharePoint — ${eSp.message}, se descargó local en su lugar)`;
+    }
+    if (!guardadoSp) cotizDescargarBlob(blob, nombreArchivo);
+    showMsg(statusId, 'loading', (guardadoSp ? `Guardado en SharePoint (${guardadoSp.ruta}).` : 'Descargado.') + ' Guardando en el historial...');
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch('/rest/v1/cotizaciones', {
-      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-      body: JSON.stringify({
-        empresa: currentEmpresa, fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
-        telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
-        referencia: st.referencia||null, tipo_venta: st.tipo_venta||null,
-        moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
-        plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
-        garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
-        firmante_nombre: st.firmante_nombre||null, items: st.items, estado: 'pendiente',
-        vendedor_nombre: currentUser?.nombre || currentUser?.email || null,
-        creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
-      })
-    });
-    if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
-    const nuevaCotizacion = (await res.json().catch(()=>[]))[0];
+    const camposComunes = {
+      fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
+      telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
+      referencia: st.referencia||null, tipo_venta: st.tipo_venta||null,
+      moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
+      plazo_entrega: st.plazo_entrega||null, lugar_entrega: st.lugar_entrega||null,
+      garantia: st.garantia||null, validez_oferta: st.validez_oferta||null, observaciones: st.observaciones||null,
+      firmante_nombre: st.firmante_nombre||null, items: st.items,
+    };
 
-    // Ítems de Stock (tienen catalogo_id): se reservan apenas se genera la
-    // cotización (stock -X, reserva +X) — no hace falta esperar a que se
+    let cotizacionId;
+    if (editando) {
+      // Antes de pisar, traemos la fila tal como está en la base (no la
+      // caché local, que puede estar vieja) para saber qué reserva de stock
+      // había activa con los ítems VIEJOS y poder liberarla bien.
+      const resPrevia = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}&select=items,stock_reservado`, {headers:{Authorization:'Bearer '+session.token}});
+      const filaPrevia = resPrevia.ok ? (await resPrevia.json())[0] : null;
+      const res = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}`, {
+        method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+        body: JSON.stringify(Object.assign({}, camposComunes, { revision, updated_at: new Date().toISOString() }))
+      });
+      if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+      cotizacionId = st._editandoId;
+      if (filaPrevia?.stock_reservado) {
+        showMsg(statusId, 'loading', 'Actualizando reserva de stock...');
+        await cotizCotizacionLiberarReserva(filaPrevia.items||[], session, true);
+        await supaFetch(`/rest/v1/cotizaciones?id=eq.${cotizacionId}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: false }) });
+      }
+      st._revisionAnterior = revision; // por si se sigue editando y se vuelve a guardar
+    } else {
+      const res = await supaFetch('/rest/v1/cotizaciones', {
+        method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+        body: JSON.stringify(Object.assign({}, camposComunes, {
+          empresa: currentEmpresa, estado: 'pendiente',
+          vendedor_nombre: currentUser?.nombre || currentUser?.email || null,
+          creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+        }))
+      });
+      if (!res.ok) { const errBody = await res.json().catch(()=>({})); throw new Error(errBody.message || 'HTTP '+res.status); }
+      cotizacionId = (await res.json().catch(()=>[]))[0]?.id;
+    }
+
+    // Ítems de Stock (tienen catalogo_id): se reservan apenas se genera/edita
+    // la cotización (stock -X, reserva +X) — no hace falta esperar a que se
     // marque vendida. Ver cotizCotizacionAplicarEstado para cómo se resuelve
     // la reserva después (vendida/perdida).
     const itemsDeStock = (st.items||[]).filter(it => it.catalogo_id);
-    if (itemsDeStock.length && nuevaCotizacion?.id) {
+    if (itemsDeStock.length && cotizacionId) {
       showMsg(statusId, 'loading', 'Reservando stock...');
       const avisosReserva = await cotizCotizacionReservarStock(itemsDeStock, session);
-      await supaFetch(`/rest/v1/cotizaciones?id=eq.${nuevaCotizacion.id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: true }) });
+      await supaFetch(`/rest/v1/cotizaciones?id=eq.${cotizacionId}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: true }) });
       if (avisosReserva.length) alert('Se reservó stock. Ojo, quedó negativo en:\n' + avisosReserva.join('\n'));
     }
 
     let avisoQ = '';
-    if (st.q_numero) {
+    if (st.q_numero && !editando) {
       showMsg(statusId, 'loading', 'Registrando en el Excel de Q...');
       try {
         const qCompleto = /^q-/i.test(st.q_numero) ? st.q_numero : 'Q-' + st.q_numero;
@@ -14382,7 +14601,8 @@ async function cotizArmadoGenerar() {
         avisoQ = ' (ojo: no se pudo registrar en el Excel de Q — ' + eQ.message + ', cargalo a mano ahí)';
       }
     }
-    showMsg(statusId, 'success', '✓ Cotización generada, descargada y guardada en el historial de cotizaciones' + avisoQ + '.');
+    const dondeQuedo = guardadoSp ? `guardada en SharePoint (${guardadoSp.ruta})` : 'descargada';
+    showMsg(statusId, 'success', `✓ Cotización ${editando?'actualizada (REV'+revision+')':'generada'}, ${dondeQuedo} y guardada en el historial de cotizaciones${avisoQ}${avisoSp}.`);
     cotizCotizacionesRender();
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo generar: ' + e.message);
@@ -14424,7 +14644,7 @@ async function cotizCotizacionesRender() {
           ${rowsData.map(({r,total,estadoLabel,estadoColor,monedaCorta}) => `<tr style="border-bottom:1px solid var(--border)">
             <td style="padding:4px 6px;white-space:nowrap">${esc(r.fecha||'')}</td>
             <td style="padding:4px 6px">${esc(r.cliente||'')}</td>
-            <td style="padding:4px 6px">${r.q_numero?esc(r.q_numero):''}</td>
+            <td style="padding:4px 6px">${r.q_numero?esc(r.q_numero):''}${r.revision?` <span style="color:var(--text2);font-size:11px">REV${r.revision}</span>`:''}</td>
             <td style="padding:4px 6px;text-align:right" title="${esc((r.items||[]).map(it=>`${it.cantidad||1}x ${it.descripcion||'(sin descripción)'}`).join('\n'))}">${(r.items||[]).length}</td>
             <td style="padding:4px 6px;text-align:right">${procesosFormatearNumero(total)}</td>
             <td style="padding:4px 6px">${esc(monedaCorta)}</td>
@@ -14439,6 +14659,7 @@ async function cotizCotizacionesRender() {
                   ${r.estado!=='perdida'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionIniciarMarcar('${r.id}','perdida')" title="Marcar perdida">✕</button>`:''}
                   ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVolverAPendiente('${r.id}')" title="Volver a pendiente">↺</button>`:''}
                 `}
+                ${r.estado==='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEditar('${r.id}')" title="Editar (se guarda como revisión nueva)">✎</button>`:''}
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionDescargar('${r.id}')" title="Descargar de nuevo">⬇</button>
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEliminar('${r.id}')" title="Eliminar">🗑</button>
               </div>
@@ -14582,8 +14803,32 @@ async function cotizCotizacionDescargar(id) {
   if (!row) return;
   try {
     const blob = await cotizGenerarXlsxBlob(row);
-    cotizDescargarBlob(blob, `Cotización - ${row.cliente}${row.q_numero?' Q-'+row.q_numero:''}.xlsx`);
+    cotizDescargarBlob(blob, `Cotización - ${row.cliente}${row.q_numero?' Q-'+row.q_numero:''}${row.revision?' REV'+row.revision:''}.xlsx`);
   } catch(e) { alert('No se pudo generar el archivo: ' + e.message); }
+}
+// Carga una cotización ya generada de vuelta en el armador para editarla —
+// al "Generar" de nuevo desde ahí, en vez de crear una cotización nueva se
+// actualiza esta misma fila y se guarda como revisión siguiente (REV1,
+// REV2...), en el mismo lugar de SharePoint que la original. Solo se puede
+// editar mientras está "pendiente" (no tiene sentido tocar una ya
+// vendida/perdida — la venta/pérdida ya quedó resuelta con esos datos).
+function cotizCotizacionEditar(id) {
+  const row = _cotizCotizacionesCache.find(r => r.id === id);
+  if (!row) return;
+  if (row.estado !== 'pendiente') { alert('Solo se pueden editar cotizaciones pendientes.'); return; }
+  cotizArmado = {
+    _editandoId: row.id, _revisionAnterior: row.revision || 0,
+    cliente: row.cliente||'', cliente_id: row.cliente_id||null, contacto_id: null, _contactos:[], _lugares:[],
+    atencion: row.atencion||'', telefono: row.telefono||'', celular: row.celular||'', email: row.email||'',
+    q_numero: row.q_numero||'', referencia: row.referencia||'', tipo_venta: row.tipo_venta||'',
+    fecha: row.fecha || new Date().toISOString().slice(0,10), moneda: row.moneda || 'Dólar',
+    forma_pago: row.forma_pago||'', forma_cancelacion: row.forma_cancelacion||'', plazo_entrega: row.plazo_entrega||'', lugar_entrega: row.lugar_entrega||'',
+    garantia: row.garantia || COTIZ_DEFAULT_GARANTIA, validez_oferta: row.validez_oferta||'', observaciones: row.observaciones || COTIZ_DEFAULT_OBSERVACIONES,
+    firmante_nombre: row.firmante_nombre || currentUser?.nombre || '',
+    items: (row.items||[]).map(it => Object.assign({}, it, { id: it.id || procesosNuevoId() })),
+  };
+  cotizArmadoRender();
+  document.getElementById('cotiz-armado-body')?.scrollIntoView({behavior:'smooth', block:'start'});
 }
 async function cotizCotizacionEliminar(id) {
   if (!confirm('¿Eliminar esta cotización del historial? No se puede deshacer (no afecta el historial de ventas si ya se había marcado como vendida).')) return;
