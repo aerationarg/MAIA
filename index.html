@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.59</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.60</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.59</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.60</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6806,7 +6806,9 @@ async function procesosStep1NormativaAplicar(candidato) {
     showMsg(statusId, 'loading', 'Extrayendo límites aplicables...');
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const prompt = `Este es un documento de normativa de vuelco/descarga de efluentes ("${nombreMostrado}").\n\nEl proyecto tiene estos parámetros sin límite normativo definido todavía (formato "Corriente: Parámetro"): ${faltantes.join('; ')}.\n\nPara cada uno, si este documento establece un límite aplicable, extraelo (valor y unidad) — revisá bien si hay tablas, recorrelas completas. Si el documento no cubre ese parámetro puntual, o no aplica, dejalo afuera de la respuesta — no lo inventes.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta, usando como clave EXACTAMENTE "Corriente|Parametro" (con esas comillas y separador, tal como aparecen arriba pero con "|" en vez de ": "): {"Corriente|Parametro":{"limite_normativo":"<string>","unidad":"<unidad>"}}\n\nIMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual lo establece la norma, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango.\n\nDocumento:\n${texto.slice(0,40000)}`;
+    const campos = (p.info_cliente && p.info_cliente.campos) || {};
+    const contextoProyecto = ['Ubicación', 'Tipo de vuelco'].map(k => campos[k] ? `${k}: ${campos[k]}` : null).filter(Boolean).join(' · ') || '(sin datos de ubicación/tipo de vuelco)';
+    const prompt = `Este es un documento de normativa de vuelco/descarga de efluentes ("${nombreMostrado}").\n\nDatos del proyecto: ${contextoProyecto}.\n\nEl proyecto tiene estos parámetros sin límite normativo definido todavía (formato "Corriente: Parámetro"): ${faltantes.join('; ')}.\n\nPara cada uno, si este documento establece un límite aplicable, extraelo (valor y unidad) — revisá bien si hay tablas, recorrelas completas hasta el final. Si el documento no cubre ese parámetro puntual, o no aplica, dejalo afuera de la respuesta — no lo inventes.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta, usando como clave EXACTAMENTE "Corriente|Parametro" (con esas comillas y separador, tal como aparecen arriba pero con "|" en vez de ": "): {"Corriente|Parametro":{"limite_normativo":"<string>","unidad":"<unidad>","fuente":"<de qué fila/columna exacta de la tabla salió>"}}\n\nREGLA ESTRICTA anti-invención: el valor que pongas en "limite_normativo" tiene que ser exactamente el que aparece en el documento para la fila de ESE parámetro — si la tabla tiene una columna distinta según destino del vertido (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo", "Mar Abierto"), fijate primero en "Tipo de vuelco" de arriba para saber cuál de esas columnas corresponde a ESTE proyecto, y copiá el número de ESA columna en ESA fila — verificá letra por letra que el número que copiaste esté realmente en esa intersección fila×columna antes de responder, no un número de una fila o columna vecina. NUNCA agregues condiciones, excepciones ni números de página que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esta normativa aunque te resulte familiar — usá EXCLUSIVAMENTE lo que está escrito en el texto de abajo. Si no podés identificar con certeza la columna correcta, dejá ese parámetro afuera de la respuesta en vez de adivinar.\n\nIMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual lo establece la norma, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango.\n\nDocumento:\n${texto.slice(0,40000)}`;
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -6835,7 +6837,7 @@ async function procesosStep1NormativaAplicar(candidato) {
       if (actual.limite_normativo != null) return; // defensa extra: ya tiene límite, no tocar
       c.campos[nombreParam] = Object.assign({}, actual, {
         limite_normativo: val.limite_normativo,
-        fuente: (actual.fuente ? actual.fuente + ' · ' : '') + `Límite normativo: ${nombreMostrado}`
+        fuente: (actual.fuente ? actual.fuente + ' · ' : '') + `Límite normativo: ${nombreMostrado}${val.fuente ? ' — ' + val.fuente : ''}`
       });
       aplicados++;
     });
@@ -6878,21 +6880,9 @@ async function procesosStep1Analizar() {
     }
     if (!contentItems.length) throw new Error('Subí archivos o seleccioná una carpeta de SharePoint primero.');
 
-    // Documentos de referencia que se adjuntan solos en este paso:
-    // Información general se sigue filtrando por RESUMEN de relevancia
-    // (procesosObtenerBibliografiaRelevante) — son pocos documentos, no hay
-    // riesgo de escala. Normativa es distinta: se elige por NOMBRE de
-    // carpeta/archivo (barato, no requiere haber procesado nada de
-    // antemano) — con "cientos de documentos" de normativa, generar el
-    // resumen de todos solo para poder filtrar por relevancia sería
-    // carísimo. Se transcribe (o se reusa la caché) solo del ÚNICO
-    // documento que la IA elige por nombre/ubicación/tipo de vuelco, y ESE
-    // se adjunta acá — así el análisis principal sigue teniendo el
-    // contexto real de la normativa (mejor calidad/justificación) sin
-    // procesar de más. procesosStep1NormativaVerificar queda como red de
-    // contención: si igual quedan parámetros sin límite después de esto (la
-    // normativa elegida no los cubría, o no se pudo elegir con confianza),
-    // ahí se le pide al usuario que confirme o elija otra.
+    // Documento de referencia que sí se adjunta en este paso: información
+    // general, filtrada por RESUMEN de relevancia (procesosObtenerBibliografiaRelevante)
+    // — son pocos documentos, no hay riesgo de escala.
     showMsg(statusId,'loading','Buscando documentos de referencia...');
     const contextoStep1 = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nArchivos del cliente/proyecto ya adjuntados: ${contentItems.map(c=>c.nombre).join(', ') || '(ninguno)'}`;
     const docsRef = await procesosObtenerBibliografiaRelevante(['informacion_general'], contextoStep1);
@@ -6900,29 +6890,23 @@ async function procesosStep1Analizar() {
       showMsg(statusId,'loading','Adjuntando información general...');
       contentItems.push(...docsRef.map(d => ({ nombre: d.nombre, block: d.block })));
     }
-    let normativaElegida = null;
-    try {
-      const candidatosNormativa = await procesosNormativaListarCandidatos();
-      if (candidatosNormativa.length) {
-        showMsg(statusId,'loading','Eligiendo normativa aplicable (por nombre)...');
-        const sugerenciaNormativa = await procesosNormativaSugerir(contextoStep1, candidatosNormativa);
-        if (sugerenciaNormativa && sugerenciaNormativa.candidato) {
-          showMsg(statusId,'loading',`Extrayendo normativa "${sugerenciaNormativa.candidato.nombre}"...`);
-          token = token || await getMsToken();
-          const textoNormativa = await procesosNormativaExtraerTexto(sugerenciaNormativa.candidato, token);
-          if (textoNormativa) {
-            normativaElegida = sugerenciaNormativa.candidato;
-            contentItems.push({ nombre: sugerenciaNormativa.candidato.nombre, block: {type:'text', text:`Documento de normativa: ${sugerenciaNormativa.candidato.nombre}\n\n${textoNormativa}`} });
-          }
-        }
-      }
-    } catch(e) { console.warn('No se pudo elegir/extraer la normativa por nombre:', e.message); }
+    // La normativa NO se adjunta acá — probado que, en la misma llamada
+    // grande junto con los documentos del cliente, la IA confunde valores
+    // entre tablas (toma un número de la columna/tabla equivocada) mucho más
+    // seguido que cuando la lee sola. Por eso el límite normativo externo se
+    // completa siempre después, en un paso aparte y más chico
+    // (procesosStep1NormativaVerificar → procesosStep1NormativaAplicar) que
+    // le manda a la IA SOLO el texto de la normativa elegida y la listita de
+    // parámetros puntuales que faltan — sin el resto de documentos compitiendo
+    // por atención. Acá solo dejamos que el límite prevalezca si el propio
+    // cliente ya lo trae explícito en sus documentos.
+    const normativaElegida = null;
 
     const textoFields = iaFields.filter(f => f.tipo !== 'parametro');
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras). Si no está ahí, fijate si el documento de normativa adjunto (elegido para este proyecto según ubicación/tipo de vuelco) lo cubre, y aplicá el valor que establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto (lo que quede sin resolver acá se vuelve a intentar después, en un paso aparte que propone y confirma un documento de normativa puntual). REGLA ESTRICTA anti-invención: el "limite_normativo" y todo lo que digas en "fuente" sobre él tienen que poder señalarse TEXTUALMENTE en el documento adjunto — si la tabla de normativa tiene varias columnas según destino del vertido (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo", "Mar Abierto"), usá la columna que corresponda al tipo de vuelco de ESTE proyecto y decí en "fuente" el nombre EXACTO de esa columna tal como figura en la tabla; NUNCA agregues condiciones, excepciones, cortes por caudal/carga (ej. "para carga menor a X Kg/día") ni números de página/sección que no estén escritos literalmente ahí — si no estás seguro de la columna correcta o de un detalle, es mejor decir "no se pudo determinar con certeza" en la fuente que inventar precisión que no existe. IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en la fuente que sea, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá de dónde salió tanto el "valor" como el "limite_normativo" (si tiene) — ej. "Valor: Planilla de datos del cliente, pág. X. Límite: Anexo II, columna 'Cond. Pluv. o cuerpo de agua superficial'" — si inferiste o estimaste el valor en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisar alguna de las dos partes, dejala afuera en vez de completarla con algo no verificable. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio (pero eso no aplica a "limite_normativo", que solo puede salir de un documento real, nunca de tu criterio o memoria).`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluida la información general de la empresa, si está adjunta).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": esta llamada NO tiene adjunto el documento de normativa externa (eso se resuelve después, en un paso aparte) — así que ACÁ solo completá "limite_normativo" si el propio CLIENTE ya lo trae indicado explícitamente en sus propios documentos (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece sobre cualquier normativa externa; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras, y no mezcles el valor de una fila/columna con el de otra). Si el cliente no trae un límite explícito propio, dejá "limite_normativo" en null — NUNCA lo completes de memoria ni infiriendo qué normativa aplicaría, ni aunque te parezca reconocer la ubicación o el tipo de vuelco: sin el documento de normativa adjunto en este paso, cualquier límite que no venga literal de los documentos del cliente es una invención. IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en el documento del cliente, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá de dónde salió el "valor" (y el "limite_normativo" si lo completaste) — ej. "Planilla de datos del cliente, pág. X" — si inferiste o estimaste el valor en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio (pero eso no aplica a "limite_normativo", que solo puede salir de un documento real del cliente en este paso, nunca de tu criterio o memoria).`;
 
     await procesosStep1EjecutarAnalisis(contentItems, prompt, normativaElegida);
   } catch(e) {
