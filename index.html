@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.65</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.66</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.65</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.66</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -731,6 +731,7 @@
         <div class="card-label">Catálogo de productos</div>
         <p class="hint" style="margin-bottom:10px">Marca/modelo/descripción estándar de lo que vende la empresa, con precio de lista — se usa como referencia al cargar una venta o armar una cotización, para no reescribir la descripción cada vez.</p>
         <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
+        <input id="cotiz-catalogo-buscar" placeholder="Buscar por marca, modelo, código o descripción..." style="margin-bottom:10px" oninput="cotizCatalogoBuscarDebounced()" />
         <div id="cotiz-catalogo-list" class="empty">Cargando...</div>
       </div>
     </div>
@@ -13694,19 +13695,31 @@ const COTIZ_STOCK_COLS = [
   ['cantidad_stock','Stock'], ['cantidad_reserva','Reserva'], ['cantidad_coronel','Coronel'],
   ['cantidad_revision','Revisión'], ['cantidad_alquiler','Alquiler'],
 ];
+let _cotizCatalogoBuscarTimeout = null;
+function cotizCatalogoBuscarDebounced() {
+  clearTimeout(_cotizCatalogoBuscarTimeout);
+  _cotizCatalogoBuscarTimeout = setTimeout(cotizCatalogoRender, 400);
+}
+const COTIZ_CATALOGO_LIMITE = 150;
 async function cotizCatalogoRender() {
   const el = document.getElementById('cotiz-catalogo-list');
   if (!el) return;
+  // El buscador vive afuera de #cotiz-catalogo-list (no se reconstruye acá
+  // adentro), así que no pierde el foco al tipear.
+  const texto = (document.getElementById('cotiz-catalogo-buscar')?.value || '').trim();
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const q = encodeURIComponent(texto);
+    let url = `/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo&limit=${COTIZ_CATALOGO_LIMITE}`;
+    if (texto) url += `&or=(marca.ilike.*${q}*,modelo.ilike.*${q}*,codigo.ilike.*${q}*,descripcion.ilike.*${q}*)`;
     const [res, resReservas] = await Promise.all([
-      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
       supaFetch(`/rest/v1/cotizaciones?select=q_numero,cliente,items&empresa=eq.${currentEmpresa}&stock_reservado=eq.true`, {headers:{Authorization:'Bearer '+session.token}}),
     ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el catálogo.</p>'; return; }
-    if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
+    if (!rows.length) { el.innerHTML = texto ? '<p class="hint">Sin resultados para esa búsqueda.</p>' : '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
     // Mapa catalogo_id → detalle de qué cotizaciones tienen reservado ese
     // producto (Q + cliente + cantidad), para poder mostrarlo junto al
     // número de "Reserva" — no reemplaza el número (que sigue siendo
@@ -13758,7 +13771,7 @@ async function cotizCatalogoRender() {
         </tbody>
       </table>
       </div>
-      <p class="hint" style="margin-top:6px">Precio de lista: valor oficial de referencia, aparte de lo que se haya vendido realmente. Total: suma de Stock + Reserva + Coronel + Revisión + Alquiler.</p>
+      <p class="hint" style="margin-top:6px">Precio de lista: valor oficial de referencia, aparte de lo que se haya vendido realmente. Total: suma de Stock + Reserva + Coronel + Revisión + Alquiler.${rows.length >= COTIZ_CATALOGO_LIMITE ? ` Se muestran los primeros ${COTIZ_CATALOGO_LIMITE} — afiná la búsqueda si no encontrás lo que buscás.` : ''}</p>
     `;
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
 }
