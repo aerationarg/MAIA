@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.68</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.69</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.68</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.69</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9412,19 +9412,23 @@ async function procesosChatSend() {
     const plantasCompactasTxt = plantasCompactasBlocks.length
       ? `\n\nDocumentos de referencia de plantas compactas disponibles (modelos ya fabricados, con capacidad/volumen ya definidos — alternativa a diseñar y construir en hormigón in situ):\n${plantasCompactasBlocks.map(b=>b.block.text).join('\n\n---\n\n')}\n\nSi el usuario pregunta por opciones de planta compacta, o si te parece que aplica como alternativa razonable para este proyecto según su caudal, mencionalo en "respuesta".`
       : '';
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.`;
-    const messages = [
-      { role:'user', content: instrucciones },
-      { role:'assistant', content: '{"respuesta":"Entendido, tengo el contexto del proyecto. ¿En qué te puedo ayudar?","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}' },
-      ...p.chat_historial.map(m => ({ role: m.role, content: m.content }))
-    ];
+    // Va como "system" (no como primer mensaje de "user") para que no se diluya
+    // a medida que la charla se alarga. Antes iba como primer turno de la
+    // conversación normal y, como el historial reinyectado en cada llamada son
+    // las respuestas ya en texto plano (no el JSON crudo), el modelo terminaba
+    // imitando ese patrón de texto plano y dejaba de respetar el formato JSON
+    // (por eso "necesita_documentos" dejaba de dispararse después de unos
+    // intercambios y la IA solo decía en prosa que iba a revisar el documento,
+    // sin hacerlo nunca). Puesto en "system" se repite en cada llamada.
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${carpeta ? '- Si para responder necesitás revisar de nuevo los documentos originales del cliente (más allá del resumen ya extraído del Paso 1), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato.\n' : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.`;
+    const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
       catch(_e) { return { respuesta: raw, necesita_documentos:false, actualizaciones_generales:{}, actualizaciones_corrientes:{} }; }
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: instrucciones, messages })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     let data = await resp.json();
@@ -9445,7 +9449,7 @@ async function procesosChatSend() {
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, messages: messages2 })
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: instrucciones, messages: messages2 })
       });
       if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
       data = await resp.json();
