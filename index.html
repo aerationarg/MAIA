@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.64</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.64</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -14523,6 +14523,29 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   });
   if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
 }
+// Al EDITAR una cotización ya registrada: busca su fila existente en la
+// hoja "Q-" (por Nº de Q, columna E) y actualiza Cliente/Referencia (C/D) —
+// no toca Fecha ni Iniciales (quedan como el registro original). No crea una
+// fila nueva ni es fatal si no la encuentra (puede ser que la cotización
+// nunca se haya llegado a registrar ahí) — solo avisa.
+async function cotizArmadoActualizarEnExcelQ(st, qNumeroCompleto) {
+  const raw = await supaConfigGet('rend_q_excel');
+  if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
+  const ref = JSON.parse(raw);
+  const token = await getMsToken();
+  const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
+  if (!rows || rows.length < 2) throw new Error('El Excel de Q está vacío.');
+  const buscado = String(qNumeroCompleto).replace(/^q-/i,'').trim();
+  const idx = rows.findIndex((r,i) => i > 0 && String(r[4] ?? '').replace(/^q-/i,'').trim() === buscado);
+  if (idx < 0) throw new Error(`No se encontró la fila de "${qNumeroCompleto}" en el Excel de Q — puede que nunca se haya registrado ahí, cargala a mano si hace falta.`);
+  const filaExcel = idx + 1; // rows[0] es el encabezado → fila 1
+  const excelBase = `https://graph.microsoft.com/v1.0/sites/${ref.siteId}/drive/items/${ref.id}/workbook/worksheets('Q-')/`;
+  const resp = await fetch(excelBase + `range(address='C${filaExcel}:D${filaExcel}')`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+    body: JSON.stringify({ values: [[st.cliente||'', st.referencia||'']] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+}
 
 // Guarda contra doble click: mientras está generando/guardando una
 // cotización, un segundo click (o el mismo evento disparado dos veces) no
@@ -14580,10 +14603,22 @@ async function cotizArmadoGenerar() {
     let cotizacionId;
     if (editando) {
       // Antes de pisar, traemos la fila tal como está en la base (no la
-      // caché local, que puede estar vieja) para saber qué reserva de stock
-      // había activa con los ítems VIEJOS y poder liberarla bien.
-      const resPrevia = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}&select=items,stock_reservado`, {headers:{Authorization:'Bearer '+session.token}});
+      // caché local, que puede estar vieja) — para saber qué reserva de
+      // stock había activa con los ítems VIEJOS y poder liberarla bien, y
+      // para guardar un snapshot del estado anterior en
+      // cotizaciones_revisiones ("Ver historial" en el listado lo usa para
+      // mostrar qué cambió en cada edición).
+      const camposSnapshot = 'cliente,atencion,telefono,celular,email,q_numero,referencia,tipo_venta,fecha,moneda,forma_pago,forma_cancelacion,plazo_entrega,lugar_entrega,garantia,validez_oferta,observaciones,firmante_nombre,items,revision,stock_reservado';
+      const resPrevia = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}&select=${camposSnapshot}`, {headers:{Authorization:'Bearer '+session.token}});
       const filaPrevia = resPrevia.ok ? (await resPrevia.json())[0] : null;
+      if (filaPrevia) {
+        try {
+          await supaFetch('/rest/v1/cotizaciones_revisiones', {
+            method:'POST', headers:{Authorization:'Bearer '+session.token},
+            body: JSON.stringify({ cotizacion_id: st._editandoId, revision: filaPrevia.revision||0, snapshot: filaPrevia, created_by_nombre: currentUser?.nombre || currentUser?.email || null })
+          });
+        } catch(eHist) { console.warn('No se pudo guardar el snapshot de historial (¿falta correr el SQL de cotizaciones_revisiones?):', eHist.message); }
+      }
       const res = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}`, {
         method:'PATCH', headers:{Authorization:'Bearer '+session.token},
         body: JSON.stringify(Object.assign({}, camposComunes, { revision, updated_at: new Date().toISOString() }))
@@ -14622,13 +14657,22 @@ async function cotizArmadoGenerar() {
     }
 
     let avisoQ = '';
-    if (st.q_numero && !editando) {
-      showMsg(statusId, 'loading', 'Registrando en el Excel de Q...');
-      try {
-        const qCompleto = /^q-/i.test(st.q_numero) ? st.q_numero : 'Q-' + st.q_numero;
-        await cotizArmadoRegistrarEnExcelQ(st, qCompleto);
-      } catch(eQ) {
-        avisoQ = ' (ojo: no se pudo registrar en el Excel de Q — ' + eQ.message + ', cargalo a mano ahí)';
+    if (st.q_numero) {
+      const qCompleto = /^q-/i.test(st.q_numero) ? st.q_numero : 'Q-' + st.q_numero;
+      if (!editando) {
+        showMsg(statusId, 'loading', 'Registrando en el Excel de Q...');
+        try {
+          await cotizArmadoRegistrarEnExcelQ(st, qCompleto);
+        } catch(eQ) {
+          avisoQ = ' (ojo: no se pudo registrar en el Excel de Q — ' + eQ.message + ', cargalo a mano ahí)';
+        }
+      } else {
+        showMsg(statusId, 'loading', 'Actualizando la fila en el Excel de Q...');
+        try {
+          await cotizArmadoActualizarEnExcelQ(st, qCompleto);
+        } catch(eQ) {
+          avisoQ = ' (ojo: no se pudo actualizar la fila en el Excel de Q — ' + eQ.message + ')';
+        }
       }
     }
     const dondeQuedo = guardadoSp ? `guardada en SharePoint (${guardadoSp.ruta})` : 'descargada';
@@ -14694,6 +14738,7 @@ async function cotizCotizacionesRender() {
                   ${r.estado!=='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVolverAPendiente('${r.id}')" title="Volver a pendiente">↺</button>`:''}
                 `}
                 ${r.estado==='pendiente'?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEditar('${r.id}')" title="Editar (se guarda como revisión nueva)">✎</button>`:''}
+                ${r.revision?`<button class="btn btn-secondary btn-sm" onclick="cotizCotizacionVerHistorial('${r.id}')" title="Ver historial de cambios">🕒</button>`:''}
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionDescargar('${r.id}')" title="Descargar de nuevo">⬇</button>
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionEliminar('${r.id}')" title="Eliminar">🗑</button>
               </div>
@@ -14708,6 +14753,13 @@ async function cotizCotizacionesRender() {
                 <button class="btn btn-primary btn-sm" onclick="cotizCotizacionConfirmarMarcar()">Confirmar</button>
                 <button class="btn btn-secondary btn-sm" onclick="cotizCotizacionCancelarMarcar()">Cancelar</button>
               </div>
+            </td>
+          </tr>` : ''}
+          ${_cotizCotizacionHistorialAbierto === r.id ? `
+          <tr style="border-bottom:1px solid var(--border);background:var(--surface2)">
+            <td colspan="12" style="padding:8px 6px">
+              ${_cotizCotizacionHistorialCache[r.id] || '<p class="hint">Cargando historial...</p>'}
+              <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="cotizCotizacionVerHistorial('${r.id}')">✕ Cerrar</button>
             </td>
           </tr>` : ''}`).join('')}
         </tbody>
@@ -14727,6 +14779,66 @@ function cotizCotizacionIniciarMarcar(id, estado) {
 }
 function cotizCotizacionCancelarMarcar() {
   _cotizCotizacionMarcarPendiente = null;
+  cotizCotizacionesRender();
+}
+
+// ── Historial de cambios de una cotización (snapshots guardados en cada
+// edición, ver cotizArmadoGenerar) ─────────────────────────────────────
+const COTIZ_CAMPOS_HISTORIAL = [
+  ['cliente','Cliente'], ['atencion','Atención'], ['telefono','Teléfono'], ['celular','Celular'], ['email','E-mail'],
+  ['referencia','Referencia'], ['tipo_venta','Tipo de venta'], ['moneda','Moneda'],
+  ['forma_pago','Forma de pago'], ['forma_cancelacion','Forma de cancelación'], ['plazo_entrega','Plazo de entrega'],
+  ['lugar_entrega','Lugar de entrega'], ['garantia','Garantía'], ['validez_oferta','Validez de la oferta'],
+  ['observaciones','Observaciones'], ['firmante_nombre','Firma'],
+];
+// Compara dos estados de una cotización (campo por campo + un resumen de
+// ítems) y devuelve las líneas de texto de lo que cambió entre uno y otro.
+function cotizDiffEstados(antes, despues) {
+  const diffs = [];
+  COTIZ_CAMPOS_HISTORIAL.forEach(([campo,label]) => {
+    const v1 = antes[campo] ?? '', v2 = despues[campo] ?? '';
+    if (String(v1) !== String(v2)) diffs.push(`${label}: "${v1||'(vacío)'}" → "${v2||'(vacío)'}"`);
+  });
+  const itemsKey = it => `${it.descripcion}|${it.cantidad}|${it.precio_unitario}`;
+  const itemsAntes = (antes.items||[]).map(itemsKey).join(';');
+  const itemsDespues = (despues.items||[]).map(itemsKey).join(';');
+  if (itemsAntes !== itemsDespues) {
+    const total = arr => (arr||[]).reduce((a,it) => a + (Number(it.cantidad)||0)*(Number(it.precio_unitario)||0), 0);
+    diffs.push(`Ítems: ${(antes.items||[]).length} ítem(s) (total ${procesosFormatearNumero(total(antes.items))}) → ${(despues.items||[]).length} ítem(s) (total ${procesosFormatearNumero(total(despues.items))})`);
+  }
+  return diffs;
+}
+let _cotizCotizacionHistorialAbierto = null; // id de la fila expandida, o null
+let _cotizCotizacionHistorialCache = {}; // id → html ya armado
+async function cotizCotizacionVerHistorial(id) {
+  if (_cotizCotizacionHistorialAbierto === id) { _cotizCotizacionHistorialAbierto = null; cotizCotizacionesRender(); return; }
+  _cotizCotizacionHistorialAbierto = id;
+  delete _cotizCotizacionHistorialCache[id];
+  cotizCotizacionesRender();
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/cotizaciones_revisiones?select=*&cotizacion_id=eq.${id}&order=revision.asc`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) throw new Error('No se pudo cargar (¿falta correr el SQL de cotizaciones_revisiones?).');
+    const snaps = await res.json();
+    const actual = _cotizCotizacionesCache.find(r => r.id === id);
+    if (!snaps.length || !actual) {
+      _cotizCotizacionHistorialCache[id] = '<p class="hint">Sin historial guardado para esta cotización.</p>';
+    } else {
+      // Estados en orden: snapshot(rev 0) → snapshot(rev 1) → ... → actual (rev N)
+      const estados = snaps.map(s => s.snapshot).concat([actual]);
+      let html = '';
+      for (let i = 0; i < snaps.length; i++) {
+        const diffs = cotizDiffEstados(estados[i], estados[i+1]);
+        html += `<div style="margin-bottom:8px">
+          <p style="font-size:12px;font-weight:600;margin-bottom:2px">REV${snaps[i].revision} → REV${snaps[i].revision+1} — ${esc(snaps[i].created_by_nombre||'?')} el ${new Date(snaps[i].created_at).toLocaleString('es-AR')}</p>
+          ${diffs.length ? `<ul style="margin:0;padding-left:18px;font-size:12px">${diffs.map(d=>`<li>${esc(d)}</li>`).join('')}</ul>` : '<p class="hint" style="margin:0">Sin cambios detectados en los campos comparados.</p>'}
+        </div>`;
+      }
+      _cotizCotizacionHistorialCache[id] = html;
+    }
+  } catch(e) {
+    _cotizCotizacionHistorialCache[id] = `<p class="hint">Error al cargar el historial: ${esc(e.message)}</p>`;
+  }
   cotizCotizacionesRender();
 }
 async function cotizCotizacionConfirmarMarcar() {
