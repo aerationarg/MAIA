@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.59</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.59</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4909,6 +4909,15 @@ function procesosDocumentosRenderLista() {
           ${det.tipo!=='carpeta' ? `<button class="sp-browse-btn" onclick="procesosDocForzarReanalisis('${d.id}')" title="Descarta el texto/resumen ya guardado y lo vuelve a transcribir de cero (por si la transcripción original quedó mal)">🔄 Forzar reanálisis</button>` : ''}
         </div>
         <div id="procesos-doc-status-${d.id}" class="status-msg" style="display:none"></div>` : ''}
+        ${det.tipo==='carpeta' && (det.archivos_cache||[]).length ? `
+        <div class="sp-selected" style="margin-top:6px;flex-direction:column;align-items:stretch;gap:4px">
+          <span class="hint" style="font-size:11px">Archivos en caché — si alguno se transcribió mal, reprocesalo puntualmente:</span>
+          ${(det.archivos_cache||[]).map((a,i) => `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;padding:2px 0">
+              <span>${esc(a.carpeta ? a.carpeta+'/' : '')}${esc(a.nombre)}</span>
+              <button class="sp-browse-btn" style="flex-shrink:0" onclick="procesosDocForzarReanalisisArchivo('${d.id}','${esc(a.carpeta||'').replace(/'/g,"\\'")}','${esc(a.nombre).replace(/'/g,"\\'")}')" title="Descarta el texto/resumen en caché de este archivo puntual y lo vuelve a transcribir de cero">🔄 Reprocesar</button>
+            </div>`).join('')}
+        </div>` : ''}
         <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosDocExpandir(null)">✕ Cerrar</button>
       </div>`;
   }).join('') + (filtrados.length > LIMITE ? `<p class="hint">Mostrando ${LIMITE} de ${filtrados.length} — afiná la búsqueda.</p>` : '');
@@ -5159,6 +5168,35 @@ async function procesosDocForzarReanalisis(id) {
     procesosBibliografiaCacheReset();
     showMsg(statusId, 'success', '✓ Reanalizado desde cero.');
     setTimeout(renderProcesosDocumentos, 1500);
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+// Igual que procesosDocForzarReanalisis pero para UN archivo puntual dentro
+// de un documento tipo carpeta (ej. un archivo de normativa cuya transcripción
+// quedó mal) — saca esa entrada de archivos_cache; la próxima vez que se
+// necesite (análisis, "Procesar pendientes", etc.) se vuelve a descargar y
+// transcribir de cero con el prompt actual, sin tocar el resto de la carpeta.
+async function procesosDocForzarReanalisisArchivo(id, carpeta, nombre) {
+  const statusId = 'procesos-doc-status-' + id;
+  if (!confirm(`¿Descartar el texto/resumen en caché de "${nombre}" y volver a transcribirlo de cero con IA la próxima vez que se use?`)) return;
+  showMsg(statusId, 'loading', 'Descartando la versión anterior de "' + nombre + '"...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc) throw new Error('No se encontró el documento.');
+    const clave = procesosClaveArchivoCache(carpeta, nombre);
+    const nuevoCache = (doc.archivos_cache || []).filter(a => procesosClaveArchivoCache(a.carpeta, a.nombre) !== clave);
+    await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ archivos_cache: nuevoCache })
+    });
+    procesosBibliografiaCacheReset();
+    showMsg(statusId, 'success', '✓ Descartado — se va a retranscribir de cero la próxima vez que se use (ej. "Procesar pendientes" o un análisis que lo necesite).');
+    setTimeout(() => procesosDocExpandir(id), 1500);
   } catch(e) {
     showMsg(statusId, 'error', '✕ ' + e.message);
   }
@@ -6884,7 +6922,7 @@ async function procesosStep1Analizar() {
     const paramFields = iaFields.filter(f => f.tipo === 'parametro');
     const textoPrompt = textoFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
     const paramPrompt = paramFields.map((f,idx) => `${idx+1}. ${f.name}${f.desc?': '+f.desc:''}`).join('\n') || '(ninguno configurado)';
-    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras). Si no está ahí, fijate si el documento de normativa adjunto (elegido para este proyecto según ubicación/tipo de vuelco) lo cubre, y aplicá el valor que establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto (lo que quede sin resolver acá se vuelve a intentar después, en un paso aparte que propone y confirma un documento de normativa puntual). IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en la fuente que sea, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá brevemente de dónde salió el "valor" — ej. "Planilla de datos del cliente" o "Informe X, según lo mencionado sobre..." — si lo inferiste o estimaste en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio.`;
+    const prompt = `Analizá toda la información adjunta sobre este cliente/proyecto (incluidos los documentos de normativa e información general de la empresa, si están adjuntos).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n${paramPrompt}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n${textoPrompt}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": primero fijate si el límite ya está indicado explícitamente en los documentos del cliente (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras). Si no está ahí, fijate si el documento de normativa adjunto (elegido para este proyecto según ubicación/tipo de vuelco) lo cubre, y aplicá el valor que establece para ese parámetro; si ninguna de las dos fuentes lo tiene, usá null — no inventes un valor de memoria sin que esté respaldado por algún documento adjunto (lo que quede sin resolver acá se vuelve a intentar después, en un paso aparte que propone y confirma un documento de normativa puntual). REGLA ESTRICTA anti-invención: el "limite_normativo" y todo lo que digas en "fuente" sobre él tienen que poder señalarse TEXTUALMENTE en el documento adjunto — si la tabla de normativa tiene varias columnas según destino del vertido (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo", "Mar Abierto"), usá la columna que corresponda al tipo de vuelco de ESTE proyecto y decí en "fuente" el nombre EXACTO de esa columna tal como figura en la tabla; NUNCA agregues condiciones, excepciones, cortes por caudal/carga (ej. "para carga menor a X Kg/día") ni números de página/sección que no estén escritos literalmente ahí — si no estás seguro de la columna correcta o de un detalle, es mejor decir "no se pudo determinar con certeza" en la fuente que inventar precisión que no existe. IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en la fuente que sea, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá de dónde salió tanto el "valor" como el "limite_normativo" (si tiene) — ej. "Valor: Planilla de datos del cliente, pág. X. Límite: Anexo II, columna 'Cond. Pluv. o cuerpo de agua superficial'" — si inferiste o estimaste el valor en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisar alguna de las dos partes, dejala afuera en vez de completarla con algo no verificable. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio (pero eso no aplica a "limite_normativo", que solo puede salir de un documento real, nunca de tu criterio o memoria).`;
 
     await procesosStep1EjecutarAnalisis(contentItems, prompt, normativaElegida);
   } catch(e) {
