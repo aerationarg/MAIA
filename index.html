@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.61</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.62</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.61</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.62</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13786,6 +13786,21 @@ async function cotizCatalogoEliminar(id) {
   cotizCatalogoRender();
 }
 
+// Chiquito "ⓘ" con las condiciones comerciales (forma de pago/cancelación,
+// plazo de entrega, validez de la oferta) en el título — se usa tanto en el
+// historial de cotizaciones como en el de ventas, para no ocupar columnas
+// enteras con datos que casi no hace falta ver pero sí guardar (quedan ahí
+// para precargar la próxima cotización a ese cliente).
+function cotizCondicionesTooltip(r) {
+  const partes = [
+    r.forma_pago ? `Forma de pago: ${r.forma_pago}` : null,
+    r.forma_cancelacion ? `Forma de cancelación: ${r.forma_cancelacion}` : null,
+    r.plazo_entrega ? `Plazo de entrega: ${r.plazo_entrega}` : null,
+    r.validez_oferta ? `Validez de la oferta: ${r.validez_oferta}` : null,
+  ].filter(Boolean);
+  if (!partes.length) return '';
+  return `<span style="cursor:help;color:var(--blue)" title="${esc(partes.join('\n'))}">ⓘ</span>`;
+}
 let _cotizHistBuscarTimeout = null;
 function cotizHistorialBuscarDebounced() {
   clearTimeout(_cotizHistBuscarTimeout);
@@ -13816,7 +13831,7 @@ async function cotizHistorialRender() {
           ${th('Fecha')}${th('Cliente')}${th('Marca')}${th('Modelo')}${th('Descripción')}
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Cant.</th>
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Precio unit.</th>
-          ${th('Moneda')}${th('Q')}${th('Vendedor')}${th('Tipo')}${th('Motivo')}<th></th>
+          ${th('Moneda')}${th('Q')}${th('Vendedor')}${th('Tipo')}${th('Motivo')}<th title="Condiciones comerciales">ⓘ</th><th></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
@@ -13832,6 +13847,7 @@ async function cotizHistorialRender() {
             <td style="padding:4px 6px">${esc(r.vendedor_nombre||'')}</td>
             <td style="padding:4px 6px">${esc(r.tipo_venta||'')}</td>
             <td style="padding:4px 6px;max-width:160px">${esc(r.motivo_triunfo||'')}</td>
+            <td style="padding:4px 6px;text-align:center">${cotizCondicionesTooltip(r)}</td>
             <td style="padding:4px 6px"><button class="btn btn-secondary btn-sm" onclick="cotizHistorialEliminar('${r.id}')">✕</button></td>
           </tr>`).join('')}
         </tbody>
@@ -14221,11 +14237,15 @@ async function cotizArmadoClienteSeleccionar(clienteId) {
     st._lugares = lugares;
     if (lugares.length >= 1) st.lugar_entrega = lugares[0].texto || '';
   } catch(e) { st._lugares = []; }
-  // Condiciones comerciales de la última cotización hecha a este cliente
-  // (forma de pago/cancelación, plazo de entrega, validez de la oferta) —
-  // se precargan solas para no tener que volver a tipearlas cada vez.
+  // Condiciones comerciales de la última VENTA a este cliente (no de la
+  // última cotización armada, se haya vendido o no) — forma de pago/
+  // cancelación, plazo de entrega, validez de la oferta. Se precargan solas
+  // para no tener que volver a tipearlas cada vez. cotizaciones_historial_ventas
+  // es por ítem (puede haber varias filas de la misma venta) — se agarra la
+  // más reciente por fecha, cualquiera de sus filas sirve (las 4 condiciones
+  // son las mismas para toda la venta).
   try {
-    const res = await supaFetch(`/rest/v1/cotizaciones?select=forma_pago,forma_cancelacion,plazo_entrega,validez_oferta&empresa=eq.${currentEmpresa}&cliente=eq.${encodeURIComponent(cliente.nombre_empresa)}&order=created_at.desc&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
+    const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=forma_pago,forma_cancelacion,plazo_entrega,validez_oferta&empresa=eq.${currentEmpresa}&cliente=eq.${encodeURIComponent(cliente.nombre_empresa)}&order=fecha.desc&limit=1`, {headers:{Authorization:'Bearer '+session.token}});
     const ultima = res.ok ? (await res.json())[0] : null;
     if (ultima) {
       if (ultima.forma_pago) st.forma_pago = ultima.forma_pago;
@@ -14638,7 +14658,7 @@ async function cotizCotizacionesRender() {
           ${th('Fecha')}${th('Cliente')}${th('Q')}
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Ítems</th>
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Total</th>
-          ${th('Moneda')}${th('Estado')}${th('Vendedor')}${th('Tipo')}${th('Motivo')}${th('Acciones')}
+          ${th('Moneda')}${th('Estado')}${th('Vendedor')}${th('Tipo')}${th('Motivo')}<th title="Condiciones comerciales">ⓘ</th>${th('Acciones')}
         </tr></thead>
         <tbody>
           ${rowsData.map(({r,total,estadoLabel,estadoColor,monedaCorta}) => `<tr style="border-bottom:1px solid var(--border)">
@@ -14652,6 +14672,7 @@ async function cotizCotizacionesRender() {
             <td style="padding:4px 6px">${esc(r.vendedor_nombre||'')}</td>
             <td style="padding:4px 6px">${esc(r.tipo_venta||'')}</td>
             <td style="padding:4px 6px;max-width:180px" title="${esc(r.motivo||'')}">${esc(r.motivo||'')}</td>
+            <td style="padding:4px 6px;text-align:center">${cotizCondicionesTooltip(r)}</td>
             <td style="padding:4px 6px">
               <div style="display:flex;gap:4px;flex-wrap:wrap">
                 ${r.estado==='vendida' ? '' : `
@@ -14667,7 +14688,7 @@ async function cotizCotizacionesRender() {
           </tr>
           ${_cotizCotizacionMarcarPendiente && _cotizCotizacionMarcarPendiente.id === r.id ? `
           <tr style="border-bottom:1px solid var(--border);background:var(--surface2)">
-            <td colspan="11" style="padding:8px 6px">
+            <td colspan="12" style="padding:8px 6px">
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                 <span style="font-size:12px">Motivo de ${_cotizCotizacionMarcarPendiente.estado==='vendida'?'triunfo':'pérdida'}:</span>
                 ${cotizSelectOpciones(opcionesMotivo, r.motivo||'', '', 'cotiz-cotiz-motivo-select')}
@@ -14726,6 +14747,11 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
         descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
         moneda: moneda3, tipo_venta: row.tipo_venta || null, motivo_triunfo: motivo || null,
         creado_por_nombre: currentUser?.nombre || currentUser?.email || null,
+        // Condiciones comerciales de esta venta — quedan guardadas acá (no
+        // hace falta que se vean en la tabla) para poder precargarlas solas
+        // la próxima vez que se le arme una cotización a este cliente.
+        forma_pago: row.forma_pago || null, forma_cancelacion: row.forma_cancelacion || null,
+        plazo_entrega: row.plazo_entrega || null, validez_oferta: row.validez_oferta || null,
       }));
       if (rows.length) {
         const res2 = await supaFetch('/rest/v1/cotizaciones_historial_ventas', { method:'POST', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify(rows) });
