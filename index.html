@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.85</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.86</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.85</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.86</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7389,7 +7389,7 @@ function procesosTecLabel(key) {
 const MCDM_CRITERIO_LABEL = {
   dbo_dqo_alto:'Carga orgánica (DBO/DQO)', nutrientes_n:'Nitrógeno', nutrientes_p:'Fósforo', fog:'Aceites y grasas',
   caudal_alto_baja_carga:'Caudal alto / baja carga', bajo_caudal_alta_carga:'Bajo caudal / alta carga', flujo_variable:'Flujo variable',
-  poco_espacio:'Poco espacio disponible', reuso_calidad:'Requerimiento de reúso', toxicos:'Compuestos tóxicos', temperatura_baja:'Temperatura invernal baja',
+  poco_espacio:'Espacio disponible', reuso_calidad:'Requerimiento de reúso', toxicos:'Compuestos tóxicos', temperatura_baja:'Temperatura invernal baja',
   opex_energia:'Prioriza bajo OPEX/energía', generacion_lodos:'Prioriza mínima generación de lodos', capex_bajo:'Prioriza bajo CAPEX', simplicidad_operacion:'Prioriza operación simple',
 };
 const MCDM_MATRIX = {
@@ -7422,6 +7422,49 @@ function mcdmCaudalAltoBajaCarga(flowRate, bod) {
   const loadKgDia = (flowRate != null && bod != null && flowRate > 0 && bod > 0) ? (flowRate * bod) / 1000 : 0;
   const loadLow = mcdmNormalize(loadKgDia, 200, 50);
   return mcdmClamp01(Math.sqrt(qHigh * loadLow));
+}
+// Qué dato de "Datos para la selección" usa cada criterio, para los que
+// pueden tener categorías editables (Cfg Procesos IA > Matriz de
+// tecnologías). Solo entran acá los que dependen de UN dato numérico
+// puntual — los que combinan más de uno (ej. la relación caudal/carga, que
+// mezcla caudal y DBO) o no son numéricos (tóxicos, prioridades sí/no)
+// quedan con su lógica propia de siempre, no entran en este mecanismo
+// genérico todavía.
+const MCDM_CATEGORICO_CAMPO = { poco_espacio: 'availableArea' };
+// Busca, para el valor dado, la categoría cuyo rango [umbral_min,umbral_max)
+// la contiene (límites null = sin tope de ese lado). Devuelve el nombre de
+// la categoría o null si no matchea ninguna (ej. no hay categorías
+// cargadas todavía, o el dato no está disponible).
+function mcdmCategoriaDeValor(categorias, valor) {
+  if (valor == null || !categorias || !categorias.length) return null;
+  const cat = categorias.find(c => (c.umbral_min == null || valor >= c.umbral_min) && (c.umbral_max == null || valor < c.umbral_max));
+  return cat ? cat.categoria : null;
+}
+// Reemplaza, para los criterios que tienen categorías cargadas en la base,
+// el active/intensity calculado por mcdmBuildConditions por "cuál categoría
+// aplica" — para el resto de los criterios (sin categorías cargadas, o que
+// ni están en MCDM_CATEGORICO_CAMPO) no toca nada, sigue su lógica de
+// siempre. Así el motor de categorías es un agregado opcional, no un
+// reemplazo del cálculo existente.
+function mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio) {
+  if (!categoriasPorCriterio) return conditions;
+  return conditions.map(c => {
+    const campo = MCDM_CATEGORICO_CAMPO[c.id];
+    const categorias = campo ? categoriasPorCriterio[c.id] : null;
+    if (!campo || !categorias || !categorias.length) return c;
+    const categoria = mcdmCategoriaDeValor(categorias, inp[campo]);
+    if (!categoria) return Object.assign({}, c, { active: false, categoria: null });
+    return Object.assign({}, c, { active: true, intensity: 1, categoria });
+  });
+}
+// Lee la celda de compatibilidad/exclusión de la matriz — soporta tanto un
+// criterio simple (matrix[criterio][tecnologia]) como uno con categorías
+// (matrix[criterio][categoria][tecnologia]).
+function mcdmCell(matrix, criterioId, categoria, tech) {
+  const node = matrix[criterioId];
+  if (!node) return { c: 0, x: false };
+  const sub = categoria ? node[categoria] : node;
+  return (sub && sub[tech]) || { c: 0, x: false };
 }
 // `pesos` es opcional: { [criterio]: peso } — si no se pasa (o falta algún
 // criterio) se usa 1, igual que en el sistema de referencia (ahí tampoco
@@ -7457,13 +7500,14 @@ function mcdmBuildConditions(inp, pesos) {
 // (con peso 1 en todos) como fallback, así nunca se rompe por no haber
 // cargado la matriz editable todavía.
 // Devuelve { recommended, scores: { [tech]: {score, excluded, top:[{criterio,contribucion}]} } }
-function mcdmSelect(inp, matrix, pesos) {
+function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio) {
   matrix = matrix || MCDM_MATRIX;
-  const conditions = mcdmBuildConditions(inp, pesos);
+  let conditions = mcdmBuildConditions(inp, pesos);
+  conditions = mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio);
   const survivors = [];
   const excludedReasons = {};
   MCDM_TECHNOLOGIES.forEach(tech => {
-    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && matrix[c.id][tech].x).map(c => c.id);
+    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && mcdmCell(matrix, c.id, c.categoria, tech).x).map(c => c.id);
     if (reasons.length) excludedReasons[tech] = reasons; else survivors.push(tech);
   });
   const scores = {};
@@ -7474,10 +7518,10 @@ function mcdmSelect(inp, matrix, pesos) {
     conditions.forEach(c => {
       const intensity = c.active ? c.intensity : 0;
       const factor = c.weight * intensity;
-      const compat = matrix[c.id][tech].c;
+      const compat = mcdmCell(matrix, c.id, c.categoria, tech).c;
       num += factor * compat;
       den += factor;
-      if (factor > 0) contribs.push({ criterio: c.id, contribucion: factor * compat });
+      if (factor > 0) contribs.push({ criterio: c.id, categoria: c.categoria || null, contribucion: factor * compat });
     });
     const score = (den > 0 ? num / den : 0) * 100;
     contribs.sort((a,b) => b.contribucion - a.contribucion);
@@ -7498,28 +7542,41 @@ function mcdmSelect(inp, matrix, pesos) {
 // — si no existen filas todavía (no se corrió la migración) o falla la
 // carga, usa el MCDM_MATRIX hardcodeado (y peso 1 en todos) como fallback,
 // igual que con los prompts: nunca se rompe por faltar la migración.
-let _procesosMcdmCache = { empresa: null, matrix: null, pesos: null };
+let _procesosMcdmCache = { empresa: null, matrix: null, pesos: null, categoriasPorCriterio: null };
 async function procesosMcdmCargar(force) {
   if (!force && _procesosMcdmCache.empresa === currentEmpresa && _procesosMcdmCache.matrix) return _procesosMcdmCache;
-  let matrix = null, pesos = {};
+  let matrix = null, pesos = {}, categoriasPorCriterio = {};
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const [resMatriz, resPesos] = await Promise.all([
+    const [resMatriz, resPesos, resCategorias] = await Promise.all([
       supaFetch(`/rest/v1/procesos_mcdm_matriz?select=*&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}}),
       supaFetch(`/rest/v1/procesos_mcdm_pesos?select=*&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_mcdm_categorias?select=*&empresa=eq.${currentEmpresa}&order=criterio,orden`, {headers:{Authorization:'Bearer '+session.token}}),
     ]);
     const rowsMatriz = resMatriz.ok ? await resMatriz.json() : [];
     const rowsPesos = resPesos.ok ? await resPesos.json() : [];
+    const rowsCategorias = resCategorias.ok ? await resCategorias.json() : [];
     if (Array.isArray(rowsMatriz) && rowsMatriz.length) {
       matrix = {};
       rowsMatriz.forEach(r => {
         matrix[r.criterio] = matrix[r.criterio] || {};
-        matrix[r.criterio][r.tecnologia] = { c: Number(r.compatibilidad), x: !!r.excluye, id: r.id };
+        // Con categoría: matrix[criterio][categoria][tecnologia]. Sin
+        // categoría (criterios simples de siempre): matrix[criterio][tecnologia].
+        if (r.categoria) {
+          matrix[r.criterio][r.categoria] = matrix[r.criterio][r.categoria] || {};
+          matrix[r.criterio][r.categoria][r.tecnologia] = { c: Number(r.compatibilidad), x: !!r.excluye, id: r.id };
+        } else {
+          matrix[r.criterio][r.tecnologia] = { c: Number(r.compatibilidad), x: !!r.excluye, id: r.id };
+        }
       });
     }
     if (Array.isArray(rowsPesos)) rowsPesos.forEach(r => { pesos[r.criterio] = Number(r.peso); });
+    if (Array.isArray(rowsCategorias)) rowsCategorias.forEach(r => {
+      categoriasPorCriterio[r.criterio] = categoriasPorCriterio[r.criterio] || [];
+      categoriasPorCriterio[r.criterio].push({ id: r.id, categoria: r.categoria, umbral_min: r.umbral_min!=null?Number(r.umbral_min):null, umbral_max: r.umbral_max!=null?Number(r.umbral_max):null, orden: r.orden });
+    });
   } catch(e) { console.warn('No se pudo cargar la matriz MCDM, se usa el fallback:', e.message); }
-  _procesosMcdmCache = { empresa: currentEmpresa, matrix: matrix || MCDM_MATRIX, pesos, rowsMatriz: matrix ? true : false };
+  _procesosMcdmCache = { empresa: currentEmpresa, matrix: matrix || MCDM_MATRIX, pesos, categoriasPorCriterio, rowsMatriz: matrix ? true : false };
   return _procesosMcdmCache;
 }
 
@@ -7542,8 +7599,51 @@ async function renderProcesosMcdmMatriz() {
     return;
   }
   el.innerHTML = 'Cargando...';
-  const { matrix, pesos, rowsMatriz } = await procesosMcdmCargar(true);
+  const { matrix, pesos, categoriasPorCriterio, rowsMatriz } = await procesosMcdmCargar(true);
   const aviso = !rowsMatriz ? `<p class="hint" style="margin-bottom:10px">⚠ Todavía no se cargó la matriz editable en la base (correspondé la migración) — se están mostrando los valores de fábrica, de solo lectura acá hasta que la cargues.</p>` : '';
+  const celdaTech = (cid, categoria, t) => {
+    const cell = mcdmCell(matrix, cid, categoria, t);
+    const keyCat = categoria || '';
+    return `<td style="padding:4px 4px;border-bottom:1px solid var(--border);text-align:center">
+      <input type="number" step="0.01" min="0" max="1" value="${cell.c}" style="width:58px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','compatibilidad',this.value,'${keyCat}')" /><br/>
+      <label style="font-size:10px;color:var(--text2);white-space:nowrap"><input type="checkbox" ${cell.x?'checked':''} ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','excluye',this.checked,'${keyCat}')" style="width:auto;vertical-align:middle" /> excl</label>
+    </td>`;
+  };
+  const filaSimple = cid => `
+    <tr>
+      <td style="padding:4px 8px;border-bottom:1px solid var(--border)">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
+      <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
+        <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
+      </td>
+      ${MCDM_TECHNOLOGIES.map(t => celdaTech(cid, null, t)).join('')}
+    </tr>`;
+  const filaCategorico = cid => {
+    const categorias = (categoriasPorCriterio[cid]||[]).slice().sort((a,b)=>(a.orden||0)-(b.orden||0));
+    const campo = MCDM_CATEGORICO_CAMPO[cid] || '?';
+    return `
+      <tr>
+        <td style="padding:4px 8px;border-bottom:1px solid var(--border);font-weight:600">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
+        <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
+          <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
+        </td>
+        <td colspan="${MCDM_TECHNOLOGIES.length}" style="padding:4px 8px;border-bottom:1px solid var(--border);color:var(--text2);font-size:11px">
+          Categorías por "${esc(campo)}" — <button class="btn btn-secondary btn-sm" style="padding:2px 8px" onclick="procesosMcdmAgregarCategoria('${cid}')">+ Categoría</button>
+        </td>
+      </tr>
+      ${categorias.map(cat => `
+        <tr>
+          <td style="padding:4px 8px 4px 20px;border-bottom:1px solid var(--border)">
+            <input value="${esc(cat.categoria)}" placeholder="Nombre" style="width:70px;padding:3px 4px" onchange="procesosMcdmUpdateCategoria('${cat.id}','categoria',this.value,'${cid}')" />
+            <div style="font-size:10px;color:var(--text2);margin-top:2px">
+              desde <input type="number" value="${cat.umbral_min!=null?cat.umbral_min:''}" placeholder="−∞" style="width:52px;padding:2px" onchange="procesosMcdmUpdateCategoria('${cat.id}','umbral_min',this.value,'${cid}')" />
+              hasta <input type="number" value="${cat.umbral_max!=null?cat.umbral_max:''}" placeholder="+∞" style="width:52px;padding:2px" onchange="procesosMcdmUpdateCategoria('${cat.id}','umbral_max',this.value,'${cid}')" />
+              <button class="remove-btn" style="margin-left:4px" onclick="procesosMcdmEliminarCategoria('${cat.id}','${cid}')">&#x2715;</button>
+            </div>
+          </td>
+          <td style="border-bottom:1px solid var(--border)"></td>
+          ${MCDM_TECHNOLOGIES.map(t => celdaTech(cid, cat.categoria, t)).join('')}
+        </tr>`).join('')}`;
+  };
   el.innerHTML = `<button class="btn btn-secondary btn-sm" onclick="procesosMcdmToggle()" style="margin-bottom:12px">▾ Ocultar criterios</button>` + aviso + MCDM_GRUPOS.map(g => `
     <div style="margin-bottom:18px">
       <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">${esc(g.label)}</div>
@@ -7557,20 +7657,7 @@ async function renderProcesosMcdmMatriz() {
             </tr>
           </thead>
           <tbody>
-            ${g.criterios.map(cid => `
-              <tr>
-                <td style="padding:4px 8px;border-bottom:1px solid var(--border)">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
-                <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
-                  <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
-                </td>
-                ${MCDM_TECHNOLOGIES.map(t => {
-                  const cell = matrix[cid][t];
-                  return `<td style="padding:4px 4px;border-bottom:1px solid var(--border);text-align:center">
-                    <input type="number" step="0.01" min="0" max="1" value="${cell.c}" style="width:58px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','compatibilidad',this.value)" /><br/>
-                    <label style="font-size:10px;color:var(--text2);white-space:nowrap"><input type="checkbox" ${cell.x?'checked':''} ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','excluye',this.checked)" style="width:auto;vertical-align:middle" /> excl</label>
-                  </td>`;
-                }).join('')}
-              </tr>`).join('')}
+            ${g.criterios.map(cid => (categoriasPorCriterio[cid]||[]).length ? filaCategorico(cid) : filaSimple(cid)).join('')}
           </tbody>
         </table>
       </div>
@@ -7580,11 +7667,14 @@ function procesosMcdmToggle() {
   _procesosMcdmExpandida = !_procesosMcdmExpandida;
   renderProcesosMcdmMatriz();
 }
-async function procesosMcdmUpdateCelda(criterio, tecnologia, campo, val) {
+// `categoria` es opcional — vacío para un criterio simple, o el nombre de
+// la categoría para uno con categorías (matrix[criterio][categoria][tech]).
+async function procesosMcdmUpdateCelda(criterio, tecnologia, campo, val, categoria) {
   const cache = _procesosMcdmCache;
-  if (!cache.matrix || !cache.matrix[criterio] || !cache.matrix[criterio][tecnologia]) return;
-  const cell = cache.matrix[criterio][tecnologia];
-  if (!cell.id) return;
+  const nodo = cache.matrix && cache.matrix[criterio];
+  if (!nodo) return;
+  const cell = categoria ? (nodo[categoria] && nodo[categoria][tecnologia]) : nodo[tecnologia];
+  if (!cell || !cell.id) return;
   const patch = {};
   if (campo === 'compatibilidad') { const v = Math.max(0, Math.min(1, Number(val)||0)); cell.c = v; patch.compatibilidad = v; }
   else { cell.x = !!val; patch.excluye = !!val; }
@@ -7603,6 +7693,61 @@ async function procesosMcdmUpdatePeso(criterio, val) {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
     body: JSON.stringify({ peso: v })
   });
+}
+// Agrega una categoría nueva (vacía, para completar) a un criterio, con una
+// fila de compatibilidad 0.5 para cada tecnología — el usuario después le
+// pone nombre, rango y ajusta los puntajes.
+async function procesosMcdmAgregarCategoria(criterio) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const existentes = (_procesosMcdmCache.categoriasPorCriterio[criterio]||[]).length;
+  const res = await supaFetch('/rest/v1/procesos_mcdm_categorias', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, criterio, categoria: 'Nueva '+(existentes+1), orden: existentes })
+  });
+  if (!res.ok) { alert('No se pudo agregar la categoría.'); return; }
+  const data = await res.json().catch(()=>null);
+  const nombreNueva = data && data[0] ? data[0].categoria : ('Nueva '+(existentes+1));
+  // Las filas de la matriz para la categoría nueva se agregan una por
+  // tecnología, con compatibilidad 0.5 de punto de partida a ajustar.
+  await Promise.all(MCDM_TECHNOLOGIES.map(t => supaFetch('/rest/v1/procesos_mcdm_matriz', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, criterio, tecnologia: t, categoria: nombreNueva, compatibilidad: 0.5, excluye: false })
+  })));
+  renderProcesosMcdmMatriz();
+}
+async function procesosMcdmUpdateCategoria(id, campo, val, criterio) {
+  const patch = {};
+  if (campo === 'umbral_min' || campo === 'umbral_max') patch[campo] = val === '' ? null : Number(val);
+  else patch[campo] = val;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  // Si se renombra la categoría, las 7 filas de la matriz de esa categoría
+  // (que la referencian por nombre, no por id) quedarían huérfanas si no
+  // se actualizan también.
+  let nombreAnterior = null;
+  if (campo === 'categoria' && criterio) {
+    const cat = (_procesosMcdmCache.categoriasPorCriterio[criterio]||[]).find(c => c.id === id);
+    nombreAnterior = cat ? cat.categoria : null;
+  }
+  await supaFetch(`/rest/v1/procesos_mcdm_categorias?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify(patch)
+  });
+  if (nombreAnterior && nombreAnterior !== val) {
+    await supaFetch(`/rest/v1/procesos_mcdm_matriz?empresa=eq.${currentEmpresa}&criterio=eq.${criterio}&categoria=eq.${encodeURIComponent(nombreAnterior)}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ categoria: val })
+    });
+  }
+  if (campo !== 'categoria') return; // solo re-renderiza si cambió el nombre (afecta las celdas de la matriz vinculadas)
+  renderProcesosMcdmMatriz();
+}
+async function procesosMcdmEliminarCategoria(id, criterio) {
+  if (!confirm('¿Eliminar esta categoría y sus 7 celdas de compatibilidad?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const cat = (_procesosMcdmCache.categoriasPorCriterio[criterio]||[]).find(c => c.id === id);
+  await supaFetch(`/rest/v1/procesos_mcdm_categorias?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (cat) await supaFetch(`/rest/v1/procesos_mcdm_matriz?empresa=eq.${currentEmpresa}&criterio=eq.${criterio}&categoria=eq.${encodeURIComponent(cat.categoria)}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosMcdmMatriz();
 }
 
 // Hace la llamada y guarda el resultado en el proyecto — sin tocar el
@@ -7664,12 +7809,16 @@ async function procesosTecnologiaProponer() {
       if (procesosCurrentProyecto !== p) return;
     }
     showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
-    const { matrix, pesos } = await procesosMcdmCargar();
-    const mcdm = mcdmSelect(inputs, matrix, pesos);
+    const { matrix, pesos, categoriasPorCriterio } = await procesosMcdmCargar();
+    const mcdm = mcdmSelect(inputs, matrix, pesos, categoriasPorCriterio);
+    // Si el criterio tiene categoría (ej. "Espacio disponible (Amplio)"), se
+    // la muestra siempre entre paréntesis — así queda explícito de qué lado
+    // salió el puntaje, sin la ambigüedad de una etiqueta genérica sola.
+    const factorTxt = x => `${MCDM_CRITERIO_LABEL[x.criterio]||x.criterio}${x.categoria?' ('+x.categoria+')':''}`;
     const analisisMcdm = MCDM_TECHNOLOGIES.map(t => {
       const s = mcdm.scores[t];
       if (s.excluded) return `- ${MCDM_TECH_LABEL[t]}: excluida (${s.exclusionReasons.map(r=>MCDM_CRITERIO_LABEL[r]||r).join(', ')})`;
-      return `- ${MCDM_TECH_LABEL[t]}: ${s.score}/100${s.top.length?' — principales factores: '+s.top.map(x=>MCDM_CRITERIO_LABEL[x.criterio]||x.criterio).join(', '):''}`;
+      return `- ${MCDM_TECH_LABEL[t]}: ${s.score}/100${s.top.length?' — principales factores: '+s.top.map(factorTxt).join(', '):''}`;
     }).join('\n');
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
