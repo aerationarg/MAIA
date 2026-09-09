@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.72</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.73</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.72</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.73</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6561,7 +6561,7 @@ function procesosStep1Html(p) {
       ${refs.length ? refs.map((r,i) => `
         <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:var(--text)">
           <input type="checkbox" ${r.incluido?'checked':''} onchange="procesosToggleReferencia(${i})" />
-          <span><b>${esc(r.nombre)}</b>${r.motivo?' — '+esc(r.motivo):''}</span>
+          <span><b>${esc(r.nombre)}</b>${r.coincide && r.coincide.length ? ` <span style="font-size:11px;color:var(--text2);border:1px solid var(--border);border-radius:8px;padding:1px 6px">${r.coincide.length}/4 · ${r.coincide.join(', ')}</span>` : ''}${r.motivo?' — '+esc(r.motivo):''}</span>
         </label>`).join('') : '<p class="hint">Todavía no se detectaron proyectos parecidos.</p>'}
       <button class="btn btn-secondary btn-sm" onclick="procesosDetectarSimilares()" style="margin-top:6px">↻ Volver a detectar</button>
       <div class="gap"></div>
@@ -7041,7 +7041,10 @@ async function procesosDetectarSimilares() {
     if (!catalogo.length) { if(hasEl) showMsg(statusId,'error','Todavía no hay proyectos con descripción/resumen cargados en el catálogo.'); return; }
 
     const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion || c.resumen_ia || ''}`).join('\n');
-    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos/relevantes como referencia para este proyecto nuevo (máximo 5), ordenados de más a menos relevante. Formato: {"similares":[{"numero":1,"motivo":"..."}]}. Si ninguno es relevante, devolvé {"similares":[]}.`;
+    // Se compara en estos 4 puntos puntuales (no "relevancia" en general) y se
+    // ordena por CANTIDAD de puntos en los que coincide — primero los que
+    // coinciden en todos o casi todos, después los que coinciden en menos.
+    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nComparalos contra el proyecto nuevo en estos 4 puntos puntuales:\n1. "tecnologia" — la tecnología de tratamiento solicitada/prevista para el proyecto nuevo (si se menciona) vs. la tecnología usada en el proyecto anterior (ej. MBR, lodos activados, DAF, etc.).\n2. "tipo_efluente" — tipo/composición del efluente (cloacal, industrial, mixto, y de qué proceso viene).\n3. "rubro" — rubro/industria del cliente.\n4. "caudal" — orden de magnitud del caudal (no hace falta que sea exacto, alcanza con que sean comparables, ej. ambos "cientos de m3/día").\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos (máximo 5), en este formato: {"similares":[{"numero":1,"coincide":["tecnologia","rubro"],"motivo":"..."}]}. En "coincide" listá SOLO los puntos de los 4 de arriba en los que realmente coincide (usando exactamente esas 4 palabras clave), puede ser una lista vacía si no coincide en ninguno pero igual te parece relevante mencionarlo. ORDENÁ la lista de mayor a menor cantidad de puntos coincidentes — primero los que coinciden en los 4, después los que coinciden en 3, etc. Si dos coinciden en la misma cantidad de puntos, el que tenga "tecnologia" entre los suyos va primero (es el más determinante). En "motivo" contá en una frase corta en qué coincide y en qué no. Si ninguno es relevante, devolvé {"similares":[]}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -7052,7 +7055,7 @@ async function procesosDetectarSimilares() {
     const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
     const sugeridos = (parsed.similares||[]).map(s => {
       const proj = catalogo[s.numero-1];
-      return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, incluido: true } : null;
+      return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, coincide: Array.isArray(s.coincide) ? s.coincide : [], incluido: true } : null;
     }).filter(Boolean);
 
     await procesosSaveProyecto({ proyectos_referencia: sugeridos }, p);
