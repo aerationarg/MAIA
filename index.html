@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.82</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.82</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1033,6 +1033,11 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Por qué Aeration elige (o no) cada tecnología de tratamiento como estándar, y en qué industrias tiene experiencia real con cada una — texto libre, editalo cuando quieras. Se va a usar como contexto de negocio al proponer tecnología para un proyecto nuevo.</p>
         <div id="procesos-tecprefs-list"></div>
         <button class="btn btn-secondary" onclick="procesosTecPrefAdd()" style="margin-top:4px">+ Agregar tecnología</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Matriz de tecnologías (MCDM)</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">El puntaje matemático que acompaña a la propuesta de tecnología: qué tan compatible es cada tecnología con cada criterio del proyecto (0 a 1), si un criterio la excluye directamente cuando es intenso, y el peso de cada criterio. Editalo si no coincide con la experiencia real de Aeration.</p>
+        <div id="procesos-mcdm-matriz"></div>
       </div>
       <div class="card">
         <div class="card-label">Prompts</div>
@@ -1986,7 +1991,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosMcdmMatriz(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
 }
@@ -7411,38 +7416,47 @@ function mcdmCaudalAltoBajaCarga(flowRate, bod) {
   const loadLow = mcdmNormalize(loadKgDia, 200, 50);
   return mcdmClamp01(Math.sqrt(qHigh * loadLow));
 }
-function mcdmBuildConditions(inp) {
+// `pesos` es opcional: { [criterio]: peso } — si no se pasa (o falta algún
+// criterio) se usa 1, igual que en el sistema de referencia (ahí tampoco
+// existía peso real por criterio, todos pesaban lo mismo).
+function mcdmBuildConditions(inp, pesos) {
+  pesos = pesos || {};
   const flowRate = inp.flowRate ?? null, bod = inp.bod ?? null, cod = inp.cod ?? null;
   const loadKgDia = (flowRate != null && bod != null && flowRate > 0 && bod > 0) ? (flowRate * bod) / 1000 : 0;
   const altoBajaInt = mcdmCaudalAltoBajaCarga(flowRate, bod);
   const bajoAltaInt = mcdmNormalize(loadKgDia, 20, 500);
   const preferAltoBaja = altoBajaInt >= bajoAltaInt;
   const toxIntensidad = { NONE:0, LOW:0.3, MODERATE:0.6, HIGH:1 };
+  const w = id => pesos[id] != null ? pesos[id] : 1;
   return [
-    { id:'dbo_dqo_alto', active:true, intensity: Math.max(mcdmNormalize(bod,300,2000), mcdmNormalize(cod,600,4000)) },
-    { id:'nutrientes_n', active:true, intensity: mcdmNormalize(inp.nitrogenTotal, 25, 100) },
-    { id:'nutrientes_p', active:true, intensity: mcdmNormalize(inp.phosphorusTotal, 5, 20) },
-    { id:'fog', active:true, intensity: mcdmNormalize(inp.oilsAndGreases, 30, 150) },
-    { id:'caudal_alto_baja_carga', active: preferAltoBaja, intensity: altoBajaInt },
-    { id:'bajo_caudal_alta_carga', active: !preferAltoBaja, intensity: bajoAltaInt },
-    { id:'flujo_variable', active:true, intensity: mcdmNormalize(inp.peakAverageRatio, 1.5, 3.5) },
-    { id:'poco_espacio', active:true, intensity: mcdmNormalize(inp.availableArea, 10000, 500) },
-    { id:'reuso_calidad', active:true, intensity: inp.reuseRequired ? 1 : 0 },
-    { id:'toxicos', active:true, intensity: toxIntensidad[inp.toxicCompoundsLevel || 'NONE'] },
-    { id:'temperatura_baja', active:true, intensity: mcdmNormalize(inp.minWinterTemperature, 5, -1) },
-    { id:'opex_energia', active:true, intensity: mcdmClamp01(inp.priorityOpex ? 1 : 0) },
-    { id:'generacion_lodos', active:true, intensity: mcdmClamp01(inp.priorityLowSludge ? 1 : 0) },
-    { id:'capex_bajo', active:true, intensity: mcdmClamp01(inp.priorityLowCapex ? 1 : 0) },
-    { id:'simplicidad_operacion', active:true, intensity: mcdmClamp01(inp.prioritySimpleOps ? 1 : 0) },
+    { id:'dbo_dqo_alto', active:true, weight:w('dbo_dqo_alto'), intensity: Math.max(mcdmNormalize(bod,300,2000), mcdmNormalize(cod,600,4000)) },
+    { id:'nutrientes_n', active:true, weight:w('nutrientes_n'), intensity: mcdmNormalize(inp.nitrogenTotal, 25, 100) },
+    { id:'nutrientes_p', active:true, weight:w('nutrientes_p'), intensity: mcdmNormalize(inp.phosphorusTotal, 5, 20) },
+    { id:'fog', active:true, weight:w('fog'), intensity: mcdmNormalize(inp.oilsAndGreases, 30, 150) },
+    { id:'caudal_alto_baja_carga', active: preferAltoBaja, weight:w('caudal_alto_baja_carga'), intensity: altoBajaInt },
+    { id:'bajo_caudal_alta_carga', active: !preferAltoBaja, weight:w('bajo_caudal_alta_carga'), intensity: bajoAltaInt },
+    { id:'flujo_variable', active:true, weight:w('flujo_variable'), intensity: mcdmNormalize(inp.peakAverageRatio, 1.5, 3.5) },
+    { id:'poco_espacio', active:true, weight:w('poco_espacio'), intensity: mcdmNormalize(inp.availableArea, 10000, 500) },
+    { id:'reuso_calidad', active:true, weight:w('reuso_calidad'), intensity: inp.reuseRequired ? 1 : 0 },
+    { id:'toxicos', active:true, weight:w('toxicos'), intensity: toxIntensidad[inp.toxicCompoundsLevel || 'NONE'] },
+    { id:'temperatura_baja', active:true, weight:w('temperatura_baja'), intensity: mcdmNormalize(inp.minWinterTemperature, 5, -1) },
+    { id:'opex_energia', active:true, weight:w('opex_energia'), intensity: mcdmClamp01(inp.priorityOpex ? 1 : 0) },
+    { id:'generacion_lodos', active:true, weight:w('generacion_lodos'), intensity: mcdmClamp01(inp.priorityLowSludge ? 1 : 0) },
+    { id:'capex_bajo', active:true, weight:w('capex_bajo'), intensity: mcdmClamp01(inp.priorityLowCapex ? 1 : 0) },
+    { id:'simplicidad_operacion', active:true, weight:w('simplicidad_operacion'), intensity: mcdmClamp01(inp.prioritySimpleOps ? 1 : 0) },
   ];
 }
+// `matrix`/`pesos` opcionales — si no se pasan usa el hardcodeado MCDM_MATRIX
+// (con peso 1 en todos) como fallback, así nunca se rompe por no haber
+// cargado la matriz editable todavía.
 // Devuelve { recommended, scores: { [tech]: {score, excluded, top:[{criterio,contribucion}]} } }
-function mcdmSelect(inp) {
-  const conditions = mcdmBuildConditions(inp);
+function mcdmSelect(inp, matrix, pesos) {
+  matrix = matrix || MCDM_MATRIX;
+  const conditions = mcdmBuildConditions(inp, pesos);
   const survivors = [];
   const excludedReasons = {};
   MCDM_TECHNOLOGIES.forEach(tech => {
-    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && MCDM_MATRIX[c.id][tech].x).map(c => c.id);
+    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && matrix[c.id][tech].x).map(c => c.id);
     if (reasons.length) excludedReasons[tech] = reasons; else survivors.push(tech);
   });
   const scores = {};
@@ -7452,8 +7466,8 @@ function mcdmSelect(inp) {
     const contribs = [];
     conditions.forEach(c => {
       const intensity = c.active ? c.intensity : 0;
-      const factor = intensity; // weight siempre 1
-      const compat = MCDM_MATRIX[c.id][tech].c;
+      const factor = c.weight * intensity;
+      const compat = matrix[c.id][tech].c;
       num += factor * compat;
       den += factor;
       if (factor > 0) contribs.push({ criterio: c.id, contribucion: factor * compat });
@@ -7471,6 +7485,107 @@ function mcdmSelect(inp) {
 // extraído en Paso 1 (campos generales + corrientes) — el usuario los revisa
 // y corrige en el panel antes de pedir la propuesta, no hace falta que la IA
 // acierte todo.
+
+// ── Matriz MCDM editable (Cfg Procesos IA) ──
+// Carga la matriz de compatibilidad y los pesos por criterio desde la base
+// — si no existen filas todavía (no se corrió la migración) o falla la
+// carga, usa el MCDM_MATRIX hardcodeado (y peso 1 en todos) como fallback,
+// igual que con los prompts: nunca se rompe por faltar la migración.
+let _procesosMcdmCache = { empresa: null, matrix: null, pesos: null };
+async function procesosMcdmCargar(force) {
+  if (!force && _procesosMcdmCache.empresa === currentEmpresa && _procesosMcdmCache.matrix) return _procesosMcdmCache;
+  let matrix = null, pesos = {};
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const [resMatriz, resPesos] = await Promise.all([
+      supaFetch(`/rest/v1/procesos_mcdm_matriz?select=*&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_mcdm_pesos?select=*&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}}),
+    ]);
+    const rowsMatriz = resMatriz.ok ? await resMatriz.json() : [];
+    const rowsPesos = resPesos.ok ? await resPesos.json() : [];
+    if (Array.isArray(rowsMatriz) && rowsMatriz.length) {
+      matrix = {};
+      rowsMatriz.forEach(r => {
+        matrix[r.criterio] = matrix[r.criterio] || {};
+        matrix[r.criterio][r.tecnologia] = { c: Number(r.compatibilidad), x: !!r.excluye, id: r.id };
+      });
+    }
+    if (Array.isArray(rowsPesos)) rowsPesos.forEach(r => { pesos[r.criterio] = Number(r.peso); });
+  } catch(e) { console.warn('No se pudo cargar la matriz MCDM, se usa el fallback:', e.message); }
+  _procesosMcdmCache = { empresa: currentEmpresa, matrix: matrix || MCDM_MATRIX, pesos, rowsMatriz: matrix ? true : false };
+  return _procesosMcdmCache;
+}
+
+const MCDM_GRUPOS = [
+  { label:'Carga del efluente', criterios:['dbo_dqo_alto','nutrientes_n','nutrientes_p','fog'] },
+  { label:'Hidráulica', criterios:['caudal_alto_baja_carga','bajo_caudal_alta_carga','flujo_variable'] },
+  { label:'Restricciones de sitio', criterios:['poco_espacio','reuso_calidad','toxicos','temperatura_baja'] },
+  { label:'Prioridades del proyecto', criterios:['opex_energia','generacion_lodos','capex_bajo','simplicidad_operacion'] },
+];
+
+async function renderProcesosMcdmMatriz() {
+  const el = document.getElementById('procesos-mcdm-matriz');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  const { matrix, pesos, rowsMatriz } = await procesosMcdmCargar(true);
+  const aviso = !rowsMatriz ? `<p class="hint" style="margin-bottom:10px">⚠ Todavía no se cargó la matriz editable en la base (correspondé la migración) — se están mostrando los valores de fábrica, de solo lectura acá hasta que la cargues.</p>` : '';
+  el.innerHTML = aviso + MCDM_GRUPOS.map(g => `
+    <div style="margin-bottom:18px">
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">${esc(g.label)}</div>
+      <div style="overflow-x:auto">
+        <table style="border-collapse:collapse;width:100%;font-size:12px">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">Criterio</th>
+              <th style="text-align:center;padding:4px 6px;border-bottom:1px solid var(--border)">Peso</th>
+              ${MCDM_TECHNOLOGIES.map(t => `<th style="text-align:center;padding:4px 6px;border-bottom:1px solid var(--border);white-space:nowrap">${MCDM_TECH_LABEL[t]}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${g.criterios.map(cid => `
+              <tr>
+                <td style="padding:4px 8px;border-bottom:1px solid var(--border)">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
+                <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
+                  <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:48px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
+                </td>
+                ${MCDM_TECHNOLOGIES.map(t => {
+                  const cell = matrix[cid][t];
+                  return `<td style="padding:4px 4px;border-bottom:1px solid var(--border);text-align:center">
+                    <input type="number" step="0.01" min="0" max="1" value="${cell.c}" style="width:44px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','compatibilidad',this.value)" /><br/>
+                    <label style="font-size:10px;color:var(--text2);white-space:nowrap"><input type="checkbox" ${cell.x?'checked':''} ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','excluye',this.checked)" style="width:auto;vertical-align:middle" /> excl</label>
+                  </td>`;
+                }).join('')}
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`).join('');
+}
+async function procesosMcdmUpdateCelda(criterio, tecnologia, campo, val) {
+  const cache = _procesosMcdmCache;
+  if (!cache.matrix || !cache.matrix[criterio] || !cache.matrix[criterio][tecnologia]) return;
+  const cell = cache.matrix[criterio][tecnologia];
+  if (!cell.id) return;
+  const patch = {};
+  if (campo === 'compatibilidad') { const v = Math.max(0, Math.min(1, Number(val)||0)); cell.c = v; patch.compatibilidad = v; }
+  else { cell.x = !!val; patch.excluye = !!val; }
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_mcdm_matriz?id=eq.${cell.id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify(patch)
+  });
+}
+async function procesosMcdmUpdatePeso(criterio, val) {
+  const cache = _procesosMcdmCache;
+  const v = Math.max(0, Number(val)||0);
+  cache.pesos[criterio] = v;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_mcdm_pesos?empresa=eq.${currentEmpresa}&criterio=eq.${criterio}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ peso: v })
+  });
+}
+
 // Hace la llamada y guarda el resultado en el proyecto — sin tocar el
 // status/render, así lo puede usar tanto el botón manual "✨ Estimar con IA"
 // como "Proponer tecnologías" cuando corre la estimación sola por no haber
@@ -7530,7 +7645,8 @@ async function procesosTecnologiaProponer() {
       if (procesosCurrentProyecto !== p) return;
     }
     showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
-    const mcdm = mcdmSelect(inputs);
+    const { matrix, pesos } = await procesosMcdmCargar();
+    const mcdm = mcdmSelect(inputs, matrix, pesos);
     const analisisMcdm = MCDM_TECHNOLOGIES.map(t => {
       const s = mcdm.scores[t];
       if (s.excluded) return `- ${MCDM_TECH_LABEL[t]}: excluida (${s.exclusionReasons.map(r=>MCDM_CRITERIO_LABEL[r]||r).join(', ')})`;
@@ -7636,8 +7752,8 @@ function procesosTecnologiaSectionHtml(p) {
     ${confirmada ? `
       <p style="font-size:14px;margin-bottom:8px">✓ Tecnología elegida: <b>${esc(procesosTecLabel(confirmada))}</b> <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaQuitarConfirmacion()" style="margin-left:8px">Cambiar</button></p>
     ` : `
-      <details style="margin-bottom:10px">
-        <summary style="cursor:pointer;font-size:13px;color:var(--text2)">Datos para la selección (estimados con IA, revisalos)</summary>
+      <details open style="margin-bottom:10px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text2)">Datos para la selección (estimados con IA, revisalos y corregilos si hace falta)</summary>
         <div style="margin-top:10px">
           <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaDerivarInputs()" style="margin-bottom:10px">✨ Estimar con IA</button>
           ${procesosTecnologiaInputsHtml(p)}
