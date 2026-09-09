@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.93</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.94</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.93</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.94</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8318,6 +8318,7 @@ function procesosStep2Html(p) {
     </div>
     ` : ''}
     <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto y ordenalas con las flechas (así queda el tren de tratamiento) — la IA ya sugirió una selección inicial, ajustala si hace falta. Las conexiones entre etapas se vuelven a sugerir solas cada vez que agregás, sacás o reordenás una.</p>
+    ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2DefinirTodas()" style="margin-bottom:8px">✦ Definir valores de todas las unidades</button>` : ''}
     ${ordenadas.map((nombre, i) => filaHoja(nombre, { reorder: true, numero: i+1, esPrimera: i===0, esUltima: i===ordenadas.length-1 })).join('')}
     ${noSeleccionadas.length ? `<div class="gap"></div><p class="hint">Otras hojas de la planilla, sin usar en este proyecto:</p>${noSeleccionadas.map(nombre => filaHoja(nombre, { reorder: false })).join('')}` : ''}
     ${Object.keys(ponderaciones).length ? `
@@ -8851,6 +8852,35 @@ async function procesosStep2AutoCompletarSiHaceFalta(nombre) {
   const h = p.diseno_data?.hojas?.[nombre];
   if (h && (h.autoCompletado || h.confirmada)) return;
   await procesosStep2RevisarYCompletar(nombre, true);
+}
+
+// Hace, para todas las hojas del tren en orden, lo mismo que ya pasa al
+// abrir una hoja individual (propagar la cadena + autocompletar si hace
+// falta) — sin tener que abrir cada una a mano. Van en orden y de una por
+// vez (no en paralelo) porque cada hoja puede depender del resultado de la
+// anterior recién calculado en esta misma corrida. Respeta lo que ya
+// estaba autocompletado o confirmado (mismo criterio que abrir a mano),
+// así no repite trabajo ya hecho.
+async function procesosStep2DefinirTodas() {
+  const p = procesosCurrentProyecto;
+  const dd = p.diseno_data || {};
+  const orden = (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada);
+  if (!orden.length) { alert('Primero seleccioná al menos una unidad/etapa.'); return; }
+  const statusId = 'procesos-step2-status';
+  for (let i = 0; i < orden.length; i++) {
+    const nombre = orden[i];
+    showMsg(statusId, 'loading', `Definiendo valores (${i+1}/${orden.length}): ${nombre}...`);
+    try {
+      procesosStep2PropagarCadena(nombre);
+      await procesosStep2AutoCompletarSiHaceFalta(nombre);
+    } catch (e) {
+      console.warn(`No se pudo definir "${nombre}":`, e.message);
+    }
+    if (procesosCurrentProyecto !== p) return; // el usuario se fue del proyecto a mitad de camino
+  }
+  const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+  renderProcesosStepContent();
+  alert(`Listo: se revisaron ${orden.length} unidad(es) en orden.`);
 }
 
 // Ídem, pero invocable las veces que haga falta (botón "Revisar y completar"),
@@ -9475,6 +9505,8 @@ function procesosStep3Html(p) {
   return `
     <div class="card-label">Paso 3 — Definir etapas y equipos</div>
     <p class="hint" style="margin:6px 0 10px">Para cada unidad/etapa definida en el Paso 2, definí los equipos necesarios (bombas, sopladores, tableros, etc.) — pedile a la IA que sugiera en base al diseño y a proyectos de referencia, o armalos a mano.</p>
+    <button class="btn btn-secondary btn-sm" onclick="procesosStep3SugerirTodas()" style="margin-bottom:8px">✦ Sugerir equipos de todas las etapas</button>
+    <div id="procesos-step3-status-batch"></div>
     ${etapas.map(filaEtapa).join('')}
     <div class="gap"></div>
     <button class="btn btn-primary" ${!todasConfirmadas ? 'disabled' : ''} onclick="procesosAvanzarPaso(4)">Continuar al Paso 4 →</button>
@@ -9719,15 +9751,29 @@ async function procesosEquiposPlantillaTexto() {
 // memoria cada vez). Paso 2 (procesosStep3MatchCatalogo) recién ahí busca
 // marca/modelo real, aparte, para no mezclar "inventar la lista" con
 // "matchear contra catálogo" en una sola respuesta larga.
+// Botón individual: pide confirmación si ya hay equipos cargados, y
+// muestra los errores en el status de la etapa abierta.
 async function procesosStep3SugerirEquipos(nombreEtapa) {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step3-status';
   const ed0 = (p.equipos_data && p.equipos_data.etapas) || {};
   const yaTiene = (ed0[nombreEtapa]?.equipos || []).length > 0;
   if (yaTiene && !confirm(`Ya hay equipos cargados para "${nombreEtapa}". ¿Reemplazarlos con una nueva sugerencia de la IA?`)) return;
-  showMsg(statusId, 'loading', 'Armando lista genérica de equipos...');
   try {
-    const apiKey = getApiKey();
+    await procesosStep3SugerirEquiposCore(nombreEtapa);
+    if (procesosCurrentProyecto === p) { const st = document.getElementById(statusId); if (st) st.innerHTML = ''; renderProcesosStepContent(); }
+  } catch (e) {
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
+  }
+}
+// El trabajo real, sin confirm() ni manejo de status propio — lo puede
+// llamar tanto el botón individual como "Sugerir equipos de todas las
+// etapas" (procesosStep3SugerirTodas), etapa por etapa en orden.
+async function procesosStep3SugerirEquiposCore(nombreEtapa) {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step3-status';
+  showMsg(statusId, 'loading', 'Armando lista genérica de equipos...');
+  const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
@@ -9766,17 +9812,43 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
     const ed = Object.assign({}, p.equipos_data);
     ed.etapas = Object.assign({}, ed.etapas);
     const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
-    e.equipos = nuevos;
-    e.confirmada = false;
-    ed.etapas[nombreEtapa] = e;
-    await procesosSaveProyecto({ equipos_data: ed }, p);
-    if (procesosCurrentProyecto === p) {
-      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-      renderProcesosStepContent();
+  e.equipos = nuevos;
+  e.confirmada = false;
+  ed.etapas[nombreEtapa] = e;
+  await procesosSaveProyecto({ equipos_data: ed }, p);
+}
+// Corre "Sugerir equipos" para todas las etapas confirmadas del Paso 2, en
+// orden, una por una (no en paralelo — cada llamada puede tardar, y así el
+// status va mostrando el progreso real). Nunca pisa una etapa que ya tenga
+// equipos cargados (para no destruir ediciones manuales sin avisar) — esas
+// se cuentan como "saltadas" y se pueden rehacer a mano con el botón
+// individual, que sí pide confirmación.
+async function procesosStep3SugerirTodas() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step3-status-batch';
+  const etapas = procesosStep3EtapasConfirmadas(p);
+  if (!etapas.length) { alert('Todavía no hay etapas confirmadas en el Paso 2.'); return; }
+  let hechas = 0, saltadas = 0, fallidas = [];
+  for (let i = 0; i < etapas.length; i++) {
+    const nombre = etapas[i];
+    const edActual = (p.equipos_data && p.equipos_data.etapas) || {};
+    if ((edActual[nombre]?.equipos || []).length > 0) { saltadas++; continue; }
+    showMsg(statusId, 'loading', `Sugiriendo equipos (${i+1}/${etapas.length}): ${nombre}...`);
+    try {
+      await procesosStep3SugerirEquiposCore(nombre);
+      hechas++;
+    } catch (e) {
+      console.warn(`No se pudo sugerir equipos para "${nombre}":`, e.message);
+      fallidas.push(nombre);
     }
-  } catch (e) {
-    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
+    if (procesosCurrentProyecto !== p) return; // el usuario se fue del proyecto a mitad de camino
   }
+  const st = document.getElementById(statusId); if (st) st.innerHTML = '';
+  renderProcesosStepContent();
+  let msg = `Listo: se completaron ${hechas} etapa(s).`;
+  if (saltadas) msg += ` ${saltadas} ya tenían equipos cargados y no se tocaron.`;
+  if (fallidas.length) msg += ` No se pudo con: ${fallidas.join(', ')}.`;
+  alert(msg);
 }
 
 // Paso 2 de 2: dado un listado YA armado (tipo/cantidad/especificacion
