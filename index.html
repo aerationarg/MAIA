@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.89</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.90</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.89</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.90</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7387,7 +7387,7 @@ function procesosTecLabel(key) {
 // alta se puede malinterpretar como "MBR gana cuando hay MUCHO espacio",
 // cuando en realidad es lo opuesto: MBR gana cuando el espacio es ESCASO).
 const MCDM_CRITERIO_LABEL = {
-  dbo_dqo_alto:'Carga orgánica (DBO/DQO)', nutrientes_n:'Nitrógeno', nutrientes_p:'Fósforo', fog:'Aceites y grasas',
+  dbo_dqo_alto:'Biodegradabilidad (DBO/DQO)', nutrientes_n:'Nitrógeno', nutrientes_p:'Fósforo', fog:'Aceites y grasas',
   flujo_variable:'Flujo variable', relacion_caudal_carga:'Relación caudal / carga orgánica',
   poco_espacio:'Espacio disponible', reuso_calidad:'Requerimiento de reúso', toxicos:'Compuestos tóxicos', temperatura_baja:'Temperatura invernal baja',
   opex_energia:'Prioriza bajo OPEX/energía', generacion_lodos:'Prioriza mínima generación de lodos', capex_bajo:'Prioriza bajo CAPEX', simplicidad_operacion:'Prioriza operación simple',
@@ -7443,6 +7443,7 @@ const MCDM_CAMPOS_DISPONIBLES = [
   { value:'priorityLowSludge', label:'Prioriza mínima generación de lodos (No=0 / Sí=1)' },
   { value:'prioritySimpleOps', label:'Prioriza operación simple (No=0 / Sí=1)' },
   { value:'organicLoad', label:'Carga orgánica (kg DBO/día — caudal × DBO)' },
+  { value:'bodCodRatio', label:'Biodegradabilidad (DBO/DQO)' },
 ];
 function mcdmCampoLabel(campo) { const f = MCDM_CAMPOS_DISPONIBLES.find(x=>x.value===campo); return f ? f.label : campo; }
 // La mayoría de los campos son datos crudos de "Datos para la selección" —
@@ -7453,6 +7454,10 @@ function mcdmValorCampo(inp, campo) {
   if (campo === 'organicLoad') {
     const fr = inp.flowRate, bod = inp.bod;
     return (fr != null && bod != null && fr > 0 && bod > 0) ? (fr * bod) / 1000 : null;
+  }
+  if (campo === 'bodCodRatio') {
+    const bod = inp.bod, cod = inp.cod;
+    return (bod != null && cod != null && cod > 0) ? bod / cod : null;
   }
   let v = inp[campo];
   if (typeof v === 'boolean') v = v ? 1 : 0;
@@ -7521,10 +7526,16 @@ function mcdmBuildConditions(inp, pesos) {
   const caudalAlto = (flowRate ?? 0) >= 1000;
   const cargaAlta = loadKgDia >= 250;
   const categoriaCaudalCarga = `${caudalAlto ? 'Alto' : 'Bajo'} caudal / ${cargaAlta ? 'alta' : 'baja'} carga`;
+  // Biodegradabilidad — la razón DBO/DQO (no cada uno normalizado por
+  // separado, eso mide magnitud/carga, no biodegradabilidad). Un ratio alto
+  // (~0.5-0.6+) es muy biodegradable, apto para biológico convencional sin
+  // vueltas; un ratio bajo (~0.1-0.2) indica materia recalcitrante/difícil
+  // de degradar biológicamente — ahí la intensidad tiene que ser alta.
+  const ratioDboDqo = (bod != null && cod != null && cod > 0) ? bod / cod : null;
   const toxIntensidad = { NONE:0, LOW:0.3, MODERATE:0.6, HIGH:1 };
   const w = id => pesos[id] != null ? pesos[id] : 1;
   return [
-    { id:'dbo_dqo_alto', active:true, weight:w('dbo_dqo_alto'), intensity: Math.max(mcdmNormalize(bod,300,2000), mcdmNormalize(cod,600,4000)) },
+    { id:'dbo_dqo_alto', active:true, weight:w('dbo_dqo_alto'), intensity: mcdmNormalize(ratioDboDqo, 0.6, 0.1) },
     { id:'nutrientes_n', active:true, weight:w('nutrientes_n'), intensity: mcdmNormalize(inp.nitrogenTotal, 25, 100) },
     { id:'nutrientes_p', active:true, weight:w('nutrientes_p'), intensity: mcdmNormalize(inp.phosphorusTotal, 5, 20) },
     { id:'fog', active:true, weight:w('fog'), intensity: mcdmNormalize(inp.oilsAndGreases, 30, 150) },
