@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.79</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.80</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.79</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.80</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7324,7 +7324,7 @@ async function procesosDetectarSimilares() {
     // Se compara en estos 4 puntos puntuales (no "relevancia" en general) y se
     // ordena por CANTIDAD de puntos en los que coincide — primero los que
     // coinciden en todos o casi todos, después los que coinciden en menos.
-    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nComparalos contra el proyecto nuevo en estos 4 puntos puntuales:\n1. "tecnologia" — la tecnología de tratamiento solicitada/prevista para el proyecto nuevo (si se menciona) vs. la tecnología usada en el proyecto anterior (ej. MBR, lodos activados, DAF, etc.).\n2. "tipo_efluente" — tipo/composición del efluente (cloacal, industrial, mixto, y de qué proceso viene).\n3. "rubro" — rubro/industria del cliente.\n4. "caudal" — orden de magnitud del caudal (no hace falta que sea exacto, alcanza con que sean comparables, ej. ambos "cientos de m3/día").\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos (máximo 5), en este formato: {"similares":[{"numero":1,"coincide":["tecnologia","rubro"],"motivo":"..."}]}. En "coincide" listá SOLO los puntos de los 4 de arriba en los que realmente coincide (usando exactamente esas 4 palabras clave), puede ser una lista vacía si no coincide en ninguno pero igual te parece relevante mencionarlo. ORDENÁ la lista de mayor a menor cantidad de puntos coincidentes — primero los que coinciden en los 4, después los que coinciden en 3, etc. Si dos coinciden en la misma cantidad de puntos, el que tenga "tecnologia" entre los suyos va primero (es el más determinante). En "motivo" contá en una frase corta en qué coincide y en qué no. Si ninguno es relevante, devolvé {"similares":[]}.`;
+    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nComparalos contra el proyecto nuevo en estos 4 puntos puntuales:\n1. "tecnologia" — la tecnología de tratamiento solicitada/prevista para el proyecto nuevo (si se menciona) vs. la tecnología usada en el proyecto anterior (ej. MBR, lodos activados, DAF, etc.).\n2. "tipo_efluente" — tipo/composición del efluente (cloacal, industrial, mixto, y de qué proceso viene).\n3. "rubro" — rubro/industria del cliente.\n4. "caudal" — MISMO orden de magnitud en sentido estricto: redondeá cada caudal a la potencia de 10 más cercana (decenas ~10-99, centenas ~100-999, miles ~1.000-9.999, decenas de miles ~10.000+) y compará esas categorías — solo coinciden si caen en la MISMA categoría. Por ejemplo 200 y 900 m3/día SÍ coinciden (ambos "centenas"); 200 y 2000 m3/día NO coinciden (uno es "centenas", el otro "miles") aunque a simple vista parezcan "no tan distintos" — una relación de 5x a 10x entre dos caudales casi siempre cruza de categoría, así que NO marques "caudal" como coincidente en esos casos. Ante la duda, no lo marques.\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos (máximo 5), en este formato: {"similares":[{"numero":1,"coincide":["tecnologia","rubro"],"motivo":"..."}]}. En "coincide" listá SOLO los puntos de los 4 de arriba en los que realmente coincide (usando exactamente esas 4 palabras clave), puede ser una lista vacía si no coincide en ninguno pero igual te parece relevante mencionarlo. ORDENÁ la lista de mayor a menor cantidad de puntos coincidentes — primero los que coinciden en los 4, después los que coinciden en 3, etc. Si dos coinciden en la misma cantidad de puntos, el que tenga "tecnologia" entre los suyos va primero (es el más determinante). En "motivo" contá en una frase corta en qué coincide y en qué no. Si ninguno es relevante, devolvé {"similares":[]}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -7471,25 +7471,36 @@ function mcdmSelect(inp) {
 // extraído en Paso 1 (campos generales + corrientes) — el usuario los revisa
 // y corrige en el panel antes de pedir la propuesta, no hace falta que la IA
 // acierte todo.
+// Hace la llamada y guarda el resultado en el proyecto — sin tocar el
+// status/render, así lo puede usar tanto el botón manual "✨ Estimar con IA"
+// como "Proponer tecnologías" cuando corre la estimación sola por no haber
+// datos todavía (antes había que abrir el panel y tocar el botón a mano
+// antes de poder proponer — quedaba una pantalla de error sin indicar qué
+// hacer si el panel estaba colapsado).
+async function procesosTecnologiaEstimarInputsCore(p) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('API key no disponible.');
+  const schema = `{"effluentType":"...","flowRate":number|null,"bod":number|null,"cod":number|null,"nitrogenTotal":number|null,"phosphorusTotal":number|null,"oilsAndGreases":number|null,"availableArea":number|null,"reuseRequired":boolean,"minWinterTemperature":number|null,"peakAverageRatio":number|null,"toxicCompoundsLevel":"NONE"|"LOW"|"MODERATE"|"HIGH","priorityLowCapex":boolean,"priorityOpex":boolean,"priorityLowSludge":boolean,"prioritySimpleOps":boolean,"currentSituation":"...","dischargeSite":"..."}`;
+  const prompt = `A partir de esta información ya extraída de un proyecto de tratamiento de efluentes:\n${procesosResumenCampos(p)}\n\nEstimá estos datos (usá null si no hay forma de estimarlo, no inventes números sin base):\n- effluentType: tipo de efluente en una frase corta (ej. "Industrial - láctea", "Cloacal", "Mixto").\n- flowRate: caudal en m3/día.\n- bod, cod: en mg/L.\n- nitrogenTotal, phosphorusTotal, oilsAndGreases: en mg/L.\n- availableArea: superficie disponible en m2, si se menciona.\n- reuseRequired: si se requiere reúso del efluente.\n- minWinterTemperature: temperatura mínima invernal en °C, si se menciona la ubicación/clima.\n- peakAverageRatio: relación caudal pico/promedio, si hay datos para estimarla (si no, null).\n- toxicCompoundsLevel: nivel de compuestos tóxicos/inhibidores esperado.\n- priorityLowCapex, priorityOpex, priorityLowSludge, prioritySimpleOps: true si el cliente mencionó explícitamente esa prioridad, si no false.\n- currentSituation: resumen breve de la situación actual (si ya tiene una planta instalada, cuál).\n- dischargeSite: sitio/tipo de descarga si se menciona.\n\nRespondé SOLO con JSON válido (sin backticks) con esta forma exacta: ${schema}`;
+  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:800, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message||'Error de la IA'); }
+  const data = await resp.json();
+  const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+  const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+  const info = Object.assign({}, p.info_cliente, { mcdm_inputs: parsed });
+  await procesosSaveProyecto({ info_cliente: info }, p);
+  return parsed;
+}
+
 async function procesosTecnologiaDerivarInputs() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-tecnologia-status';
   showMsg(statusId, 'loading', 'Estimando datos con IA...');
   try {
-    const apiKey = getApiKey();
-    if (!apiKey) throw new Error('API key no disponible.');
-    const schema = `{"effluentType":"...","flowRate":number|null,"bod":number|null,"cod":number|null,"nitrogenTotal":number|null,"phosphorusTotal":number|null,"oilsAndGreases":number|null,"availableArea":number|null,"reuseRequired":boolean,"minWinterTemperature":number|null,"peakAverageRatio":number|null,"toxicCompoundsLevel":"NONE"|"LOW"|"MODERATE"|"HIGH","priorityLowCapex":boolean,"priorityOpex":boolean,"priorityLowSludge":boolean,"prioritySimpleOps":boolean,"currentSituation":"...","dischargeSite":"..."}`;
-    const prompt = `A partir de esta información ya extraída de un proyecto de tratamiento de efluentes:\n${procesosResumenCampos(p)}\n\nEstimá estos datos (usá null si no hay forma de estimarlo, no inventes números sin base):\n- effluentType: tipo de efluente en una frase corta (ej. "Industrial - láctea", "Cloacal", "Mixto").\n- flowRate: caudal en m3/día.\n- bod, cod: en mg/L.\n- nitrogenTotal, phosphorusTotal, oilsAndGreases: en mg/L.\n- availableArea: superficie disponible en m2, si se menciona.\n- reuseRequired: si se requiere reúso del efluente.\n- minWinterTemperature: temperatura mínima invernal en °C, si se menciona la ubicación/clima.\n- peakAverageRatio: relación caudal pico/promedio, si hay datos para estimarla (si no, null).\n- toxicCompoundsLevel: nivel de compuestos tóxicos/inhibidores esperado.\n- priorityLowCapex, priorityOpex, priorityLowSludge, prioritySimpleOps: true si el cliente mencionó explícitamente esa prioridad, si no false.\n- currentSituation: resumen breve de la situación actual (si ya tiene una planta instalada, cuál).\n- dischargeSite: sitio/tipo de descarga si se menciona.\n\nRespondé SOLO con JSON válido (sin backticks) con esta forma exacta: ${schema}`;
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:800, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message||'Error de la IA'); }
-    const data = await resp.json();
-    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
-    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
-    const info = Object.assign({}, p.info_cliente, { mcdm_inputs: parsed });
-    await procesosSaveProyecto({ info_cliente: info }, p);
+    await procesosTecnologiaEstimarInputsCore(p);
     if (procesosCurrentProyecto === p) { showMsg(statusId,'success','✓ Datos estimados — revisalos abajo antes de proponer.'); renderProcesosStepContent(); }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
@@ -7507,12 +7518,18 @@ function procesosTecnologiaUpdateInput(campo, val, esBool) {
 async function procesosTecnologiaProponer() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-tecnologia-status';
-  const inputs = p.info_cliente?.mcdm_inputs;
-  if (!inputs) { showMsg(statusId,'error','✕ Primero estimá o completá los datos de abajo.'); return; }
-  showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
+    let inputs = p.info_cliente?.mcdm_inputs;
+    if (!inputs) {
+      // No hacía falta abrir el panel de "Datos para la selección" a mano
+      // primero — si nunca se estimaron, se estiman acá mismo antes de seguir.
+      showMsg(statusId, 'loading', 'Estimando datos del proyecto con IA...');
+      inputs = await procesosTecnologiaEstimarInputsCore(p);
+      if (procesosCurrentProyecto !== p) return;
+    }
+    showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
     const mcdm = mcdmSelect(inputs);
     const analisisMcdm = MCDM_TECHNOLOGIES.map(t => {
       const s = mcdm.scores[t];
