@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.90</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.91</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.90</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.91</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7387,6 +7387,7 @@ function procesosTecLabel(key) {
 // alta se puede malinterpretar como "MBR gana cuando hay MUCHO espacio",
 // cuando en realidad es lo opuesto: MBR gana cuando el espacio es ESCASO).
 const MCDM_CRITERIO_LABEL = {
+  tecnologia_solicitada:'Tecnología solicitada por el cliente',
   dbo_dqo_alto:'Biodegradabilidad (DBO/DQO)', nutrientes_n:'Nitrógeno', nutrientes_p:'Fósforo', fog:'Aceites y grasas',
   flujo_variable:'Flujo variable', relacion_caudal_carga:'Relación caudal / carga orgánica',
   poco_espacio:'Espacio disponible', reuso_calidad:'Requerimiento de reúso', toxicos:'Compuestos tóxicos', temperatura_baja:'Temperatura invernal baja',
@@ -7512,6 +7513,15 @@ function mcdmCell(matrix, criterioId, categoria, tech) {
   const sub = categoria ? node[categoria] : node;
   return (sub && sub[tech]) || { c: 0, x: false };
 }
+// Como mcdmCell, pero para criterios cuya compatibilidad no sale de la
+// matriz sino que se calcula al vuelo con el `inp` del proyecto —
+// "tecnologia_solicitada" es el único caso hoy: 1 para la tecnología que
+// pidió el cliente, 0 para el resto (nunca excluye a las demás, para no
+// convertirlo en un candado absoluto).
+function mcdmCompat(matrix, cond, tech, inp) {
+  if (cond.id === 'tecnologia_solicitada') return { c: inp.requestedTechnology === tech ? 1 : 0, x: false };
+  return mcdmCell(matrix, cond.id, cond.categoria, tech);
+}
 // `pesos` es opcional: { [criterio]: peso } — si no se pasa (o falta algún
 // criterio) se usa 1, igual que en el sistema de referencia (ahí tampoco
 // existía peso real por criterio, todos pesaban lo mismo).
@@ -7533,8 +7543,18 @@ function mcdmBuildConditions(inp, pesos) {
   // de degradar biológicamente — ahí la intensidad tiene que ser alta.
   const ratioDboDqo = (bod != null && cod != null && cod > 0) ? bod / cod : null;
   const toxIntensidad = { NONE:0, LOW:0.3, MODERATE:0.6, HIGH:1 };
-  const w = id => pesos[id] != null ? pesos[id] : 1;
+  // Peso más alto por default que el resto (que arrancan en 1) — si el
+  // cliente pidió una tecnología puntual, eso tiene que pesar más que
+  // cualquier criterio técnico individual, aunque no ser un candado
+  // absoluto (los demás criterios en conjunto todavía pueden inclinar la
+  // balanza si hay una razón de peso). Editable como cualquier otro peso.
+  const w = id => pesos[id] != null ? pesos[id] : (id === 'tecnologia_solicitada' ? 3 : 1);
   return [
+    // Sin fila en la matriz — la "compatibilidad" no es fija por tecnología,
+    // se calcula al vuelo en mcdmSelect (1 para la que pidió el cliente, 0
+    // para el resto) porque depende de un dato del proyecto, no de una
+    // tabla. Ver mcdmCompat.
+    { id:'tecnologia_solicitada', active: !!inp.requestedTechnology, weight:w('tecnologia_solicitada'), intensity:1 },
     { id:'dbo_dqo_alto', active:true, weight:w('dbo_dqo_alto'), intensity: mcdmNormalize(ratioDboDqo, 0.6, 0.1) },
     { id:'nutrientes_n', active:true, weight:w('nutrientes_n'), intensity: mcdmNormalize(inp.nitrogenTotal, 25, 100) },
     { id:'nutrientes_p', active:true, weight:w('nutrientes_p'), intensity: mcdmNormalize(inp.phosphorusTotal, 5, 20) },
@@ -7562,7 +7582,7 @@ function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio, camposPorCriterio
   const survivors = [];
   const excludedReasons = {};
   MCDM_TECHNOLOGIES.forEach(tech => {
-    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && mcdmCell(matrix, c.id, c.categoria, tech).x).map(c => c.id);
+    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && mcdmCompat(matrix, c, tech, inp).x).map(c => c.id);
     if (reasons.length) excludedReasons[tech] = reasons; else survivors.push(tech);
   });
   const scores = {};
@@ -7573,7 +7593,7 @@ function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio, camposPorCriterio
     conditions.forEach(c => {
       const intensity = c.active ? c.intensity : 0;
       const factor = c.weight * intensity;
-      const compat = mcdmCell(matrix, c.id, c.categoria, tech).c;
+      const compat = mcdmCompat(matrix, c, tech, inp).c;
       num += factor * compat;
       den += factor;
       if (factor > 0) contribs.push({ criterio: c.id, categoria: c.categoria || null, contribucion: factor * compat });
@@ -7639,7 +7659,11 @@ async function procesosMcdmCargar(force) {
   return _procesosMcdmCache;
 }
 
+// Criterios cuya compatibilidad se calcula al vuelo (mcdmCompat), no sale
+// de una fila de la matriz — no tiene sentido mostrarles celdas editables.
+const MCDM_CRITERIOS_CALCULADOS = ['tecnologia_solicitada'];
 const MCDM_GRUPOS = [
+  { label:'Preferencia del cliente', criterios:['tecnologia_solicitada'] },
   { label:'Carga del efluente', criterios:['dbo_dqo_alto','nutrientes_n','nutrientes_p','fog'] },
   { label:'Hidráulica', criterios:['relacion_caudal_carga','flujo_variable'] },
   { label:'Restricciones de sitio', criterios:['poco_espacio','reuso_calidad','toxicos','temperatura_baja'] },
@@ -7735,6 +7759,16 @@ async function renderProcesosMcdmMatriz() {
           ${MCDM_TECHNOLOGIES.map(t => celdaTech(cid, cat.categoria, t)).join('')}
         </tr>`).join('')}`;
   };
+  const filaCalculada = cid => `
+    <tr>
+      <td style="padding:4px 8px;border-bottom:1px solid var(--border)">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
+      <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
+        <input type="number" step="0.5" min="0" value="${pesos[cid]!=null?pesos[cid]:3}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
+      </td>
+      <td colspan="${MCDM_TECHNOLOGIES.length}" style="padding:4px 8px;border-bottom:1px solid var(--border);color:var(--text2);font-size:11px">
+        Se calcula solo: 1,0 para la tecnología que pidió el cliente (si pidió alguna en "Datos para la selección"), 0 para el resto — no hay celdas para editar. Subí o bajá el peso si querés que influya más o menos que los demás criterios.
+      </td>
+    </tr>`;
   el.innerHTML = `<button class="btn btn-secondary btn-sm" onclick="procesosMcdmToggle()" style="margin-bottom:12px">▾ Ocultar criterios</button>` + aviso + MCDM_GRUPOS.map(g => `
     <div style="margin-bottom:18px">
       <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">${esc(g.label)}</div>
@@ -7748,7 +7782,7 @@ async function renderProcesosMcdmMatriz() {
             </tr>
           </thead>
           <tbody>
-            ${g.criterios.map(cid => (categoriasPorCriterio[cid]||[]).length ? filaCategorico(cid) : filaSimple(cid)).join('')}
+            ${g.criterios.map(cid => MCDM_CRITERIOS_CALCULADOS.includes(cid) ? filaCalculada(cid) : ((categoriasPorCriterio[cid]||[]).length ? filaCategorico(cid) : filaSimple(cid))).join('')}
           </tbody>
         </table>
       </div>
@@ -7869,8 +7903,8 @@ async function procesosMcdmEliminarCategoria(id, criterio) {
 async function procesosTecnologiaEstimarInputsCore(p) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('API key no disponible.');
-  const schema = `{"effluentType":"...","flowRate":number|null,"bod":number|null,"cod":number|null,"nitrogenTotal":number|null,"phosphorusTotal":number|null,"oilsAndGreases":number|null,"availableArea":number|null,"reuseRequired":boolean,"minWinterTemperature":number|null,"peakAverageRatio":number|null,"toxicCompoundsLevel":"NONE"|"LOW"|"MODERATE"|"HIGH","priorityLowCapex":boolean,"priorityOpex":boolean,"priorityLowSludge":boolean,"prioritySimpleOps":boolean,"currentSituation":"...","dischargeSite":"..."}`;
-  const prompt = `A partir de esta información ya extraída de un proyecto de tratamiento de efluentes:\n${procesosResumenCampos(p)}\n\nEstimá estos datos (usá null si no hay forma de estimarlo, no inventes números sin base):\n- effluentType: tipo de efluente en una frase corta (ej. "Industrial - láctea", "Cloacal", "Mixto").\n- flowRate: caudal en m3/día.\n- bod, cod: en mg/L.\n- nitrogenTotal, phosphorusTotal, oilsAndGreases: en mg/L.\n- availableArea: superficie disponible en m2, si se menciona.\n- reuseRequired: si se requiere reúso del efluente.\n- minWinterTemperature: temperatura mínima invernal en °C, si se menciona la ubicación/clima.\n- peakAverageRatio: relación caudal pico/promedio, si hay datos para estimarla (si no, null).\n- toxicCompoundsLevel: nivel de compuestos tóxicos/inhibidores esperado.\n- priorityLowCapex, priorityOpex, priorityLowSludge, prioritySimpleOps: true si el cliente mencionó explícitamente esa prioridad, si no false.\n- currentSituation: resumen breve de la situación actual (si ya tiene una planta instalada, cuál).\n- dischargeSite: sitio/tipo de descarga si se menciona.\n\nRespondé SOLO con JSON válido (sin backticks) con esta forma exacta: ${schema}`;
+  const schema = `{"requestedTechnology":"Lagunas"|"LodosActivados"|"MBR"|"MBBR"|"SBR"|"LechoPercolador"|"Anaerobico"|null,"effluentType":"...","flowRate":number|null,"bod":number|null,"cod":number|null,"nitrogenTotal":number|null,"phosphorusTotal":number|null,"oilsAndGreases":number|null,"availableArea":number|null,"reuseRequired":boolean,"minWinterTemperature":number|null,"peakAverageRatio":number|null,"toxicCompoundsLevel":"NONE"|"LOW"|"MODERATE"|"HIGH","priorityLowCapex":boolean,"priorityOpex":boolean,"priorityLowSludge":boolean,"prioritySimpleOps":boolean,"currentSituation":"...","dischargeSite":"..."}`;
+  const prompt = `A partir de esta información ya extraída de un proyecto de tratamiento de efluentes:\n${procesosResumenCampos(p)}\n\nEstimá estos datos (usá null si no hay forma de estimarlo, no inventes números sin base):\n- requestedTechnology: SOLO si el cliente pidió explícitamente una tecnología puntual (ej. "queremos un MBR", "necesitamos ampliar la laguna existente") usá el nombre EXACTO de esta lista: Lagunas, LodosActivados, MBR, MBBR, SBR, LechoPercolador, Anaerobico. Si no se menciona ninguna tecnología puntual pedida por el cliente, dejalo en null — no lo infieras del tipo de efluente ni de nada indirecto, tiene que ser un pedido explícito.\n- effluentType: tipo de efluente en una frase corta (ej. "Industrial - láctea", "Cloacal", "Mixto").\n- flowRate: caudal en m3/día.\n- bod, cod: en mg/L.\n- nitrogenTotal, phosphorusTotal, oilsAndGreases: en mg/L.\n- availableArea: superficie disponible en m2, si se menciona.\n- reuseRequired: si se requiere reúso del efluente.\n- minWinterTemperature: temperatura mínima invernal en °C, si se menciona la ubicación/clima.\n- peakAverageRatio: relación caudal pico/promedio, si hay datos para estimarla (si no, null).\n- toxicCompoundsLevel: nivel de compuestos tóxicos/inhibidores esperado.\n- priorityLowCapex, priorityOpex, priorityLowSludge, prioritySimpleOps: true si el cliente mencionó explícitamente esa prioridad, si no false.\n- currentSituation: resumen breve de la situación actual (si ya tiene una planta instalada, cuál).\n- dischargeSite: sitio/tipo de descarga si se menciona.\n\nRespondé SOLO con JSON válido (sin backticks) con esta forma exacta: ${schema}`;
   const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
     method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:800, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -7938,7 +7972,7 @@ async function procesosTecnologiaProponer() {
       ? prefsRows.map(r => `${r.tecnologia}${r.sigla?' ('+r.sigla+')':''}: ${r.preferencia||'(sin preferencia cargada)'}${r.experiencia?' — Experiencia: '+r.experiencia.replace(/\n/g,'; '):''}`).join('\n')
       : '(sin preferencias cargadas todavía — Cfg Procesos IA > Preferencias por tecnología)';
 
-    const datosProyecto = `${procesosResumenCampos(p)}\n\nDatos puntuales para selección de tecnología:\n- Tipo de efluente: ${inputs.effluentType||'—'}\n- Caudal: ${inputs.flowRate!=null?inputs.flowRate+' m3/día':'—'}\n- DBO: ${inputs.bod!=null?inputs.bod+' mg/L':'—'}\n- DQO: ${inputs.cod!=null?inputs.cod+' mg/L':'—'}\n- Sitio de descarga: ${inputs.dischargeSite||'—'}\n- Situación actual: ${inputs.currentSituation||'—'}`;
+    const datosProyecto = `${procesosResumenCampos(p)}\n\nDatos puntuales para selección de tecnología:\n${inputs.requestedTechnology ? `- Tecnología solicitada EXPLÍCITAMENTE por el cliente: ${procesosTecLabel(inputs.requestedTechnology)} — dale mucho peso a esto, es un pedido directo, no algo inferido.\n` : ''}- Tipo de efluente: ${inputs.effluentType||'—'}\n- Caudal: ${inputs.flowRate!=null?inputs.flowRate+' m3/día':'—'}\n- DBO: ${inputs.bod!=null?inputs.bod+' mg/L':'—'}\n- DQO: ${inputs.cod!=null?inputs.cod+' mg/L':'—'}\n- Sitio de descarga: ${inputs.dischargeSite||'—'}\n- Situación actual: ${inputs.currentSituation||'—'}`;
 
     const DEFAULT_TEMPLATE = `Sos un experto en ingeniería de tratamiento de aguas residuales de Aeration, una empresa argentina especializada en sistemas de tratamiento de efluentes.\n\nTu tarea es proponer entre 1 y 3 tecnologías candidatas para este proyecto.\n\nDatos del proyecto:\n{{datosProyecto}}\n\nPreferencias de Aeration por tecnología (por qué se elige o no cada una, y experiencia real):\n{{preferenciasTecnologia}}\n\nAnálisis cuantitativo (MCDM, solo como referencia, no vinculante):\n{{analisisMcdm}}\n\nConsiderá:\n1. El tipo de industria y efluente.\n2. El caudal y las cargas orgánicas (DBO/DQO).\n3. Los requerimientos de calidad de salida y el sitio de descarga.\n4. Las preferencias y experiencia de Aeration por tecnología (de arriba).\n5. La viabilidad técnico-económica para este proyecto puntual.\n6. Continuidad tecnológica: si la situación actual menciona una tecnología ya instalada, la recomendación por defecto debe ser ampliar/escalar/optimizar esa misma tecnología, salvo que exista una razón técnica o regulatoria de peso (no alcanza la calidad exigida, o el caudal nuevo supera 3 veces la capacidad instalada). Cambiar de tecnología implica costos de CAPEX, capacitación y logística — el sesgo debe ser siempre hacia la continuidad.\n7. Combinaciones: la mayoría de los proyectos van con UNA sola tecnología, pero si hay una razón técnica concreta (por ejemplo carga orgánica muy alta que conviene reducir con un pretratamiento antes de la etapa biológica principal, o un requerimiento que la tecnología principal no resuelve bien sola) podés proponer una COMBINACIÓN de dos tecnologías de la lista, en el orden en que irían en el tren de tratamiento. No la propongas solo porque "no está mal" — tiene que aportar algo concreto que una sola tecnología no logre.\n\nInstrucciones de salida:\n- Proponé entre 1 y 3 opciones, sin repetir tecnologías ni combinaciones, usando SOLO nombres de esta lista: Lagunas, Lodos Activados, MBR, MBBR, SBR, Lecho Percolador, Anaeróbico.\n- Para una tecnología combinada, poné "tecnologia" como los dos nombres separados por " + ", en el orden del tren de tratamiento (ej. "Anaeróbico + MBR").\n- Cada justificación: un párrafo corto (máx. 100 palabras) en español, citando datos concretos del proyecto — nada de afirmaciones genéricas que aplicarían a cualquier proyecto. Si es una combinación, explicá específicamente por qué hace falta la combinación y no alcanza con una sola.\n- El puntaje MCDM es una referencia cuantitativa, no vinculante — podés proponer otra tecnología (o combinación) si el criterio cualitativo (preferencias de Aeration, continuidad tecnológica) lo justifica mejor. El MCDM no evalúa combinaciones, solo tecnologías individuales.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"opciones":[{"tecnologia":"MBR","justificacion":"..."},{"tecnologia":"Anaeróbico + MBR","justificacion":"..."}]}`;
 
@@ -7994,6 +8028,11 @@ function procesosTecnologiaInputsHtml(p) {
   const bool = (campo, val) => `<input type="checkbox" ${val?'checked':''} onchange="procesosTecnologiaUpdateInput('${campo}',this.checked,true)" />`;
   return `
     <div style="margin-bottom:10px">
+      ${row('Tecnología solicitada por el cliente', `
+        <select onchange="procesosTecnologiaUpdateInput('requestedTechnology',this.value)">
+          <option value="" ${!inp.requestedTechnology?'selected':''}>(ninguna en particular)</option>
+          ${MCDM_TECHNOLOGIES.map(t => `<option value="${t}" ${inp.requestedTechnology===t?'selected':''}>${MCDM_TECH_LABEL[t]}</option>`).join('')}
+        </select>`)}
       ${row('Tipo de efluente', `<input class="result-val" value="${esc(inp.effluentType||'')}" oninput="procesosTecnologiaUpdateInput('effluentType',this.value)" />`)}
       ${row('Caudal (m3/día)', num('flowRate', inp.flowRate))}
       ${row('DBO (mg/L)', num('bod', inp.bod))}
