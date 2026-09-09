@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.93</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.93</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1033,6 +1033,12 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Por qué Aeration elige (o no) cada tecnología de tratamiento como estándar, y en qué industrias tiene experiencia real con cada una — texto libre, editalo cuando quieras. Se va a usar como contexto de negocio al proponer tecnología para un proyecto nuevo.</p>
         <div id="procesos-tecprefs-list"></div>
         <button class="btn btn-secondary" onclick="procesosTecPrefAdd()" style="margin-top:4px">+ Agregar tecnología</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Plantilla de equipos por etapa</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Qué equipos genéricos (sin marca) suele llevar cada tipo de etapa, y con qué características/cantidad — conocimiento propio de la empresa. En Paso 3, la IA usa esto para armar la lista genérica antes de buscar marca/modelo en los catálogos reales.</p>
+        <div id="procesos-equipos-plantilla-list"></div>
+        <button class="btn btn-secondary" onclick="procesosEquiposPlantillaAdd()" style="margin-top:4px">+ Agregar equipo a la plantilla</button>
       </div>
       <div class="card">
         <div class="card-label">Matriz de tecnologías (MCDM)</div>
@@ -1991,7 +1997,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosMcdmMatriz(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
 }
@@ -5935,6 +5941,124 @@ async function procesosTecPrefEliminar(id) {
   renderProcesosTecPrefs();
 }
 
+// ── Plantilla de equipos genéricos por etapa (Cfg Procesos IA) ──
+// Conocimiento propio de la empresa (qué equipos suele llevar cada tipo de
+// etapa, sin marca) — se usa en Paso 3 antes de mirar catálogos reales, así
+// la lista genérica no depende de que la IA "se acuerde" de memoria cada
+// vez ni de tener documentos de equipos adjuntos.
+let _procesosEquiposPlantillaState = { rows: null, filtro: '', expandedId: null };
+async function renderProcesosEquiposPlantilla() {
+  const el = document.getElementById('procesos-equipos-plantilla-list');
+  if (!el) return;
+  const filtroPrevio = _procesosEquiposPlantillaState.filtro || '';
+  const expandedPrevio = _procesosEquiposPlantillaState.expandedId || null;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=etapa_patron,orden`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_equipos_plantilla?).</p>'; return; }
+    _procesosEquiposPlantillaState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
+    procesosEquiposPlantillaRenderLista();
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
+}
+function procesosEquiposPlantillaEtiqueta(r) { return `${r.etapa_patron||'(sin etapa)'} — ${r.tipo_equipo||'(sin nombre)'}`; }
+function procesosEquiposPlantillaRenderLista() {
+  const el = document.getElementById('procesos-equipos-plantilla-list');
+  if (!el) return;
+  const { rows, filtro, expandedId } = _procesosEquiposPlantillaState;
+  if (!rows) return;
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? rows.filter(r => [r.etapa_patron, r.tipo_equipo, r.caracteristicas, r.cantidad_sugerida].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(r => r.id === expandedId) : []);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-equipos-plantilla-buscar" placeholder="Buscar por etapa o equipo..." value="${esc(filtro)}" oninput="procesosEquiposPlantillaFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="if(this.value) procesosEquiposPlantillaExpandir(this.value); this.value=''" style="max-width:280px">
+        <option value="">Ver todos (${rows.length})...</option>
+        ${rows.map(r => `<option value="${r.id}">${esc(procesosEquiposPlantillaEtiqueta(r))}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${rows.length} ítem${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay equipos cargados en la plantilla.</p>'; return; }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí uno del desplegable para verlo.</p>';
+    procesosEquiposPlantillaRestaurarFoco();
+    return;
+  }
+  el.innerHTML = header + filtrados.map(r => {
+    const abierto = expandedId === r.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosEquiposPlantillaExpandir('${r.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>${esc(procesosEquiposPlantillaEtiqueta(r))}</span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosEquiposPlantillaEliminar('${r.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    return `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(r.etapa_patron||'')}" placeholder="Tipo de etapa (ej. Ecualización)" style="max-width:220px;font-weight:600" oninput="procesosEquiposPlantillaUpdate('${r.id}','etapa_patron',this.value)" />
+          <input value="${esc(r.tipo_equipo||'')}" placeholder="Equipo (ej. Bomba centrífuga sumergible)" style="flex:1" oninput="procesosEquiposPlantillaUpdate('${r.id}','tipo_equipo',this.value)" />
+          <button class="remove-btn" onclick="procesosEquiposPlantillaEliminar('${r.id}')">&#x2715;</button>
+        </div>
+        <label style="font-size:12px;color:var(--text2);margin-top:6px">Cantidad sugerida</label>
+        <input value="${esc(r.cantidad_sugerida||'')}" placeholder="ej. 2 (1 en uso + 1 en back-up)" oninput="procesosEquiposPlantillaUpdate('${r.id}','cantidad_sugerida',this.value)" style="margin-bottom:8px" />
+        <label style="font-size:12px;color:var(--text2)">Características (texto libre — lo que importe para ESTE equipo)</label>
+        <textarea rows="3" placeholder="ej. Caudal (m3/h), potencia (HP), material" oninput="procesosEquiposPlantillaUpdate('${r.id}','caracteristicas',this.value)" style="margin-bottom:6px">${esc(r.caracteristicas||'')}</textarea>
+        <button class="btn btn-secondary btn-sm" onclick="procesosEquiposPlantillaExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('');
+  procesosEquiposPlantillaRestaurarFoco();
+}
+function procesosEquiposPlantillaRestaurarFoco() {
+  const inp = document.getElementById('procesos-equipos-plantilla-buscar');
+  if (!inp || !_procesosEquiposPlantillaState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+function procesosEquiposPlantillaFiltrar(v) {
+  _procesosEquiposPlantillaState.filtro = v;
+  _procesosEquiposPlantillaState._buscando = true;
+  procesosEquiposPlantillaRenderLista();
+}
+function procesosEquiposPlantillaExpandir(id) {
+  _procesosEquiposPlantillaState.expandedId = id;
+  procesosEquiposPlantillaRenderLista();
+}
+async function procesosEquiposPlantillaAdd() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_equipos_plantilla', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, etapa_patron: 'Nueva etapa', tipo_equipo: 'Nuevo equipo' })
+  });
+  if (!res.ok) { alert('No se pudo agregar.'); return; }
+  const data = await res.json().catch(()=>null);
+  _procesosEquiposPlantillaState.filtro = '';
+  _procesosEquiposPlantillaState.expandedId = data && data[0] ? data[0].id : null;
+  renderProcesosEquiposPlantilla();
+}
+async function procesosEquiposPlantillaUpdate(id, field, val) {
+  const row = (_procesosEquiposPlantillaState.rows||[]).find(r => r.id === id);
+  if (row) row[field] = val;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_plantilla?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function procesosEquiposPlantillaEliminar(id) {
+  if (!confirm('¿Eliminar este equipo de la plantilla?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_plantilla?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosEquiposPlantillaState.expandedId === id) _procesosEquiposPlantillaState.expandedId = null;
+  renderProcesosEquiposPlantilla();
+}
+
 // ── Prompts editables (Cfg Procesos IA) ──
 // Cada fila es una llamada a IA real del código, identificada por "key". El
 // código arma los datos dinámicos (contexto del proyecto, etc.) y los
@@ -5972,7 +6096,7 @@ function procesosPromptFill(template, vars) {
 const PROCESOS_PROMPT_PASO = {
   step1_analizar: 1, tecnologia_seleccion: 1, normativa_sugerir: 1, normativa_aplicar: 1,
   step2_elegir_hojas: 2, step2_mapeos: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
-  step3_sugerir_equipos: 3, step3_chat: 3,
+  step3_sugerir_equipos: 3, step3_match_catalogo: 3, step3_chat: 3,
   step4_generar: 4, step4_chat: 4,
 };
 function procesosPromptPaso(key) { return PROCESOS_PROMPT_PASO[key] || 99; }
@@ -9280,8 +9404,12 @@ function procesosNuevoId() { return 'eq_' + Date.now().toString(36) + Math.rando
 // cachea acá: la relevancia cambia según la etapa, así que conviene
 // recalcularla cada vez (el texto/resumen de cada archivo sí queda cacheado
 // en archivos_cache, eso no se vuelve a bajar de SharePoint).
+// soloCache=true — usa solo catálogos ya transcriptos (con "Procesar
+// pendientes" en Cfg Procesos IA), nunca dispara una transcripción nueva
+// en medio de un click de "Sugerir equipos"/chat (antes sí lo hacía, y con
+// varios catálogos sin cachear se sentía como que la app se colgaba).
 async function procesosStep3GetEquiposBlocks(contextoTexto) {
-  return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto);
+  return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto, true);
 }
 
 function procesosStep3EtapasConfirmadas(p) {
@@ -9569,13 +9697,35 @@ function procesosStep3EliminarEquipo(nombreEtapa, equipoId) {
   renderProcesosStepContent();
 }
 
+// Trae toda la plantilla de equipos genéricos por etapa (Cfg Procesos IA),
+// formateada para el prompt — es chica (unas pocas decenas de filas como
+// mucho), no hace falta filtrar por relevancia como con los documentos.
+async function procesosEquiposPlantillaTexto() {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_equipos_plantilla?select=etapa_patron,tipo_equipo,cantidad_sugerida,caracteristicas&empresa=eq.${currentEmpresa}&order=etapa_patron,orden`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = res.ok ? await res.json() : [];
+    if (!Array.isArray(rows) || !rows.length) return '';
+    const porEtapa = {};
+    rows.forEach(r => { (porEtapa[r.etapa_patron] = porEtapa[r.etapa_patron] || []).push(r); });
+    return Object.entries(porEtapa).map(([etapa, items]) => `${etapa}:\n` + items.map(i =>
+      `  - ${i.tipo_equipo}${i.cantidad_sugerida ? ' (cantidad sugerida: '+i.cantidad_sugerida+')' : ''}${i.caracteristicas ? ' — características: '+i.caracteristicas : ''}`
+    ).join('\n')).join('\n\n');
+  } catch(e) { console.warn('No se pudo cargar la plantilla de equipos:', e.message); return ''; }
+}
+
+// Paso 1 de 2: arma la lista GENÉRICA de equipos (sin catálogos adjuntos —
+// liviano, usa la plantilla de la empresa en vez de que la IA la invente de
+// memoria cada vez). Paso 2 (procesosStep3MatchCatalogo) recién ahí busca
+// marca/modelo real, aparte, para no mezclar "inventar la lista" con
+// "matchear contra catálogo" en una sola respuesta larga.
 async function procesosStep3SugerirEquipos(nombreEtapa) {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step3-status';
   const ed0 = (p.equipos_data && p.equipos_data.etapas) || {};
   const yaTiene = (ed0[nombreEtapa]?.equipos || []).length > 0;
   if (yaTiene && !confirm(`Ya hay equipos cargados para "${nombreEtapa}". ¿Reemplazarlos con una nueva sugerencia de la IA?`)) return;
-  showMsg(statusId, 'loading', 'Sugiriendo equipos con IA...');
+  showMsg(statusId, 'loading', 'Armando lista genérica de equipos...');
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
@@ -9584,24 +9734,34 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
     const referencias = await procesosGetResumenesReferencias();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
-    const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`);
+    const plantilla = await procesosEquiposPlantillaTexto();
     const referenciasTxt = referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : '';
     const leccionesTxt = lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : '';
-    const equiposDocTxt = equiposBlocks.length ? '\nAdjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala para proponer marcas/modelos/capacidades reales cuando aplique.\n' : '';
-    const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{equiposDocTxt}}\nSugerí la lista de equipos necesarios para esta etapa (bombas, sopladores, tableros eléctricos, agitadores, etc. según corresponda al tipo de etapa), basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad, tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. si se puede estimar) y una justificación breve de por qué se eligió esa cantidad/capacidad.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
+    const plantillaTxt = plantilla ? '\nPlantilla de equipos genéricos de la empresa, por tipo de etapa (usala como referencia principal — elegí la sección más parecida a esta etapa, no tiene que calzar exacto el nombre):\n' + plantilla + '\n' : '';
+    const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo, eso se resuelve en un paso aparte.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{plantillaTxt}}\nSugerí la lista de equipos necesarios para esta etapa, basándote en los valores de diseño (caudal, dimensiones, carga, etc.), en la plantilla de la empresa de arriba (si hay una sección aplicable) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad (seguí la cantidad sugerida de la plantilla si la hay, ej. redundancia N+1 — no la ignores), tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. — usá las características de la plantilla como guía de qué datos completar) y una justificación breve.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const templateStep3Sugerir = await procesosPromptText('step3_sugerir_equipos', DEFAULT_TEMPLATE_STEP3_SUGERIR);
-    const prompt = procesosPromptFill(templateStep3Sugerir, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', resumenCampos: procesosResumenCampos(p), referenciasTxt, leccionesTxt, equiposDocTxt });
+    const prompt = procesosPromptFill(templateStep3Sugerir, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', resumenCampos: procesosResumenCampos(p), referenciasTxt, leccionesTxt, plantillaTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 5000, messages: [{ role: 'user', content: [...equiposBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 3000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
     const data = await resp.json();
     const text = data.content?.find(c => c.type === 'text')?.text || '{}';
     let parsed;
     try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
-    catch (_e) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, probablemente por tener adjunta mucha documentación de equipos) — probá de nuevo.'); }
-    const nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', justificacion: eq.justificacion || '' }));
+    catch (_e) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar) — probá de nuevo.'); }
+    let nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', justificacion: eq.justificacion || '' }));
+
+    // Paso 2: recién ahora, con la lista ya armada, se busca marca/modelo
+    // real en los catálogos — si falla o no hay nada relevante, se guarda
+    // igual la lista genérica del paso 1 (nunca se pierde por el paso 2).
+    try {
+      showMsg(statusId, 'loading', 'Buscando equivalentes en catálogo...');
+      nuevos = await procesosStep3MatchCatalogo(nombreEtapa, nuevos, valoresEtapa);
+    } catch (eCat) {
+      console.warn('No se pudo buscar en catálogo, se deja la lista genérica:', eCat.message);
+    }
 
     const ed = Object.assign({}, p.equipos_data);
     ed.etapas = Object.assign({}, ed.etapas);
@@ -9617,6 +9777,40 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
   } catch (e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
   }
+}
+
+// Paso 2 de 2: dado un listado YA armado (tipo/cantidad/especificacion
+// genérica), busca si hay un producto puntual en los catálogos de
+// referencia (categoría "Equipos") que matchee cada ítem, y si lo
+// encuentra, le agrega marca/modelo a la especificación — nunca cambia
+// tipo/cantidad/justificación, esos ya quedaron decididos en el paso 1.
+// Si no hay documentos de equipos relevantes (o ya cacheados), no llama a
+// la IA de nuevo — devuelve la lista tal cual vino.
+async function procesosStep3MatchCatalogo(nombreEtapa, equipos, valoresEtapa) {
+  const p = procesosCurrentProyecto;
+  const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`);
+  if (!equiposBlocks.length || !equipos.length) return equipos;
+  const apiKey = getApiKey();
+  if (!apiKey) return equipos;
+  const listado = equipos.map((eq,i) => `${i+1}. ${eq.tipo} — cantidad ${eq.cantidad} — ${eq.especificacion}`).join('\n');
+  const DEFAULT_TEMPLATE_STEP3_MATCH = `Esta es la lista de equipos ya definida (genérica, sin marca) para la etapa "{{nombreEtapa}}":\n{{listado}}\n\nRevisá los catálogos/fichas técnicas adjuntos: para cada ítem de la lista que tenga un producto puntual (marca/modelo) que lo satisfaga razonablemente, agregalo. Si ningún documento adjunto aplica a un ítem, dejalo tal cual (no inventes una marca sin base en los documentos).\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta, un elemento por cada ítem de la lista EN EL MISMO ORDEN (repetí el número): {"equipos":[{"numero":1,"marca_modelo":"Marca X — Modelo Y" o null}]}`;
+  const template = await procesosPromptText('step3_match_catalogo', DEFAULT_TEMPLATE_STEP3_MATCH);
+  const prompt = procesosPromptFill(template, { nombreEtapa, listado });
+  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: [...equiposBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
+  });
+  if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  const porNumero = {};
+  (parsed.equipos || []).forEach(x => { if (x.numero) porNumero[x.numero] = x.marca_modelo; });
+  return equipos.map((eq, i) => {
+    const marcaModelo = porNumero[i+1];
+    if (!marcaModelo) return eq;
+    return Object.assign({}, eq, { especificacion: eq.especificacion + ` — ${marcaModelo}` });
+  });
 }
 
 const _procesosStep3ChatEnviando = {};
