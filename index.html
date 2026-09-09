@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.77</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.78</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.77</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.78</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5813,49 +5813,108 @@ async function procesosCatalogoEliminar(id) {
 // Texto libre editable desde la app — nada de SharePoint acá, es contexto de
 // negocio (por qué se elige o no cada tecnología, en qué industrias hay
 // experiencia) que después va a usar el prompt de selección de tecnología.
-let _procesosTecPrefsRows = null;
+// Mismo criterio que Documentos/Catálogo/Lecciones: con varias tecnologías
+// no se muestra nada expandido hasta que se busca o se elige una del
+// desplegable — evita una pantalla larga de textareas todas abiertas.
+let _procesosTecPrefsState = { rows: null, filtro: '', expandedId: null };
 async function renderProcesosTecPrefs() {
   const el = document.getElementById('procesos-tecprefs-list');
   if (!el) return;
+  const filtroPrevio = _procesosTecPrefsState.filtro || '';
+  const expandedPrevio = _procesosTecPrefsState.expandedId || null;
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const res = await supaFetch(`/rest/v1/procesos_tecnologia_prefs?select=*&empresa=eq.${currentEmpresa}&order=orden,created_at`, {headers:{Authorization:'Bearer '+session.token}});
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_tecnologia_prefs?).</p>'; return; }
-    _procesosTecPrefsRows = rows;
+    _procesosTecPrefsState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
     procesosTecPrefsRenderLista();
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
 }
+function procesosTecPrefEtiqueta(t) { return `${t.tecnologia||'(sin nombre)'}${t.sigla?' ('+t.sigla+')':''}`; }
 function procesosTecPrefsRenderLista() {
   const el = document.getElementById('procesos-tecprefs-list');
-  if (!el || !_procesosTecPrefsRows) return;
-  if (!_procesosTecPrefsRows.length) { el.innerHTML = '<p class="hint">Todavía no hay tecnologías cargadas.</p>'; return; }
-  el.innerHTML = _procesosTecPrefsRows.map(t => `
-    <div class="field-row">
-      <div class="field-row-top">
-        <input value="${esc(t.tecnologia||'')}" placeholder="Tecnología (ej. MBR)" style="max-width:220px;font-weight:600" oninput="procesosTecPrefUpdate('${t.id}','tecnologia',this.value)" />
-        <input value="${esc(t.sigla||'')}" placeholder="Sigla (opcional)" style="max-width:100px" oninput="procesosTecPrefUpdate('${t.id}','sigla',this.value)" />
-        <button class="remove-btn" onclick="procesosTecPrefEliminar('${t.id}')">&#x2715;</button>
-      </div>
-      <label style="font-size:12px;color:var(--text2);margin-top:6px">Preferencia de Aeration (por qué se elige o no como estándar)</label>
-      <textarea rows="3" placeholder="¿Por qué Aeration elige o no esta tecnología?" oninput="procesosTecPrefUpdate('${t.id}','preferencia',this.value)" style="margin-bottom:8px">${esc(t.preferencia||'')}</textarea>
-      <label style="font-size:12px;color:var(--text2)">Experiencia (industrias, una por línea)</label>
-      <textarea rows="3" placeholder="Industrias donde ya se usó esta tecnología" oninput="procesosTecPrefUpdate('${t.id}','experiencia',this.value)">${esc(t.experiencia||'')}</textarea>
-    </div>`).join('');
+  if (!el) return;
+  const { rows, filtro, expandedId } = _procesosTecPrefsState;
+  if (!rows) return;
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? rows.filter(t => [t.tecnologia, t.sigla, t.preferencia, t.experiencia].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(t => t.id === expandedId) : []);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-tecpref-buscar" placeholder="Buscar por tecnología..." value="${esc(filtro)}" oninput="procesosTecPrefFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="if(this.value) procesosTecPrefExpandir(this.value); this.value=''" style="max-width:260px">
+        <option value="">Ver todas (${rows.length})...</option>
+        ${rows.map(t => `<option value="${t.id}">${esc(procesosTecPrefEtiqueta(t))}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${rows.length} tecnología${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay tecnologías cargadas.</p>'; return; }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí una del desplegable para verla.</p>';
+    procesosTecPrefRestaurarFoco();
+    return;
+  }
+  el.innerHTML = header + filtrados.map(t => {
+    const abierto = expandedId === t.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosTecPrefExpandir('${t.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>${esc(procesosTecPrefEtiqueta(t))}</span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosTecPrefEliminar('${t.id}')">&#x2715;</button>
+        </div>
+      </div>`;
+    }
+    return `
+      <div class="field-row">
+        <div class="field-row-top">
+          <input value="${esc(t.tecnologia||'')}" placeholder="Tecnología (ej. MBR)" style="max-width:220px;font-weight:600" oninput="procesosTecPrefUpdate('${t.id}','tecnologia',this.value)" />
+          <input value="${esc(t.sigla||'')}" placeholder="Sigla (opcional)" style="max-width:100px" oninput="procesosTecPrefUpdate('${t.id}','sigla',this.value)" />
+          <button class="remove-btn" onclick="procesosTecPrefEliminar('${t.id}')">&#x2715;</button>
+        </div>
+        <label style="font-size:12px;color:var(--text2);margin-top:6px">Preferencia de Aeration (por qué se elige o no como estándar)</label>
+        <textarea rows="3" placeholder="¿Por qué Aeration elige o no esta tecnología?" oninput="procesosTecPrefUpdate('${t.id}','preferencia',this.value)" style="margin-bottom:8px">${esc(t.preferencia||'')}</textarea>
+        <label style="font-size:12px;color:var(--text2)">Experiencia (industrias, una por línea)</label>
+        <textarea rows="3" placeholder="Industrias donde ya se usó esta tecnología" oninput="procesosTecPrefUpdate('${t.id}','experiencia',this.value)" style="margin-bottom:6px">${esc(t.experiencia||'')}</textarea>
+        <button class="btn btn-secondary btn-sm" onclick="procesosTecPrefExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('');
+  procesosTecPrefRestaurarFoco();
+}
+function procesosTecPrefRestaurarFoco() {
+  const inp = document.getElementById('procesos-tecpref-buscar');
+  if (!inp || !_procesosTecPrefsState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+function procesosTecPrefFiltrar(v) {
+  _procesosTecPrefsState.filtro = v;
+  _procesosTecPrefsState._buscando = true;
+  procesosTecPrefsRenderLista();
+}
+function procesosTecPrefExpandir(id) {
+  _procesosTecPrefsState.expandedId = id;
+  procesosTecPrefsRenderLista();
 }
 async function procesosTecPrefAdd() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const orden = (_procesosTecPrefsRows||[]).length;
+  const orden = (_procesosTecPrefsState.rows||[]).length;
   const res = await supaFetch('/rest/v1/procesos_tecnologia_prefs', {
     method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
     body: JSON.stringify({ empresa: currentEmpresa, tecnologia: 'Nueva tecnología', orden })
   });
   if (!res.ok) { alert('No se pudo agregar.'); return; }
+  const data = await res.json().catch(()=>null);
+  _procesosTecPrefsState.filtro = '';
+  _procesosTecPrefsState.expandedId = data && data[0] ? data[0].id : null;
   renderProcesosTecPrefs();
 }
 async function procesosTecPrefUpdate(id, field, val) {
-  const row = (_procesosTecPrefsRows||[]).find(r => r.id === id);
+  const row = (_procesosTecPrefsState.rows||[]).find(r => r.id === id);
   if (row) row[field] = val;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_tecnologia_prefs?id=eq.${id}`, {
@@ -5867,6 +5926,7 @@ async function procesosTecPrefEliminar(id) {
   if (!confirm('¿Eliminar esta tecnología?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_tecnologia_prefs?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosTecPrefsState.expandedId === id) _procesosTecPrefsState.expandedId = null;
   renderProcesosTecPrefs();
 }
 
@@ -5901,23 +5961,45 @@ function procesosPromptFill(template, vars) {
   return template.replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] != null ? String(vars[k]) : ''));
 }
 
-let _procesosPromptsState = { rows: null, expandedId: null };
+// Mismo criterio que Documentos/Catálogo/Lecciones: no se muestra nada
+// expandido hasta que se busca o se elige uno del desplegable.
+let _procesosPromptsState = { rows: null, filtro: '', expandedId: null };
 async function renderProcesosPrompts() {
   const el = document.getElementById('procesos-prompts-list');
   if (!el) return;
+  const filtroPrevio = _procesosPromptsState.filtro || '';
+  const expandedPrevio = _procesosPromptsState.expandedId || null;
   el.innerHTML = 'Cargando...';
   await procesosPromptsCargar(true);
   const rows = Object.values(_procesosPromptsCache.byKey).sort((a,b) => (a.nombre||'').localeCompare(b.nombre||''));
-  _procesosPromptsState = { rows, expandedId: _procesosPromptsState.expandedId };
+  _procesosPromptsState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
   procesosPromptsRenderLista();
 }
 function procesosPromptsRenderLista() {
   const el = document.getElementById('procesos-prompts-list');
   if (!el) return;
-  const { rows, expandedId } = _procesosPromptsState;
+  const { rows, filtro, expandedId } = _procesosPromptsState;
   if (!rows) return;
-  if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay prompts cargados (correspondé la migración de procesos_prompts).</p>'; return; }
-  el.innerHTML = rows.map(p => {
+  const f = (filtro || '').trim().toLowerCase();
+  const filtrados = f
+    ? rows.filter(p => [p.nombre, p.key, p.descripcion].some(v => (v||'').toLowerCase().includes(f)))
+    : (expandedId ? rows.filter(p => p.id === expandedId) : []);
+  const header = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <input id="procesos-prompt-buscar" placeholder="Buscar por nombre..." value="${esc(filtro)}" oninput="procesosPromptFiltrar(this.value)" style="flex:1;min-width:160px" />
+      <select onchange="if(this.value) procesosPromptExpandir(this.value); this.value=''" style="max-width:280px">
+        <option value="">Ver todos (${rows.length})...</option>
+        ${rows.map(p => `<option value="${p.id}">${esc(p.nombre)}</option>`).join('')}
+      </select>
+      <span class="hint" style="white-space:nowrap">${rows.length} prompt${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+    </div>`;
+  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay prompts cargados (correspondé la migración de procesos_prompts).</p>'; return; }
+  if (!f && !expandedId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí uno del desplegable para verlo.</p>';
+    procesosPromptRestaurarFoco();
+    return;
+  }
+  el.innerHTML = header + filtrados.map(p => {
     const abierto = expandedId === p.id;
     if (!abierto) {
       return `
@@ -5940,6 +6022,19 @@ function procesosPromptsRenderLista() {
         <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosPromptExpandir(null)">✕ Cerrar</button>
       </div>`;
   }).join('');
+  procesosPromptRestaurarFoco();
+}
+function procesosPromptRestaurarFoco() {
+  const inp = document.getElementById('procesos-prompt-buscar');
+  if (!inp || !_procesosPromptsState._buscando) return;
+  inp.focus();
+  const pos = inp.value.length;
+  try { inp.setSelectionRange(pos, pos); } catch(_e) {}
+}
+function procesosPromptFiltrar(v) {
+  _procesosPromptsState.filtro = v;
+  _procesosPromptsState._buscando = true;
+  procesosPromptsRenderLista();
 }
 function procesosPromptExpandir(id) {
   _procesosPromptsState.expandedId = id;
