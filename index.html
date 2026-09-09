@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.74</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.75</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.74</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.75</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1033,6 +1033,11 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Por qué Aeration elige (o no) cada tecnología de tratamiento como estándar, y en qué industrias tiene experiencia real con cada una — texto libre, editalo cuando quieras. Se va a usar como contexto de negocio al proponer tecnología para un proyecto nuevo.</p>
         <div id="procesos-tecprefs-list"></div>
         <button class="btn btn-secondary" onclick="procesosTecPrefAdd()" style="margin-top:4px">+ Agregar tecnología</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Prompts</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Las instrucciones que recibe la IA en cada llamada puntual de Procesos IA — editalas si querés cambiar cómo piensa MAIA en algún paso, sin tener que pedirlo. El código sigue armando los datos del proyecto e insertándolos donde corresponda dentro de tu texto.</p>
+        <div id="procesos-prompts-list"></div>
       </div>
       <div class="card">
         <div class="card-label">Base de proyectos anteriores</div>
@@ -1981,7 +1986,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
 }
@@ -5861,6 +5866,91 @@ async function procesosTecPrefEliminar(id) {
   renderProcesosTecPrefs();
 }
 
+// ── Prompts editables (Cfg Procesos IA) ──
+// Cada fila es una llamada a IA real del código, identificada por "key". El
+// código arma los datos dinámicos (contexto del proyecto, etc.) y los
+// inserta en el template vía {{variable}} — lo que se edita acá es SOLO la
+// parte de instrucciones/criterios, nunca la parte de "acá van los datos".
+// Si una key no tiene fila cargada todavía (nadie corrió la migración, o es
+// nueva), procesosPromptText() devuelve el fallback embebido en el código —
+// nunca se rompe una función por faltar la fila.
+let _procesosPromptsCache = { empresa: null, byKey: {} };
+async function procesosPromptsCargar(force) {
+  if (!force && _procesosPromptsCache.empresa === currentEmpresa) return;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_prompts?select=*&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    const byKey = {};
+    if (res.ok && Array.isArray(rows)) rows.forEach(r => { byKey[r.key] = r; });
+    _procesosPromptsCache = { empresa: currentEmpresa, byKey };
+  } catch(e) { console.warn('No se pudieron cargar los prompts:', e.message); }
+}
+// Devuelve el template de texto (de la base si ya lo cargaron/editaron, si
+// no el fallback del código) — SIN rellenar variables todavía.
+async function procesosPromptText(key, fallback) {
+  await procesosPromptsCargar(false);
+  return _procesosPromptsCache.byKey[key]?.template || fallback;
+}
+// Reemplaza {{variable}} por su valor — variables no encontradas quedan vacías.
+function procesosPromptFill(template, vars) {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] != null ? String(vars[k]) : ''));
+}
+
+let _procesosPromptsState = { rows: null, expandedId: null };
+async function renderProcesosPrompts() {
+  const el = document.getElementById('procesos-prompts-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  await procesosPromptsCargar(true);
+  const rows = Object.values(_procesosPromptsCache.byKey).sort((a,b) => (a.nombre||'').localeCompare(b.nombre||''));
+  _procesosPromptsState = { rows, expandedId: _procesosPromptsState.expandedId };
+  procesosPromptsRenderLista();
+}
+function procesosPromptsRenderLista() {
+  const el = document.getElementById('procesos-prompts-list');
+  if (!el) return;
+  const { rows, expandedId } = _procesosPromptsState;
+  if (!rows) return;
+  if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay prompts cargados (correspondé la migración de procesos_prompts).</p>'; return; }
+  el.innerHTML = rows.map(p => {
+    const abierto = expandedId === p.id;
+    if (!abierto) {
+      return `
+      <div class="field-row" style="cursor:pointer" onclick="procesosPromptExpandir('${p.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span><b>${esc(p.nombre)}</b></span>
+          <span class="hint">${esc(p.key)}</span>
+        </div>
+      </div>`;
+    }
+    return `
+      <div class="field-row">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px">
+          <b>${esc(p.nombre)}</b>
+          <span class="hint">key: ${esc(p.key)}</span>
+        </div>
+        ${p.descripcion ? `<p class="hint" style="margin:0 0 6px">${esc(p.descripcion)}</p>` : ''}
+        ${p.variables ? `<p class="hint" style="margin:0 0 8px">Variables disponibles: <code>${esc(p.variables)}</code></p>` : ''}
+        <textarea rows="10" style="font-family:var(--font-mono,monospace);font-size:12.5px" oninput="procesosPromptUpdate('${p.id}',this.value)">${esc(p.template||'')}</textarea>
+        <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosPromptExpandir(null)">✕ Cerrar</button>
+      </div>`;
+  }).join('');
+}
+function procesosPromptExpandir(id) {
+  _procesosPromptsState.expandedId = id;
+  procesosPromptsRenderLista();
+}
+async function procesosPromptUpdate(id, val) {
+  const row = (_procesosPromptsState.rows||[]).find(r => r.id === id);
+  if (row) { row.template = val; _procesosPromptsCache.byKey[row.key] = row; }
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_prompts?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ template: val, updated_at: new Date().toISOString() })
+  });
+}
+
 // ── Lecciones aprendidas (Cfg Procesos IA) ──────────────
 // Mismo criterio que documentos/catálogo: con la sincronización de
 // SharePoint esto puede crecer a cientos — no se muestra nada expandido
@@ -6631,6 +6721,9 @@ function procesosStep1Html(p) {
           <span><b>${esc(r.nombre)}</b>${r.coincide && r.coincide.length ? ` <span style="font-size:11px;color:var(--text2);border:1px solid var(--border);border-radius:8px;padding:1px 6px">${r.coincide.length}/4 · ${r.coincide.join(', ')}</span>` : ''}${r.motivo?' — '+esc(r.motivo):''}</span>
         </label>`).join('') : '<p class="hint">Todavía no se detectaron proyectos parecidos.</p>'}
       <button class="btn btn-secondary btn-sm" onclick="procesosDetectarSimilares()" style="margin-top:6px">↻ Volver a detectar</button>
+
+      ${procesosTecnologiaSectionHtml(p)}
+
       <div class="gap"></div>
       <button class="btn btn-primary" onclick="procesosAvanzarPaso(2)">Continuar al Paso 2 →</button>
     ` : ''}
@@ -7137,6 +7230,289 @@ function procesosToggleReferencia(idx) {
   const p = procesosCurrentProyecto;
   p.proyectos_referencia[idx].incluido = !p.proyectos_referencia[idx].incluido;
   procesosSaveProyecto({ proyectos_referencia: p.proyectos_referencia }, p);
+}
+
+// ── Selección de tecnología (Paso 1) ──────────────────────────────────────
+// Dos capas, igual que en el sistema de referencia que compartió Fede:
+// 1) MCDM — puntaje matemático 0-100 por tecnología, sin IA, a partir de una
+//    matriz fija de compatibilidad (aprobada por Fede) contra 15 criterios
+//    del proyecto. Puro cálculo, no cuesta nada.
+// 2) IA — con ese puntaje como referencia (no vinculante) + las preferencias
+//    de negocio de Aeration por tecnología, propone 1 a 3 opciones con
+//    justificación cualitativa citando datos concretos del proyecto.
+// El usuario elige una (de las propuestas o cualquier otra a mano) — no es
+// un paso bloqueante: "Continuar al Paso 2" sigue disponible igual, esto es
+// una ayuda a la decisión, no un gate.
+
+const MCDM_TECHNOLOGIES = ['Lagunas','LodosActivados','MBR','MBBR','SBR','LechoPercolador','Anaerobico'];
+const MCDM_TECH_LABEL = { Lagunas:'Lagunas', LodosActivados:'Lodos Activados', MBR:'MBR', MBBR:'MBBR', SBR:'SBR', LechoPercolador:'Lecho Percolador', Anaerobico:'Anaeróbico' };
+const MCDM_CRITERIO_LABEL = {
+  dbo_dqo_alto:'Carga orgánica (DBO/DQO)', nutrientes_n:'Nitrógeno', nutrientes_p:'Fósforo', fog:'Aceites y grasas',
+  caudal_alto_baja_carga:'Caudal alto / baja carga', bajo_caudal_alta_carga:'Bajo caudal / alta carga', flujo_variable:'Flujo variable',
+  poco_espacio:'Espacio disponible', reuso_calidad:'Requerimiento de reúso', toxicos:'Compuestos tóxicos', temperatura_baja:'Temperatura invernal',
+  opex_energia:'OPEX energético', generacion_lodos:'Generación de lodos', capex_bajo:'CAPEX', simplicidad_operacion:'Simplicidad operativa',
+};
+const MCDM_MATRIX = {
+  dbo_dqo_alto:{Lagunas:{c:0.45,x:false},LodosActivados:{c:0.75,x:false},MBR:{c:0.9,x:false},MBBR:{c:0.85,x:false},SBR:{c:0.8,x:false},LechoPercolador:{c:0.55,x:false},Anaerobico:{c:0.9,x:false}},
+  nutrientes_n:{Lagunas:{c:0.55,x:false},LodosActivados:{c:0.72,x:false},MBR:{c:0.82,x:false},MBBR:{c:0.68,x:false},SBR:{c:0.78,x:false},LechoPercolador:{c:0.52,x:false},Anaerobico:{c:0.4,x:false}},
+  nutrientes_p:{Lagunas:{c:0.55,x:false},LodosActivados:{c:0.72,x:false},MBR:{c:0.82,x:false},MBBR:{c:0.68,x:false},SBR:{c:0.78,x:false},LechoPercolador:{c:0.52,x:false},Anaerobico:{c:0.4,x:false}},
+  fog:{Lagunas:{c:0.5,x:false},LodosActivados:{c:0.62,x:false},MBR:{c:0.2,x:true},MBBR:{c:0.66,x:false},SBR:{c:0.58,x:false},LechoPercolador:{c:0.4,x:false},Anaerobico:{c:0.85,x:false}},
+  caudal_alto_baja_carga:{Lagunas:{c:0.95,x:false},LodosActivados:{c:0.6,x:false},MBR:{c:0.45,x:false},MBBR:{c:0.5,x:false},SBR:{c:0.35,x:false},LechoPercolador:{c:0.85,x:false},Anaerobico:{c:0.4,x:false}},
+  bajo_caudal_alta_carga:{Lagunas:{c:0.35,x:false},LodosActivados:{c:0.75,x:false},MBR:{c:0.95,x:false},MBBR:{c:0.9,x:false},SBR:{c:0.8,x:false},LechoPercolador:{c:0.4,x:false},Anaerobico:{c:0.85,x:false}},
+  flujo_variable:{Lagunas:{c:0.65,x:false},LodosActivados:{c:0.6,x:false},MBR:{c:0.75,x:false},MBBR:{c:0.8,x:false},SBR:{c:0.9,x:false},LechoPercolador:{c:0.45,x:false},Anaerobico:{c:0.55,x:false}},
+  poco_espacio:{Lagunas:{c:0.2,x:false},LodosActivados:{c:0.55,x:false},MBR:{c:0.95,x:false},MBBR:{c:0.88,x:false},SBR:{c:0.78,x:false},LechoPercolador:{c:0.5,x:false},Anaerobico:{c:0.62,x:false}},
+  reuso_calidad:{Lagunas:{c:0.3,x:false},LodosActivados:{c:0.62,x:false},MBR:{c:0.98,x:false},MBBR:{c:0.82,x:false},SBR:{c:0.75,x:false},LechoPercolador:{c:0.45,x:false},Anaerobico:{c:0.35,x:false}},
+  toxicos:{Lagunas:{c:0.25,x:true},LodosActivados:{c:0.45,x:false},MBR:{c:0.4,x:false},MBBR:{c:0.55,x:false},SBR:{c:0.85,x:false},LechoPercolador:{c:0.3,x:true},Anaerobico:{c:0.8,x:false}},
+  temperatura_baja:{Lagunas:{c:0.22,x:true},LodosActivados:{c:0.6,x:false},MBR:{c:0.8,x:false},MBBR:{c:0.86,x:false},SBR:{c:0.74,x:false},LechoPercolador:{c:0.48,x:false},Anaerobico:{c:0.7,x:false}},
+  opex_energia:{Lagunas:{c:0.9,x:false},LodosActivados:{c:0.45,x:false},MBR:{c:0.3,x:false},MBBR:{c:0.55,x:false},SBR:{c:0.42,x:false},LechoPercolador:{c:0.8,x:false},Anaerobico:{c:0.88,x:false}},
+  generacion_lodos:{Lagunas:{c:0.75,x:false},LodosActivados:{c:0.35,x:false},MBR:{c:0.55,x:false},MBBR:{c:0.5,x:false},SBR:{c:0.45,x:false},LechoPercolador:{c:0.6,x:false},Anaerobico:{c:0.92,x:false}},
+  capex_bajo:{Lagunas:{c:0.95,x:false},LodosActivados:{c:0.62,x:false},MBR:{c:0.28,x:false},MBBR:{c:0.52,x:false},SBR:{c:0.56,x:false},LechoPercolador:{c:0.86,x:false},Anaerobico:{c:0.68,x:false}},
+  simplicidad_operacion:{Lagunas:{c:0.9,x:false},LodosActivados:{c:0.42,x:false},MBR:{c:0.3,x:false},MBBR:{c:0.68,x:false},SBR:{c:0.5,x:false},LechoPercolador:{c:0.82,x:false},Anaerobico:{c:0.72,x:false}},
+};
+
+function mcdmClamp01(v) { return Math.max(0, Math.min(1, v)); }
+function mcdmNormalize(value, low, high) {
+  if (value == null || Number.isNaN(value) || low === high) return 0;
+  const minB = Math.min(low, high), maxB = Math.max(low, high);
+  const clamped = Math.max(minB, Math.min(maxB, value));
+  return mcdmClamp01((clamped - low) / (high - low));
+}
+function mcdmCaudalAltoBajaCarga(flowRate, bod) {
+  const qHigh = mcdmNormalize(flowRate, 500, 5000);
+  const loadKgDia = (flowRate != null && bod != null && flowRate > 0 && bod > 0) ? (flowRate * bod) / 1000 : 0;
+  const loadLow = mcdmNormalize(loadKgDia, 200, 50);
+  return mcdmClamp01(Math.sqrt(qHigh * loadLow));
+}
+function mcdmBuildConditions(inp) {
+  const flowRate = inp.flowRate ?? null, bod = inp.bod ?? null, cod = inp.cod ?? null;
+  const loadKgDia = (flowRate != null && bod != null && flowRate > 0 && bod > 0) ? (flowRate * bod) / 1000 : 0;
+  const altoBajaInt = mcdmCaudalAltoBajaCarga(flowRate, bod);
+  const bajoAltaInt = mcdmNormalize(loadKgDia, 20, 500);
+  const preferAltoBaja = altoBajaInt >= bajoAltaInt;
+  const toxIntensidad = { NONE:0, LOW:0.3, MODERATE:0.6, HIGH:1 };
+  return [
+    { id:'dbo_dqo_alto', active:true, intensity: Math.max(mcdmNormalize(bod,300,2000), mcdmNormalize(cod,600,4000)) },
+    { id:'nutrientes_n', active:true, intensity: mcdmNormalize(inp.nitrogenTotal, 25, 100) },
+    { id:'nutrientes_p', active:true, intensity: mcdmNormalize(inp.phosphorusTotal, 5, 20) },
+    { id:'fog', active:true, intensity: mcdmNormalize(inp.oilsAndGreases, 30, 150) },
+    { id:'caudal_alto_baja_carga', active: preferAltoBaja, intensity: altoBajaInt },
+    { id:'bajo_caudal_alta_carga', active: !preferAltoBaja, intensity: bajoAltaInt },
+    { id:'flujo_variable', active:true, intensity: mcdmNormalize(inp.peakAverageRatio, 1.5, 3.5) },
+    { id:'poco_espacio', active:true, intensity: mcdmNormalize(inp.availableArea, 10000, 500) },
+    { id:'reuso_calidad', active:true, intensity: inp.reuseRequired ? 1 : 0 },
+    { id:'toxicos', active:true, intensity: toxIntensidad[inp.toxicCompoundsLevel || 'NONE'] },
+    { id:'temperatura_baja', active:true, intensity: mcdmNormalize(inp.minWinterTemperature, 5, -1) },
+    { id:'opex_energia', active:true, intensity: mcdmClamp01(inp.priorityOpex ? 1 : 0) },
+    { id:'generacion_lodos', active:true, intensity: mcdmClamp01(inp.priorityLowSludge ? 1 : 0) },
+    { id:'capex_bajo', active:true, intensity: mcdmClamp01(inp.priorityLowCapex ? 1 : 0) },
+    { id:'simplicidad_operacion', active:true, intensity: mcdmClamp01(inp.prioritySimpleOps ? 1 : 0) },
+  ];
+}
+// Devuelve { recommended, scores: { [tech]: {score, excluded, top:[{criterio,contribucion}]} } }
+function mcdmSelect(inp) {
+  const conditions = mcdmBuildConditions(inp);
+  const survivors = [];
+  const excludedReasons = {};
+  MCDM_TECHNOLOGIES.forEach(tech => {
+    const reasons = conditions.filter(c => c.active && c.intensity > 0.3 && MCDM_MATRIX[c.id][tech].x).map(c => c.id);
+    if (reasons.length) excludedReasons[tech] = reasons; else survivors.push(tech);
+  });
+  const scores = {};
+  MCDM_TECHNOLOGIES.forEach(tech => {
+    if (!survivors.includes(tech)) { scores[tech] = { score:null, excluded:true, exclusionReasons: excludedReasons[tech]||[], top:[] }; return; }
+    let num = 0, den = 0;
+    const contribs = [];
+    conditions.forEach(c => {
+      const intensity = c.active ? c.intensity : 0;
+      const factor = intensity; // weight siempre 1
+      const compat = MCDM_MATRIX[c.id][tech].c;
+      num += factor * compat;
+      den += factor;
+      if (factor > 0) contribs.push({ criterio: c.id, contribucion: factor * compat });
+    });
+    const score = (den > 0 ? num / den : 0) * 100;
+    contribs.sort((a,b) => b.contribucion - a.contribucion);
+    scores[tech] = { score: Math.round(score*10)/10, excluded:false, exclusionReasons:[], top: contribs.slice(0,3) };
+  });
+  let recommended = null, best = -Infinity;
+  survivors.forEach(tech => { if ((scores[tech].score||0) > best) { best = scores[tech].score||0; recommended = tech; } });
+  return { recommended, scores };
+}
+
+// Estima con IA los ~15 datos que necesita el cálculo MCDM a partir de lo ya
+// extraído en Paso 1 (campos generales + corrientes) — el usuario los revisa
+// y corrige en el panel antes de pedir la propuesta, no hace falta que la IA
+// acierte todo.
+async function procesosTecnologiaDerivarInputs() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-tecnologia-status';
+  showMsg(statusId, 'loading', 'Estimando datos con IA...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const schema = `{"effluentType":"...","flowRate":number|null,"bod":number|null,"cod":number|null,"nitrogenTotal":number|null,"phosphorusTotal":number|null,"oilsAndGreases":number|null,"availableArea":number|null,"reuseRequired":boolean,"minWinterTemperature":number|null,"peakAverageRatio":number|null,"toxicCompoundsLevel":"NONE"|"LOW"|"MODERATE"|"HIGH","priorityLowCapex":boolean,"priorityOpex":boolean,"priorityLowSludge":boolean,"prioritySimpleOps":boolean,"currentSituation":"...","dischargeSite":"..."}`;
+    const prompt = `A partir de esta información ya extraída de un proyecto de tratamiento de efluentes:\n${procesosResumenCampos(p)}\n\nEstimá estos datos (usá null si no hay forma de estimarlo, no inventes números sin base):\n- effluentType: tipo de efluente en una frase corta (ej. "Industrial - láctea", "Cloacal", "Mixto").\n- flowRate: caudal en m3/día.\n- bod, cod: en mg/L.\n- nitrogenTotal, phosphorusTotal, oilsAndGreases: en mg/L.\n- availableArea: superficie disponible en m2, si se menciona.\n- reuseRequired: si se requiere reúso del efluente.\n- minWinterTemperature: temperatura mínima invernal en °C, si se menciona la ubicación/clima.\n- peakAverageRatio: relación caudal pico/promedio, si hay datos para estimarla (si no, null).\n- toxicCompoundsLevel: nivel de compuestos tóxicos/inhibidores esperado.\n- priorityLowCapex, priorityOpex, priorityLowSludge, prioritySimpleOps: true si el cliente mencionó explícitamente esa prioridad, si no false.\n- currentSituation: resumen breve de la situación actual (si ya tiene una planta instalada, cuál).\n- dischargeSite: sitio/tipo de descarga si se menciona.\n\nRespondé SOLO con JSON válido (sin backticks) con esta forma exacta: ${schema}`;
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:800, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message||'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const info = Object.assign({}, p.info_cliente, { mcdm_inputs: parsed });
+    await procesosSaveProyecto({ info_cliente: info }, p);
+    if (procesosCurrentProyecto === p) { showMsg(statusId,'success','✓ Datos estimados — revisalos abajo antes de proponer.'); renderProcesosStepContent(); }
+  } catch(e) {
+    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+function procesosTecnologiaUpdateInput(campo, val, esBool) {
+  const p = procesosCurrentProyecto;
+  const inputs = Object.assign({}, p.info_cliente?.mcdm_inputs || {});
+  inputs[campo] = esBool ? val : (val === '' ? null : (isNaN(Number(val)) ? val : Number(val)));
+  const info = Object.assign({}, p.info_cliente, { mcdm_inputs: inputs });
+  procesosSaveProyectoDebounced({ info_cliente: info });
+}
+
+async function procesosTecnologiaProponer() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-tecnologia-status';
+  const inputs = p.info_cliente?.mcdm_inputs;
+  if (!inputs) { showMsg(statusId,'error','✕ Primero estimá o completá los datos de abajo.'); return; }
+  showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const mcdm = mcdmSelect(inputs);
+    const analisisMcdm = MCDM_TECHNOLOGIES.map(t => {
+      const s = mcdm.scores[t];
+      if (s.excluded) return `- ${MCDM_TECH_LABEL[t]}: excluida (${s.exclusionReasons.map(r=>MCDM_CRITERIO_LABEL[r]||r).join(', ')})`;
+      return `- ${MCDM_TECH_LABEL[t]}: ${s.score}/100${s.top.length?' — principales factores: '+s.top.map(x=>MCDM_CRITERIO_LABEL[x.criterio]||x.criterio).join(', '):''}`;
+    }).join('\n');
+
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const prefsRes = await supaFetch(`/rest/v1/procesos_tecnologia_prefs?select=tecnologia,sigla,preferencia,experiencia&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}});
+    const prefsRows = prefsRes.ok ? await prefsRes.json() : [];
+    const preferenciasTecnologia = prefsRows.length
+      ? prefsRows.map(r => `${r.tecnologia}${r.sigla?' ('+r.sigla+')':''}: ${r.preferencia||'(sin preferencia cargada)'}${r.experiencia?' — Experiencia: '+r.experiencia.replace(/\n/g,'; '):''}`).join('\n')
+      : '(sin preferencias cargadas todavía — Cfg Procesos IA > Preferencias por tecnología)';
+
+    const datosProyecto = `${procesosResumenCampos(p)}\n\nDatos puntuales para selección de tecnología:\n- Tipo de efluente: ${inputs.effluentType||'—'}\n- Caudal: ${inputs.flowRate!=null?inputs.flowRate+' m3/día':'—'}\n- DBO: ${inputs.bod!=null?inputs.bod+' mg/L':'—'}\n- DQO: ${inputs.cod!=null?inputs.cod+' mg/L':'—'}\n- Sitio de descarga: ${inputs.dischargeSite||'—'}\n- Situación actual: ${inputs.currentSituation||'—'}`;
+
+    const DEFAULT_TEMPLATE = `Sos un experto en ingeniería de tratamiento de aguas residuales de Aeration, una empresa argentina especializada en sistemas de tratamiento de efluentes.\n\nTu tarea es proponer entre 1 y 3 tecnologías candidatas para este proyecto.\n\nDatos del proyecto:\n{{datosProyecto}}\n\nPreferencias de Aeration por tecnología (por qué se elige o no cada una, y experiencia real):\n{{preferenciasTecnologia}}\n\nAnálisis cuantitativo (MCDM, solo como referencia, no vinculante):\n{{analisisMcdm}}\n\nConsiderá:\n1. El tipo de industria y efluente.\n2. El caudal y las cargas orgánicas (DBO/DQO).\n3. Los requerimientos de calidad de salida y el sitio de descarga.\n4. Las preferencias y experiencia de Aeration por tecnología (de arriba).\n5. La viabilidad técnico-económica para este proyecto puntual.\n6. Continuidad tecnológica: si la situación actual menciona una tecnología ya instalada, la recomendación por defecto debe ser ampliar/escalar/optimizar esa misma tecnología, salvo que exista una razón técnica o regulatoria de peso (no alcanza la calidad exigida, o el caudal nuevo supera 3 veces la capacidad instalada). Cambiar de tecnología implica costos de CAPEX, capacitación y logística — el sesgo debe ser siempre hacia la continuidad.\n\nInstrucciones de salida:\n- Proponé entre 1 y 3 opciones, sin repetir tecnologías, SOLO de esta lista: Lagunas, Lodos Activados, MBR, MBBR, SBR, Lecho Percolador, Anaeróbico.\n- Cada justificación: un párrafo corto (máx. 100 palabras) en español, citando datos concretos del proyecto — nada de afirmaciones genéricas que aplicarían a cualquier proyecto.\n- El puntaje MCDM es una referencia cuantitativa, no vinculante — podés proponer otra tecnología si el criterio cualitativo (preferencias de Aeration, continuidad tecnológica) lo justifica mejor.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"opciones":[{"tecnologia":"MBR","justificacion":"..."}]}`;
+
+    const template = await procesosPromptText('tecnologia_seleccion', DEFAULT_TEMPLATE);
+    const prompt = procesosPromptFill(template, { datosProyecto, preferenciasTecnologia, analisisMcdm });
+
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message||'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+
+    const nombreATech = {}; MCDM_TECHNOLOGIES.forEach(t => { nombreATech[MCDM_TECH_LABEL[t]] = t; nombreATech[t] = t; });
+    const opciones = (parsed.opciones||[]).map(o => {
+      const tech = nombreATech[o.tecnologia] || o.tecnologia;
+      const s = mcdm.scores[tech];
+      return { tecnologia: tech, justificacion: o.justificacion||'', puntaje: s?s.score:null, top: s?s.top:[] };
+    }).filter((o,i,arr) => MCDM_TECHNOLOGIES.includes(o.tecnologia) && arr.findIndex(x=>x.tecnologia===o.tecnologia)===i).slice(0,3);
+
+    if (!opciones.length) throw new Error('La IA no devolvió ninguna opción válida.');
+    await procesosSaveProyecto({ tecnologia_opciones: opciones }, p);
+    if (procesosCurrentProyecto === p) { showMsg(statusId,'success','✓ Propuesta lista.'); renderProcesosStepContent(); }
+  } catch(e) {
+    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
+  }
+}
+
+async function procesosTecnologiaConfirmar(tech) {
+  const p = procesosCurrentProyecto;
+  await procesosSaveProyecto({ tecnologia_confirmada: tech }, p);
+  if (procesosCurrentProyecto === p) renderProcesosStepContent();
+}
+function procesosTecnologiaQuitarConfirmacion() {
+  const p = procesosCurrentProyecto;
+  procesosSaveProyecto({ tecnologia_confirmada: null }, p);
+  if (procesosCurrentProyecto === p) renderProcesosStepContent();
+}
+
+function procesosTecnologiaInputsHtml(p) {
+  const inp = p.info_cliente?.mcdm_inputs || {};
+  const row = (label, inner) => `<div class="result-field"><span class="result-key">${label}</span>${inner}</div>`;
+  const num = (campo, val) => `<input class="result-val" type="number" step="any" value="${val!=null?val:''}" oninput="procesosTecnologiaUpdateInput('${campo}',this.value)" style="max-width:120px" />`;
+  const bool = (campo, val) => `<input type="checkbox" ${val?'checked':''} onchange="procesosTecnologiaUpdateInput('${campo}',this.checked,true)" />`;
+  return `
+    <div style="margin-bottom:10px">
+      ${row('Tipo de efluente', `<input class="result-val" value="${esc(inp.effluentType||'')}" oninput="procesosTecnologiaUpdateInput('effluentType',this.value)" />`)}
+      ${row('Caudal (m3/día)', num('flowRate', inp.flowRate))}
+      ${row('DBO (mg/L)', num('bod', inp.bod))}
+      ${row('DQO (mg/L)', num('cod', inp.cod))}
+      ${row('Nitrógeno total (mg/L)', num('nitrogenTotal', inp.nitrogenTotal))}
+      ${row('Fósforo total (mg/L)', num('phosphorusTotal', inp.phosphorusTotal))}
+      ${row('Aceites y grasas (mg/L)', num('oilsAndGreases', inp.oilsAndGreases))}
+      ${row('Superficie disponible (m2)', num('availableArea', inp.availableArea))}
+      ${row('Temperatura mín. invernal (°C)', num('minWinterTemperature', inp.minWinterTemperature))}
+      ${row('Relación caudal pico/promedio', num('peakAverageRatio', inp.peakAverageRatio))}
+      ${row('Nivel de tóxicos', `
+        <select onchange="procesosTecnologiaUpdateInput('toxicCompoundsLevel',this.value)">
+          ${['NONE','LOW','MODERATE','HIGH'].map(l => `<option value="${l}" ${inp.toxicCompoundsLevel===l?'selected':''}>${({NONE:'Ninguno',LOW:'Bajo',MODERATE:'Moderado',HIGH:'Alto'})[l]}</option>`).join('')}
+        </select>`)}
+      ${row('Requiere reúso del efluente', bool('reuseRequired', inp.reuseRequired))}
+      ${row('Prioriza bajo CAPEX', bool('priorityLowCapex', inp.priorityLowCapex))}
+      ${row('Prioriza bajo OPEX/energía', bool('priorityOpex', inp.priorityOpex))}
+      ${row('Prioriza mínima generación de lodos', bool('priorityLowSludge', inp.priorityLowSludge))}
+      ${row('Prioriza operación simple', bool('prioritySimpleOps', inp.prioritySimpleOps))}
+    </div>
+    <label style="font-size:12px;color:var(--text2)">Situación actual (¿ya tiene una planta instalada?)</label>
+    <textarea rows="2" oninput="procesosTecnologiaUpdateInput('currentSituation',this.value)" style="margin-bottom:6px">${esc(inp.currentSituation||'')}</textarea>
+    <label style="font-size:12px;color:var(--text2)">Sitio de descarga</label>
+    <input value="${esc(inp.dischargeSite||'')}" oninput="procesosTecnologiaUpdateInput('dischargeSite',this.value)" />
+  `;
+}
+
+function procesosTecnologiaSectionHtml(p) {
+  const opciones = p.tecnologia_opciones || [];
+  const confirmada = p.tecnologia_confirmada;
+  return `
+    <div class="gap"></div>
+    <div class="card-label">Elegir tecnología</div>
+    ${confirmada ? `
+      <p style="font-size:14px;margin-bottom:8px">✓ Tecnología elegida: <b>${esc(MCDM_TECH_LABEL[confirmada]||confirmada)}</b> <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaQuitarConfirmacion()" style="margin-left:8px">Cambiar</button></p>
+    ` : `
+      <details style="margin-bottom:10px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--text2)">Datos para la selección (estimados con IA, revisalos)</summary>
+        <div style="margin-top:10px">
+          <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaDerivarInputs()" style="margin-bottom:10px">✨ Estimar con IA</button>
+          ${procesosTecnologiaInputsHtml(p)}
+        </div>
+      </details>
+      <button class="btn btn-primary" onclick="procesosTecnologiaProponer()">✦ Proponer tecnologías</button>
+      <div id="procesos-tecnologia-status"></div>
+      ${opciones.length ? `
+        <div class="gap"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          ${opciones.map(o => `
+            <div class="card" style="flex:1;min-width:240px">
+              <div class="card-label">${esc(MCDM_TECH_LABEL[o.tecnologia]||o.tecnologia)}</div>
+              <p style="font-size:13px;color:var(--text2);margin:0 0 8px">Puntaje: <b style="color:var(--text)">${o.puntaje!=null?o.puntaje+'/100':'N/D'}</b>${o.top&&o.top.length?' · '+o.top.map(t=>MCDM_CRITERIO_LABEL[t.criterio]||t.criterio).join(', '):''}</p>
+              <p style="font-size:13px;white-space:pre-wrap">${esc(o.justificacion)}</p>
+              <button class="btn btn-primary btn-sm" onclick="procesosTecnologiaConfirmar('${o.tecnologia}')" style="margin-top:8px">Elegir</button>
+            </div>`).join('')}
+        </div>
+      ` : ''}
+      <div class="gap"></div>
+      <label style="font-size:12px;color:var(--text2)">O elegí cualquier otra tecnología directamente</label>
+      <select onchange="if(this.value) procesosTecnologiaConfirmar(this.value)" style="margin-top:4px">
+        <option value="">Elegir tecnología...</option>
+        ${MCDM_TECHNOLOGIES.map(t => `<option value="${t}">${MCDM_TECH_LABEL[t]}</option>`).join('')}
+      </select>
+    `}
+  `;
 }
 
 async function procesosAvanzarPaso(step) {
