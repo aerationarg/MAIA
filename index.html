@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.87</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.87</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7423,14 +7423,29 @@ function mcdmCaudalAltoBajaCarga(flowRate, bod) {
   const loadLow = mcdmNormalize(loadKgDia, 200, 50);
   return mcdmClamp01(Math.sqrt(qHigh * loadLow));
 }
-// Qué dato de "Datos para la selección" usa cada criterio, para los que
-// pueden tener categorías editables (Cfg Procesos IA > Matriz de
-// tecnologías). Solo entran acá los que dependen de UN dato numérico
-// puntual — los que combinan más de uno (ej. la relación caudal/carga, que
-// mezcla caudal y DBO) o no son numéricos (tóxicos, prioridades sí/no)
-// quedan con su lógica propia de siempre, no entran en este mecanismo
-// genérico todavía.
-const MCDM_CATEGORICO_CAMPO = { poco_espacio: 'availableArea' };
+// Datos numéricos/booleanos de "Datos para la selección" que se pueden
+// elegir como base de categorías para CUALQUIER criterio, desde Cfg
+// Procesos IA > Matriz de tecnologías (qué campo usa cada criterio queda
+// guardado en procesos_mcdm_pesos.campo_valor). Quedan afuera los campos de
+// texto libre (tipo de efluente, situación actual, sitio de descarga) y el
+// enum de tóxicos, que no tienen un umbral numérico con sentido.
+const MCDM_CAMPOS_DISPONIBLES = [
+  { value:'flowRate', label:'Caudal (m3/día)' },
+  { value:'bod', label:'DBO (mg/L)' },
+  { value:'cod', label:'DQO (mg/L)' },
+  { value:'nitrogenTotal', label:'Nitrógeno total (mg/L)' },
+  { value:'phosphorusTotal', label:'Fósforo total (mg/L)' },
+  { value:'oilsAndGreases', label:'Aceites y grasas (mg/L)' },
+  { value:'availableArea', label:'Superficie disponible (m2)' },
+  { value:'minWinterTemperature', label:'Temperatura mín. invernal (°C)' },
+  { value:'peakAverageRatio', label:'Relación caudal pico/promedio' },
+  { value:'reuseRequired', label:'Requiere reúso (No=0 / Sí=1)' },
+  { value:'priorityLowCapex', label:'Prioriza bajo CAPEX (No=0 / Sí=1)' },
+  { value:'priorityOpex', label:'Prioriza bajo OPEX (No=0 / Sí=1)' },
+  { value:'priorityLowSludge', label:'Prioriza mínima generación de lodos (No=0 / Sí=1)' },
+  { value:'prioritySimpleOps', label:'Prioriza operación simple (No=0 / Sí=1)' },
+];
+function mcdmCampoLabel(campo) { const f = MCDM_CAMPOS_DISPONIBLES.find(x=>x.value===campo); return f ? f.label : campo; }
 // Busca, para el valor dado, la categoría cuyo rango [umbral_min,umbral_max)
 // la contiene (límites null = sin tope de ese lado). Devuelve el nombre de
 // la categoría o null si no matchea ninguna (ej. no hay categorías
@@ -7440,19 +7455,25 @@ function mcdmCategoriaDeValor(categorias, valor) {
   const cat = categorias.find(c => (c.umbral_min == null || valor >= c.umbral_min) && (c.umbral_max == null || valor < c.umbral_max));
   return cat ? cat.categoria : null;
 }
-// Reemplaza, para los criterios que tienen categorías cargadas en la base,
-// el active/intensity calculado por mcdmBuildConditions por "cuál categoría
-// aplica" — para el resto de los criterios (sin categorías cargadas, o que
-// ni están en MCDM_CATEGORICO_CAMPO) no toca nada, sigue su lógica de
-// siempre. Así el motor de categorías es un agregado opcional, no un
-// reemplazo del cálculo existente.
-function mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio) {
-  if (!categoriasPorCriterio) return conditions;
+// Reemplaza, para los criterios que tienen categorías cargadas en la base
+// Y un campo_valor asignado, el active/intensity calculado por
+// mcdmBuildConditions por "cuál categoría aplica" — para el resto de los
+// criterios (sin campo_valor, o sin categorías todavía) no toca nada,
+// sigue su lógica de siempre. Así el motor de categorías es un agregado
+// opcional por criterio, no un reemplazo global del cálculo existente.
+// Ojo: si se le asigna campo_valor+categorías a un criterio que hoy usa una
+// fórmula propia con más de un dato (ej. la relación caudal/carga), esa
+// fórmula deja de usarse acá y se reemplaza por las categorías — es una
+// decisión válida, pero hay que saber que se está pisando.
+function mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio, camposPorCriterio) {
+  if (!categoriasPorCriterio || !camposPorCriterio) return conditions;
   return conditions.map(c => {
-    const campo = MCDM_CATEGORICO_CAMPO[c.id];
+    const campo = camposPorCriterio[c.id];
     const categorias = campo ? categoriasPorCriterio[c.id] : null;
     if (!campo || !categorias || !categorias.length) return c;
-    const categoria = mcdmCategoriaDeValor(categorias, inp[campo]);
+    let valor = inp[campo];
+    if (typeof valor === 'boolean') valor = valor ? 1 : 0;
+    const categoria = mcdmCategoriaDeValor(categorias, valor);
     if (!categoria) return Object.assign({}, c, { active: false, categoria: null });
     return Object.assign({}, c, { active: true, intensity: 1, categoria });
   });
@@ -7500,10 +7521,10 @@ function mcdmBuildConditions(inp, pesos) {
 // (con peso 1 en todos) como fallback, así nunca se rompe por no haber
 // cargado la matriz editable todavía.
 // Devuelve { recommended, scores: { [tech]: {score, excluded, top:[{criterio,contribucion}]} } }
-function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio) {
+function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio, camposPorCriterio) {
   matrix = matrix || MCDM_MATRIX;
   let conditions = mcdmBuildConditions(inp, pesos);
-  conditions = mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio);
+  conditions = mcdmAplicarCategorias(conditions, inp, categoriasPorCriterio, camposPorCriterio);
   const survivors = [];
   const excludedReasons = {};
   MCDM_TECHNOLOGIES.forEach(tech => {
@@ -7542,10 +7563,10 @@ function mcdmSelect(inp, matrix, pesos, categoriasPorCriterio) {
 // — si no existen filas todavía (no se corrió la migración) o falla la
 // carga, usa el MCDM_MATRIX hardcodeado (y peso 1 en todos) como fallback,
 // igual que con los prompts: nunca se rompe por faltar la migración.
-let _procesosMcdmCache = { empresa: null, matrix: null, pesos: null, categoriasPorCriterio: null };
+let _procesosMcdmCache = { empresa: null, matrix: null, pesos: null, categoriasPorCriterio: null, camposPorCriterio: null };
 async function procesosMcdmCargar(force) {
   if (!force && _procesosMcdmCache.empresa === currentEmpresa && _procesosMcdmCache.matrix) return _procesosMcdmCache;
-  let matrix = null, pesos = {}, categoriasPorCriterio = {};
+  let matrix = null, pesos = {}, categoriasPorCriterio = {}, camposPorCriterio = {};
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const [resMatriz, resPesos, resCategorias] = await Promise.all([
@@ -7570,13 +7591,13 @@ async function procesosMcdmCargar(force) {
         }
       });
     }
-    if (Array.isArray(rowsPesos)) rowsPesos.forEach(r => { pesos[r.criterio] = Number(r.peso); });
+    if (Array.isArray(rowsPesos)) rowsPesos.forEach(r => { pesos[r.criterio] = Number(r.peso); if (r.campo_valor) camposPorCriterio[r.criterio] = r.campo_valor; });
     if (Array.isArray(rowsCategorias)) rowsCategorias.forEach(r => {
       categoriasPorCriterio[r.criterio] = categoriasPorCriterio[r.criterio] || [];
       categoriasPorCriterio[r.criterio].push({ id: r.id, categoria: r.categoria, umbral_min: r.umbral_min!=null?Number(r.umbral_min):null, umbral_max: r.umbral_max!=null?Number(r.umbral_max):null, orden: r.orden });
     });
   } catch(e) { console.warn('No se pudo cargar la matriz MCDM, se usa el fallback:', e.message); }
-  _procesosMcdmCache = { empresa: currentEmpresa, matrix: matrix || MCDM_MATRIX, pesos, categoriasPorCriterio, rowsMatriz: matrix ? true : false };
+  _procesosMcdmCache = { empresa: currentEmpresa, matrix: matrix || MCDM_MATRIX, pesos, categoriasPorCriterio, camposPorCriterio, rowsMatriz: matrix ? true : false };
   return _procesosMcdmCache;
 }
 
@@ -7599,7 +7620,7 @@ async function renderProcesosMcdmMatriz() {
     return;
   }
   el.innerHTML = 'Cargando...';
-  const { matrix, pesos, categoriasPorCriterio, rowsMatriz } = await procesosMcdmCargar(true);
+  const { matrix, pesos, categoriasPorCriterio, camposPorCriterio, rowsMatriz } = await procesosMcdmCargar(true);
   const aviso = !rowsMatriz ? `<p class="hint" style="margin-bottom:10px">⚠ Todavía no se cargó la matriz editable en la base (correspondé la migración) — se están mostrando los valores de fábrica, de solo lectura acá hasta que la cargues.</p>` : '';
   const celdaTech = (cid, categoria, t) => {
     const cell = mcdmCell(matrix, cid, categoria, t);
@@ -7609,17 +7630,35 @@ async function renderProcesosMcdmMatriz() {
       <label style="font-size:10px;color:var(--text2);white-space:nowrap"><input type="checkbox" ${cell.x?'checked':''} ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCelda('${cid}','${t}','excluye',this.checked,'${keyCat}')" style="width:auto;vertical-align:middle" /> excl</label>
     </td>`;
   };
-  const filaSimple = cid => `
+  // Selector de "a qué dato del proyecto responde este criterio" — vale para
+  // CUALQUIER criterio, es lo que habilita agregarle categorías. Si el
+  // criterio ya tiene una fórmula propia con más de un dato (ej. relación
+  // caudal/carga), asignarle un campo acá la reemplaza — se avisa abajo.
+  const campoSelector = (cid, campoActual) => `
+    <select style="font-size:10px;padding:2px;width:100%;max-width:230px" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdateCampoValor('${cid}',this.value)">
+      <option value="">— sin categorías —</option>
+      ${MCDM_CAMPOS_DISPONIBLES.map(f => `<option value="${f.value}" ${campoActual===f.value?'selected':''}>${esc(f.label)}</option>`).join('')}
+    </select>`;
+  const filaSimple = cid => {
+    const campoActual = camposPorCriterio[cid] || '';
+    return `
     <tr>
-      <td style="padding:4px 8px;border-bottom:1px solid var(--border)">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
+      <td style="padding:4px 8px;border-bottom:1px solid var(--border)">
+        ${esc(MCDM_CRITERIO_LABEL[cid]||cid)}
+        <div style="margin-top:4px;display:flex;align-items:center;gap:4px">
+          ${campoSelector(cid, campoActual)}
+          ${campoActual ? `<button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:10px;white-space:nowrap" onclick="procesosMcdmAgregarCategoria('${cid}')">+ Categoría</button>` : ''}
+        </div>
+      </td>
       <td style="padding:4px 6px;border-bottom:1px solid var(--border);text-align:center">
         <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
       </td>
       ${MCDM_TECHNOLOGIES.map(t => celdaTech(cid, null, t)).join('')}
     </tr>`;
+  };
   const filaCategorico = cid => {
     const categorias = (categoriasPorCriterio[cid]||[]).slice().sort((a,b)=>(a.orden||0)-(b.orden||0));
-    const campo = MCDM_CATEGORICO_CAMPO[cid] || '?';
+    const campoActual = camposPorCriterio[cid] || '';
     return `
       <tr>
         <td style="padding:4px 8px;border-bottom:1px solid var(--border);font-weight:600">${esc(MCDM_CRITERIO_LABEL[cid]||cid)}</td>
@@ -7627,7 +7666,10 @@ async function renderProcesosMcdmMatriz() {
           <input type="number" step="0.1" min="0" value="${pesos[cid]!=null?pesos[cid]:1}" style="width:56px;padding:4px 2px;text-align:center" ${rowsMatriz?'':'disabled'} onchange="procesosMcdmUpdatePeso('${cid}',this.value)" />
         </td>
         <td colspan="${MCDM_TECHNOLOGIES.length}" style="padding:4px 8px;border-bottom:1px solid var(--border);color:var(--text2);font-size:11px">
-          Categorías por "${esc(campo)}" — <button class="btn btn-secondary btn-sm" style="padding:2px 8px" onclick="procesosMcdmAgregarCategoria('${cid}')">+ Categoría</button>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            Categorías por: ${campoSelector(cid, campoActual)}
+            <button class="btn btn-secondary btn-sm" style="padding:2px 8px" onclick="procesosMcdmAgregarCategoria('${cid}')">+ Categoría</button>
+          </div>
         </td>
       </tr>
       ${categorias.map(cat => `
@@ -7697,7 +7739,21 @@ async function procesosMcdmUpdatePeso(criterio, val) {
 // Agrega una categoría nueva (vacía, para completar) a un criterio, con una
 // fila de compatibilidad 0.5 para cada tecnología — el usuario después le
 // pone nombre, rango y ajusta los puntajes.
+// Guarda a qué dato del proyecto responde un criterio — es lo que habilita
+// (o deshabilita, si se limpia) poder agregarle categorías.
+async function procesosMcdmUpdateCampoValor(criterio, campoValor) {
+  _procesosMcdmCache.camposPorCriterio = _procesosMcdmCache.camposPorCriterio || {};
+  if (campoValor) _procesosMcdmCache.camposPorCriterio[criterio] = campoValor;
+  else delete _procesosMcdmCache.camposPorCriterio[criterio];
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_mcdm_pesos?empresa=eq.${currentEmpresa}&criterio=eq.${criterio}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ campo_valor: campoValor || null })
+  });
+  renderProcesosMcdmMatriz();
+}
 async function procesosMcdmAgregarCategoria(criterio) {
+  if (!_procesosMcdmCache.camposPorCriterio || !_procesosMcdmCache.camposPorCriterio[criterio]) { alert('Primero elegí a qué dato del proyecto responde este criterio.'); return; }
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const existentes = (_procesosMcdmCache.categoriasPorCriterio[criterio]||[]).length;
   const res = await supaFetch('/rest/v1/procesos_mcdm_categorias', {
@@ -7809,8 +7865,8 @@ async function procesosTecnologiaProponer() {
       if (procesosCurrentProyecto !== p) return;
     }
     showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
-    const { matrix, pesos, categoriasPorCriterio } = await procesosMcdmCargar();
-    const mcdm = mcdmSelect(inputs, matrix, pesos, categoriasPorCriterio);
+    const { matrix, pesos, categoriasPorCriterio, camposPorCriterio } = await procesosMcdmCargar();
+    const mcdm = mcdmSelect(inputs, matrix, pesos, categoriasPorCriterio, camposPorCriterio);
     // Si el criterio tiene categoría (ej. "Espacio disponible (Amplio)"), se
     // la muestra siempre entre paréntesis — así queda explícito de qué lado
     // salió el puntaje, sin la ambigüedad de una etiqueta genérica sola.
