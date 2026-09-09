@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.73</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.74</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.73</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.74</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1027,6 +1027,12 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Normativas, planillas de cálculo e información general de la empresa, vinculadas desde SharePoint. Los de "Normativa" e "Información general" se adjuntan solos en el Paso 1; los de "Planilla de cálculo" e "Información general" se adjuntan solos en el Paso 2.</p>
         <div id="procesos-documentos-list"></div>
         <button class="btn btn-secondary" onclick="procesosDocAdd()" style="margin-top:4px">+ Agregar documento</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Preferencias por tecnología</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Por qué Aeration elige (o no) cada tecnología de tratamiento como estándar, y en qué industrias tiene experiencia real con cada una — texto libre, editalo cuando quieras. Se va a usar como contexto de negocio al proponer tecnología para un proyecto nuevo.</p>
+        <div id="procesos-tecprefs-list"></div>
+        <button class="btn btn-secondary" onclick="procesosTecPrefAdd()" style="margin-top:4px">+ Agregar tecnología</button>
       </div>
       <div class="card">
         <div class="card-label">Base de proyectos anteriores</div>
@@ -1975,7 +1981,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
 }
@@ -5792,6 +5798,67 @@ async function procesosCatalogoEliminar(id) {
   await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
   if (_procesosCatalogoState.expandedId === id) _procesosCatalogoState.expandedId = null;
   renderProcesosCatalogo();
+}
+
+// ── Preferencias de Aeration por tecnología (Cfg Procesos IA) ──
+// Texto libre editable desde la app — nada de SharePoint acá, es contexto de
+// negocio (por qué se elige o no cada tecnología, en qué industrias hay
+// experiencia) que después va a usar el prompt de selección de tecnología.
+let _procesosTecPrefsRows = null;
+async function renderProcesosTecPrefs() {
+  const el = document.getElementById('procesos-tecprefs-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_tecnologia_prefs?select=*&empresa=eq.${currentEmpresa}&order=orden,created_at`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_tecnologia_prefs?).</p>'; return; }
+    _procesosTecPrefsRows = rows;
+    procesosTecPrefsRenderLista();
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
+}
+function procesosTecPrefsRenderLista() {
+  const el = document.getElementById('procesos-tecprefs-list');
+  if (!el || !_procesosTecPrefsRows) return;
+  if (!_procesosTecPrefsRows.length) { el.innerHTML = '<p class="hint">Todavía no hay tecnologías cargadas.</p>'; return; }
+  el.innerHTML = _procesosTecPrefsRows.map(t => `
+    <div class="field-row">
+      <div class="field-row-top">
+        <input value="${esc(t.tecnologia||'')}" placeholder="Tecnología (ej. MBR)" style="max-width:220px;font-weight:600" oninput="procesosTecPrefUpdate('${t.id}','tecnologia',this.value)" />
+        <input value="${esc(t.sigla||'')}" placeholder="Sigla (opcional)" style="max-width:100px" oninput="procesosTecPrefUpdate('${t.id}','sigla',this.value)" />
+        <button class="remove-btn" onclick="procesosTecPrefEliminar('${t.id}')">&#x2715;</button>
+      </div>
+      <label style="font-size:12px;color:var(--text2);margin-top:6px">Preferencia de Aeration (por qué se elige o no como estándar)</label>
+      <textarea rows="3" placeholder="¿Por qué Aeration elige o no esta tecnología?" oninput="procesosTecPrefUpdate('${t.id}','preferencia',this.value)" style="margin-bottom:8px">${esc(t.preferencia||'')}</textarea>
+      <label style="font-size:12px;color:var(--text2)">Experiencia (industrias, una por línea)</label>
+      <textarea rows="3" placeholder="Industrias donde ya se usó esta tecnología" oninput="procesosTecPrefUpdate('${t.id}','experiencia',this.value)">${esc(t.experiencia||'')}</textarea>
+    </div>`).join('');
+}
+async function procesosTecPrefAdd() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const orden = (_procesosTecPrefsRows||[]).length;
+  const res = await supaFetch('/rest/v1/procesos_tecnologia_prefs', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, tecnologia: 'Nueva tecnología', orden })
+  });
+  if (!res.ok) { alert('No se pudo agregar.'); return; }
+  renderProcesosTecPrefs();
+}
+async function procesosTecPrefUpdate(id, field, val) {
+  const row = (_procesosTecPrefsRows||[]).find(r => r.id === id);
+  if (row) row[field] = val;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_tecnologia_prefs?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [field]: val })
+  });
+}
+async function procesosTecPrefEliminar(id) {
+  if (!confirm('¿Eliminar esta tecnología?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_tecnologia_prefs?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosTecPrefs();
 }
 
 // ── Lecciones aprendidas (Cfg Procesos IA) ──────────────
