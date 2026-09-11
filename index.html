@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.98</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.98</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6198,7 +6198,14 @@ async function procesosPromptUpdate(id, val) {
 // Mismo criterio que documentos/catálogo: con la sincronización de
 // SharePoint esto puede crecer a cientos — no se muestra nada expandido
 // hasta que se busca o se elige una del desplegable.
-let _procesosLeccionesState = { rows: null, filtro: '', expandedId: null };
+// "Fase del Proyecto" y "Rubro" son desplegables (mismas opciones que la
+// columna de SharePoint) editables desde acá — si no hay opciones cargadas
+// en procesos_lecciones_opciones, se usan estas por defecto.
+const PROCESOS_LECCION_FASES_DEFAULT = ['Diseño de Ingeniería','Compras','Contractual','Sitio','Sistema de Gestión Integrado','Comercial'];
+const PROCESOS_LECCION_RUBROS_DEFAULT = ['Obra Civil','Piping','Eléctrico','Equipos','Mecánica','Instrumentación','General','SSHHyMA','Procesos'];
+const PROCESOS_LECCION_OPCION_AGREGAR = '__agregar__';
+
+let _procesosLeccionesState = { rows: null, filtro: '', expandedId: null, opciones: { fase_proyecto: [], rubro: [] } };
 
 async function renderProcesosLecciones() {
   const el = document.getElementById('procesos-lecciones-list');
@@ -6209,12 +6216,57 @@ async function renderProcesosLecciones() {
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_lecciones?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const [res, opcionesRes] = await Promise.all([
+      supaFetch(`/rest/v1/procesos_lecciones?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_lecciones_opciones?select=campo,valor&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null)
+    ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; return; }
-    _procesosLeccionesState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio, _buscando: buscandoPrevio };
+    const opcionesRows = opcionesRes && opcionesRes.ok ? await opcionesRes.json().catch(()=>[]) : [];
+    const opciones = {
+      fase_proyecto: [...PROCESOS_LECCION_FASES_DEFAULT, ...opcionesRows.filter(o=>o.campo==='fase_proyecto').map(o=>o.valor)],
+      rubro: [...PROCESOS_LECCION_RUBROS_DEFAULT, ...opcionesRows.filter(o=>o.campo==='rubro').map(o=>o.valor)]
+    };
+    _procesosLeccionesState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio, _buscando: buscandoPrevio, opciones };
     procesosLeccionesRenderLista();
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar lecciones.</p>'; }
+}
+
+// Devuelve las opciones para el desplegable de un campo, agregando el valor
+// actual de la lección si no está en la lista (para no perderlo/vaciarlo).
+function procesosLeccionOpciones(campo, valorActual) {
+  const base = (_procesosLeccionesState.opciones && _procesosLeccionesState.opciones[campo]) || [];
+  const lista = [...new Set(base)];
+  if (valorActual && !lista.includes(valorActual)) lista.push(valorActual);
+  return lista;
+}
+
+function procesosLeccionSelectHtml(campo, leccionId, valorActual, placeholder) {
+  const opciones = procesosLeccionOpciones(campo, valorActual);
+  return `<select style="flex:1;min-width:140px" onchange="procesosLeccionSelectChange('${campo}','${leccionId}',this)">
+    <option value="">${esc(placeholder)}</option>
+    ${opciones.map(o => `<option value="${esc(o)}" ${o===valorActual?'selected':''}>${esc(o)}</option>`).join('')}
+    <option value="${PROCESOS_LECCION_OPCION_AGREGAR}">+ Agregar opción...</option>
+  </select>`;
+}
+
+async function procesosLeccionSelectChange(campo, leccionId, selectEl) {
+  if (selectEl.value !== PROCESOS_LECCION_OPCION_AGREGAR) {
+    procesosLeccionUpdate(leccionId, campo, selectEl.value);
+    return;
+  }
+  const valorPrevio = (_procesosLeccionesState.rows||[]).find(r => r.id === leccionId)?.[campo] || '';
+  const nuevo = prompt('Nueva opción para ' + (campo==='fase_proyecto'?'Fase del Proyecto':'Rubro') + ':');
+  if (!nuevo || !nuevo.trim()) { selectEl.value = valorPrevio; return; }
+  const valor = nuevo.trim();
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch('/rest/v1/procesos_lecciones_opciones', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, campo, valor })
+  }).catch(()=>null);
+  if (!_procesosLeccionesState.opciones[campo].includes(valor)) _procesosLeccionesState.opciones[campo].push(valor);
+  procesosLeccionUpdate(leccionId, campo, valor);
+  procesosLeccionesRenderLista();
 }
 
 function procesosLeccionEtiqueta(l) {
@@ -6267,8 +6319,8 @@ function procesosLeccionesRenderLista() {
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">
           <input value="${esc(l.origen_proyecto_nombre||'')}" placeholder="Proyecto" style="flex:1;min-width:140px" oninput="procesosLeccionUpdate('${l.id}','origen_proyecto_nombre',this.value)" />
-          <input value="${esc(l.fase_proyecto||'')}" placeholder="Fase del proyecto" style="flex:1;min-width:140px" oninput="procesosLeccionUpdate('${l.id}','fase_proyecto',this.value)" />
-          <input value="${esc(l.rubro||'')}" placeholder="Rubro" style="flex:1;min-width:120px" oninput="procesosLeccionUpdate('${l.id}','rubro',this.value)" />
+          ${procesosLeccionSelectHtml('fase_proyecto', l.id, l.fase_proyecto||'', 'Fase del proyecto...')}
+          ${procesosLeccionSelectHtml('rubro', l.id, l.rubro||'', 'Rubro...')}
         </div>
         <label style="font-size:12px;color:var(--text2)">Situación</label>
         <textarea rows="2" placeholder="Situación" oninput="procesosLeccionUpdate('${l.id}','situacion',this.value)" style="margin-bottom:6px">${esc(l.situacion||'')}</textarea>
