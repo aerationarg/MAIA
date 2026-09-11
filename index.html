@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.102</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.102</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9992,21 +9992,14 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
   const dd = p.diseno_data || {};
   const h = dd.hojas?.[nombreEtapa] || {};
   const valoresResumen = Object.entries(h.valoresConEtiqueta || {}).slice(0, 6);
-  // Si hay una etapa configurada en Cfg Procesos IA que matchee, el "tipo"
-  // de equipo se elige de esa lista cerrada (select) en vez de texto libre
-  // — así tampoco por acá se puede cargar algo por fuera de la plantilla.
-  // Si no hay ninguna configurada todavía, se deja el input de texto libre
-  // (no hay lista con la que restringir).
+  // Carga manual: texto libre (con autocompletar de la plantilla configurada
+  // vía <datalist>) — si se escribe algo que no está en la plantilla de esta
+  // etapa, procesosStep3SetEquipoCampo ofrece agregarlo ahí. La lista
+  // CERRADA sigue aplicando solo a "Sugerir equipos con IA" y al chat.
   const plantillaMatch = procesosEquiposPlantillaDeEtapa(nombreEtapa);
-  const tipoFieldHtml = eq => {
-    if (!plantillaMatch) return `<input value="${esc(eq.tipo || '')}" placeholder="Tipo de equipo" style="flex:1;min-width:160px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','tipo',this.value)" />`;
-    const opciones = plantillaMatch.equipos.map(pe => pe.tipo_equipo);
-    if (eq.tipo && !opciones.includes(eq.tipo)) opciones.push(eq.tipo);
-    return `<select style="flex:1;min-width:160px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','tipo',this.value)">
-      <option value="">-- Elegir equipo --</option>
-      ${opciones.map(o => `<option value="${esc(o)}" ${o===eq.tipo?'selected':''}>${esc(o)}</option>`).join('')}
-    </select>`;
-  };
+  const datalistId = 'procesos-step3-tipos-' + safe.replace(/[^a-zA-Z0-9]/g, '');
+  const datalistHtml = plantillaMatch ? `<datalist id="${datalistId}">${plantillaMatch.equipos.map(pe => `<option value="${esc(pe.tipo_equipo)}"></option>`).join('')}</datalist>` : '';
+  const tipoFieldHtml = eq => `<input value="${esc(eq.tipo || '')}" placeholder="Tipo de equipo" list="${datalistId}" style="flex:1;min-width:160px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','tipo',this.value)" />`;
 
   const filaEquipo = eq => `
     <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
@@ -10024,11 +10017,12 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
         <button class="btn btn-secondary btn-sm" onclick="procesosStep3AbrirEtapa('${safe}')">✕ Cerrar</button>
       </div>
       ${valoresResumen.length ? `<p class="hint" style="margin-bottom:8px">${valoresResumen.map(([k, v]) => `${esc(k)}: ${esc(String(v))}`).join(' · ')}</p>` : ''}
-      ${!plantillaMatch ? `<p class="hint" style="margin-bottom:8px">⚠ No hay una etapa configurada en Cfg Procesos IA &gt; Plantilla de equipos por etapa que coincida con "${esc(nombreEtapa)}" — agregala ahí para poder elegir equipos de una lista fija (mientras tanto, el tipo de equipo queda en texto libre y "Sugerir equipos con IA" no va a funcionar para esta etapa).</p>` : ''}
+      ${!plantillaMatch ? `<p class="hint" style="margin-bottom:8px">⚠ No hay una etapa configurada en Cfg Procesos IA &gt; Plantilla de equipos por etapa que coincida con "${esc(nombreEtapa)}" — agregala ahí para poder autocompletar y para que "Sugerir equipos con IA" funcione en esta etapa.</p>` : ''}
       <div id="procesos-step3-status"></div>
       <button class="btn btn-primary btn-sm" onclick="procesosStep3SugerirEquipos('${safe}')">✦ Sugerir equipos con IA</button>
       <div class="gap"></div>
       <label>Equipos</label>
+      ${datalistHtml}
       ${(e.equipos || []).length ? `
         <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2);flex-wrap:wrap">
           <span style="width:56px">Cant.</span><span style="flex:1;min-width:160px">Tipo</span><span style="flex:2;min-width:200px">Especificación</span><span style="flex:2;min-width:200px">Justificación</span>
@@ -10066,6 +10060,26 @@ function procesosStep3SetEquipoCampo(nombreEtapa, equipoId, campo, valor) {
   ed.etapas[nombreEtapa] = e;
   procesosSaveProyecto({ equipos_data: ed }, p);
   renderProcesosStepContent();
+  // Carga manual: es texto libre, pero si lo que se escribió no está en la
+  // plantilla configurada para esta etapa, se ofrece agregarlo ahí (así
+  // queda disponible para "Sugerir equipos con IA" y futuros proyectos).
+  if (campo === 'tipo' && valor.trim()) procesosStep3SugerirAgregarAPlantilla(nombreEtapa, valor.trim());
+}
+async function procesosStep3SugerirAgregarAPlantilla(nombreEtapa, valor) {
+  await procesosEquiposPlantillaCargar();
+  const match = procesosEquiposPlantillaDeEtapa(nombreEtapa);
+  if (!match) return; // no hay ninguna etapa configurada que coincida — nada para sugerir
+  const yaExiste = match.equipos.some(eq => eq.tipo_equipo.trim().toLowerCase() === valor.toLowerCase());
+  if (yaExiste) return;
+  if (!confirm(`"${valor}" no está en la plantilla de equipos de "${match.etapa.nombre}". ¿Agregarlo ahí para que quede disponible en futuros proyectos?`)) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const orden = match.equipos.length;
+  await supaFetch('/rest/v1/procesos_equipos_plantilla', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, etapa_id: match.etapa.id, tipo_equipo: valor, orden })
+  });
+  await procesosEquiposPlantillaCargar(true);
+  if (procesosCurrentProyecto) renderProcesosStepContent();
 }
 
 function procesosStep3AgregarEquipo(nombreEtapa) {
