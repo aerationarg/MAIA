@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.98</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.99</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.98</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.99</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -669,7 +669,10 @@
           <div class="card-label">💬 Chat con la IA</div>
           <p class="hint" style="margin-top:-6px;margin-bottom:10px">Preguntale sobre este proyecto, pedile que piense algo o que te ayude a decidir — tiene el contexto de todos los pasos completados hasta ahora.</p>
           <div id="procesos-chat-messages" style="max-height:320px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:8px"></div>
+          <div id="procesos-chat-archivos-list" style="margin-bottom:8px"></div>
           <div style="display:flex;gap:8px">
+            <input type="file" id="procesos-chat-archivo-input" accept=".pdf,.docx,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none" onchange="procesosChatArchivoSubir(this)" />
+            <button class="btn btn-secondary" style="width:auto;padding:12px 14px" title="Adjuntar un archivo al proyecto (PDF, Word, Excel o imagen)" onclick="document.getElementById('procesos-chat-archivo-input').click()">📎</button>
             <input type="text" id="procesos-chat-input" placeholder="Escribí tu mensaje..." onkeydown="if(event.key==='Enter')procesosChatSend()" style="flex:1" />
             <button class="btn btn-primary" style="width:auto;padding:12px 18px" onclick="procesosChatSend()">Enviar</button>
           </div>
@@ -1793,7 +1796,7 @@ const MSAL_CONFIG = {
   },
   cache: { cacheLocation: 'localStorage' }
 };
-const SCOPES = ['Files.ReadWrite', 'Sites.Read.All', 'Sites.ReadWrite.All', 'User.Read', 'Mail.Send'];
+const SCOPES = ['Files.ReadWrite', 'Sites.Read.All', 'Sites.ReadWrite.All', 'User.Read', 'Mail.Send', 'Mail.Read'];
 const SHAREPOINT_HOST = 'aerationargentina.sharepoint.com';
 const SITE_NAME = 'as';
 const NP_FOLDER   = 'Operaciones y Mantenimiento/IA/Compras-COMEX';
@@ -5343,6 +5346,132 @@ async function procesosResumirTexto(texto, nombreArchivo, carpeta) {
   } catch(e) { console.warn(`No se pudo resumir "${nombreArchivo}":`, e.message); return null; }
 }
 
+// ── Extracción de texto de un archivo LOCAL (subido a mano en el chat, o
+// bytes de un adjunto de mail ya descargados) — sin pasar por SharePoint.
+// xlsx/docx se extraen 100% en el navegador (más fiel que pedirle a la IA
+// que "transcriba" una tabla, y sin gastar tokens); pdf/imagen se transcriben
+// con IA igual que los documentos de referencia (Claude no puede leer un
+// .docx/.xlsx directo, pero sí un PDF o una imagen).
+function procesosArchivoLocalExtraerXlsx(buf) {
+  const wb = XLSX.read(buf, { type:'array' });
+  return wb.SheetNames.map(nombre => {
+    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[nombre]).trim();
+    return csv ? `Hoja "${nombre}":\n${csv}` : '';
+  }).filter(Boolean).join('\n\n');
+}
+async function procesosArchivoLocalExtraerDocx(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  const xmlFile = zip.file('word/document.xml');
+  if (!xmlFile) return '';
+  const xml = await xmlFile.async('string');
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const parrafos = doc.getElementsByTagName('w:p');
+  const lineas = [];
+  for (let i = 0; i < parrafos.length; i++) {
+    const texto = procesosPropuestaElText(parrafos[i]).trim();
+    if (texto) lineas.push(texto);
+  }
+  return lineas.join('\n');
+}
+function procesosArchivoLocalEsImagen(nombre) { return /\.(jpe?g|png)$/i.test(nombre); }
+function procesosArchivoLocalEsPdf(nombre) { return /\.pdf$/i.test(nombre); }
+function procesosArchivoLocalEsExcel(nombre) { return /\.xlsx?$/i.test(nombre); }
+function procesosArchivoLocalEsWord(nombre) { return /\.docx$/i.test(nombre); }
+function procesosArchivoLocalContentBlock(nombre, buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  if (procesosArchivoLocalEsPdf(nombre)) {
+    if (procesosContarPaginasPdfAprox(binary) > 100) throw new Error('El PDF supera las 100 páginas (límite de Claude por documento).');
+    return {type:'document', source:{type:'base64', media_type:'application/pdf', data:btoa(binary)}};
+  }
+  const mt = /\.png$/i.test(nombre) ? 'image/png' : 'image/jpeg';
+  return {type:'image', source:{type:'base64', media_type:mt, data:btoa(binary)}};
+}
+// Dispatcher único: dado nombre+bytes de un archivo local, devuelve su texto
+// (y un resumen corto, para que después pueda entrar en el filtro de
+// relevancia junto con el resto de la bibliografía). Devuelve null si el tipo
+// de archivo no está soportado.
+async function procesosArchivoLocalExtraerTexto(nombre, buf) {
+  let texto = null;
+  if (procesosArchivoLocalEsExcel(nombre)) {
+    texto = procesosArchivoLocalExtraerXlsx(buf);
+  } else if (procesosArchivoLocalEsWord(nombre)) {
+    texto = await procesosArchivoLocalExtraerDocx(buf);
+  } else if (procesosArchivoLocalEsPdf(nombre) || procesosArchivoLocalEsImagen(nombre)) {
+    const block = procesosArchivoLocalContentBlock(nombre, buf);
+    texto = await procesosExtraerTextoDeContentBlock(block, nombre);
+  } else {
+    throw new Error('Tipo de archivo no soportado — probá con PDF, Word (.docx), Excel (.xlsx) o imagen (.jpg/.png).');
+  }
+  if (!texto) return null;
+  const resumen = await procesosResumirTexto(texto, nombre);
+  return { texto, resumen };
+}
+
+// ── Mails del proyecto (categorizados en Outlook con el nombre EXACTO del
+// proyecto) — búsqueda EN VIVO cada vez que hace falta (no se cachea la
+// lista de mails en sí, para no mostrar información vieja si categorizan uno
+// nuevo), pero el texto de los adjuntos SÍ se cachea para siempre en
+// procesos_proyecto_archivos (no tiene sentido re-analizar el mismo PDF cada
+// vez que se vuelve a preguntar algo del proyecto).
+async function procesosMailBuscarProyecto(nombreProyecto) {
+  const token = await getMsToken();
+  const catEsc = nombreProyecto.replace(/'/g, "''");
+  const filtro = `categories/any(c:c eq '${catEsc}')`;
+  const select = 'id,subject,from,toRecipients,receivedDateTime,sentDateTime,hasAttachments,body';
+  let mensajes = [];
+  for (const folder of ['inbox', 'sentitems']) {
+    const url = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder}/messages?$filter=${encodeURIComponent(filtro)}&$select=${select}&$top=25`;
+    const resp = await fetch(url, { headers: { Authorization: 'Bearer '+token, Prefer: 'outlook.body-content-type="text"' } });
+    if (!resp.ok) continue;
+    const data = await resp.json().catch(()=>null);
+    if (data?.value) mensajes = mensajes.concat(data.value);
+  }
+  if (!mensajes.length) return [];
+  mensajes.sort((a,b) => new Date(b.receivedDateTime||b.sentDateTime||0) - new Date(a.receivedDateTime||a.sentDateTime||0));
+
+  const p = procesosCurrentProyecto;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const cacheRes = await supaFetch(`/rest/v1/procesos_proyecto_archivos?select=mail_msg_id,mail_att_id&proyecto_id=eq.${p.id}&mail_att_id=not.is.null`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null);
+  const cacheRows = cacheRes && cacheRes.ok ? await cacheRes.json().catch(()=>[]) : [];
+  const yaCacheado = new Set(cacheRows.map(r => r.mail_msg_id+'|'+r.mail_att_id));
+
+  const resultado = [];
+  for (const m of mensajes) {
+    const adjuntosInfo = [];
+    if (m.hasAttachments) {
+      try {
+        const attResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${m.id}/attachments`, { headers: { Authorization: 'Bearer '+token } });
+        const attData = attResp.ok ? await attResp.json().catch(()=>null) : null;
+        const attachments = (attData?.value || []).filter(a => a['@odata.type'] === '#microsoft.graph.fileAttachment' && !a.isInline && a.size < 15*1024*1024);
+        for (const a of attachments) {
+          adjuntosInfo.push(a.name);
+          if (yaCacheado.has(m.id+'|'+a.id)) continue;
+          try {
+            const bin = atob(a.contentBytes);
+            const bytes = new Uint8Array(bin.length);
+            for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+            const extraido = await procesosArchivoLocalExtraerTexto(a.name, bytes.buffer);
+            if (extraido?.texto) {
+              await supaFetch('/rest/v1/procesos_proyecto_archivos', {
+                method:'POST', headers:{Authorization:'Bearer '+session.token},
+                body: JSON.stringify({ empresa: currentEmpresa, proyecto_id: p.id, nombre: a.name, tipo:'mail_adjunto', mime: a.contentType||null, texto_extraido: extraido.texto, resumen_ia: extraido.resumen||null, origen_detalle: `Adjunto de mail: "${m.subject||'(sin asunto)'}"`, mail_msg_id: m.id, mail_att_id: a.id })
+              });
+              yaCacheado.add(m.id+'|'+a.id);
+            }
+          } catch(e) { console.warn(`No se pudo analizar el adjunto "${a.name}":`, e.message); }
+        }
+      } catch(e) { console.warn('No se pudieron traer los adjuntos del mail:', e.message); }
+    }
+    const de = m.from?.emailAddress ? `${m.from.emailAddress.name||''} <${m.from.emailAddress.address||''}>` : '(desconocido)';
+    const para = (m.toRecipients||[]).map(r=>r.emailAddress?.address).filter(Boolean).join(', ');
+    const fecha = m.receivedDateTime || m.sentDateTime || '';
+    resultado.push({ texto: `De: ${de}${para?' | Para: '+para:''} | Fecha: ${fecha}\nAsunto: ${m.subject||'(sin asunto)'}\n${(m.body?.content||'').trim()}${adjuntosInfo.length ? '\nAdjuntos: '+adjuntosInfo.join(', ')+' (ya analizados, disponibles como archivos del proyecto)' : ''}` });
+  }
+  return resultado;
+}
+
 // Texto cacheado de un documento vinculado como archivo suelto (procesos_documentos,
 // tipo:'archivo') — lo (re)extrae solo si cambió (por fecha de modificación real
 // en SharePoint) o si todavía no tiene caché. De paso (re)genera el resumen.
@@ -5597,42 +5726,75 @@ async function procesosObtenerCandidatosBibliografia(categorias, soloCache) {
   _procesosBibliografiaCache.porCategoria[key] = candidatos;
   return candidatos;
 }
+// Filtra una lista de candidatos {nombre,resumen,texto} a los relevantes para
+// el contexto dado (con IA, a partir del resumen de cada uno) — compartido
+// entre la bibliografía de referencia y los archivos propios del proyecto.
+async function procesosSeleccionarRelevantes(conTexto, contextoTexto) {
+  const UMBRAL = 3;
+  if (conTexto.length <= UMBRAL) return conTexto;
+  const conResumen = conTexto.filter(c => c.resumen);
+  const sinResumen = conTexto.filter(c => !c.resumen); // no se puede juzgar relevancia sin resumen — se incluyen igual, mejor pecar de más
+  if (!conResumen.length) return conTexto; // ninguno tiene resumen todavía (recién agregados) — se mandan todos
+  const apiKey = getApiKey();
+  const listado = conResumen.map((c,i) => `${i+1}. ${c.nombre}: ${c.resumen}`).join('\n');
+  const prompt = `Contexto del proyecto:\n${contextoTexto}\n\nDocumentos disponibles (con un resumen breve de cada uno):\n${listado}\n\n¿Cuáles de estos documentos son realmente relevantes/aplicables para ESTE proyecto puntual? Elegí solo los que aporten algo específico y aplicable — no los que sean de una tecnología, tipo de equipo, jurisdicción o rubro que no tiene nada que ver. Respondé SOLO con JSON (sin backticks): {"relevantes":[1,3]} (los números de la lista, en cualquier cantidad). Si ninguno aplica, {"relevantes":[]}. Ante la duda, incluilo (mejor pasarse que quedarse corto).`;
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const idx = new Set(parsed.relevantes || []);
+    return sinResumen.concat(conResumen.filter((c,i) => idx.has(i+1)));
+  } catch(e) {
+    console.warn('No se pudo filtrar por relevancia, se usa todo:', e.message);
+    return conTexto;
+  }
+}
+
 async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto, soloCache) {
   try {
     const candidatos = await procesosObtenerCandidatosBibliografia(categorias, soloCache);
     const conTexto = candidatos.filter(c => c.texto);
     if (!conTexto.length) return [];
-    const UMBRAL = 3;
-    let seleccionados;
-    if (conTexto.length <= UMBRAL) {
-      seleccionados = conTexto;
-    } else {
-      const conResumen = conTexto.filter(c => c.resumen);
-      const sinResumen = conTexto.filter(c => !c.resumen); // no se puede juzgar relevancia sin resumen — se incluyen igual, mejor pecar de más
-      if (!conResumen.length) {
-        seleccionados = conTexto; // ninguno tiene resumen todavía (recién agregados) — se mandan todos
-      } else {
-        const apiKey = getApiKey();
-        const listado = conResumen.map((c,i) => `${i+1}. ${c.nombre}: ${c.resumen}`).join('\n');
-        const prompt = `Contexto del proyecto:\n${contextoTexto}\n\nDocumentos de referencia disponibles (con un resumen breve de cada uno):\n${listado}\n\n¿Cuáles de estos documentos son realmente relevantes/aplicables para ESTE proyecto puntual? Elegí solo los que aporten algo específico y aplicable — no los que sean de una tecnología, tipo de equipo, jurisdicción o rubro que no tiene nada que ver. Respondé SOLO con JSON (sin backticks): {"relevantes":[1,3]} (los números de la lista, en cualquier cantidad). Si ninguno aplica, {"relevantes":[]}. Ante la duda, incluilo (mejor pasarse que quedarse corto).`;
-        try {
-          const resp = await fetch('https://api.anthropic.com/v1/messages', {
-            method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-            body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
-          });
-          const data = await resp.json();
-          const text = data.content?.find(c=>c.type==='text')?.text || '{}';
-          const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
-          const idx = new Set(parsed.relevantes || []);
-          seleccionados = sinResumen.concat(conResumen.filter((c,i) => idx.has(i+1)));
-        } catch(e) {
-          console.warn('No se pudo filtrar bibliografía por relevancia, se usa todo:', e.message);
-          seleccionados = conTexto;
-        }
-      }
-    }
+    const seleccionados = await procesosSeleccionarRelevantes(conTexto, contextoTexto);
     return seleccionados.map(c => ({ block: {type:'text', text:`Documento: ${c.nombre}\n\n${c.texto}`}, nombre: c.nombre }));
   } catch(e) { console.warn('No se pudo obtener la bibliografía:', e.message); return []; }
+}
+
+// ── Archivos propios del proyecto (subidos a mano en el chat, o traídos de
+// mails categorizados) — accesibles desde CUALQUIER chat/paso del proyecto
+// (general, Paso 2, Paso 3, Paso 4), no solo donde se cargaron. El texto ya
+// queda extraído/cacheado en procesos_proyecto_archivos al momento de subir
+// el archivo o de traer el mail — acá solo se lee ese caché (nunca dispara
+// una extracción nueva), así es seguro llamarlo desde cualquier chat sin
+// riesgo de colgar la UI.
+async function procesosProyectoArchivosGetCandidatos() {
+  const p = procesosCurrentProyecto;
+  if (!p?.id) return [];
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_proyecto_archivos?select=nombre,resumen_ia,texto_extraido&proyecto_id=eq.${p.id}&texto_extraido=not.is.null`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null);
+  if (!res || !res.ok) return [];
+  const rows = await res.json().catch(()=>[]);
+  return rows.map(r => ({ nombre: r.nombre, resumen: r.resumen_ia || null, texto: r.texto_extraido }));
+}
+async function procesosProyectoArchivosBlocks(contextoTexto) {
+  try {
+    const candidatos = await procesosProyectoArchivosGetCandidatos();
+    if (!candidatos.length) return [];
+    const seleccionados = await procesosSeleccionarRelevantes(candidatos, contextoTexto);
+    return seleccionados.map(c => ({ block: {type:'text', text:`Archivo del proyecto: ${c.nombre}\n\n${c.texto}`}, nombre: c.nombre }));
+  } catch(e) { console.warn('No se pudieron obtener los archivos del proyecto:', e.message); return []; }
+}
+// Listado liviano (nombre + resumen corto, sin el texto completo) para que
+// el contexto general del proyecto (procesosBuildContexto) siempre sepa qué
+// archivos hay cargados, aunque no se inyecte su contenido completo ahí.
+async function procesosProyectoArchivosListado() {
+  const candidatos = await procesosProyectoArchivosGetCandidatos();
+  if (!candidatos.length) return '';
+  return `Archivos propios cargados en el proyecto (subidos a mano o traídos de mails):\n${candidatos.map(c => `- ${c.nombre}${c.resumen ? ': '+c.resumen : ''}`).join('\n')}`;
 }
 
 // Genera (y cachea) un resumen breve de un proyecto del catálogo a partir de los
@@ -9338,17 +9500,19 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
     const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`, true);
+    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
     const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : '';
     const plantasCompactasTxt = plantasCompactasBlocks.length ? 'Adjunto documentos de referencia de plantas compactas (modelos ya fabricados, con capacidad/volumen ya definidos) — si el usuario pregunta por esa alternativa, o te parece que aplica razonablemente para esta etapa según el caudal, mencionalo en "reply" (todavía no hay una acción automática para fijar los valores del modelo, eso el usuario lo tiene que hacer a mano por ahora).\n\n' : '';
+    const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta unidad.\n\n' : '';
     const leccionesTxt = lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : '';
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : '';
-    const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{criteriosTxt}}{{plantasCompactasTxt}}{{leccionesTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{criteriosTxt}}{{plantasCompactasTxt}}{{archivosProyectoTxt}}{{leccionesTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const templateStep2Chat = await procesosPromptText('step2_chat', DEFAULT_TEMPLATE_STEP2_CHAT);
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), criteriosTxt, plantasCompactasTxt, leccionesTxt, historialTxt, msg });
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, historialTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -10039,14 +10203,16 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const h = dd.hojas?.[nombreEtapa] || {};
     const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
     const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
+    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : '';
     const equiposDocTxt = equiposBlocks.length ? 'Adjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala si aplica.\n\n' : '';
-    const DEFAULT_TEMPLATE_STEP3_CHAT = `Estás ayudando a definir los equipos de la etapa/unidad "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n{{valoresEtapa}}\n\nEquipos actualmente cargados para esta etapa:\n{{listado}}\n\n{{historialTxt}}{{equiposDocTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
+    const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta etapa.\n\n' : '';
+    const DEFAULT_TEMPLATE_STEP3_CHAT = `Estás ayudando a definir los equipos de la etapa/unidad "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n{{valoresEtapa}}\n\nEquipos actualmente cargados para esta etapa:\n{{listado}}\n\n{{historialTxt}}{{equiposDocTxt}}{{archivosProyectoTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
     const templateStep3Chat = await procesosPromptText('step3_chat', DEFAULT_TEMPLATE_STEP3_CHAT);
-    const prompt = procesosPromptFill(templateStep3Chat, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', listado, historialTxt, equiposDocTxt, msg });
+    const prompt = procesosPromptFill(templateStep3Chat, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', listado, historialTxt, equiposDocTxt, archivosProyectoTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache(equiposBlocks.map(x=>x.block)), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...equiposBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -10142,7 +10308,7 @@ function procesosResumenCampos(p) {
   return parts.join('\n\n');
 }
 
-function procesosBuildContexto(hastaStep) {
+async function procesosBuildContexto(hastaStep) {
   const p = procesosCurrentProyecto;
   let ctx = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n\n`;
   if (p.info_cliente?.campos || p.info_cliente?.corrientes?.length) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
@@ -10150,6 +10316,12 @@ function procesosBuildContexto(hastaStep) {
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
   if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
   if (hastaStep > 3) { const equipos = procesosResumenEquipos(p); if (equipos) ctx += `Equipos definidos por etapa:\n${equipos}\n\n`; }
+  // Listado liviano (sin el contenido completo) de archivos propios del
+  // proyecto — para que la IA sepa que existen aunque acá no se les inyecte
+  // el texto entero (eso lo hace cada chat/paso por separado, filtrado por
+  // relevancia, vía procesosProyectoArchivosBlocks).
+  const archivosListado = await procesosProyectoArchivosListado();
+  if (archivosListado) ctx += archivosListado + '\n\n';
   return ctx;
 }
 
@@ -10683,7 +10855,7 @@ async function procesosStep4GenerarConIA() {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const contexto = procesosBuildContexto(4);
+    const contexto = await procesosBuildContexto(4);
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(contexto);
     const ofertasTxt = ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia de redacción y estructura.\n\n' : '';
     const DEFAULT_TEMPLATE_STEP4_GENERAR = `{{contexto}}\n{{ofertasTxt}}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
@@ -10739,18 +10911,20 @@ async function procesosStep4SeccionChatSend(key) {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const contexto = procesosBuildContexto(4);
+    const contexto = await procesosBuildContexto(4);
     const historialPrevio = (sec.chat||[]).slice(0,-1).map(m=>`${m.role==='user'?'Usuario':'Asistente'}: ${m.content}`).join('\n');
     const formatoTxt = meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
+    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : '';
     const ofertasTxt = ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia.\n\n' : '';
-    const DEFAULT_TEMPLATE_STEP4_CHAT = `{{contexto}}\nEstás ayudando a redactar la sección "{{seccionLabel}}" de una propuesta técnica de Aeration Argentina (formato: {{formatoTxt}}).\n\nTexto actual de la sección:\n"""\n{{textoActual}}\n"""\n\n{{historialTxt}}{{ofertasTxt}}Pedido del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
+    const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta sección.\n\n' : '';
+    const DEFAULT_TEMPLATE_STEP4_CHAT = `{{contexto}}\nEstás ayudando a redactar la sección "{{seccionLabel}}" de una propuesta técnica de Aeration Argentina (formato: {{formatoTxt}}).\n\nTexto actual de la sección:\n"""\n{{textoActual}}\n"""\n\n{{historialTxt}}{{ofertasTxt}}{{archivosProyectoTxt}}Pedido del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
     const templateStep4Chat = await procesosPromptText('step4_chat', DEFAULT_TEMPLATE_STEP4_CHAT);
-    const prompt = procesosPromptFill(templateStep4Chat, { contexto, seccionLabel: meta.label, formatoTxt, textoActual: sec.texto || '(vacío)', historialTxt, ofertasTxt, msg });
+    const prompt = procesosPromptFill(templateStep4Chat, { contexto, seccionLabel: meta.label, formatoTxt, textoActual: sec.texto || '(vacío)', historialTxt, ofertasTxt, archivosProyectoTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...procesosConCache(ofertasBlocks.map(x=>x.block)), {type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...procesosConCache([...ofertasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -10836,11 +11010,62 @@ function renderProcesosChat() {
   const el = document.getElementById('procesos-chat-messages');
   const p = procesosCurrentProyecto;
   const hist = p.chat_historial || [];
-  if (!hist.length) { el.innerHTML = '<div class="empty">Todavía no chateaste sobre este proyecto.</div>'; return; }
-  el.innerHTML = hist.map(m => `
-    <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:80%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>
-  `).join('');
-  el.scrollTop = el.scrollHeight;
+  if (!hist.length) { el.innerHTML = '<div class="empty">Todavía no chateaste sobre este proyecto.</div>'; }
+  else {
+    el.innerHTML = hist.map(m => `
+      <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:80%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>
+    `).join('');
+    el.scrollTop = el.scrollHeight;
+  }
+  procesosChatArchivosRender();
+}
+
+// Archivos propios del proyecto (subidos acá o traídos de mails) — se
+// muestran como chips debajo de la conversación. Disponibles también desde
+// Paso 2/3/4, no solo desde este chat (ver procesosProyectoArchivosBlocks).
+async function procesosChatArchivosRender() {
+  const el = document.getElementById('procesos-chat-archivos-list');
+  if (!el) return;
+  const p = procesosCurrentProyecto;
+  if (!p?.id) { el.innerHTML = ''; return; }
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/procesos_proyecto_archivos?select=id,nombre,tipo,texto_extraido&proyecto_id=eq.${p.id}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null);
+  if (!res || !res.ok || procesosCurrentProyecto !== p) return;
+  const rows = await res.json().catch(()=>[]);
+  if (!rows.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap">${rows.map(r => `
+    <span class="hint" style="background:var(--surface2);border-radius:12px;padding:3px 10px;display:inline-flex;align-items:center;gap:6px">
+      ${r.tipo==='mail_adjunto'?'📧':'📎'} ${esc(r.nombre)}${r.texto_extraido?'':' (procesando...)'}
+      <span style="cursor:pointer" onclick="procesosChatArchivoEliminar('${r.id}')" title="Quitar">&#x2715;</span>
+    </span>`).join('')}</div>`;
+}
+async function procesosChatArchivoEliminar(id) {
+  if (!confirm('¿Quitar este archivo del proyecto?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_proyecto_archivos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  procesosChatArchivosRender();
+}
+async function procesosChatArchivoSubir(inputEl) {
+  const file = inputEl.files?.[0];
+  inputEl.value = '';
+  if (!file) return;
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-chat-status';
+  if (file.size > 20*1024*1024) { showMsg(statusId, 'error', '✕ El archivo pesa más de 20 MB.'); return; }
+  showMsg(statusId, 'loading', `Analizando "${file.name}"...`);
+  try {
+    const buf = await file.arrayBuffer();
+    const extraido = await procesosArchivoLocalExtraerTexto(file.name, buf);
+    if (!extraido?.texto) throw new Error('No se pudo extraer contenido de este archivo.');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch('/rest/v1/procesos_proyecto_archivos', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ empresa: currentEmpresa, proyecto_id: p.id, nombre: file.name, tipo:'chat_upload', mime: file.type||null, texto_extraido: extraido.texto, resumen_ia: extraido.resumen||null })
+    });
+    if (procesosCurrentProyecto === p) { document.getElementById(statusId).innerHTML = ''; procesosChatArchivosRender(); }
+  } catch(e) {
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo analizar "'+file.name+'": ' + e.message);
+  }
 }
 
 let _procesosChatEnviando = false;
@@ -10869,7 +11094,7 @@ async function procesosChatSend() {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const contexto = procesosBuildContexto(4);
+    const contexto = await procesosBuildContexto(4);
     const carpeta = p.info_cliente?.carpeta_cliente;
     const nombresGenerales = Object.keys(p.info_cliente?.campos || {}).join(', ') || '(ninguno todavía)';
     const corrientesActuales = p.info_cliente?.corrientes || [];
@@ -10881,6 +11106,14 @@ async function procesosChatSend() {
     const plantasCompactasBlocks = await procesosObtenerBibliografiaRelevante(['plantas_compactas'], contexto, true);
     const plantasCompactasTxt = plantasCompactasBlocks.length
       ? `\n\nDocumentos de referencia de plantas compactas disponibles (modelos ya fabricados, con capacidad/volumen ya definidos — alternativa a diseñar y construir en hormigón in situ):\n${plantasCompactasBlocks.map(b=>b.block.text).join('\n\n---\n\n')}\n\nSi el usuario pregunta por opciones de planta compacta, o si te parece que aplica como alternativa razonable para este proyecto según su caudal, mencionalo en "respuesta".`
+      : '';
+    // Archivos propios de ESTE proyecto (subidos a mano acá, o traídos de mails
+    // categorizados) — a diferencia de la bibliografía de la empresa, son pocos
+    // y ya están filtrados a este proyecto puntual, así que se inyectan directo
+    // (sin pasar por el circuito de "necesita_documentos").
+    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(contexto);
+    const archivosProyectoTxt = archivosProyectoBlocks.length
+      ? `\n\nArchivos propios de este proyecto (subidos a mano o traídos de mails categorizados):\n${archivosProyectoBlocks.map(b=>b.block.text).join('\n\n---\n\n')}`
       : '';
     // Directorio de TODOS los documentos de referencia de Cfg Procesos IA
     // (todas las categorías salvo las plantillas de generación) — solo
@@ -10919,7 +11152,10 @@ async function procesosChatSend() {
     // sin hacerlo nunca). Puesto en "system" se repite en cada llamada.
     const hayCatalogoConCarpeta = catalogo.some(c => c.carpeta_item_id && (c.archivos_cache||[]).some(a=>a.texto));
     const puedePedirDocs = carpeta || hayReferenciaCache || hayCatalogoConCarpeta;
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
+    // Mails del proyecto: solo se ofrece si hay sesión de Microsoft iniciada
+    // (si no, ni tiene sentido mencionárselo a la IA como opción).
+    const puedePedirMails = !!msAccount;
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con su nombre exacto ("${p.nombre}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
     // "instrucciones" es idéntico entre mensajes de la MISMA charla (mismo
     // proyecto, misma info ya extraída) — con cache_control, Anthropic lo
     // guarda de su lado y cobra bastante menos por él del segundo mensaje
@@ -10928,7 +11164,7 @@ async function procesosChatSend() {
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
-      catch(_e) { return { respuesta: raw, necesita_documentos:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{} }; }
+      catch(_e) { return { respuesta: raw, necesita_documentos:false, necesita_mails:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{} }; }
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -10939,36 +11175,45 @@ async function procesosChatSend() {
     let raw = data.content?.find(c=>c.type==='text')?.text || '{}';
     let parsed = parseRespuesta(raw);
 
-    if (puedePedirDocs && parsed.necesita_documentos) {
-      showMsg(statusId,'loading','Revisando los documentos...');
+    if ((puedePedirDocs && parsed.necesita_documentos) || (puedePedirMails && parsed.necesita_mails)) {
+      showMsg(statusId,'loading', parsed.necesita_mails ? 'Revisando los mails...' : 'Revisando los documentos...');
       let contentBlocks = [];
-      if (carpeta) {
-        const token = await getMsToken();
-        // Texto cacheado por archivo (info_cliente.carpeta_cliente.archivos_cache) —
-        // solo reprocesa lo nuevo/cambiado, no vuelve a mandar los PDF/imágenes
-        // originales cada vez que hace falta reconsultar algo en este proyecto.
-        const textos = await procesosClienteGetTextosCarpeta(token, p);
-        contentBlocks = contentBlocks.concat(textos.map(t => ({type:'text', text:`Documento: ${procesosNombreConCarpeta(t.nombre, t.carpeta)}\n\n${t.texto}`})));
-      }
-      if (hayReferenciaCache) {
-        // soloCache=true — usa solo lo que ya está transcripto/cacheado en Cfg
-        // Procesos IA, nunca dispara una transcripción nueva en medio del chat.
-        const refBlocks = await procesosObtenerBibliografiaRelevante(PROCESOS_CHAT_CATEGORIAS_REFERENCIA, contexto, true);
-        contentBlocks = contentBlocks.concat(refBlocks.map(b => b.block));
-      }
       let notaCatalogo = '';
-      if (parsed.proyecto_catalogo_solicitado) {
-        const entry = catalogo.find(c => c.nombre === parsed.proyecto_catalogo_solicitado);
-        const archivosConTexto = entry ? (entry.archivos_cache||[]).filter(a=>a.texto) : [];
-        if (archivosConTexto.length) {
-          archivosConTexto.forEach(a => contentBlocks.push({type:'text', text:`Documento (proyecto anterior "${entry.nombre}"): ${procesosNombreConCarpeta(a.nombre, a.carpeta)}\n\n${a.texto}`}));
-        } else {
-          notaCatalogo = ` El proyecto "${parsed.proyecto_catalogo_solicitado}" de la base de proyectos anteriores no tiene documentos ya analizados disponibles todavía (avisale eso al usuario si le hacía falta ese detalle).`;
+      if (puedePedirMails && parsed.necesita_mails) {
+        try {
+          const mails = await procesosMailBuscarProyecto(p.nombre);
+          contentBlocks = contentBlocks.concat(mails.map(m => ({type:'text', text: m.texto})));
+          if (!mails.length) contentBlocks.push({type:'text', text:`No se encontró ningún mail categorizado con el nombre exacto "${p.nombre}" en Bandeja de entrada ni Enviados.`});
+        } catch(e) { console.warn('No se pudieron buscar los mails del proyecto:', e.message); contentBlocks.push({type:'text', text:'No se pudo consultar el correo en este momento: '+e.message}); }
+      }
+      if (parsed.necesita_documentos) {
+        if (carpeta) {
+          const token = await getMsToken();
+          // Texto cacheado por archivo (info_cliente.carpeta_cliente.archivos_cache) —
+          // solo reprocesa lo nuevo/cambiado, no vuelve a mandar los PDF/imágenes
+          // originales cada vez que hace falta reconsultar algo en este proyecto.
+          const textos = await procesosClienteGetTextosCarpeta(token, p);
+          contentBlocks = contentBlocks.concat(textos.map(t => ({type:'text', text:`Documento: ${procesosNombreConCarpeta(t.nombre, t.carpeta)}\n\n${t.texto}`})));
+        }
+        if (hayReferenciaCache) {
+          // soloCache=true — usa solo lo que ya está transcripto/cacheado en Cfg
+          // Procesos IA, nunca dispara una transcripción nueva en medio del chat.
+          const refBlocks = await procesosObtenerBibliografiaRelevante(PROCESOS_CHAT_CATEGORIAS_REFERENCIA, contexto, true);
+          contentBlocks = contentBlocks.concat(refBlocks.map(b => b.block));
+        }
+        if (parsed.proyecto_catalogo_solicitado) {
+          const entry = catalogo.find(c => c.nombre === parsed.proyecto_catalogo_solicitado);
+          const archivosConTexto = entry ? (entry.archivos_cache||[]).filter(a=>a.texto) : [];
+          if (archivosConTexto.length) {
+            archivosConTexto.forEach(a => contentBlocks.push({type:'text', text:`Documento (proyecto anterior "${entry.nombre}"): ${procesosNombreConCarpeta(a.nombre, a.carpeta)}\n\n${a.texto}`}));
+          } else {
+            notaCatalogo = ` El proyecto "${parsed.proyecto_catalogo_solicitado}" de la base de proyectos anteriores no tiene documentos ya analizados disponibles todavía (avisale eso al usuario si le hacía falta ese detalle).`;
+          }
         }
       }
       const messages2 = messages.concat([
         { role:'assistant', content: raw },
-        { role:'user', content: [...contentBlocks, {type:'text', text: (contentBlocks.length ? 'Ahí tenés los documentos.' : 'No encontré ningún documento ya analizado que aplique a tu consulta.') + notaCatalogo + ' Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" en false, y el resto de los campos si corresponde).'}] }
+        { role:'user', content: [...contentBlocks, {type:'text', text: (contentBlocks.length ? 'Ahí tenés los documentos/mails.' : 'No encontré ningún documento ya analizado que aplique a tu consulta.') + notaCatalogo + ' Ahora sí, respondé mi consulta anterior con el mismo formato JSON de antes ("respuesta", "necesita_documentos" y "necesita_mails" en false, y el resto de los campos si corresponde).'}] }
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
