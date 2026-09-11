@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.94</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.95</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.94</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.95</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7347,35 +7347,47 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt, normativaYaUs
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible. Recargá la página.');
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:8000, messages:[{role:'user', content:[...contentItems.map(x=>x.block), {type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) {
-      const e = await resp.json();
-      const msg = e.error?.message || 'Error de la IA';
-      if (/100 PDF pages/i.test(msg)) {
-        const m = /messages\.\d+\.content\.(\d+)\./.exec(msg);
-        const idx = m ? Number(m[1]) : -1;
-        const sugeridos = new Set();
-        if (idx >= 0 && idx < contentItems.length) sugeridos.add(contentItems[idx].nombre);
-        procesosStep1PendingRetry = { contentItems: contentItems.map(it => Object.assign({}, it, { excluido: sugeridos.has(it.nombre) })), prompt, sugeridos };
-        showMsg(statusId,'error','✕ '+msg);
-        renderProcesosStepContent();
-        return;
+    // Si la respuesta viene cortada (se acabó max_tokens antes de terminar el
+    // JSON — pasa con muchas corrientes o muchos campos configurados),
+    // reintenta UNA vez con el doble de espacio antes de rendirse, para no
+    // depender de que el usuario vuelva a tocar el botón a mano.
+    const intentar = async (maxTokens) => {
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:maxTokens, messages:[{role:'user', content:[...contentItems.map(x=>x.block), {type:'text', text:prompt}]}] })
+      });
+      if (!resp.ok) {
+        const e = await resp.json();
+        const msg = e.error?.message || 'Error de la IA';
+        if (/100 PDF pages/i.test(msg)) {
+          const m = /messages\.\d+\.content\.(\d+)\./.exec(msg);
+          const idx = m ? Number(m[1]) : -1;
+          const sugeridos = new Set();
+          if (idx >= 0 && idx < contentItems.length) sugeridos.add(contentItems[idx].nombre);
+          procesosStep1PendingRetry = { contentItems: contentItems.map(it => Object.assign({}, it, { excluido: sugeridos.has(it.nombre) })), prompt, sugeridos };
+          showMsg(statusId,'error','✕ '+msg);
+          renderProcesosStepContent();
+          throw null; // ya se mostró el estado propio (selector de archivos), no hay que seguir ni tirar error genérico
+        }
+        throw new Error(msg);
       }
-      throw new Error(msg);
-    }
-    const data = await resp.json();
-    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+      const data = await resp.json();
+      const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+      return JSON.parse(text.replace(/```json|```/g,'').trim()); // puede tirar SyntaxError si se cortó — lo maneja el caller
+    };
     let extraido;
     try {
-      extraido = JSON.parse(text.replace(/```json|```/g,'').trim());
+      extraido = await intentar(8000);
     } catch (parseErr) {
-      // La respuesta llegó cortada a mitad de camino (se acabó el max_tokens
-      // antes de que la IA terminara el JSON) — pasa sobre todo con muchas
-      // corrientes o muchos campos configurados en Cfg Procesos IA.
-      throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar) — probá analizar de nuevo. Si vuelve a pasar seguido, puede ser que haya demasiados campos configurados en Cfg Procesos IA para lo que entra en una sola respuesta.');
+      if (parseErr === null) return; // caso "100 PDF pages" de arriba, ya se manejó
+      if (!(parseErr instanceof SyntaxError)) throw parseErr; // error real de la API, no tiene sentido reintentar
+      console.warn('Respuesta de Paso 1 cortada, reintentando con el doble de espacio...');
+      try {
+        extraido = await intentar(16000);
+      } catch (parseErr2) {
+        if (parseErr2 === null) return;
+        throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar con más espacio) — probá analizar de nuevo. Si vuelve a pasar seguido, puede ser que haya demasiados campos configurados en Cfg Procesos IA para lo que entra en una sola respuesta.');
+      }
     }
 
     await procesosSaveProyecto({ info_cliente: { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null } }, p);
@@ -9787,16 +9799,27 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
     const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo, eso se resuelve en un paso aparte.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{plantillaTxt}}\nSugerí la lista de equipos necesarios para esta etapa, basándote en los valores de diseño (caudal, dimensiones, carga, etc.), en la plantilla de la empresa de arriba (si hay una sección aplicable) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica. Para cada equipo indicá cantidad (seguí la cantidad sugerida de la plantilla si la hay, ej. redundancia N+1 — no la ignores), tipo/nombre, una especificación técnica breve (capacidad, potencia, material, etc. — usá las características de la plantilla como guía de qué datos completar) y una justificación breve.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const templateStep3Sugerir = await procesosPromptText('step3_sugerir_equipos', DEFAULT_TEMPLATE_STEP3_SUGERIR);
     const prompt = procesosPromptFill(templateStep3Sugerir, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', resumenCampos: procesosResumenCampos(p), referenciasTxt, leccionesTxt, plantillaTxt });
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 3000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
-    });
-    if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
-    const data = await resp.json();
-    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    // Si se corta (max_tokens insuficiente), reintenta sola una vez con el
+    // doble antes de rendirse — ver mismo patrón en procesosStep1EjecutarAnalisis.
+    const intentarSugerir = async (maxTokens) => {
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: maxTokens, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      });
+      if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+      const data = await resp.json();
+      const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+      return JSON.parse(text.replace(/```json|```/g, '').trim());
+    };
     let parsed;
-    try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
-    catch (_e) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar) — probá de nuevo.'); }
+    try {
+      parsed = await intentarSugerir(3000);
+    } catch (_e) {
+      if (!(_e instanceof SyntaxError)) throw _e;
+      console.warn('Respuesta de "Sugerir equipos" cortada, reintentando con el doble de espacio...');
+      try { parsed = await intentarSugerir(6000); }
+      catch (_e2) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar con más espacio) — probá de nuevo.'); }
+    }
     let nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', justificacion: eq.justificacion || '' }));
 
     // Paso 2: recién ahora, con la lista ya armada, se busca marca/modelo
