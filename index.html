@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.100</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.101</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.100</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.101</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -661,6 +661,18 @@
       </div>
       <div id="procesos-proyecto-view" style="display:none">
         <button class="btn btn-secondary btn-sm" onclick="procesosVolverALista()" style="margin-bottom:12px">← Volver a proyectos</button>
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
+            <div>
+              <div id="procesos-proyecto-nombre-label" style="font-weight:600;font-size:15px"></div>
+              <p class="hint" style="margin:2px 0 0" id="procesos-proyecto-paso-label"></p>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <label class="hint" style="white-space:nowrap" title="Categoría de Outlook que identifica los mails de este proyecto. Si se deja vacío, se usa el nombre del proyecto.">Categoría (mails):</label>
+              <input id="procesos-proyecto-categoria" placeholder="= nombre del proyecto" style="width:200px" oninput="procesosProyectoUpdateCategoria(this.value)" />
+            </div>
+          </div>
+        </div>
         <div class="card">
           <div id="procesos-steps-nav" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap"></div>
           <div id="procesos-step-content"></div>
@@ -1039,9 +1051,8 @@
       </div>
       <div class="card">
         <div class="card-label">Plantilla de equipos por etapa</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Qué equipos genéricos (sin marca) suele llevar cada tipo de etapa, y con qué características/cantidad — conocimiento propio de la empresa. En Paso 3, la IA usa esto para armar la lista genérica antes de buscar marca/modelo en los catálogos reales.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Las etapas/unidades de tratamiento de la empresa y, dentro de cada una, qué equipos genéricos (sin marca) suele llevar, con qué cantidad sugerida y descripción — conocimiento propio de la empresa. En Paso 3, la IA usa esto para armar la lista genérica antes de buscar marca/modelo en los catálogos reales.</p>
         <div id="procesos-equipos-plantilla-list"></div>
-        <button class="btn btn-secondary" onclick="procesosEquiposPlantillaAdd()" style="margin-top:4px">+ Agregar equipo a la plantilla</button>
       </div>
       <div class="card">
         <div class="card-label">Matriz de tecnologías (MCDM)</div>
@@ -6108,70 +6119,87 @@ async function procesosTecPrefEliminar(id) {
 // etapa, sin marca) — se usa en Paso 3 antes de mirar catálogos reales, así
 // la lista genérica no depende de que la IA "se acuerde" de memoria cada
 // vez ni de tener documentos de equipos adjuntos.
-let _procesosEquiposPlantillaState = { rows: null, filtro: '', expandedId: null };
+// Organizado por ETAPA primero (procesos_equipos_etapas) y equipos dentro de
+// cada una (procesos_equipos_plantilla.etapa_id) — antes era una lista plana
+// de equipos con la etapa como un campo más de cada uno, costaba ver de
+// un vistazo qué tenía cada etapa.
+let _procesosEquiposPlantillaState = { etapas: null, equipos: null, filtro: '', expandedEtapaId: null };
 async function renderProcesosEquiposPlantilla() {
   const el = document.getElementById('procesos-equipos-plantilla-list');
   if (!el) return;
   const filtroPrevio = _procesosEquiposPlantillaState.filtro || '';
-  const expandedPrevio = _procesosEquiposPlantillaState.expandedId || null;
+  const expandedPrevio = _procesosEquiposPlantillaState.expandedEtapaId || null;
+  const buscandoPrevio = _procesosEquiposPlantillaState._buscando;
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=etapa_patron,orden`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await res.json();
-    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_equipos_plantilla?).</p>'; return; }
-    _procesosEquiposPlantillaState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
+    const [etapasRes, equiposRes] = await Promise.all([
+      supaFetch(`/rest/v1/procesos_equipos_etapas?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}})
+    ]);
+    if (!etapasRes.ok) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_equipos_etapas?).</p>'; return; }
+    const etapas = await etapasRes.json();
+    const equipos = equiposRes.ok ? await equiposRes.json() : [];
+    _procesosEquiposPlantillaState = { etapas, equipos, filtro: filtroPrevio, expandedEtapaId: expandedPrevio, _buscando: buscandoPrevio };
     procesosEquiposPlantillaRenderLista();
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
 }
-function procesosEquiposPlantillaEtiqueta(r) { return `${r.etapa_patron||'(sin etapa)'} — ${r.tipo_equipo||'(sin nombre)'}`; }
 function procesosEquiposPlantillaRenderLista() {
   const el = document.getElementById('procesos-equipos-plantilla-list');
   if (!el) return;
-  const { rows, filtro, expandedId } = _procesosEquiposPlantillaState;
-  if (!rows) return;
+  const { etapas, equipos, filtro, expandedEtapaId } = _procesosEquiposPlantillaState;
+  if (!etapas) return;
   const f = (filtro || '').trim().toLowerCase();
-  const filtrados = f
-    ? rows.filter(r => [r.etapa_patron, r.tipo_equipo, r.caracteristicas, r.cantidad_sugerida].some(v => (v||'').toLowerCase().includes(f)))
-    : (expandedId ? rows.filter(r => r.id === expandedId) : []);
+  const equiposDe = etapaId => (equipos||[]).filter(eq => eq.etapa_id === etapaId);
+  const etapaMatch = et => (et.nombre||'').toLowerCase().includes(f) || equiposDe(et.id).some(eq => [eq.tipo_equipo, eq.caracteristicas, eq.cantidad_sugerida].some(v => (v||'').toLowerCase().includes(f)));
+  const visibles = f ? etapas.filter(etapaMatch) : (expandedEtapaId ? etapas.filter(et => et.id === expandedEtapaId) : []);
   const header = `
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
       <input id="procesos-equipos-plantilla-buscar" placeholder="Buscar por etapa o equipo..." value="${esc(filtro)}" oninput="procesosEquiposPlantillaFiltrar(this.value)" style="flex:1;min-width:160px" />
-      <select onchange="if(this.value) procesosEquiposPlantillaExpandir(this.value); this.value=''" style="max-width:280px">
-        <option value="">Ver todos (${rows.length})...</option>
-        ${rows.map(r => `<option value="${r.id}">${esc(procesosEquiposPlantillaEtiqueta(r))}</option>`).join('')}
+      <select onchange="if(this.value) procesosEquiposEtapaExpandir(this.value); this.value=''" style="max-width:280px">
+        <option value="">Ver todas (${etapas.length})...</option>
+        ${etapas.map(et => `<option value="${et.id}">${esc(et.nombre)} (${equiposDe(et.id).length})</option>`).join('')}
       </select>
-      <span class="hint" style="white-space:nowrap">${rows.length} ítem${rows.length===1?'':'s'}${f ? ` · ${filtrados.length} coincidencia${filtrados.length===1?'':'s'}` : ''}</span>
+      <button class="btn btn-secondary btn-sm" onclick="procesosEquiposEtapaAgregar()">+ Agregar etapa</button>
+      <span class="hint" style="white-space:nowrap">${etapas.length} etapa${etapas.length===1?'':'s'}${f ? ` · ${visibles.length} coincidencia${visibles.length===1?'':'s'}` : ''}</span>
     </div>`;
-  if (!rows.length) { el.innerHTML = header + '<p class="hint">Todavía no hay equipos cargados en la plantilla.</p>'; return; }
-  if (!f && !expandedId) {
-    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí uno del desplegable para verlo.</p>';
+  if (!etapas.length) { el.innerHTML = header + '<p class="hint">Todavía no hay etapas cargadas.</p>'; return; }
+  if (!f && !expandedEtapaId) {
+    el.innerHTML = header + '<p class="hint">Escribí arriba para buscar, o elegí una etapa del desplegable para verla.</p>';
     procesosEquiposPlantillaRestaurarFoco();
     return;
   }
-  el.innerHTML = header + filtrados.map(r => {
-    const abierto = expandedId === r.id;
-    if (!abierto) {
+  el.innerHTML = header + visibles.map(et => {
+    const abierta = expandedEtapaId === et.id;
+    const eqs = equiposDe(et.id);
+    if (!abierta) {
       return `
-      <div class="field-row" style="cursor:pointer" onclick="procesosEquiposPlantillaExpandir('${r.id}')">
+      <div class="field-row" style="cursor:pointer" onclick="procesosEquiposEtapaExpandir('${et.id}')">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <span>${esc(procesosEquiposPlantillaEtiqueta(r))}</span>
-          <button class="remove-btn" onclick="event.stopPropagation();procesosEquiposPlantillaEliminar('${r.id}')">&#x2715;</button>
+          <span><strong>${esc(et.nombre)}</strong> — ${eqs.length} equipo${eqs.length===1?'':'s'}</span>
+          <button class="remove-btn" onclick="event.stopPropagation();procesosEquiposEtapaEliminar('${et.id}')">&#x2715;</button>
         </div>
       </div>`;
     }
     return `
       <div class="field-row">
         <div class="field-row-top">
-          <input value="${esc(r.etapa_patron||'')}" placeholder="Tipo de etapa (ej. Ecualización)" style="max-width:220px;font-weight:600" oninput="procesosEquiposPlantillaUpdate('${r.id}','etapa_patron',this.value)" />
-          <input value="${esc(r.tipo_equipo||'')}" placeholder="Equipo (ej. Bomba centrífuga sumergible)" style="flex:1" oninput="procesosEquiposPlantillaUpdate('${r.id}','tipo_equipo',this.value)" />
-          <button class="remove-btn" onclick="procesosEquiposPlantillaEliminar('${r.id}')">&#x2715;</button>
+          <input value="${esc(et.nombre)}" placeholder="Nombre de la etapa" style="flex:1;font-weight:600" oninput="procesosEquiposEtapaUpdateNombre('${et.id}',this.value)" />
+          <button class="remove-btn" onclick="procesosEquiposEtapaEliminar('${et.id}')">&#x2715;</button>
         </div>
-        <label style="font-size:12px;color:var(--text2);margin-top:6px">Cantidad sugerida</label>
-        <input value="${esc(r.cantidad_sugerida||'')}" placeholder="ej. 2 (1 en uso + 1 en back-up)" oninput="procesosEquiposPlantillaUpdate('${r.id}','cantidad_sugerida',this.value)" style="margin-bottom:8px" />
-        <label style="font-size:12px;color:var(--text2)">Características (texto libre — lo que importe para ESTE equipo)</label>
-        <textarea rows="3" placeholder="ej. Caudal (m3/h), potencia (HP), material" oninput="procesosEquiposPlantillaUpdate('${r.id}','caracteristicas',this.value)" style="margin-bottom:6px">${esc(r.caracteristicas||'')}</textarea>
-        <button class="btn btn-secondary btn-sm" onclick="procesosEquiposPlantillaExpandir(null)">✕ Cerrar</button>
+        ${eqs.length ? eqs.map(eq => `
+          <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px">
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input value="${esc(eq.tipo_equipo||'')}" placeholder="Nombre del equipo (ej. Bomba centrífuga sumergible)" style="flex:1" oninput="procesosEquiposPlantillaUpdate('${eq.id}','tipo_equipo',this.value)" />
+              <button class="remove-btn" onclick="procesosEquiposPlantillaEliminar('${eq.id}')">&#x2715;</button>
+            </div>
+            <input value="${esc(eq.cantidad_sugerida||'')}" placeholder="Cantidad sugerida (ej. 2 — 1 en uso + 1 en back-up)" oninput="procesosEquiposPlantillaUpdate('${eq.id}','cantidad_sugerida',this.value)" style="margin-bottom:6px" />
+            <textarea rows="2" placeholder="Descripción (características, capacidad, material...)" oninput="procesosEquiposPlantillaUpdate('${eq.id}','caracteristicas',this.value)" style="margin-bottom:2px">${esc(eq.caracteristicas||'')}</textarea>
+          </div>`).join('') : '<p class="hint" style="margin:8px 0">Todavía no tiene equipos cargados.</p>'}
+        <div style="margin-top:8px">
+          <button class="btn btn-secondary btn-sm" onclick="procesosEquiposPlantillaAdd('${et.id}')">+ Agregar equipo</button>
+          <button class="btn btn-secondary btn-sm" onclick="procesosEquiposEtapaExpandir(null)" style="margin-left:6px">✕ Cerrar</button>
+        </div>
       </div>`;
   }).join('');
   procesosEquiposPlantillaRestaurarFoco();
@@ -6188,24 +6216,55 @@ function procesosEquiposPlantillaFiltrar(v) {
   _procesosEquiposPlantillaState._buscando = true;
   procesosEquiposPlantillaRenderLista();
 }
-function procesosEquiposPlantillaExpandir(id) {
-  _procesosEquiposPlantillaState.expandedId = id;
+function procesosEquiposEtapaExpandir(id) {
+  _procesosEquiposPlantillaState.expandedEtapaId = id;
   procesosEquiposPlantillaRenderLista();
 }
-async function procesosEquiposPlantillaAdd() {
+async function procesosEquiposEtapaAgregar() {
+  const nombre = prompt('Nombre de la nueva etapa (ej. "MBBR"):');
+  if (!nombre || !nombre.trim()) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const orden = (_procesosEquiposPlantillaState.etapas||[]).length;
+  const res = await supaFetch('/rest/v1/procesos_equipos_etapas', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.trim(), orden })
+  });
+  const data = await res.json().catch(()=>null);
+  if (!res.ok || !data || !data.length) { alert('No se pudo agregar la etapa.'); return; }
+  _procesosEquiposPlantillaState.filtro = '';
+  _procesosEquiposPlantillaState.expandedEtapaId = data[0].id;
+  renderProcesosEquiposPlantilla();
+}
+async function procesosEquiposEtapaUpdateNombre(id, val) {
+  const et = (_procesosEquiposPlantillaState.etapas||[]).find(e => e.id === id);
+  if (et) et.nombre = val;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_etapas?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ nombre: val })
+  });
+}
+async function procesosEquiposEtapaEliminar(id) {
+  const et = (_procesosEquiposPlantillaState.etapas||[]).find(e => e.id === id);
+  const n = (_procesosEquiposPlantillaState.equipos||[]).filter(eq => eq.etapa_id === id).length;
+  if (!confirm(`¿Eliminar la etapa "${et?.nombre||''}"${n ? ` y sus ${n} equipo(s)` : ''}?`)) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_etapas?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  if (_procesosEquiposPlantillaState.expandedEtapaId === id) _procesosEquiposPlantillaState.expandedEtapaId = null;
+  renderProcesosEquiposPlantilla();
+}
+async function procesosEquiposPlantillaAdd(etapaId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const orden = (_procesosEquiposPlantillaState.equipos||[]).filter(eq => eq.etapa_id === etapaId).length;
   const res = await supaFetch('/rest/v1/procesos_equipos_plantilla', {
     method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-    body: JSON.stringify({ empresa: currentEmpresa, etapa_patron: 'Nueva etapa', tipo_equipo: 'Nuevo equipo' })
+    body: JSON.stringify({ empresa: currentEmpresa, etapa_id: etapaId, tipo_equipo: '', orden })
   });
-  if (!res.ok) { alert('No se pudo agregar.'); return; }
-  const data = await res.json().catch(()=>null);
-  _procesosEquiposPlantillaState.filtro = '';
-  _procesosEquiposPlantillaState.expandedId = data && data[0] ? data[0].id : null;
+  if (!res.ok) { alert('No se pudo agregar el equipo.'); return; }
   renderProcesosEquiposPlantilla();
 }
 async function procesosEquiposPlantillaUpdate(id, field, val) {
-  const row = (_procesosEquiposPlantillaState.rows||[]).find(r => r.id === id);
+  const row = (_procesosEquiposPlantillaState.equipos||[]).find(r => r.id === id);
   if (row) row[field] = val;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_equipos_plantilla?id=eq.${id}`, {
@@ -6217,7 +6276,6 @@ async function procesosEquiposPlantillaEliminar(id) {
   if (!confirm('¿Eliminar este equipo de la plantilla?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_equipos_plantilla?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
-  if (_procesosEquiposPlantillaState.expandedId === id) _procesosEquiposPlantillaState.expandedId = null;
   renderProcesosEquiposPlantilla();
 }
 
@@ -6979,9 +7037,20 @@ async function procesosAbrirProyecto(id) {
   // proyecto DISTINTO (automático, por el chequeo de id).
   document.getElementById('procesos-list-view').style.display = 'none';
   document.getElementById('procesos-proyecto-view').style.display = '';
+  renderProcesosProyectoHeader();
   renderProcesosStepsNav();
   renderProcesosStepContent();
   renderProcesosChat();
+}
+
+function renderProcesosProyectoHeader() {
+  const p = procesosCurrentProyecto;
+  document.getElementById('procesos-proyecto-nombre-label').textContent = p.nombre + (p.cliente ? ' — '+p.cliente : '');
+  document.getElementById('procesos-proyecto-paso-label').textContent = `Paso ${p.paso_actual}/4 — ${PROCESOS_STEP_LABEL[p.paso_actual]||''}`;
+  document.getElementById('procesos-proyecto-categoria').value = p.categoria || '';
+}
+function procesosProyectoUpdateCategoria(val) {
+  procesosSaveProyectoDebounced({ categoria: val });
 }
 
 function procesosVolverALista() {
@@ -10010,14 +10079,20 @@ function procesosStep3EliminarEquipo(nombreEtapa, equipoId) {
 async function procesosEquiposPlantillaTexto() {
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_equipos_plantilla?select=etapa_patron,tipo_equipo,cantidad_sugerida,caracteristicas&empresa=eq.${currentEmpresa}&order=etapa_patron,orden`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = res.ok ? await res.json() : [];
-    if (!Array.isArray(rows) || !rows.length) return '';
-    const porEtapa = {};
-    rows.forEach(r => { (porEtapa[r.etapa_patron] = porEtapa[r.etapa_patron] || []).push(r); });
-    return Object.entries(porEtapa).map(([etapa, items]) => `${etapa}:\n` + items.map(i =>
-      `  - ${i.tipo_equipo}${i.cantidad_sugerida ? ' (cantidad sugerida: '+i.cantidad_sugerida+')' : ''}${i.caracteristicas ? ' — características: '+i.caracteristicas : ''}`
-    ).join('\n')).join('\n\n');
+    const [etapasRes, equiposRes] = await Promise.all([
+      supaFetch(`/rest/v1/procesos_equipos_etapas?select=id,nombre&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=etapa_id,tipo_equipo,cantidad_sugerida,caracteristicas&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}})
+    ]);
+    const etapas = etapasRes.ok ? await etapasRes.json() : [];
+    const equipos = equiposRes.ok ? await equiposRes.json() : [];
+    if (!etapas.length) return '';
+    return etapas.map(et => {
+      const items = equipos.filter(eq => eq.etapa_id === et.id && eq.tipo_equipo);
+      if (!items.length) return '';
+      return `${et.nombre}:\n` + items.map(i =>
+        `  - ${i.tipo_equipo}${i.cantidad_sugerida ? ' (cantidad sugerida: '+i.cantidad_sugerida+')' : ''}${i.caracteristicas ? ' — descripción: '+i.caracteristicas : ''}`
+      ).join('\n');
+    }).filter(Boolean).join('\n\n');
   } catch(e) { console.warn('No se pudo cargar la plantilla de equipos:', e.message); return ''; }
 }
 
@@ -11177,7 +11252,13 @@ async function procesosChatSend() {
     // Mails del proyecto: solo se ofrece si hay sesión de Microsoft iniciada
     // (si no, ni tiene sentido mencionárselo a la IA como opción).
     const puedePedirMails = !!msAccount;
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con su nombre exacto ("${p.nombre}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
+    // La categoría de Outlook que identifica los mails de este proyecto: si
+    // el proyecto tiene "Categoría" propia definida (subcampo editable en el
+    // encabezado del proyecto), se usa esa — si no, se usa el nombre del
+    // proyecto tal cual (comportamiento de antes, para no romper proyectos
+    // que ya vienen categorizando por nombre).
+    const categoriaMail = p.categoria || p.nombre;
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con la categoría exacta ("${categoriaMail}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
     // "instrucciones" es idéntico entre mensajes de la MISMA charla (mismo
     // proyecto, misma info ya extraída) — con cache_control, Anthropic lo
     // guarda de su lado y cobra bastante menos por él del segundo mensaje
@@ -11203,9 +11284,9 @@ async function procesosChatSend() {
       let notaCatalogo = '';
       if (puedePedirMails && parsed.necesita_mails) {
         try {
-          const mails = await procesosMailBuscarProyecto(p.nombre);
+          const mails = await procesosMailBuscarProyecto(categoriaMail);
           contentBlocks = contentBlocks.concat(mails.map(m => ({type:'text', text: m.texto})));
-          if (!mails.length) contentBlocks.push({type:'text', text:`No se encontró ningún mail categorizado con el nombre exacto "${p.nombre}" en Bandeja de entrada ni Enviados.`});
+          if (!mails.length) contentBlocks.push({type:'text', text:`No se encontró ningún mail categorizado con "${categoriaMail}" en Bandeja de entrada ni Enviados.`});
         } catch(e) { console.warn('No se pudieron buscar los mails del proyecto:', e.message); contentBlocks.push({type:'text', text:'No se pudo consultar el correo en este momento: '+e.message}); }
       }
       if (parsed.necesita_documentos) {
