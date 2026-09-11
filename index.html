@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10112,23 +10112,38 @@ function procesosStep3SetEquipoCampo(nombreEtapa, equipoId, campo, valor) {
   ed.etapas[nombreEtapa] = e;
   procesosSaveProyecto({ equipos_data: ed }, p);
   renderProcesosStepContent();
-  // Carga manual: es texto libre, pero si lo que se escribió no está en la
-  // plantilla configurada para esta etapa, se ofrece agregarlo ahí (así
-  // queda disponible para "Sugerir equipos con IA" y futuros proyectos).
-  if (campo === 'tipo' && valor.trim()) procesosStep3SugerirAgregarAPlantilla(nombreEtapa, valor.trim());
+  // Carga manual: texto libre, pero automáticamente se refleja en "Plantilla
+  // de equipos por etapa" (Cfg Procesos IA) — si la etapa todavía no está
+  // configurada, se crea con el nombre real de esta etapa; si el equipo
+  // todavía no está en esa etapa, se agrega ahí y se pide completar
+  // cantidad sugerida y descripción para dejarlo bien cargado.
+  if (campo === 'tipo' && valor.trim()) procesosStep3SincronizarEquipoAPlantilla(nombreEtapa, valor.trim());
 }
-async function procesosStep3SugerirAgregarAPlantilla(nombreEtapa, valor) {
+async function procesosStep3SincronizarEquipoAPlantilla(nombreEtapa, valor) {
   await procesosEquiposPlantillaCargar();
-  const match = procesosEquiposPlantillaDeEtapa(nombreEtapa);
-  if (!match) return; // no hay ninguna etapa configurada que coincida — nada para sugerir
+  let match = procesosEquiposPlantillaDeEtapa(nombreEtapa);
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!match) {
+    // No hay ninguna etapa configurada que coincida — se crea una nueva
+    // en la plantilla, con el nombre EXACTO de esta etapa del proyecto.
+    const orden = (_procesosEquiposPlantillaCache?.etapas || []).length;
+    const res = await supaFetch('/rest/v1/procesos_equipos_etapas', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+      body: JSON.stringify({ empresa: currentEmpresa, nombre: nombreEtapa, orden })
+    });
+    const data = await res.json().catch(()=>null);
+    if (!res.ok || !data || !data.length) { console.warn('No se pudo crear la etapa en la plantilla de equipos.'); return; }
+    await procesosEquiposPlantillaCargar(true);
+    match = { etapa: data[0], equipos: [] };
+  }
   const yaExiste = match.equipos.some(eq => eq.tipo_equipo.trim().toLowerCase() === valor.toLowerCase());
   if (yaExiste) return;
-  if (!confirm(`"${valor}" no está en la plantilla de equipos de "${match.etapa.nombre}". ¿Agregarlo ahí para que quede disponible en futuros proyectos?`)) return;
-  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const cantidad = prompt(`Cantidad sugerida para "${valor}" en la plantilla de "${match.etapa.nombre}" (ej. "2 — 1 en uso + 1 en back-up"):`) || '';
+  const descripcion = prompt(`Descripción de "${valor}" (características, capacidad, material, etc.):`) || '';
   const orden = match.equipos.length;
   await supaFetch('/rest/v1/procesos_equipos_plantilla', {
     method:'POST', headers:{Authorization:'Bearer '+session.token},
-    body: JSON.stringify({ empresa: currentEmpresa, etapa_id: match.etapa.id, tipo_equipo: valor, orden })
+    body: JSON.stringify({ empresa: currentEmpresa, etapa_id: match.etapa.id, tipo_equipo: valor, cantidad_sugerida: cantidad, caracteristicas: descripcion, orden })
   });
   await procesosEquiposPlantillaCargar(true);
   if (procesosCurrentProyecto) renderProcesosStepContent();
@@ -10190,7 +10205,12 @@ function procesosEquiposPlantillaDeEtapa(nombreEtapa) {
   const norm = s => (s||'').trim().toLowerCase();
   const n = norm(nombreEtapa);
   let etapa = cache.etapas.find(et => norm(et.nombre) === n);
-  if (!etapa) etapa = cache.etapas.find(et => n.includes(norm(et.nombre)) || norm(et.nombre).includes(n));
+  // El match flexible (por ejemplo "Pozo" ⊂ "Pozo Cloacal") solo se intenta
+  // con nombres de 4 letras o más — nombres cortos como "LA" o "EQ" hacían
+  // falsos positivos contra cualquier etapa real que tuviera esas letras
+  // en cualquier lado (ej. "LA" adentro de "Plantilla" o "Digestor" nunca
+  // debería matchear "EQ" solo porque comparte substring).
+  if (!etapa) etapa = cache.etapas.find(et => { const en = norm(et.nombre); return en.length >= 4 && (n.includes(en) || en.includes(n)); });
   if (!etapa) return null;
   const equipos = cache.equipos.filter(eq => eq.etapa_id === etapa.id && eq.tipo_equipo);
   return { etapa, equipos };
