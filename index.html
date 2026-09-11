@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.95</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.96</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.95</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.96</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9201,6 +9201,20 @@ function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) 
   evalAt(mid);
 }
 
+// Marca el ÚLTIMO bloque de una lista de content blocks con cache_control
+// — Anthropic cachea todo el prefijo hasta ahí (los documentos de
+// referencia adjuntos, que suelen repetirse igual entre mensajes seguidos
+// del mismo chat) y cobra bastante menos por esa parte del segundo mensaje
+// en adelante. El texto del prompt (dinámico, cambia cada mensaje) va
+// siempre DESPUÉS de este punto, sin marcar, así solo se cachea lo que
+// realmente se repite.
+function procesosConCache(blocks) {
+  if (!blocks || !blocks.length) return blocks || [];
+  const copia = blocks.slice();
+  copia[copia.length - 1] = Object.assign({}, copia[copia.length - 1], { cache_control: { type: 'ephemeral' } });
+  return copia;
+}
+
 const _procesosStep2ChatEnviando = {};
 async function procesosStep2ChatSend(nombre, msgOverride) {
   const input = document.getElementById('procesos-step2-chat-input');
@@ -9250,7 +9264,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), criteriosTxt, plantasCompactasTxt, leccionesTxt, historialTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -9948,7 +9962,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const prompt = procesosPromptFill(templateStep3Chat, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', listado, historialTxt, equiposDocTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...equiposBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache(equiposBlocks.map(x=>x.block)), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -10652,7 +10666,7 @@ async function procesosStep4SeccionChatSend(key) {
     const prompt = procesosPromptFill(templateStep4Chat, { contexto, seccionLabel: meta.label, formatoTxt, textoActual: sec.texto || '(vacío)', historialTxt, ofertasTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...ofertasBlocks.map(x=>x.block), {type:'text', text:prompt}]}] })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...procesosConCache(ofertasBlocks.map(x=>x.block)), {type:'text', text:prompt}]}] })
     });
     if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
@@ -10822,6 +10836,11 @@ async function procesosChatSend() {
     const hayCatalogoConCarpeta = catalogo.some(c => c.carpeta_item_id && (c.archivos_cache||[]).some(a=>a.texto));
     const puedePedirDocs = carpeta || hayReferenciaCache || hayCatalogoConCarpeta;
     const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
+    // "instrucciones" es idéntico entre mensajes de la MISMA charla (mismo
+    // proyecto, misma info ya extraída) — con cache_control, Anthropic lo
+    // guarda de su lado y cobra bastante menos por él del segundo mensaje
+    // en adelante, en vez de precio completo en cada mensaje del chat.
+    const systemBlocks = [{ type:'text', text: instrucciones, cache_control:{ type:'ephemeral' } }];
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
@@ -10829,7 +10848,7 @@ async function procesosChatSend() {
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: instrucciones, messages })
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: systemBlocks, messages })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
     let data = await resp.json();
@@ -10869,7 +10888,7 @@ async function procesosChatSend() {
       ]);
       resp = await fetch('https://api.anthropic.com/v1/messages', {
         method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: instrucciones, messages: messages2 })
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:2000, system: systemBlocks, messages: messages2 })
       });
       if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message||'Error de la IA'); }
       data = await resp.json();
