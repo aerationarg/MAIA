@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11214,14 +11214,29 @@ async function procesosStep4GenerarConIA() {
     const DEFAULT_TEMPLATE_STEP4_GENERAR = `{{contexto}}\n{{ofertasTxt}}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones":\n- "intro_parametros": los parámetros de diseño clave (caudal, cargas, etc.) van a una TABLA — una línea POR PARÁMETRO con el formato exacto "Parámetro | Unidad | Valor" (ej: "Caudal medio | m3/h | 11.4"), sin fila de encabezado (eso ya lo pone la plantilla).\n- "intro_calidad_vuelco": los límites de vuelco relevantes también van a una TABLA — una línea POR PARÁMETRO con el formato exacto "Parámetro | Límite | Unidad | Fuente" (ej: "DBO5 | 50 | mg/l | Resolución 336/03 ADA"), indicando en "Fuente" de qué normativa/documento salió CADA límite puntual (no inventes la fuente si no está clara en el contexto — poné el nombre de la normativa aplicable que sí figure ahí).\n- "intro_seleccion_tecnologia": por qué se eligió la tecnología/tren propuesto, en prosa breve.\n- "etapas_proceso": una línea por cada etapa del tren de tratamiento, en el orden del proceso — cada etapa son DOS líneas: la primera "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto de arriba), y la segunda una descripción breve de esa etapa (sin el "### ").\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
     const templateStep4Generar = await procesosPromptText('step4_generar', DEFAULT_TEMPLATE_STEP4_GENERAR);
     const prompt = procesosPromptFill(templateStep4Generar, { contexto, ofertasTxt });
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...ofertasBlocks.map(x=>x.block), {type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
-    const data = await resp.json();
-    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
-    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    // Con las tablas (fila por parámetro) el contenido pedido es bastante más
+    // largo que antes — si se corta (max_tokens insuficiente), reintenta sola
+    // una vez con el doble antes de rendirse, mismo patrón que
+    // procesosStep1EjecutarAnalisis / procesosStep3SugerirEquiposCore.
+    const intentarGenerar = async (maxTokens) => {
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:maxTokens, messages:[{role:'user', content:[...ofertasBlocks.map(x=>x.block), {type:'text', text:prompt}]}] })
+      });
+      if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error de la IA'); }
+      const data = await resp.json();
+      const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+      return JSON.parse(text.replace(/```json|```/g,'').trim());
+    };
+    let parsed;
+    try {
+      parsed = await intentarGenerar(6000);
+    } catch (_e) {
+      if (!(_e instanceof SyntaxError)) throw _e;
+      console.warn('Respuesta de "Generar contenido con IA" cortada, reintentando con el doble de espacio...');
+      try { parsed = await intentarGenerar(12000); }
+      catch (_e2) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar con más espacio) — probá de nuevo.'); }
+    }
 
     const pd = Object.assign({}, p.propuesta_data);
     pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
