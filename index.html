@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10642,15 +10642,57 @@ function procesosPropuestaParrafoVineta(texto) {
 function procesosPropuestaParrafoSubtitulo(texto) {
   return `<w:p><w:pPr><w:ind w:firstLine="0"/><w:rPr><w:b/><w:bCs/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:bCs/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
 }
+// Título de una etapa del proceso (ej. "MBR") — Título3 real (no solo negrita
+// como procesosPropuestaParrafoSubtitulo), así queda numerado, con la
+// jerarquía visual de la plantilla y en el índice cuando Word actualice los
+// campos (F9) — no hace falta agregar bookmarks a mano, eso lo genera Word.
+function procesosPropuestaParrafoTituloEtapa(texto) {
+  return `<w:p><w:pPr><w:pStyle w:val="Ttulo3"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+}
 // Convierte texto editable (multilínea) en párrafos: 'prosa' = un párrafo por
-// línea no vacía; 'bullets' = viñeta por línea, salvo las que arrancan con
-// "## " que se arman como subtítulo en negrita sin viñeta (para agrupar,
-// como "Exclusiones Generales"/"SGI" en Límite de suministro).
+// línea no vacía; 'bullets' = viñeta por línea. En cualquiera de los dos
+// tipos, una línea que arranca con "## " se arma como subtítulo en negrita
+// sin viñeta (para agrupar, como "Exclusiones Generales"/"SGI" en Límite de
+// suministro), y una que arranca con "### " se arma como título de etapa
+// (Título3) — se usa en "Etapas de proceso".
 function procesosPropuestaTextoAXml(texto, tipo) {
   const lineas = String(texto || '').split('\n').map(l => l.trim()).filter(Boolean);
   if (!lineas.length) return '';
-  if (tipo === 'bullets') return lineas.map(l => l.startsWith('## ') ? procesosPropuestaParrafoSubtitulo(l.slice(3).trim()) : procesosPropuestaParrafoVineta(l)).join('');
-  return lineas.map(procesosPropuestaParrafoNormal).join('');
+  const marcador = l => {
+    if (l.startsWith('### ')) return procesosPropuestaParrafoTituloEtapa(l.slice(4).trim());
+    if (l.startsWith('## ')) return procesosPropuestaParrafoSubtitulo(l.slice(3).trim());
+    return null;
+  };
+  if (tipo === 'bullets') return lineas.map(l => marcador(l) || procesosPropuestaParrafoVineta(l)).join('');
+  return lineas.map(l => marcador(l) || procesosPropuestaParrafoNormal(l)).join('');
+}
+// Arma una tabla completa (encabezado en negrita + filas de datos) a partir
+// de arrays ya parseados — usada para "Parámetros de diseño" y "Calidad de
+// vuelco". Lleva bordes explícitos (no depende de que el estilo con nombre
+// exista en la plantilla) para que la grilla se vea sí o sí.
+function procesosPropuestaCeldaTabla(texto, ancho, negrita) {
+  const rpr = negrita ? '<w:rPr><w:b/><w:bCs/></w:rPr>' : '';
+  return `<w:tc><w:tcPr><w:tcW w:w="${ancho}" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/>${rpr}</w:pPr><w:r>${rpr}<w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p></w:tc>`;
+}
+function procesosPropuestaFilaTabla(celdas, anchos, negrita) {
+  return '<w:tr>' + celdas.map((c, i) => procesosPropuestaCeldaTabla(c, anchos[i], negrita)).join('') + '</w:tr>';
+}
+function procesosPropuestaTablaXml(encabezados, filas, anchos) {
+  const anchoTotal = anchos.reduce((a, b) => a + b, 0);
+  const grid = anchos.map(w => `<w:gridCol w:w="${w}"/>`).join('');
+  const bordes = `<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>`;
+  const filasXml = procesosPropuestaFilaTabla(encabezados, anchos, true) + filas.map(f => procesosPropuestaFilaTabla(f, anchos, false)).join('');
+  return `<w:tbl><w:tblPr><w:tblStyle w:val="Tablaconcuadrcula4-nfasis1"/><w:tblW w:w="${anchoTotal}" w:type="dxa"/>${bordes}<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>${grid}</w:tblGrid>${filasXml}</w:tbl>`;
+}
+// Parsea el texto editable de una sección-tabla ("Parámetro | Unidad | Valor"
+// una fila por línea) en arrays de celdas — completa con vacío si a alguna
+// línea le faltan columnas, y descarta las de más.
+function procesosPropuestaParsearFilasTabla(texto, nCols) {
+  return String(texto || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+    const partes = l.split('|').map(s => s.trim());
+    while (partes.length < nCols) partes.push('');
+    return partes.slice(0, nCols);
+  });
 }
 // Reemplaza todo lo que hay entre el encabezado y el próximo encabezado (de
 // cualquier nivel, o el final del documento) por los párrafos generados.
@@ -10668,6 +10710,39 @@ function procesosPropuestaReemplazarBloque(doc, nivel, texto, nuevoTexto, tipo) 
   const nuevos = procesosPropuestaParsearFragmento(doc, procesosPropuestaTextoAXml(nuevoTexto, tipo) || procesosPropuestaParrafoNormal(''));
   aSacar.forEach(n => parent.removeChild(n));
   nuevos.forEach(n => parent.insertBefore(n, refNode));
+}
+// Igual que procesosPropuestaReemplazarBloque, pero para secciones cuyo
+// contenido ES una tabla (Parámetros de diseño / Calidad de vuelco) — a
+// diferencia de la otra, ACÁ sí hay que barrer una w:tbl si ya existía (de
+// una generación anterior), por eso no corta el barrido al toparse con una.
+function procesosPropuestaReemplazarBloqueTabla(doc, nivel, texto, tablaXml) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto);
+  const parent = heading.parentNode;
+  let node = heading.nextSibling;
+  const aSacar = [];
+  while (node) {
+    if (node.nodeType === 1 && (procesosPropuestaEsEncabezado(node) || node.tagName === 'w:sectPr')) break;
+    aSacar.push(node);
+    node = node.nextSibling;
+  }
+  const refNode = node;
+  const nuevos = procesosPropuestaParsearFragmento(doc, tablaXml);
+  aSacar.forEach(n => parent.removeChild(n));
+  nuevos.forEach(n => parent.insertBefore(n, refNode));
+}
+// Se asegura de que un encabezado de Nivel 1 arranque en una hoja nueva
+// (salto de página manual) — si ya tiene uno justo antes (por ejemplo, en
+// una segunda generación sobre el mismo documento) no agrega otro. No es
+// un salto de sección, es el mismo tipo de salto manual que ya usa la
+// plantilla real de Aeration entre los grandes bloques de la propuesta.
+function procesosPropuestaAsegurarSaltoDePagina(doc, textoTitulo1) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, 1, textoTitulo1);
+  const prev = heading.previousSibling;
+  const yaTiene = prev && prev.nodeType === 1 && prev.tagName === 'w:p'
+    && procesosPropuestaHijos(prev, 'w:r').some(r => procesosPropuestaHijos(r, 'w:br').some(b => b.getAttribute('w:type') === 'page'));
+  if (yaTiene) return;
+  const salto = procesosPropuestaParsearFragmento(doc, '<w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="left"/></w:pPr><w:r><w:rPr><w:rFonts w:cs="Tahoma"/></w:rPr><w:br w:type="page"/></w:r></w:p>')[0];
+  heading.parentNode.insertBefore(salto, heading);
 }
 function procesosPropuestaBuscarTabla(doc, nivel, texto) {
   const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto);
@@ -10688,9 +10763,21 @@ function procesosPropuestaReemplazarFilas(doc, tbl, filasEncabezado, nuevasFilas
 function procesosPropuestaFilaSuministro(cantidad, detalle) {
   return `<w:tr><w:tc><w:tcPr><w:tcW w:w="727" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(cantidad)}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="8912" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(detalle)}</w:t></w:r></w:p></w:tc></w:tr>`;
 }
+// Fila separadora de etapa (ocupa las 2 columnas, centrada y en negrita) —
+// va antes de los equipos de esa etapa, para que la tabla de Suministro se
+// lea agrupada por etapa en vez de una lista plana sin ningún corte.
+function procesosPropuestaFilaSuministroEtapa(nombreEtapa) {
+  return `<w:tr><w:tc><w:tcPr><w:tcW w:w="9639" w:type="dxa"/><w:gridSpan w:val="2"/></w:tcPr><w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/><w:rPr><w:b/><w:bCs/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(nombreEtapa)}</w:t></w:r></w:p></w:tc></w:tr>`;
+}
 function procesosPropuestaReemplazarTablaSuministro(doc, items) {
   const tbl = procesosPropuestaBuscarTabla(doc, 2, 'Suministro');
-  const xml = items.map(it => procesosPropuestaFilaSuministro(it.cantidad, it.detalle)).join('');
+  let xml = '';
+  let etapaActual = null;
+  items.forEach(it => {
+    const etapaTxt = it.etapa || '(sin etapa)';
+    if (etapaTxt !== etapaActual) { xml += procesosPropuestaFilaSuministroEtapa(etapaTxt); etapaActual = etapaTxt; }
+    xml += procesosPropuestaFilaSuministro(it.cantidad, it.detalle);
+  });
   procesosPropuestaReemplazarFilas(doc, tbl, 1, xml || procesosPropuestaFilaSuministro('', '(sin equipos definidos)'));
 }
 function procesosPropuestaCeldaComercial(texto, w) {
@@ -10782,12 +10869,22 @@ function procesosPropuestaReemplazarCaratula(doc, c) {
 function procesosPropuestaAplicarDatos(doc, p) {
   const pd = p.propuesta_data || {};
   procesosPropuestaReemplazarCaratula(doc, pd.caratula || {});
+  // No es fatal si la plantilla vinculada no tiene este encabezado puntual
+  // (ej. una plantilla vieja/distinta) — el resto de la propuesta se arma
+  // igual, solo no se asegura el salto de página.
+  try { procesosPropuestaAsegurarSaltoDePagina(doc, 'INTRODUCCIÓN'); } catch(e) { console.warn('No se pudo asegurar el salto de página antes de la Introducción:', e.message); }
   PROCESOS_PROPUESTA_SECCIONES.forEach(s => {
     const texto = (pd.secciones && pd.secciones[s.key] && pd.secciones[s.key].texto) || '';
-    procesosPropuestaReemplazarBloque(doc, s.nivel, s.heading, texto, s.tipo);
+    if (s.columnas) {
+      const filas = procesosPropuestaParsearFilasTabla(texto, s.columnas.length);
+      const tablaXml = procesosPropuestaTablaXml(s.columnas, filas.length ? filas : [['Sin datos cargados todavía', ...Array(s.columnas.length - 1).fill('')]], s.anchos);
+      procesosPropuestaReemplazarBloqueTabla(doc, s.nivel, s.heading, tablaXml);
+    } else {
+      procesosPropuestaReemplazarBloque(doc, s.nivel, s.heading, texto, s.tipo);
+    }
   });
   const items = pd.comercial_items || [];
-  procesosPropuestaReemplazarTablaSuministro(doc, items.map(it => ({ cantidad: it.cantidad, detalle: it.descripcion })));
+  procesosPropuestaReemplazarTablaSuministro(doc, items.map(it => ({ cantidad: it.cantidad, detalle: it.descripcion, etapa: it.etapa })));
   procesosPropuestaReemplazarTablaComercial(doc, items);
   procesosPropuestaReemplazarCondicionesComerciales(doc, pd.condiciones_comerciales || {});
 }
@@ -10808,6 +10905,7 @@ function procesosPropuestaDocATextoHtml(doc) {
       if (!texto) continue;
       if (styleVal === 'Ttulo1') html += `<h3 style="margin:14px 0 4px">${esc(texto)}</h3>`;
       else if (styleVal === 'Ttulo2') html += `<h4 style="margin:10px 0 4px">${esc(texto)}</h4>`;
+      else if (styleVal === 'Ttulo3') html += `<h5 style="margin:8px 0 2px">${esc(texto)}</h5>`;
       else if (styleVal === 'Prrafodelista') html += `<div style="margin-left:16px;font-size:13px">• ${esc(texto)}</div>`;
       else html += `<p style="font-size:13px;margin:4px 0">${esc(texto)}</p>`;
     } else if (node.tagName === 'w:tbl') {
@@ -10897,8 +10995,8 @@ Las condiciones comerciales quedarán sujetas a la aprobación del permiso de im
 La aceptación de la OC quedará supeditada a la posibilidad de acceder, en el momento de la recepción de la OC, al Mercado Único y Libre de cambios (MULC) utilizado para realizar las importaciones.`;
 
 const PROCESOS_PROPUESTA_SECCIONES = [
-  { key:'intro_parametros', heading:'Parámetros de diseño', nivel:2, tipo:'prosa', label:'Parámetros de diseño', default:'' },
-  { key:'intro_calidad_vuelco', heading:'Calidad de vuelco', nivel:2, tipo:'prosa', label:'Calidad de vuelco', default:'' },
+  { key:'intro_parametros', heading:'Parámetros de diseño', nivel:2, tipo:'tabla_parametros', label:'Parámetros de diseño', default:'', columnas:['Parámetro','Unidad','Valor'], anchos:[4500,1800,3339] },
+  { key:'intro_calidad_vuelco', heading:'Calidad de vuelco', nivel:2, tipo:'tabla_vuelco', label:'Calidad de vuelco', default:'', columnas:['Parámetro','Límite','Unidad','Fuente'], anchos:[3200,1600,1400,3439] },
   { key:'intro_seleccion_tecnologia', heading:'Selección de tecnología', nivel:2, tipo:'prosa', label:'Selección de tecnología', default:'' },
   { key:'etapas_proceso', heading:'Etapas de proceso', nivel:2, tipo:'prosa', label:'Etapas de proceso', default:'' },
   { key:'limite_suministro', heading:'Límite de suministro', nivel:2, tipo:'bullets', label:'Límite de suministro (exclusiones)', default: PROCESOS_PROPUESTA_DEFAULT_LIMITE_SUMINISTRO },
@@ -11046,7 +11144,7 @@ function procesosStep4SeccionPanelHtml(meta) {
   const sec = pd.secciones[meta.key] || { texto:'', chat:[] };
   return `
     <div class="card" style="margin-top:8px">
-      <p class="hint" style="margin-bottom:6px">${meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>
+      <p class="hint" style="margin-bottom:6px">${meta.columnas ? `Una línea = una fila de la tabla, con el formato "${meta.columnas.join(' | ')}".` : meta.key === 'etapas_proceso' ? 'Una línea "### Nombre de la etapa" por cada etapa (se ve como título), seguida de una línea con su descripción.' : meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>
       <textarea rows="${meta.tipo==='bullets'?12:6}" oninput="procesosStep4SetSeccionTexto('${meta.key}', this.value)">${esc(sec.texto||'')}</textarea>
       <div class="gap"></div>
       <label>Chat de esta sección</label>
@@ -11113,7 +11211,7 @@ async function procesosStep4GenerarConIA() {
     const contexto = await procesosBuildContexto(4);
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(contexto);
     const ofertasTxt = ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa, como referencia de redacción y estructura.\n\n' : '';
-    const DEFAULT_TEMPLATE_STEP4_GENERAR = `{{contexto}}\n{{ofertasTxt}}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones": "intro_parametros" son los parámetros de diseño clave (caudal, cargas, etc.), 1-3 líneas sin viñetas, una por línea. "intro_calidad_vuelco" son los límites de vuelco relevantes, 1-3 líneas. "intro_seleccion_tecnologia" es por qué se eligió la tecnología/tren propuesto, en prosa breve. "etapas_proceso" es una línea por cada etapa del tren de tratamiento (nombre + muy breve descripción), en el orden del proceso.\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
+    const DEFAULT_TEMPLATE_STEP4_GENERAR = `{{contexto}}\n{{ofertasTxt}}Redactá contenido para una propuesta técnica de Aeration Argentina. Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"caratula":{"destinatario_empresa":"...","suministro_objeto":"...","ubicacion":"...","ref_numero":"..."},"secciones":{"intro_parametros":"...","intro_calidad_vuelco":"...","intro_seleccion_tecnologia":"...","etapas_proceso":"..."}}\n\nPara "caratula": "destinatario_empresa" es el nombre del cliente/empresa a la que se dirige la propuesta; "suministro_objeto" una frase corta de qué se suministra (ej: "una planta de tratamiento de efluentes cloacales"); "ubicacion" dónde está la obra, si se sabe; "ref_numero" dejalo vacío ("") si no hay forma de saberlo.\nPara "secciones":\n- "intro_parametros": los parámetros de diseño clave (caudal, cargas, etc.) van a una TABLA — una línea POR PARÁMETRO con el formato exacto "Parámetro | Unidad | Valor" (ej: "Caudal medio | m3/h | 11.4"), sin fila de encabezado (eso ya lo pone la plantilla).\n- "intro_calidad_vuelco": los límites de vuelco relevantes también van a una TABLA — una línea POR PARÁMETRO con el formato exacto "Parámetro | Límite | Unidad | Fuente" (ej: "DBO5 | 50 | mg/l | Resolución 336/03 ADA"), indicando en "Fuente" de qué normativa/documento salió CADA límite puntual (no inventes la fuente si no está clara en el contexto — poné el nombre de la normativa aplicable que sí figure ahí).\n- "intro_seleccion_tecnologia": por qué se eligió la tecnología/tren propuesto, en prosa breve.\n- "etapas_proceso": una línea por cada etapa del tren de tratamiento, en el orden del proceso — cada etapa son DOS líneas: la primera "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto de arriba), y la segunda una descripción breve de esa etapa (sin el "### ").\nUsá SOLO información realmente disponible en el contexto de arriba — si algo no se puede determinar, dejalo como string vacío "" en vez de inventar.`;
     const templateStep4Generar = await procesosPromptText('step4_generar', DEFAULT_TEMPLATE_STEP4_GENERAR);
     const prompt = procesosPromptFill(templateStep4Generar, { contexto, ofertasTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -11168,7 +11266,11 @@ async function procesosStep4SeccionChatSend(key) {
     if (!apiKey) throw new Error('API key no disponible.');
     const contexto = await procesosBuildContexto(4);
     const historialPrevio = (sec.chat||[]).slice(0,-1).map(m=>`${m.role==='user'?'Usuario':'Asistente'}: ${m.content}`).join('\n');
-    const formatoTxt = meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
+    const formatoTxt = meta.columnas
+      ? `tabla — una línea por fila, con el formato exacto "${meta.columnas.join(' | ')}" (sin encabezado, eso ya lo pone la plantilla)`
+      : meta.key === 'etapas_proceso'
+        ? 'una línea por cada etapa del proceso: esa línea tiene que empezar con "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto), y en la línea siguiente una descripción breve (sin el "### ")'
+        : meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : '';
