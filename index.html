@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8680,7 +8680,8 @@ function procesosStep2Html(p) {
     const corrientes = h.corrientesAsignadas || [];
     const badges = [
       ...corrientes.map(c => `<span class="badge" style="background:var(--surface);color:var(--text2);border:1px solid var(--border)">${esc(c)}</span>`),
-      h.grupo ? `<span class="badge" style="background:var(--blue-bg);color:var(--blue)">${h.disposicion === 'serie' ? '→ Serie' : '⇄ Paralelo'}</span>` : ''
+      h.grupo ? `<span class="badge" style="background:var(--blue-bg);color:var(--blue)">${h.disposicion === 'serie' ? '→ Serie' : '⇄ Paralelo'}</span>` : '',
+      h.tipo === 'auxiliar' ? `<span class="badge" style="background:var(--surface2);color:var(--text3);border:1px solid var(--border)">Auxiliar${h.etapaAsociada ? ' → '+esc(h.etapaAsociada) : ''}</span>` : ''
     ].filter(Boolean).join(' ');
     return `
     <div class="field-row" style="padding:8px 0">
@@ -9284,6 +9285,36 @@ function procesosStep2DuplicarHoja(nombreOrigen) {
   });
 }
 
+function procesosStep2SetTipoHoja(nombre, tipo) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  h.tipo = tipo;
+  if (tipo !== 'auxiliar') h.etapaAsociada = null;
+  dd.hojas[nombre] = h;
+  procesosSaveProyecto({ diseno_data: dd }, p).then(() => { if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel(); });
+}
+function procesosStep2SetEtapaAsociada(nombre, etapaAsociada) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({}, dd.hojas[nombre]);
+  h.etapaAsociada = etapaAsociada || null;
+  dd.hojas[nombre] = h;
+  procesosSaveProyecto({ diseno_data: dd }, p);
+}
+function procesosStep2ToggleCorriente(nombre, corriente) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({}, dd.hojas[nombre]);
+  const actuales = h.corrientesAsignadas || [];
+  h.corrientesAsignadas = actuales.includes(corriente) ? actuales.filter(c => c !== corriente) : actuales.concat([corriente]);
+  dd.hojas[nombre] = h;
+  procesosSaveProyecto({ diseno_data: dd }, p).then(() => { if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel(); });
+}
+
 function procesosStep2ToggleHoja(nombre, checked) {
   const p = procesosCurrentProyecto;
   const dd = Object.assign({}, p.diseno_data);
@@ -9460,6 +9491,11 @@ function procesosStep2RenderHojaPanel() {
     </div>`;
   };
 
+  const dd0 = p.diseno_data || {};
+  const otrasEtapas = (dd0.orden || []).filter(n => n !== nombre && dd0.hojas?.[n]?.tipo !== 'auxiliar');
+  const corrientesProyecto = (p.info_cliente?.corrientes || []).map(c => c.nombre).filter(Boolean);
+  const corrientesHoja = h.corrientesAsignadas || [];
+
   el.innerHTML = `
     <div class="card" style="margin-top:10px">
       <div style="display:flex;align-items:center;justify-content:space-between">
@@ -9470,6 +9506,25 @@ function procesosStep2RenderHojaPanel() {
       <div class="card" style="margin-bottom:10px;border-color:var(--red)">
         <p class="hint" style="color:var(--red)">⚠ Una hoja de la que toma datos se guardó de nuevo después que esta — puede estar desactualizada.</p>
         <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2GuardarHoja('${safe}')">↻ Actualizar y guardar</button>
+      </div>
+      ` : ''}
+      <label>Tipo de hoja</label>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-sm ${h.tipo!=='auxiliar'?'btn-primary':'btn-secondary'}" style="width:auto" onclick="procesosStep2SetTipoHoja('${safe}','etapa')">Etapa</button>
+        <button class="btn btn-sm ${h.tipo==='auxiliar'?'btn-primary':'btn-secondary'}" style="width:auto" onclick="procesosStep2SetTipoHoja('${safe}','auxiliar')">Cálculo auxiliar</button>
+      </div>
+      ${h.tipo === 'auxiliar' ? `
+      <label>Alimenta a la etapa</label>
+      <select onchange="procesosStep2SetEtapaAsociada('${safe}',this.value)" style="margin-bottom:4px">
+        <option value="">-- Elegir etapa --</option>
+        ${otrasEtapas.map(n => `<option value="${esc(n)}" ${h.etapaAsociada===n?'selected':''}>${esc(n)}</option>`).join('')}
+      </select>
+      <p class="hint" style="margin:0 0 10px">No aparece como una etapa propia en Paso 3 ni en la propuesta — sus valores se le pasan a la etapa elegida al sugerir sus equipos.</p>
+      ` : ''}
+      ${corrientesProyecto.length ? `
+      <label>Corriente(s) que la alimentan</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        ${corrientesProyecto.map(c => `<span class="badge" style="cursor:pointer;background:${corrientesHoja.includes(c)?'var(--blue-bg)':'var(--surface2)'};color:${corrientesHoja.includes(c)?'var(--blue)':'var(--text2)'};border:1px solid var(--border)" onclick="procesosStep2ToggleCorriente('${safe}','${c.replace(/'/g,"\\'")}')">${esc(c)}</span>`).join('')}
       </div>
       ` : ''}
       <label>Datos de la hoja (en el orden del Excel)</label>
@@ -9958,9 +10013,20 @@ async function procesosStep3GetEquiposBlocks(contextoTexto) {
   return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto, true);
 }
 
+// Hojas confirmadas que cuentan como una ETAPA propia (con su propia unidad
+// de equipos en Paso 3 y su propio ítem en la propuesta) — excluye las
+// marcadas como cálculo auxiliar (ej. "Difusores", que dimensiona la
+// aireación de otra etapa pero no es una etapa en sí misma).
 function procesosStep3EtapasConfirmadas(p) {
   const dd = p.diseno_data || {};
-  return (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada && dd.hojas[n]?.confirmada);
+  return (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada && dd.hojas[n]?.confirmada && dd.hojas[n]?.tipo !== 'auxiliar');
+}
+// Hojas auxiliares confirmadas asociadas a una etapa puntual — sus valores
+// calculados se le pasan a esa etapa al sugerir equipos, aunque no tengan
+// equipos propios.
+function procesosStep2AuxiliaresDe(p, nombreEtapa) {
+  const dd = p.diseno_data || {};
+  return (dd.orden || []).filter(n => dd.hojas?.[n]?.tipo === 'auxiliar' && dd.hojas[n]?.etapaAsociada === nombreEtapa && dd.hojas[n]?.confirmada);
 }
 
 // Resumen en texto de los equipos definidos, para usar como contexto del Paso 4.
@@ -10364,7 +10430,18 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
     if (!apiKey) throw new Error('API key no disponible.');
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
-    const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+    // Además de los valores propios, se suman los de cualquier hoja auxiliar
+    // asociada (ej. "Difusores" alimenta a "MBR") — no son una etapa propia,
+    // pero sus resultados sí importan para dimensionar los equipos de esta.
+    const auxiliares = procesosStep2AuxiliaresDe(p, nombreEtapa);
+    const valoresEtapa = [
+      Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n'),
+      ...auxiliares.map(nombreAux => {
+        const hAux = dd.hojas[nombreAux];
+        const vals = Object.entries(hAux.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+        return vals ? `  (cálculo auxiliar "${nombreAux}"):\n${vals}` : '';
+      })
+    ].filter(Boolean).join('\n');
     const referencias = await procesosGetResumenesReferencias();
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
     // Lista CERRADA: solo se puede elegir equipos configurados en Cfg
@@ -10533,7 +10610,15 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const historialPrevio = (ePrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
-    const valoresEtapa = Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+    const auxiliares = procesosStep2AuxiliaresDe(p, nombreEtapa);
+    const valoresEtapa = [
+      Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n'),
+      ...auxiliares.map(nombreAux => {
+        const hAux = dd.hojas[nombreAux];
+        const vals = Object.entries(hAux.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n');
+        return vals ? `  (cálculo auxiliar "${nombreAux}"):\n${vals}` : '';
+      })
+    ].filter(Boolean).join('\n');
     const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
     const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : '';
@@ -10637,7 +10722,13 @@ function procesosResumenDiseno(p) {
     const h = dd.hojas[nombre];
     const entries = Object.entries(h.valoresConEtiqueta || {});
     const vals = entries.map(([label, v]) => `  - ${label}: ${v}`).join('\n');
-    return `Unidad/etapa "${nombre}":\n${vals || '  (sin valores)'}`;
+    // Una hoja auxiliar (ej. "Difusores") NO es una etapa del proceso — se
+    // etiqueta distinto a propósito para que la IA no la liste como una más
+    // al redactar "Etapas de proceso" en la propuesta.
+    const titulo = h.tipo === 'auxiliar'
+      ? `Cálculo auxiliar "${nombre}"${h.etapaAsociada ? ' (asociado a la etapa "'+h.etapaAsociada+'", NO es una etapa en sí misma)' : ' (NO es una etapa en sí misma)'}`
+      : `Unidad/etapa "${nombre}"`;
+    return `${titulo}:\n${vals || '  (sin valores)'}`;
   }).join('\n\n');
   if (dd.cumplimiento && dd.cumplimiento.length) {
     ctx += '\n\nCumplimiento vs. límites de vuelco:\n' + dd.cumplimiento.map(r => `  - ${r.parametro}: ${r.valor_final}${r.unidad?' '+r.unidad:''} (límite ${r.limite}${r.unidad?' '+r.unidad:''}) — ${r.cumple?'cumple':'NO cumple'}`).join('\n');
