@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.16</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.17</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.16</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.17</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16465,7 +16465,7 @@ async function cotizHistorialSetCampo(id, campo, val) {
 async function cotizHistorialMarcarEntregada(id) {
   if (!confirm('¿Marcar como entregada? Esto descuenta definitivamente el stock reservado para este ítem — no se puede deshacer desde acá.')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?id=eq.${id}&select=catalogo_id,cantidad`, {headers:{Authorization:'Bearer '+session.token}});
+  const res = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?id=eq.${id}&select=catalogo_id,cantidad,cotizacion_id`, {headers:{Authorization:'Bearer '+session.token}});
   const row = res.ok ? (await res.json())[0] : null;
   if (!row) { alert('No se pudo leer esta fila del historial.'); return; }
   try {
@@ -16474,6 +16474,18 @@ async function cotizHistorialMarcarEntregada(id) {
       method:'PATCH', headers:{Authorization:'Bearer '+session.token},
       body: JSON.stringify({ entregado: true, entregado_at: new Date().toISOString() })
     });
+    // Si esta fila pertenece a una cotización (columna agregada para poder
+    // rastrear esto) y ya no le queda ningún ítem con stock pendiente de
+    // entrega, se le saca el "stock_reservado" — si no, el ⓘ de "Reserva"
+    // en el catálogo seguía mostrando esa cotización como si todavía
+    // tuviera algo reservado, aunque la cantidad ya se había descontado bien.
+    if (row.cotizacion_id) {
+      const resHermanas = await supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=entregado&cotizacion_id=eq.${row.cotizacion_id}&catalogo_id=not.is.null`, {headers:{Authorization:'Bearer '+session.token}});
+      const hermanas = resHermanas.ok ? await resHermanas.json() : [];
+      if (hermanas.length && hermanas.every(h => h.entregado)) {
+        await supaFetch(`/rest/v1/cotizaciones?id=eq.${row.cotizacion_id}`, { method:'PATCH', headers:{Authorization:'Bearer '+session.token}, body: JSON.stringify({ stock_reservado: false }) });
+      }
+    }
     cotizHistorialRender();
   } catch(e) { alert('No se pudo marcar como entregada: ' + e.message); }
 }
@@ -17567,6 +17579,7 @@ async function cotizCotizacionAplicarEstado(id, estado, motivo) {
       const moneda3 = row.moneda === 'Dólar' ? 'USD' : (row.moneda === 'Peso' ? 'ARS' : (row.moneda||'USD'));
       const rows = (row.items||[]).map(it => ({
         empresa: currentEmpresa, fecha: row.fecha, cliente: row.cliente, q_numero: row.q_numero || null,
+        cotizacion_id: id,
         vendedor_nombre: row.vendedor_nombre || null,
         marca: it.marca || null, modelo: it.modelo || null, catalogo_id: it.catalogo_id || null,
         descripcion: it.descripcion, cantidad: Number(it.cantidad)||1, precio_unitario: Number(it.precio_unitario)||0,
