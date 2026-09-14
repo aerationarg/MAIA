@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8653,8 +8653,14 @@ function procesosStep2Html(p) {
   }
 
   const nombresHojas = st.workbook.SheetNames;
-  const algunaSeleccionada = nombresHojas.some(n => hojasGuardadas[n]?.seleccionada);
-  const seleccionadas = nombresHojas.filter(n => hojasGuardadas[n]?.seleccionada);
+  // "seleccionadas" tiene que mirar TODAS las claves de dd.hojas, no solo las
+  // hojas reales del Excel — una instancia duplicada (ej. "Pozo industrial")
+  // vive como su propia clave en dd.hojas pero no aparece en
+  // workbook.SheetNames, y si acá solo mirábamos nombresHojas, "todas
+  // confirmadas" se calculaba mal (ignoraba instancias sin confirmar).
+  const todasLasClaves = Object.keys(hojasGuardadas);
+  const algunaSeleccionada = todasLasClaves.some(n => hojasGuardadas[n]?.seleccionada);
+  const seleccionadas = todasLasClaves.filter(n => hojasGuardadas[n]?.seleccionada);
   const todasConfirmadas = algunaSeleccionada && seleccionadas.every(n => hojasGuardadas[n]?.confirmada);
   const algunaDesactualizada = seleccionadas.some(n => procesosStep2HojaDesactualizada(n));
   const orden = dd.orden || [];
@@ -8670,23 +8676,29 @@ function procesosStep2Html(p) {
   const filaHoja = (nombre, opts) => {
     const h = hojasGuardadas[nombre] || {};
     const safe = nombre.replace(/'/g,"\\'");
-    const idx = nombresHojas.indexOf(nombre);
     const desactualizada = h.seleccionada && procesosStep2HojaDesactualizada(nombre);
+    const corrientes = h.corrientesAsignadas || [];
+    const badges = [
+      ...corrientes.map(c => `<span class="badge" style="background:var(--surface);color:var(--text2);border:1px solid var(--border)">${esc(c)}</span>`),
+      h.grupo ? `<span class="badge" style="background:var(--blue-bg);color:var(--blue)">${h.disposicion === 'serie' ? '→ Serie' : '⇄ Paralelo'}</span>` : ''
+    ].filter(Boolean).join(' ');
     return `
     <div class="field-row" style="padding:8px 0">
-      <div style="display:flex;align-items:center;gap:8px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${opts.reorder ? `
         <div class="reorder-btns">
           <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',-1)" ${opts.esPrimera?'disabled':''}>&#9650;</button>
           <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',1)" ${opts.esUltima?'disabled':''}>&#9660;</button>
         </div>` : ''}
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);flex:1">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);flex:1;min-width:160px">
           <input type="checkbox" ${h.seleccionada?'checked':''} onchange="procesosStep2ToggleHoja('${safe}',this.checked)" />
           <span>${opts.numero!=null?`<b>${opts.numero}.</b> `:''}<b>${esc(nombre)}</b>${h.motivo?' — '+esc(h.motivo):''}${h.confirmada?(desactualizada?' <span style="color:var(--red)" title="Una hoja de la que toma datos se actualizó después de guardar esta — revisala de nuevo">⚠ desactualizada</span>':' <span style="color:var(--green)">✓ definida</span>'):''}</span>
         </label>
+        ${badges}
         ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2AbrirHoja('${safe}')">${h.confirmada?'Editar':'Definir'} valores →</button>` : ''}
+        ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2DuplicarHoja('${safe}')" title="Crear otra unidad independiente con esta misma hoja de cálculo">⧉ Duplicar</button>` : ''}
       </div>
-      <div id="procesos-step2-panel-${idx}"></div>
+      <div id="${procesosStep2PanelId(nombre)}"></div>
     </div>`;
   };
 
@@ -8870,12 +8882,34 @@ function procesosStep2GetSharedHF() {
 // forma de llamada de siempre (getCellValue/setCellContents con {row,col}, el
 // "sheet" que le pasen se ignora y se usa el índice real de esta hoja), así el
 // resto del código no tiene que cambiar.
+// Una "hoja" del proyecto puede ser una hoja real del Excel (nombreHoja ===
+// nombre de sheet), o una INSTANCIA duplicada de una (ej. "Pozo industrial",
+// con hojaBase:"Pozo") — para esas todavía no existe una sheet propia en la
+// instancia compartida de HyperFormula, así que se crea acá mismo la primera
+// vez que se pide (addSheet + setSheetContent con la misma grilla/fórmulas de
+// la hoja base), y se le reaplican los valores ya guardados de ESA instancia.
 function procesosStep2GetHF(nombreHoja) {
   const st = procesosStep2State;
   if (st.hfInstances[nombreHoja]) return st.hfInstances[nombreHoja];
   const sharedHf = procesosStep2GetSharedHF();
-  const idx = st.sheetIndex[nombreHoja];
-  if (idx == null) return null;
+  let idx = st.sheetIndex[nombreHoja];
+  if (idx == null) {
+    const p = procesosCurrentProyecto;
+    const h = p.diseno_data?.hojas?.[nombreHoja];
+    const hojaBase = (h && h.hojaBase) || nombreHoja;
+    const modelBase = st.hojaModels[hojaBase] || (st.workbook?.Sheets?.[hojaBase] ? (st.hojaModels[hojaBase] = procesosStep2BuildModel(st.workbook.Sheets[hojaBase])) : null);
+    if (!modelBase) return null;
+    idx = sharedHf.addSheet(nombreHoja);
+    sharedHf.setSheetContent(idx, modelBase.grid);
+    st.sheetIndex[nombreHoja] = idx;
+    st.hojaModels[nombreHoja] = modelBase;
+    if (h && h.valores) {
+      Object.entries(h.valores).forEach(([cellRef, val]) => {
+        const cell = modelBase.cells.find(c => c.ref === cellRef);
+        if (cell) sharedHf.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[val]]);
+      });
+    }
+  }
   const wrapper = {
     getCellValue: addr => sharedHf.getCellValue({ sheet: idx, row: addr.row, col: addr.col }),
     setCellContents: (addr, data) => sharedHf.setCellContents({ sheet: idx, row: addr.row, col: addr.col }, data),
@@ -8909,7 +8943,10 @@ function procesosStep2GetValorFuente(fuente) {
     return (typeof val === 'number') ? val : null;
   }
   if (fuente.origen === 'hoja' && fuente.hoja && fuente.celda_origen) {
-    const hfOrigen = procesosStep2State.hfInstances[fuente.hoja];
+    // Vía procesosStep2GetHF (no lee hfInstances directo) para que, si la
+    // hoja de origen es una instancia duplicada que todavía no se tocó en
+    // esta sesión, se cree ahora en vez de devolver null en silencio.
+    const hfOrigen = procesosStep2GetHF(fuente.hoja);
     const modelOrigen = procesosStep2State.hojaModels[fuente.hoja];
     const cellOrigen = modelOrigen && modelOrigen.cells.find(c => c.ref === fuente.celda_origen);
     if (hfOrigen && cellOrigen) {
@@ -8984,9 +9021,14 @@ function procesosStep2PropagarCadena(hastaHoja) {
   const idxHasta = hastaHoja ? orden.indexOf(hastaHoja) : orden.length - 1;
   for (let i = 0; i <= idxHasta && i < orden.length; i++) {
     const nombre = orden[i];
-    if (!procesosStep2State.workbook.Sheets[nombre]) continue;
-    const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+    // procesosStep2GetHF resuelve tanto una hoja real del Excel como una
+    // instancia duplicada (crea su sheet en HyperFormula si hace falta,
+    // reusando la grilla de su hoja base) — antes esto se resolvía leyendo
+    // workbook.Sheets[nombre] directo, que para una instancia no existe y
+    // hacía que se saltee entera (sus mapeos nunca se aplicaban).
     const hf = procesosStep2GetHF(nombre);
+    const model = procesosStep2State.hojaModels[nombre];
+    if (!hf || !model) continue;
     (mapeos[nombre] || []).forEach(m => {
       const cell = model.cells.find(c => c.ref === m.celda);
       if (!cell) return;
@@ -9034,7 +9076,11 @@ async function procesosStep2SugerirMapeos() {
       return `Corriente "${c.nombre}":\n${vals || '  (sin parámetros)'}`;
     }).join('\n\n') || '(sin corrientes definidas en el Paso 1)';
     const descHojas = orden.map(nombre => {
-      const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+      // procesosStep2GetHF (no workbook.Sheets[nombre] directo) para que una
+      // instancia duplicada resuelva su modelo desde la hoja base.
+      procesosStep2GetHF(nombre);
+      const model = procesosStep2State.hojaModels[nombre];
+      if (!model) return `Hoja "${nombre}": (no se pudo leer)`;
       const editables = model.cells.filter(c => !c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
       const resultados = model.cells.filter(c => c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} [fórmula: ${model.grid[c.row][c.col]}]`).join('; ');
       return `Hoja "${nombre}":\n  Datos editables: ${editables || '(ninguno)'}\n  Resultados/calculados (con su fórmula): ${resultados || '(ninguno)'}`;
@@ -9143,7 +9189,7 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
           try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
           catch (_e) { throw new Error('La respuesta de la IA quedó incompleta (probablemente por tener muchas hojas) — probá reintentar.'); }
           (parsed.hojas || []).forEach(h => {
-            if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false };
+            if (!dd.hojas[h.nombre]) dd.hojas[h.nombre] = { seleccionada: !!h.incluir, motivo: h.motivo || '', valores: {}, chat: [], confirmada: false, hojaBase: h.nombre };
           });
           if (Array.isArray(parsed.orden) && parsed.orden.length) {
             dd.orden = parsed.orden.filter(n => dd.hojas[n] && dd.hojas[n].seleccionada);
@@ -9155,7 +9201,7 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
       } else {
         st.sugerenciaError = 'No hay API key disponible — recargá la página.';
       }
-      workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }; });
+      workbook.SheetNames.forEach(n => { if (!dd.hojas[n]) dd.hojas[n] = { seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false, hojaBase: n }; });
       if (!dd.orden) dd.orden = workbook.SheetNames.filter(n => dd.hojas[n]?.seleccionada);
       await procesosSaveProyecto({ diseno_data: dd }, p);
     }
@@ -9178,11 +9224,71 @@ function procesosStep2SugerirMapeosDebounced() {
   _procesosMapeoTimeout = setTimeout(() => { procesosStep2SugerirMapeos(); }, 1200);
 }
 
+// Id del slot del DOM para el panel de una hoja — a partir del NOMBRE, no de
+// una posición en workbook.SheetNames (una instancia duplicada no tiene
+// posición ahí). Sanitizado porque el nombre puede tener espacios/acentos.
+function procesosStep2PanelId(nombre) {
+  return 'procesos-step2-panel-' + nombre.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+// Crea una nueva unidad independiente a partir de otra ya cargada, reusando
+// la misma hoja de cálculo (fórmulas/grilla) como "hoja base" pero con sus
+// propios valores, confirmación y equipos — para el caso de necesitar más de
+// una unidad de un mismo tipo (ej. "Pozo cloacal" + "Pozo industrial", o dos
+// líneas de MBR en paralelo).
+function procesosStep2DuplicarHoja(nombreOrigen) {
+  const p = procesosCurrentProyecto;
+  const dd = p.diseno_data || {};
+  const origen = dd.hojas?.[nombreOrigen];
+  if (!origen) return;
+  const hojaBase = origen.hojaBase || nombreOrigen;
+
+  const nombreSugerido = prompt(`Nombre de la nueva unidad (copia de "${nombreOrigen}"):`, nombreOrigen + ' 2');
+  if (!nombreSugerido || !nombreSugerido.trim()) return;
+  const nuevoNombre = nombreSugerido.trim();
+  if (dd.hojas?.[nuevoNombre]) { alert(`Ya existe una unidad llamada "${nuevoNombre}".`); return; }
+
+  const corrientesProyecto = (p.info_cliente?.corrientes || []).map(c => c.nombre).filter(Boolean);
+  let corrientesNuevas = origen.corrientesAsignadas || [];
+  if (corrientesProyecto.length) {
+    const resp = prompt(`¿Qué corriente alimenta a "${nuevoNombre}"? Opciones: ${corrientesProyecto.join(', ')}. Dejá vacío si no aplica o son varias.`, corrientesNuevas[0] || '');
+    if (resp && resp.trim()) {
+      const match = corrientesProyecto.find(c => c.toLowerCase() === resp.trim().toLowerCase());
+      corrientesNuevas = match ? [match] : [resp.trim()];
+    } else if (resp !== null) {
+      corrientesNuevas = [];
+    }
+  }
+
+  const respDisp = (prompt(`¿Relación con "${nombreOrigen}"? Escribí "paralelo", "serie", o dejá vacío si son independientes (ej. corrientes distintas que no reparten caudal entre sí).`, 'paralelo') || '').trim().toLowerCase();
+  const disposicion = respDisp.startsWith('para') ? 'paralelo' : respDisp.startsWith('ser') ? 'serie' : null;
+  const grupo = disposicion ? (origen.grupo || ('grupo_' + procesosNuevoId())) : null;
+
+  const ddN = Object.assign({}, dd);
+  ddN.hojas = Object.assign({}, dd.hojas);
+  if (disposicion && !origen.grupo) {
+    ddN.hojas[nombreOrigen] = Object.assign({}, origen, { grupo, disposicion: origen.disposicion || disposicion });
+  }
+  ddN.hojas[nuevoNombre] = {
+    seleccionada: true, motivo: '', valores: {}, chat: [], confirmada: false,
+    hojaBase, tipo: origen.tipo || 'etapa', etapaAsociada: origen.etapaAsociada || null,
+    corrientesAsignadas: corrientesNuevas, disposicion, grupo
+  };
+  const orden = (dd.orden || []).slice();
+  const idxOrigen = orden.indexOf(nombreOrigen);
+  orden.splice(idxOrigen >= 0 ? idxOrigen + 1 : orden.length, 0, nuevoNombre);
+  ddN.orden = orden;
+
+  procesosSaveProyecto({ diseno_data: ddN }, p).then(() => {
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
+  });
+}
+
 function procesosStep2ToggleHoja(nombre, checked) {
   const p = procesosCurrentProyecto;
   const dd = Object.assign({}, p.diseno_data);
   dd.hojas = Object.assign({}, dd.hojas);
-  const h = Object.assign({ seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  const h = Object.assign({ seleccionada: false, motivo: '', valores: {}, chat: [], confirmada: false, hojaBase: nombre }, dd.hojas[nombre]);
   h.seleccionada = checked;
   dd.hojas[nombre] = h;
   let orden = (dd.orden || []).slice();
@@ -9298,17 +9404,27 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
 
 function procesosStep2RenderHojaPanel() {
   const nombre = procesosStep2State.hojaAbierta;
-  const idxAbierta = nombre ? procesosStep2State.workbook?.SheetNames?.indexOf(nombre) : -1;
+  // El id del slot en el DOM se arma a partir del NOMBRE (no de la posición
+  // en workbook.SheetNames) — una instancia duplicada (ej. "Pozo industrial")
+  // no es una hoja real del Excel, así que buscarla en SheetNames siempre
+  // daba -1 y hacía que dos instancias distintas colisionaran en el mismo
+  // slot "procesos-step2-panel--1".
+  const panelId = nombre ? procesosStep2PanelId(nombre) : null;
   // Limpia el slot de cualquier otra hoja que haya quedado con contenido de una
   // apertura anterior (cada hoja tiene el suyo propio, ahí mismo en la lista).
   document.querySelectorAll('[id^="procesos-step2-panel-"]').forEach(elx => {
-    if (elx.id !== `procesos-step2-panel-${idxAbierta}`) elx.innerHTML = '';
+    if (elx.id !== panelId) elx.innerHTML = '';
   });
-  if (!nombre || idxAbierta < 0) return;
-  const el = document.getElementById(`procesos-step2-panel-${idxAbierta}`);
+  if (!nombre || !panelId) return;
+  const el = document.getElementById(panelId);
   if (!el) return;
-  const model = procesosStep2State.hojaModels[nombre] || (procesosStep2State.hojaModels[nombre] = procesosStep2BuildModel(procesosStep2State.workbook.Sheets[nombre]));
+  // procesosStep2GetHF ya deja hojaModels[nombre] resuelto (para una hoja
+  // real del Excel, o para una instancia duplicada reusando la grilla de su
+  // hoja base) — llamarlo primero evita volver a intentar construir el
+  // modelo desde workbook.Sheets[nombre], que para una instancia no existe.
   const hf = procesosStep2GetHF(nombre);
+  const model = procesosStep2State.hojaModels[nombre];
+  if (!hf || !model) return;
   const p = procesosCurrentProyecto;
   const h = (p.diseno_data?.hojas?.[nombre]) || { valores: {}, chat: [] };
   const safe = nombre.replace(/'/g,"\\'");
@@ -9528,11 +9644,12 @@ function procesosStep2DescartarLeccion() {
 }
 
 async function procesosStep2SetValor(nombre, cellRef, val) {
+  const hf = procesosStep2GetHF(nombre);
   const model = procesosStep2State.hojaModels[nombre];
+  if (!hf || !model) return;
   const cell = model.cells.find(c => c.ref === cellRef);
   if (!cell) return;
   const numVal = val === '' ? '' : (isNaN(Number(val)) ? val : Number(val));
-  const hf = procesosStep2GetHF(nombre);
   hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[numVal]]);
 
   const p = procesosCurrentProyecto;
