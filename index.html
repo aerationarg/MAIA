@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.17</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.18</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.17</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.18</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4380,7 +4380,7 @@ async function renderHallazgos() {
 }
 
 // ── Asistente MAIA (chat flotante, con búsqueda en SharePoint) ──
-const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, y también explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿dónde está la plantilla de rendición?" o "¿cómo cargo un hallazgo?".';
+const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, y también explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿dónde está la plantilla de rendición?", "¿qué dice la lista de Hallazgos sobre tal proyecto?" o "¿cómo cargo un hallazgo?".';
 let _maiaChatMessages = [];
 let _maiaChatLoading = false;
 let _maiaChatSourceCache = null;
@@ -4400,6 +4400,28 @@ const MAIA_CHAT_TOOLS = [
     name: 'leer_archivo_sharepoint',
     description: 'Descarga y lee el CONTENIDO de un archivo de SharePoint (Word, Excel, PowerPoint, PDF o imagen) para analizarlo y responder preguntas sobre lo que dice. Usala SOLO después de encontrar el archivo con buscar_sharepoint y de que el usuario haya confirmado cuál(es) leer — nunca la llames sin esa confirmación explícita.',
     input_schema: { type:'object', properties: { url: { type:'string', description:'El link exacto del archivo, tal cual vino en el resultado de buscar_sharepoint' } }, required:['url'] }
+  },
+  {
+    name: 'buscar_sitios_sharepoint',
+    description: 'Busca sitios de SharePoint de Aeration por nombre. Es el primer paso para después listar o leer Listas (no archivos) de ese sitio — el resultado incluye un "id" de sitio que hace falta pasarle a buscar_listas_sharepoint y leer_lista_sharepoint.',
+    input_schema: { type:'object', properties: { query: { type:'string', description:'Texto a buscar en el nombre del sitio (podés usar "*" para traer todos)' } }, required:['query'] }
+  },
+  {
+    name: 'buscar_listas_sharepoint',
+    description: 'Lista las Listas de SharePoint (listas/tablas de datos, no archivos) que hay en un sitio puntual. Necesita el "id" de sitio que devolvió buscar_sitios_sharepoint.',
+    input_schema: { type:'object', properties: {
+      site_id: { type:'string', description:'El id exacto del sitio, tal cual vino en el resultado de buscar_sitios_sharepoint' },
+      query: { type:'string', description:'Texto para filtrar por nombre de lista (opcional)' }
+    }, required:['site_id'] }
+  },
+  {
+    name: 'leer_lista_sharepoint',
+    description: 'Lee los ítems (filas) de una Lista de SharePoint puntual, con nombres de columna legibles. Necesita el "id" de sitio y el "id" de lista, tal cual vinieron de buscar_sitios_sharepoint y buscar_listas_sharepoint.',
+    input_schema: { type:'object', properties: {
+      site_id: { type:'string', description:'El id exacto del sitio' },
+      list_id: { type:'string', description:'El id exacto de la lista' },
+      filtro: { type:'string', description:'Texto para quedarte solo con los ítems que lo contengan en algún campo (opcional)' }
+    }, required:['site_id','list_id'] }
   }
 ];
 
@@ -4551,6 +4573,85 @@ async function maiaChatBuscarSharePoint(query) {
   }).join('\n');
 }
 
+async function maiaChatBuscarSitios(query) {
+  const token = await getMsToken();
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/sites?search=${encodeURIComponent(query || '*')}&$select=id,displayName,name,webUrl`, { headers: { Authorization: 'Bearer '+token } });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al buscar sitios de SharePoint.'); }
+  const data = await resp.json();
+  const sites = (data.value||[]).filter(s => s.displayName && s.name !== 'root');
+  if (!sites.length) return 'No se encontraron sitios para "'+query+'".';
+  return sites.map((s,i) => `${i+1}. ${s.displayName} — id: ${s.id} — ${s.webUrl}`).join('\n');
+}
+
+async function maiaChatBuscarListas(siteId, query) {
+  if (!siteId) throw new Error('Falta el id de sitio (usá buscar_sitios_sharepoint primero).');
+  const token = await getMsToken();
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists?$select=id,displayName&$top=200`, { headers: { Authorization: 'Bearer '+token } });
+  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al listar las listas de ese sitio.'); }
+  const data = await resp.json();
+  let listas = (data.value||[]).filter(l => l.displayName);
+  if (query && query.trim()) {
+    const q = query.trim().toLowerCase();
+    listas = listas.filter(l => l.displayName.toLowerCase().includes(q));
+  }
+  if (!listas.length) return 'No se encontraron listas' + (query ? ' que coincidan con "'+query+'"' : '') + ' en ese sitio.';
+  return listas.map((l,i) => `${i+1}. ${l.displayName} — id: ${l.id}`).join('\n');
+}
+
+// Nombres de campo "ruidosos" que SharePoint agrega a todos los ítems y que
+// no aportan nada para leer el contenido de la lista (metadata interna,
+// distinta de las columnas reales que definió quien armó la lista).
+const MAIA_CHAT_LISTA_CAMPOS_RUIDO = new Set(['ContentType','Attachments','Edit','LinkTitleNoMenu','LinkTitle','ItemChildCount','FolderChildCount','AppAuthor','AppEditor','_ComplianceFlags','_ComplianceTag','_ComplianceTagWrittenTime','_ComplianceTagUserId','_CommentCount','_LikeCount']);
+function maiaChatListaValorTexto(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.map(maiaChatListaValorTexto).filter(Boolean).join(', ');
+  if (typeof v === 'object') return v.LookupValue || v.Email || v.DisplayName || JSON.stringify(v);
+  return String(v);
+}
+async function maiaChatLeerLista(siteId, listId, filtro) {
+  if (!siteId || !listId) throw new Error('Falta el id de sitio y/o de lista (usá buscar_sitios_sharepoint y buscar_listas_sharepoint primero).');
+  const token = await getMsToken();
+  // Nombre interno → nombre visible de cada columna (ej. "Lecci_x00f3_nAprendida" → "Lección Aprendida"),
+  // así el resultado que lee la IA usa los nombres que el usuario reconoce.
+  const colsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/columns?$select=name,displayName&$filter=hidden eq false&$top=200`, { headers: { Authorization: 'Bearer '+token } });
+  const colsData = colsResp.ok ? await colsResp.json() : { value: [] };
+  const nombreVisible = {};
+  (colsData.value||[]).forEach(c => { if (c.name && c.displayName) nombreVisible[c.name] = c.displayName; });
+
+  let url = `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items?$expand=fields&$top=100`;
+  const items = [];
+  let paginas = 0;
+  while (url && paginas < 5) {
+    const resp = await fetch(url, { headers: { Authorization: 'Bearer '+token } });
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'Error al leer la lista.'); }
+    const data = await resp.json();
+    items.push(...(data.value||[]));
+    url = data['@odata.nextLink'] || null;
+    paginas++;
+  }
+  if (!items.length) return 'Esa lista está vacía.';
+
+  const filas = items.map(item => {
+    const f = item.fields || {};
+    const partes = Object.keys(f)
+      .filter(k => !k.startsWith('_') && !k.startsWith('@') && k !== 'id' && !MAIA_CHAT_LISTA_CAMPOS_RUIDO.has(k))
+      .map(k => `${nombreVisible[k] || k}: ${maiaChatListaValorTexto(f[k])}`)
+      .filter(p => !/:\s*$/.test(p));
+    return partes.join(' | ');
+  }).filter(Boolean);
+
+  let filtradas = filas;
+  if (filtro && filtro.trim()) {
+    const q = filtro.trim().toLowerCase();
+    filtradas = filas.filter(f => f.toLowerCase().includes(q));
+    if (!filtradas.length) return `Ningún ítem de esta lista (de ${filas.length} en total) contiene "${filtro}".`;
+  }
+  const LIMITE = 40;
+  const mostrar = filtradas.slice(0, LIMITE);
+  const nota = filtradas.length > LIMITE ? `\n\n(Mostrando los primeros ${LIMITE} de ${filtradas.length} ítems — pedile al usuario que afine la búsqueda si hace falta ver el resto.)` : '';
+  return mostrar.map((f,i) => `${i+1}. ${f}`).join('\n') + nota;
+}
+
 // Lee el propio archivo fuente de MAIA (el mismo index.html servido) para que el asistente
 // pueda explicar el funcionamiento real de la app en vez de depender de un manual aparte que
 // hay que ir actualizando a mano. Se corta por las secciones marcadas con comentarios
@@ -4674,7 +4775,7 @@ async function maiaChatCallClaude(messages) {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer.',
+      system: 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer. Si te preguntan por datos que viven en una LISTA de SharePoint (un registro, un listado, una tabla de seguimiento — no un archivo), encadená estas tres herramientas: 1) buscar_sitios_sharepoint para encontrar el sitio (te da un "id" de sitio); 2) buscar_listas_sharepoint con ese id para encontrar la lista correcta (te da un "id" de lista); 3) leer_lista_sharepoint con ambos ids para traer los ítems — pasale "filtro" con lo que el usuario esté buscando para no traer la lista entera de una. Copiá los ids EXACTOS tal cual vinieron en el resultado anterior, nunca los inventes ni los abrevies. Si el usuario ya te dio el nombre exacto del sitio y la lista, igual tenés que resolverlos con estas herramientas antes de leer_lista_sharepoint — no asumas los ids.',
       tools: MAIA_CHAT_TOOLS,
       messages: maiaChatTrimForApi(messages, 8)
     })
@@ -4695,7 +4796,8 @@ async function maiaChatSend() {
   let hintEl = null;
   try {
     let rounds = 0;
-    while (rounds < 4) {
+    const MAIA_CHAT_MAX_ROUNDS = 6; // la cadena sitio→lista→ítems de una lista de SharePoint necesita más rondas que la búsqueda de archivos
+    while (rounds < MAIA_CHAT_MAX_ROUNDS) {
       rounds++;
       const data = await maiaChatCallClaude(_maiaChatMessages);
       _maiaChatMessages.push({ role:'assistant', content: data.content });
@@ -4710,7 +4812,8 @@ async function maiaChatSend() {
         const usaArchivo = toolUses.some(t => t.name === 'leer_archivo_sharepoint');
         const usaCodigo = toolUses.some(t => t.name === 'leer_codigo_maia');
         const usaSp = toolUses.some(t => t.name === 'buscar_sharepoint');
-        const label = usaArchivo ? '📄 Leyendo el archivo...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : '🔎 Buscando en SharePoint...';
+        const usaListas = toolUses.some(t => ['buscar_sitios_sharepoint','buscar_listas_sharepoint','leer_lista_sharepoint'].includes(t.name));
+        const label = usaArchivo ? '📄 Leyendo el archivo...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : usaListas ? '📋 Buscando en listas de SharePoint...' : '🔎 Buscando en SharePoint...';
         hintEl = maiaChatRenderMsg('system-hint', label);
       }
       const toolResults = [];
@@ -4723,6 +4826,12 @@ async function maiaChatSend() {
             const file = await maiaChatLeerArchivo(tu.input?.url || '');
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: `Archivo "${file.name}" descargado. Se adjunta a continuación para analizarlo.` });
             extraBlocks.push(file.block);
+          } else if (tu.name === 'buscar_sitios_sharepoint') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarSitios(tu.input?.query || '') });
+          } else if (tu.name === 'buscar_listas_sharepoint') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarListas(tu.input?.site_id || '', tu.input?.query || '') });
+          } else if (tu.name === 'leer_lista_sharepoint') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatLeerLista(tu.input?.site_id || '', tu.input?.list_id || '', tu.input?.filtro || '') });
           } else {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarSharePoint(tu.input?.query || '') });
           }
@@ -4731,7 +4840,7 @@ async function maiaChatSend() {
         }
       }
       _maiaChatMessages.push({ role:'user', content: [...toolResults, ...extraBlocks] });
-      if (rounds >= 4) {
+      if (rounds >= MAIA_CHAT_MAX_ROUNDS) {
         if (hintEl) hintEl.remove();
         maiaChatRenderMsg('assistant', 'No pude terminar de resolver la búsqueda — probá reformular la pregunta.');
       }
