@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.34</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.35</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.34</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.35</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16614,8 +16614,19 @@ async function clientesSucursalEliminar(id) {
 // Cfg Imputación > Excel de Clientes) — como no sabemos de antemano en qué
 // columna está cada dato, se muestra una vista previa y el usuario confirma
 // (una sola vez; después queda recordado) qué columna es cada cosa.
-// Solo CREA clientes nuevos (excel_id que todavía no existe en MAIA): a los
-// que ya existen no los toca para nada, ni el nombre.
+// Solo CREA clientes nuevos: a los que ya existen no los toca para nada, ni
+// el nombre. "Nuevo" se decide comparando el nombre de empresa normalizado
+// (sin acentos/mayúsculas/puntuación) contra los que ya hay en MAIA — el ID
+// del Excel no sirve para esto porque no coincide con el excel_id guardado
+// en varios clientes (quedaron desincronizados de una carga vieja).
+function clientesNormalizarNombre(s) {
+  return String(s ?? '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[.,]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 let _clientesImportPreview = null;
 async function clientesImportarAbrir() {
   const wrap = document.getElementById('clientes-import-wrap');
@@ -16634,21 +16645,27 @@ async function clientesImportarAbrir() {
     const dataRows = rows.slice(1).filter(r => r.some(c => c != null && String(c).trim() !== ''));
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const resExist = await supaFetch('/rest/v1/clientes?select=excel_id&excel_id=not.is.null', {headers:{Authorization:'Bearer '+session.token}});
-    const existentes = resExist.ok ? await resExist.json() : [];
-    const idsExistentes = new Set(existentes.map(c => String(c.excel_id)));
+    let nombresExistentes = [];
+    let offset = 0;
+    while (true) {
+      const resExist = await supaFetch(`/rest/v1/clientes?select=nombre_empresa&order=nombre_empresa&limit=1000&offset=${offset}`, {headers:{Authorization:'Bearer '+session.token}});
+      const pagina = resExist.ok ? await resExist.json() : [];
+      nombresExistentes = nombresExistentes.concat(pagina);
+      if (pagina.length < 1000) break;
+      offset += 1000;
+    }
+    const nombresNormExistentes = new Set(nombresExistentes.map(c => clientesNormalizarNombre(c.nombre_empresa)));
 
     const savedMapRaw = await supaConfigGet('clientes_excel_mapping');
     const savedMap = savedMapRaw ? JSON.parse(savedMapRaw) : {};
     const adivinar = patrones => { const i = headers.findIndex(h => patrones.some(p => h.toLowerCase().includes(p))); return i >= 0 ? i : 0; };
-    const idGuess = savedMap.idCol ?? adivinar(['id']);
     const nombreGuess = savedMap.nombreCol ?? (headers.length > 2 ? 2 : adivinar(['cliente','empresa','nombre']));
 
-    _clientesImportPreview = { headers, rows: dataRows, idsExistentes };
+    _clientesImportPreview = { headers, rows: dataRows, nombresNormExistentes };
     el.innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-        <div><label style="font-size:12px">Columna ID</label><select id="clientes-import-col-id" onchange="clientesImportarActualizarPreview()">${headers.map((h,i) => `<option value="${i}" ${i===idGuess?'selected':''}>${String.fromCharCode(65+i)} — ${esc(h||'(sin encabezado)')}</option>`).join('')}</select></div>
-        <div><label style="font-size:12px">Columna Nombre de empresa</label><select id="clientes-import-col-nombre" onchange="clientesImportarActualizarPreview()">${headers.map((h,i) => `<option value="${i}" ${i===nombreGuess?'selected':''}>${String.fromCharCode(65+i)} — ${esc(h||'(sin encabezado)')}</option>`).join('')}</select></div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:12px">Columna Nombre de empresa</label>
+        <select id="clientes-import-col-nombre" onchange="clientesImportarActualizarPreview()">${headers.map((h,i) => `<option value="${i}" ${i===nombreGuess?'selected':''}>${String.fromCharCode(65+i)} — ${esc(h||'(sin encabezado)')}</option>`).join('')}</select>
       </div>
       <div id="clientes-import-preview"></div>
       <button class="btn btn-secondary" onclick="clientesImportarCerrar()">Cancelar</button>
@@ -16660,18 +16677,17 @@ async function clientesImportarAbrir() {
   }
 }
 function clientesImportarCalcularNuevos() {
-  const idCol = Number(document.getElementById('clientes-import-col-id').value);
   const nombreCol = Number(document.getElementById('clientes-import-col-nombre').value);
-  const { rows, idsExistentes } = _clientesImportPreview;
+  const { rows, nombresNormExistentes } = _clientesImportPreview;
   const vistos = new Set();
   const nuevos = [];
   for (const r of rows) {
-    const excel_id = String(r[idCol] ?? '').trim();
     const nombre_empresa = String(r[nombreCol] ?? '').trim();
-    if (!excel_id || !nombre_empresa) continue;
-    if (idsExistentes.has(excel_id) || vistos.has(excel_id)) continue;
-    vistos.add(excel_id);
-    nuevos.push({ excel_id, nombre_empresa });
+    if (!nombre_empresa) continue;
+    const n = clientesNormalizarNombre(nombre_empresa);
+    if (nombresNormExistentes.has(n) || vistos.has(n)) continue;
+    vistos.add(n);
+    nuevos.push({ nombre_empresa });
   }
   return nuevos;
 }
@@ -16680,15 +16696,15 @@ function clientesImportarActualizarPreview() {
   if (!el || !_clientesImportPreview) return;
   const nuevos = clientesImportarCalcularNuevos();
   if (!nuevos.length) {
-    el.innerHTML = `<p class="hint" style="margin:8px 0">No hay clientes nuevos — todos los excel_id del Excel ya existen en MAIA.</p>`;
+    el.innerHTML = `<p class="hint" style="margin:8px 0">No hay clientes nuevos — todos los nombres del Excel ya existen en MAIA.</p>`;
     return;
   }
   el.innerHTML = `
-    <p class="hint" style="margin:8px 0">${nuevos.length} cliente${nuevos.length===1?'':'s'} nuevo${nuevos.length===1?'':'s'} (no está${nuevos.length===1?'':'n'} en MAIA todavía). Los que ya existen no se tocan.</p>
+    <p class="hint" style="margin:8px 0">${nuevos.length} cliente${nuevos.length===1?'':'s'} nuevo${nuevos.length===1?'':'s'} (no está${nuevos.length===1?'':'n'} en MAIA todavía, comparando por nombre). Los que ya existen no se tocan.</p>
     <div style="overflow-x:auto;max-height:200px;margin-bottom:10px">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <tr><th style="text-align:left;padding:4px;border-bottom:1px solid var(--border)">ID</th><th style="text-align:left;padding:4px;border-bottom:1px solid var(--border)">Nombre de empresa</th></tr>
-        ${nuevos.map(f => `<tr><td style="padding:4px;border-bottom:1px solid var(--border)">${esc(f.excel_id)}</td><td style="padding:4px;border-bottom:1px solid var(--border)">${esc(f.nombre_empresa)}</td></tr>`).join('')}
+        <tr><th style="text-align:left;padding:4px;border-bottom:1px solid var(--border)">Nombre de empresa</th></tr>
+        ${nuevos.map(f => `<tr><td style="padding:4px;border-bottom:1px solid var(--border)">${esc(f.nombre_empresa)}</td></tr>`).join('')}
       </table>
     </div>
     <button class="btn btn-primary" onclick="clientesImportarConfirmar()">Crear ${nuevos.length} cliente${nuevos.length===1?'':'s'} nuevo${nuevos.length===1?'':'s'}</button>
@@ -16704,11 +16720,10 @@ function clientesImportarCerrar() {
 async function clientesImportarConfirmar() {
   if (!_clientesImportPreview) return;
   const statusId = 'clientes-import-status';
-  const idCol = Number(document.getElementById('clientes-import-col-id').value);
   const nombreCol = Number(document.getElementById('clientes-import-col-nombre').value);
   showMsg(statusId, 'loading', 'Creando...');
   try {
-    await supaConfigSet('clientes_excel_mapping', JSON.stringify({ idCol, nombreCol }));
+    await supaConfigSet('clientes_excel_mapping', JSON.stringify({ nombreCol }));
     const nuevos = clientesImportarCalcularNuevos();
     if (!nuevos.length) throw new Error('No hay clientes nuevos para crear.');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
