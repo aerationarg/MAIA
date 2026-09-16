@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.32</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.32</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -702,7 +702,9 @@
           <input id="clientes-buscar" placeholder="Buscar por empresa o rubro..." style="flex:1;min-width:180px" oninput="clientesBuscarDebounced()" />
           <button class="btn btn-primary" onclick="clientesAdd()">+ Nuevo cliente</button>
           <button class="btn btn-secondary" onclick="clientesImportarAbrir()">Importar desde Excel</button>
+          <button class="btn btn-secondary" onclick="clientesExportarExcel()">Exportar a Excel</button>
         </div>
+        <div id="clientes-export-status"></div>
         <div id="clientes-import-wrap" style="display:none;margin-bottom:12px">
           <div class="card" id="clientes-import-body"></div>
         </div>
@@ -16351,6 +16353,60 @@ async function clientesGetProfiles() {
   return _clientesProfilesCache;
 }
 
+// Trae TODOS los clientes (paginando de a 1000, límite por defecto de
+// PostgREST) junto con sus contactos, para el export a Excel — no depende
+// de lo que haya cargado _clientesCache (que puede estar filtrado por el
+// buscador o recortado).
+async function clientesFetchTodosConContactos() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  let todos = [];
+  let offset = 0;
+  const PAGINA = 1000;
+  while (true) {
+    const res = await supaFetch(`/rest/v1/clientes?select=*,clientes_contactos(*)&order=nombre_empresa&limit=${PAGINA}&offset=${offset}`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) throw new Error('No se pudo traer la lista de clientes.');
+    const rows = await res.json();
+    todos = todos.concat(rows);
+    if (rows.length < PAGINA) break;
+    offset += PAGINA;
+  }
+  return todos;
+}
+async function clientesExportarExcel() {
+  const statusId = 'clientes-export-status';
+  showMsg(statusId, 'loading', 'Generando Excel...');
+  try {
+    const [clientes, profiles] = await Promise.all([clientesFetchTodosConContactos(), clientesGetProfiles()]);
+    const profileById = {};
+    profiles.forEach(p => { profileById[p.id] = p.nombre || p.email; });
+
+    const hojaClientes = [
+      ['Nombre de la empresa', 'Rubro', 'Tamaño', 'Descripción', 'Responsable', 'Cantidad de contactos'],
+    ];
+    const hojaContactos = [
+      ['Empresa', 'Nombre', 'Apellido', 'Cargo', 'E-mail', 'Celular'],
+    ];
+    clientes.forEach(c => {
+      const contactos = c.clientes_contactos || [];
+      const responsable = c.responsable_user_id ? (profileById[c.responsable_user_id] || '') : (c.excel_responsable_valor || '');
+      hojaClientes.push([c.nombre_empresa || '', c.rubro || '', c.tamano || '', c.descripcion || '', responsable, contactos.length]);
+      contactos.forEach(ct => {
+        hojaContactos.push([c.nombre_empresa || '', ct.nombre || '', ct.apellido || '', ct.cargo || '', ct.email || '', ct.celular || '']);
+      });
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet(hojaClientes);
+    const ws2 = XLSX.utils.aoa_to_sheet(hojaContactos);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Clientes');
+    XLSX.utils.book_append_sheet(wb, ws2, 'Contactos');
+    XLSX.writeFile(wb, `Clientes MAIA - ${new Date().toISOString().slice(0,10)}.xlsx`);
+    showMsg(statusId, 'success', `✓ Exportados ${clientes.length} clientes.`);
+    setTimeout(() => { const el = document.getElementById(statusId); if (el) el.style.display = 'none'; }, 3000);
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ No se pudo exportar: ' + e.message);
+  }
+}
 async function clientesRender() {
   const el = document.getElementById('clientes-list');
   if (!el) return;
