@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.23</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.24</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.23</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.24</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16324,10 +16324,11 @@ async function clientesRender() {
     // Lugares de entrega: consulta aparte (no embebida) — así, si la tabla
     // todavía no existe (falta correr el SQL), no se rompe el resto de la
     // lista de clientes, solo se queda sin lugares cargados.
-    const [res, profiles, resLugares] = await Promise.all([
+    const [res, profiles, resLugares, resSucursales] = await Promise.all([
       supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
       clientesGetProfiles(),
       supaFetch('/rest/v1/clientes_lugares_entrega?select=*', {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null),
+      supaFetch('/rest/v1/clientes_sucursales?select=*', {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null),
     ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar la lista de clientes.</p>'; return; }
@@ -16335,7 +16336,11 @@ async function clientesRender() {
     if (resLugares && resLugares.ok) {
       (await resLugares.json()).forEach(l => { (lugaresPorCliente[l.cliente_id] = lugaresPorCliente[l.cliente_id] || []).push(l); });
     }
-    rows.forEach(c => { c.clientes_lugares_entrega = lugaresPorCliente[c.id] || []; });
+    let sucursalesPorCliente = {};
+    if (resSucursales && resSucursales.ok) {
+      (await resSucursales.json()).forEach(s => { (sucursalesPorCliente[s.cliente_id] = sucursalesPorCliente[s.cliente_id] || []).push(s); });
+    }
+    rows.forEach(c => { c.clientes_lugares_entrega = lugaresPorCliente[c.id] || []; c.clientes_sucursales = sucursalesPorCliente[c.id] || []; });
     _clientesCache = rows;
     if (!rows.length) { el.innerHTML = '<p class="hint">Todavía no hay clientes cargados.</p>'; return; }
     el.innerHTML = rows.map(c => {
@@ -16355,6 +16360,7 @@ async function clientesRender() {
 function clientesPanelHtml(c, profiles) {
   const contactos = c.clientes_contactos || [];
   const lugares = c.clientes_lugares_entrega || [];
+  const sucursales = c.clientes_sucursales || [];
   const respOptions = profiles.map(p => `<option value="${p.id}" ${p.id===c.responsable_user_id?'selected':''}>${esc(p.nombre||p.email)}</option>`).join('');
   return `
     <div class="card" style="margin-top:8px">
@@ -16400,6 +16406,16 @@ function clientesPanelHtml(c, profiles) {
           <button class="btn btn-secondary btn-sm" onclick="clientesLugarEliminar('${l.id}')">✕</button>
         </div>`).join('') : '<p class="hint">Sin lugares de entrega cargados todavía.</p>'}
       <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesLugarAdd('${c.id}')">+ Agregar lugar de entrega</button>
+
+      <div class="gap"></div>
+      <label>Sucursales</label>
+      <p class="hint" style="margin-bottom:6px">Se usan para precargar "Sucursal" al armar una cotización — si hay más de una, se puede elegir cuál.</p>
+      ${sucursales.length ? sucursales.map(s => `
+        <div class="field-row" style="padding:4px 0;display:flex;gap:6px;align-items:center">
+          <input value="${esc(s.nombre||'')}" placeholder="Ej: Sucursal Rosario" style="flex:1" onchange="clientesSucursalUpdate('${s.id}',this.value)" />
+          <button class="btn btn-secondary btn-sm" onclick="clientesSucursalEliminar('${s.id}')">✕</button>
+        </div>`).join('') : '<p class="hint">Sin sucursales cargadas todavía.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="clientesSucursalAdd('${c.id}')">+ Agregar sucursal</button>
 
       <div class="gap"></div>
       <button class="btn btn-secondary btn-sm" onclick="clientesEliminar('${c.id}')" style="color:var(--red)">Eliminar cliente</button>
@@ -16474,6 +16490,28 @@ async function clientesLugarEliminar(id) {
   if (!confirm('¿Eliminar este lugar de entrega?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/clientes_lugares_entrega?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  clientesRender();
+}
+async function clientesSucursalAdd(clienteId) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/clientes_sucursales', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ cliente_id: clienteId, nombre: '' })
+  });
+  if (!res.ok) { alert('No se pudo agregar la sucursal — ¿corriste el SQL que crea la tabla "clientes_sucursales"?'); return; }
+  clientesRender();
+}
+async function clientesSucursalUpdate(id, nombre) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_sucursales?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ nombre })
+  });
+}
+async function clientesSucursalEliminar(id) {
+  if (!confirm('¿Eliminar esta sucursal?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/clientes_sucursales?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
   clientesRender();
 }
 
@@ -17002,9 +17040,9 @@ let cotizArmado = null;
 function cotizArmadoInit() {
   if (cotizArmado) return cotizArmado;
   cotizArmado = {
-    cliente:'', cliente_id:null, contacto_id:null, _contactos:[], _lugares:[],
+    cliente:'', cliente_id:null, contacto_id:null, _contactos:[], _lugares:[], sucursal_id:null, _sucursales:[],
     atencion:'', telefono:'', celular:'', email:'', q_numero:'', referencia:'', tipo_venta:'',
-    fecha: new Date().toISOString().slice(0,10), moneda:'Dólar',
+    fecha: new Date().toISOString().slice(0,10), moneda:'Dólar', sucursal:'',
     forma_pago:'30 dias FF', forma_cancelacion:'', plazo_entrega:'', lugar_entrega:'',
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
     firmante_nombre: currentUser?.nombre || '',
@@ -17081,6 +17119,16 @@ function cotizArmadoRender() {
           </select>` : ''}
         </div>
         <input value="${esc(st.atencion||'')}" oninput="cotizArmadoSetCampo('atencion',this.value)" />
+      </div>
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+          <label style="font-size:12px">Sucursal</label>
+          ${(st._sucursales||[]).length > 1 ? `
+          <select style="font-size:11px;padding:1px 4px;max-width:150px;height:auto" onchange="cotizArmadoSeleccionarSucursal(this.value)" title="Cambiar de sucursal">
+            ${st._sucursales.map(s => `<option value="${s.id}" ${s.id===st.sucursal_id?'selected':''}>${esc(s.nombre||'(sin nombre)')}</option>`).join('')}
+          </select>` : ''}
+        </div>
+        <input value="${esc(st.sucursal||'')}" oninput="cotizArmadoSetCampo('sucursal',this.value)" />
       </div>
       ${campo('fecha','Fecha','date')}
       ${campo('telefono','Teléfono')}
@@ -17215,6 +17263,9 @@ async function cotizArmadoClienteSeleccionar(clienteId) {
   st._contactos = [];
   st.lugar_entrega = '';
   st._lugares = [];
+  st.sucursal = '';
+  st.sucursal_id = null;
+  st._sucursales = [];
   const sugEl = document.getElementById('cotiz-armado-cliente-sugerencias');
   if (sugEl) { sugEl.style.display = 'none'; sugEl.innerHTML = ''; }
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -17233,6 +17284,15 @@ async function cotizArmadoClienteSeleccionar(clienteId) {
     st._lugares = lugares;
     if (lugares.length >= 1) st.lugar_entrega = lugares[0].texto || '';
   } catch(e) { st._lugares = []; }
+  // Sucursales del cliente (tabla clientes_sucursales) — mismo patrón que
+  // contacto/lugar de entrega: se precarga la primera, y si hay más de una
+  // se puede elegir con el desplegable.
+  try {
+    const res = await supaFetch(`/rest/v1/clientes_sucursales?select=*&cliente_id=eq.${clienteId}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    const sucursales = res.ok ? await res.json() : [];
+    st._sucursales = sucursales;
+    if (sucursales.length >= 1) { st.sucursal_id = sucursales[0].id; st.sucursal = sucursales[0].nombre || ''; }
+  } catch(e) { st._sucursales = []; }
   // Condiciones comerciales de la última VENTA a este cliente (no de la
   // última cotización armada, se haya vendido o no) — forma de pago/
   // cancelación, plazo de entrega, validez de la oferta. Se precargan solas
@@ -17256,6 +17316,13 @@ function cotizArmadoSeleccionarLugar(lugarId) {
   const st = cotizArmadoInit();
   const lug = (st._lugares || []).find(l => l.id === lugarId);
   st.lugar_entrega = lug ? (lug.texto || '') : '';
+  cotizArmadoRender();
+}
+function cotizArmadoSeleccionarSucursal(sucursalId) {
+  const st = cotizArmadoInit();
+  const suc = (st._sucursales || []).find(s => s.id === sucursalId);
+  st.sucursal_id = suc ? suc.id : null;
+  st.sucursal = suc ? (suc.nombre || '') : '';
   cotizArmadoRender();
 }
 function cotizArmadoAplicarContacto(ct) {
@@ -17627,7 +17694,7 @@ async function cotizArmadoGenerar() {
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const camposComunes = {
-      fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null,
+      fecha: st.fecha, cliente: st.cliente, atencion: st.atencion||null, sucursal: st.sucursal||null,
       telefono: st.telefono||null, celular: st.celular||null, email: st.email||null, q_numero: st.q_numero||null,
       referencia: st.referencia||null, tipo_venta: st.tipo_venta||null,
       moneda: st.moneda, forma_pago: st.forma_pago||null, forma_cancelacion: st.forma_cancelacion||null,
@@ -17645,7 +17712,7 @@ async function cotizArmadoGenerar() {
       // para guardar un snapshot del estado anterior en
       // cotizaciones_revisiones ("Ver historial" en el listado lo usa para
       // mostrar qué cambió en cada edición).
-      const camposSnapshot = 'cliente,atencion,telefono,celular,email,q_numero,referencia,tipo_venta,fecha,moneda,forma_pago,forma_cancelacion,plazo_entrega,lugar_entrega,garantia,validez_oferta,observaciones,firmante_nombre,items,revision,stock_reservado,iva,subtotal,total';
+      const camposSnapshot = 'cliente,atencion,sucursal,telefono,celular,email,q_numero,referencia,tipo_venta,fecha,moneda,forma_pago,forma_cancelacion,plazo_entrega,lugar_entrega,garantia,validez_oferta,observaciones,firmante_nombre,items,revision,stock_reservado,iva,subtotal,total';
       const resPrevia = await supaFetch(`/rest/v1/cotizaciones?id=eq.${st._editandoId}&select=${camposSnapshot}`, {headers:{Authorization:'Bearer '+session.token}});
       const filaPrevia = resPrevia.ok ? (await resPrevia.json())[0] : null;
       if (filaPrevia) {
@@ -17817,7 +17884,7 @@ function cotizCotizacionCancelarMarcar() {
 // ── Historial de cambios de una cotización (snapshots guardados en cada
 // edición, ver cotizArmadoGenerar) ─────────────────────────────────────
 const COTIZ_CAMPOS_HISTORIAL = [
-  ['cliente','Cliente'], ['atencion','Atención'], ['telefono','Teléfono'], ['celular','Celular'], ['email','E-mail'],
+  ['cliente','Cliente'], ['atencion','Atención'], ['sucursal','Sucursal'], ['telefono','Teléfono'], ['celular','Celular'], ['email','E-mail'],
   ['referencia','Referencia'], ['tipo_venta','Tipo de venta'], ['moneda','Moneda'],
   ['forma_pago','Forma de pago'], ['forma_cancelacion','Forma de cancelación'], ['plazo_entrega','Plazo de entrega'],
   ['lugar_entrega','Lugar de entrega'], ['garantia','Garantía'], ['validez_oferta','Validez de la oferta'],
@@ -18000,8 +18067,8 @@ function cotizCotizacionEditar(id) {
   if (row.estado !== 'pendiente') { alert('Solo se pueden editar cotizaciones pendientes.'); return; }
   cotizArmado = {
     _editandoId: row.id, _revisionAnterior: row.revision || 0,
-    cliente: row.cliente||'', cliente_id: row.cliente_id||null, contacto_id: null, _contactos:[], _lugares:[],
-    atencion: row.atencion||'', telefono: row.telefono||'', celular: row.celular||'', email: row.email||'',
+    cliente: row.cliente||'', cliente_id: row.cliente_id||null, contacto_id: null, _contactos:[], _lugares:[], sucursal_id:null, _sucursales:[],
+    atencion: row.atencion||'', sucursal: row.sucursal||'', telefono: row.telefono||'', celular: row.celular||'', email: row.email||'',
     q_numero: row.q_numero||'', referencia: row.referencia||'', tipo_venta: row.tipo_venta||'',
     fecha: row.fecha || new Date().toISOString().slice(0,10), moneda: row.moneda || 'Dólar',
     forma_pago: row.forma_pago||'', forma_cancelacion: row.forma_cancelacion||'', plazo_entrega: row.plazo_entrega||'', lugar_entrega: row.lugar_entrega||'',
