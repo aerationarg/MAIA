@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.28</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.29</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.28</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.29</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -17185,7 +17185,7 @@ function cotizArmadoRender() {
     <button class="btn btn-secondary btn-sm" style="margin-bottom:10px" onclick="cotizArmadoNueva()">↻ Nueva cotización</button>
     ${st._editandoId ? `<p class="hint" style="margin:-4px 0 6px;color:var(--blue)">✎ Editando ${st.q_numero?'Q-'+esc(st.q_numero):'esta cotización'} (usá "↻ Nueva cotización" para salir sin guardar).</p>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px;cursor:pointer">
-      <input type="checkbox" ${st._mantenerVersion?'checked':''} onchange="cotizArmadoSetCampo('_mantenerVersion',this.checked)" style="width:auto" />
+      <input type="checkbox" ${st._mantenerVersion?'checked':''} onchange="cotizArmadoSetCampo('_mantenerVersion',this.checked); cotizArmadoRender();" style="width:auto" />
       Mantener el número de versión actual (sobrescribe el mismo Excel/PDF en vez de generar REV${(st._revisionAnterior||0)+1})
     </label>` : ''}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
@@ -17253,7 +17253,7 @@ function cotizArmadoRender() {
     <div class="gap"></div>
     <label>Buscar y agregar ítems</label>
     <input id="cotiz-armado-buscar" placeholder="Buscar por ítem, marca, modelo..." oninput="cotizArmadoBuscarItemsDebounced()" />
-    <div id="cotiz-armado-sugerencias"></div>
+    <div id="cotiz-armado-sugerencias" style="max-height:280px;overflow-y:auto"></div>
     <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="cotizArmadoAgregarManual()">+ Agregar ítem manual</button>
 
     <div class="gap"></div>
@@ -17488,26 +17488,37 @@ async function cotizArmadoBuscarItems() {
   el.innerHTML = 'Buscando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const q = encodeURIComponent(texto);
-    const orFiltro = `or=(descripcion.ilike.*${q}*,marca.ilike.*${q}*,modelo.ilike.*${q}*)`;
     const st = cotizArmadoInit();
     const clienteActual = (st.cliente || '').trim();
-    // Si hay un cliente elegido, se trae también lo vendido puntualmente a
-    // ESE cliente (aparte) para mostrarlo primero — más relevante como
-    // referencia de precio que lo vendido a cualquier otro.
+    // Se trae un conjunto amplio (sin filtro de texto en el servidor) y se
+    // filtra/ordena acá por "contiene TODAS las palabras escritas, en
+    // cualquier orden" (ej. "bomba 25,4" encuentra "Bomba Tsurumi 25,4") —
+    // se evita armar el filtro de texto como or()/and() agrupado de
+    // PostgREST porque el texto puede traer comas u otros caracteres que
+    // ese formato interpreta como separadores y rompen el filtro.
     const queries = [
-      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&${orFiltro}&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}),
-      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&${orFiltro}&order=marca&limit=5`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&order=fecha.desc&limit=300`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo&limit=300`, {headers:{Authorization:'Bearer '+session.token}}),
     ];
-    if (clienteActual) queries.push(supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&cliente=ilike.*${encodeURIComponent(clienteActual)}*&${orFiltro}&order=fecha.desc&limit=6`, {headers:{Authorization:'Bearer '+session.token}}));
+    if (clienteActual) queries.push(supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&cliente=ilike.*${encodeURIComponent(clienteActual)}*&order=fecha.desc&limit=200`, {headers:{Authorization:'Bearer '+session.token}}));
     const [histRes, catRes, histClienteRes] = await Promise.all(queries);
-    const histGeneral = histRes.ok ? await histRes.json() : [];
-    const cat = catRes.ok ? await catRes.json() : [];
-    const histCliente = histClienteRes && histClienteRes.ok ? await histClienteRes.json() : [];
+    const histGeneralAll = histRes.ok ? await histRes.json() : [];
+    const catAll = catRes.ok ? await catRes.json() : [];
+    const histClienteAll = histClienteRes && histClienteRes.ok ? await histClienteRes.json() : [];
+
+    const palabras = texto.toLowerCase().split(/\s+/).filter(Boolean);
+    const contieneTodas = campos => {
+      const combinado = campos.filter(Boolean).join(' ').toLowerCase();
+      return palabras.every(p => combinado.includes(p));
+    };
+    const histGeneral = histGeneralAll.filter(r => contieneTodas([r.marca, r.modelo, r.descripcion]));
+    const cat = catAll.filter(r => contieneTodas([r.marca, r.modelo, r.descripcion, r.codigo])).slice(0, 40);
+    const histCliente = histClienteAll.filter(r => contieneTodas([r.marca, r.modelo, r.descripcion]));
     // Del cliente actual primero, después el resto (sin repetir los que ya
-    // salieron en la primera lista), tope de 6 en total para no saturar.
+    // salieron en la primera lista) — tope generoso, ahora que el panel de
+    // resultados se puede scrollear.
     const vistos = new Set(histCliente.map(r => r.id));
-    const hist = histCliente.concat(histGeneral.filter(r => !vistos.has(r.id))).slice(0, 6);
+    const hist = histCliente.concat(histGeneral.filter(r => !vistos.has(r.id))).slice(0, 40);
     _cotizUltimaBusqueda = { hist, cat };
     let html = '';
     if (hist.length) {
@@ -17717,17 +17728,69 @@ async function cotizGuardarEnSharePoint(st, blob, nombreArchivo) {
   const item = await resp.json();
   return { item, ruta: `${cfg.label} › ${cotizSanitizeNombre(st.cliente)} › ${nombreCarpetaQ}`, siteId: cfg.siteId, folderId: qFolderId };
 }
-// Convierte el Excel recién subido a PDF (vía Graph, ?format=pdf) y lo sube
-// a la misma carpeta con el mismo nombre base — no es fatal si falla, la
-// cotización ya quedó generada y guardada igual.
+// Convierte el Excel recién subido a PDF y lo sube a la misma carpeta con
+// el mismo nombre base — no es fatal si falla, la cotización ya quedó
+// generada y guardada igual.
+//
+// ?format=pdf convierte TODO el libro (todas las hojas de la plantilla
+// F-COM-04, no solo "Modelo AA" que es la única que se completa) — para
+// que el PDF final tenga solo esa hoja, se hace una copia temporal del
+// archivo recién subido, se le borran todas las demás hojas (API de Excel),
+// se convierte ESA copia a PDF, y se la borra al final.
 async function cotizGuardarPdfEnSharePoint(guardadoSp, nombreBase) {
   const token = await getMsToken();
-  const pdfResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${guardadoSp.siteId}/drive/items/${guardadoSp.item.id}/content?format=pdf`, { headers:{Authorization:'Bearer '+token} });
-  if (!pdfResp.ok) throw new Error('No se pudo convertir a PDF (HTTP '+pdfResp.status+').');
-  const pdfBuf = await pdfResp.arrayBuffer();
-  const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${guardadoSp.siteId}/drive/items/${guardadoSp.folderId}:/${encodeURIComponent(nombreBase+'.pdf')}:/content`;
-  const putResp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: pdfBuf });
-  if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error('No se pudo subir el PDF: ' + (e.error?.message || 'HTTP '+putResp.status)); }
+  const siteId = guardadoSp.siteId;
+  let copiaId = null;
+  try {
+    const nombreCopia = `_tmp_pdf_${Date.now()}.xlsx`;
+    const copyResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${guardadoSp.item.id}/copy`, {
+      method:'POST', headers:{Authorization:'Bearer '+token, 'Content-Type':'application/json', Prefer:'respond-async'},
+      body: JSON.stringify({ parentReference: { driveId: guardadoSp.item.parentReference?.driveId, id: guardadoSp.folderId }, name: nombreCopia })
+    });
+    if (!copyResp.ok && copyResp.status !== 202) throw new Error('No se pudo copiar el Excel para convertirlo (HTTP '+copyResp.status+').');
+    const monitorUrl = copyResp.headers.get('Location');
+    if (monitorUrl) {
+      for (let intento = 0; intento < 20 && !copiaId; intento++) {
+        await new Promise(r => setTimeout(r, 1500));
+        const pollResp = await fetch(monitorUrl);
+        if (!pollResp.ok) break;
+        const pollData = await pollResp.json();
+        if (pollData.status === 'completed') copiaId = pollData.resourceId;
+        else if (pollData.status === 'failed') throw new Error('Falló la copia del Excel.');
+      }
+    }
+    if (!copiaId) {
+      await new Promise(r => setTimeout(r, 2000));
+      const listResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${guardadoSp.folderId}/children?$filter=name eq '${encodeURIComponent(nombreCopia)}'`, { headers:{Authorization:'Bearer '+token} });
+      if (listResp.ok) { const listData = await listResp.json(); copiaId = (listData.value||[])[0]?.id || null; }
+    }
+    if (!copiaId) throw new Error('No se encontró la copia del Excel para convertirla.');
+
+    const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiaId}/workbook/worksheets?$select=name`, { headers:{Authorization:'Bearer '+token} });
+    if (sheetsResp.ok) {
+      const sheetsData = await sheetsResp.json();
+      const nombres = (sheetsData.value||[]).map(s => s.name);
+      // Si por lo que sea "Modelo AA" no está en la lista, no se borra nada
+      // (mejor un PDF con hojas de más que uno vacío por borrar todo).
+      if (nombres.includes('Modelo AA')) {
+        for (const nombre of nombres) {
+          if (nombre === 'Modelo AA') continue;
+          await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiaId}/workbook/worksheets('${encodeURIComponent(nombre)}')`, {
+            method:'DELETE', headers:{Authorization:'Bearer '+token}
+          }).catch(()=>null);
+        }
+      }
+    }
+
+    const pdfResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiaId}/content?format=pdf`, { headers:{Authorization:'Bearer '+token} });
+    if (!pdfResp.ok) throw new Error('No se pudo convertir a PDF (HTTP '+pdfResp.status+').');
+    const pdfBuf = await pdfResp.arrayBuffer();
+    const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${guardadoSp.folderId}:/${encodeURIComponent(nombreBase+'.pdf')}:/content`;
+    const putResp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: pdfBuf });
+    if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error('No se pudo subir el PDF: ' + (e.error?.message || 'HTTP '+putResp.status)); }
+  } finally {
+    if (copiaId) await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiaId}`, { method:'DELETE', headers:{Authorization:'Bearer '+token} }).catch(()=>null);
+  }
 }
 // Nombre pedido: "Q-XXXX - Referencia - Cliente" (sin extensión) — se le
 // agrega " REVn" solo si esta cotización realmente quedó en esa revisión
