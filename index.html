@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.26</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.27</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.26</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.27</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -747,7 +747,13 @@
         <div class="card-label">Catálogo de productos</div>
         <p class="hint" style="margin-bottom:10px">Marca/modelo/descripción estándar de lo que vende la empresa, con precio de lista — se usa como referencia al cargar una venta o armar una cotización, para no reescribir la descripción cada vez.</p>
         <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
-        <input id="cotiz-catalogo-buscar" placeholder="Buscar por marca, modelo, código o descripción..." style="margin-bottom:10px" oninput="cotizCatalogoBuscarDebounced()" />
+        <input id="cotiz-catalogo-buscar" placeholder="Buscar por marca, modelo, código o descripción..." style="margin-bottom:6px" oninput="cotizCatalogoBuscarDebounced()" />
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+          <input id="cotiz-catalogo-filtro-marca" placeholder="Filtrar por marca" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
+          <input id="cotiz-catalogo-filtro-modelo" placeholder="Filtrar por modelo" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
+          <input id="cotiz-catalogo-filtro-codigo" placeholder="Filtrar por código" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
+          <input id="cotiz-catalogo-filtro-descripcion" placeholder="Filtrar por descripción" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
+        </div>
         <div id="cotiz-catalogo-list" class="empty">Cargando...</div>
       </div>
     </div>
@@ -16631,22 +16637,25 @@ const COTIZ_CATALOGO_LIMITE = 150;
 async function cotizCatalogoRender() {
   const el = document.getElementById('cotiz-catalogo-list');
   if (!el) return;
-  // El buscador vive afuera de #cotiz-catalogo-list (no se reconstruye acá
-  // adentro), así que no pierde el foco al tipear.
+  // El buscador y los filtros por campo viven afuera de #cotiz-catalogo-list
+  // (no se reconstruyen acá adentro), así que no pierden el foco al tipear.
   const texto = (document.getElementById('cotiz-catalogo-buscar')?.value || '').trim();
+  const filtroCampo = campo => (document.getElementById(`cotiz-catalogo-filtro-${campo}`)?.value || '').trim();
+  const filtros = { marca: filtroCampo('marca'), modelo: filtroCampo('modelo'), codigo: filtroCampo('codigo'), descripcion: filtroCampo('descripcion') };
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const q = encodeURIComponent(texto);
     let url = `/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo&limit=${COTIZ_CATALOGO_LIMITE}`;
     if (texto) url += `&or=(marca.ilike.*${q}*,modelo.ilike.*${q}*,codigo.ilike.*${q}*,descripcion.ilike.*${q}*)`;
+    Object.entries(filtros).forEach(([campo, val]) => { if (val) url += `&${campo}=ilike.*${encodeURIComponent(val)}*`; });
     const [res, resReservas] = await Promise.all([
       supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
       supaFetch(`/rest/v1/cotizaciones?select=q_numero,cliente,items&empresa=eq.${currentEmpresa}&stock_reservado=eq.true`, {headers:{Authorization:'Bearer '+session.token}}),
     ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el catálogo.</p>'; return; }
-    if (!rows.length) { el.innerHTML = texto ? '<p class="hint">Sin resultados para esa búsqueda.</p>' : '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
+    if (!rows.length) { el.innerHTML = (texto || Object.values(filtros).some(Boolean)) ? '<p class="hint">Sin resultados para esa búsqueda.</p>' : '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
     // Mapa catalogo_id → detalle de qué cotizaciones tienen reservado ese
     // producto (Q + cliente + cantidad), para poder mostrarlo junto al
     // número de "Reserva" — no reemplaza el número (que sigue siendo
@@ -16660,7 +16669,15 @@ async function cotizCatalogoRender() {
         });
       });
     }
-    const inputNum = (r, campo, w) => `<input value="${esc(String(r[campo]||0))}" style="width:${w||52}px;text-align:right" onchange="cotizCatalogoUpdate('${r.id}','${campo}',Number(this.value)||0)" />`;
+    // Los campos ya NO se guardan solos en cada "onchange" (eso hacía que la
+    // lista entera se reordenara/refetchara en cada campo completado,
+    // "moviendo" la fila que se estaba editando) — ahora se escribe todo
+    // primero (inputs sin guardado automático, identificados por id) y recién
+    // se persiste al tocar "💾 Guardar" de esa fila, que ahí sí refresca la
+    // lista entera. El Total de esa fila igual se recalcula en vivo al
+    // tipear, sin red ni recargar la lista.
+    const inputTxt = (r, campo, w, ph) => `<input id="cc-${r.id}-${campo}" value="${esc(r[campo]||'')}" ${ph?`placeholder="${esc(ph)}"`:''} style="width:${w}px" />`;
+    const inputNum = (r, campo, w) => `<input id="cc-${r.id}-${campo}" value="${esc(String(r[campo]||0))}" style="width:${w||52}px;text-align:right" oninput="cotizCatalogoRecalcularTotalFila('${r.id}')" />`;
     el.innerHTML = `
       <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -16681,18 +16698,18 @@ async function cotizCatalogoRender() {
             const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(r[campo])||0), 0);
             return `<tr style="border-bottom:1px solid var(--border)">
               <td style="padding:4px 6px;font-family:monospace;font-size:10px;color:var(--text2)" title="${esc(r.id)}">${esc(r.id.slice(0,8))}</td>
-              <td style="padding:2px"><input value="${esc(r.marca||'')}" style="width:90px" onchange="cotizCatalogoUpdate('${r.id}','marca',this.value)" /></td>
-              <td style="padding:2px"><input value="${esc(r.modelo||'')}" style="width:90px" onchange="cotizCatalogoUpdate('${r.id}','modelo',this.value)" /></td>
-              <td style="padding:2px"><input value="${esc(r.codigo||'')}" style="width:80px" onchange="cotizCatalogoUpdate('${r.id}','codigo',this.value)" /></td>
-              <td style="padding:2px"><input value="${esc(r.descripcion||'')}" title="${esc(r.descripcion||'')}" style="width:240px" onchange="cotizCatalogoUpdate('${r.id}','descripcion',this.value)" /></td>
-              <td style="padding:2px"><input value="${r.precio_lista!=null?esc(String(r.precio_lista)):''}" placeholder="0.00" style="width:80px;text-align:right" onchange="cotizCatalogoUpdate('${r.id}','precio_lista',this.value===''?null:Number(this.value))" /></td>
-              <td style="padding:2px"><select style="width:66px" onchange="cotizCatalogoUpdate('${r.id}','moneda_lista',this.value)">
+              <td style="padding:2px">${inputTxt(r,'marca',90)}</td>
+              <td style="padding:2px">${inputTxt(r,'modelo',90)}</td>
+              <td style="padding:2px">${inputTxt(r,'codigo',80)}</td>
+              <td style="padding:2px"><input id="cc-${r.id}-descripcion" value="${esc(r.descripcion||'')}" title="${esc(r.descripcion||'')}" style="width:240px" /></td>
+              <td style="padding:2px"><input id="cc-${r.id}-precio_lista" value="${r.precio_lista!=null?esc(String(r.precio_lista)):''}" placeholder="0.00" style="width:80px;text-align:right" /></td>
+              <td style="padding:2px"><select id="cc-${r.id}-moneda_lista" style="width:66px">
                 <option value="USD" ${r.moneda_lista!=='ARS'?'selected':''}>USD</option>
                 <option value="ARS" ${r.moneda_lista==='ARS'?'selected':''}>ARS</option>
               </select></td>
               ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
-              <td style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
-              <td style="padding:2px"><button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
+              <td id="cc-${r.id}-total" style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
+              <td style="padding:2px;white-space:nowrap"><button class="btn btn-primary btn-sm" onclick="cotizCatalogoGuardarFila('${r.id}')" title="Guardar los cambios de esta fila">💾</button> <button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -16711,13 +16728,26 @@ async function cotizCatalogoAdd() {
   if (!res.ok) { alert('No se pudo agregar.'); return; }
   cotizCatalogoRender();
 }
-async function cotizCatalogoUpdate(id, field, val) {
+function cotizCatalogoRecalcularTotalFila(id) {
+  const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(document.getElementById(`cc-${id}-${campo}`)?.value) || 0), 0);
+  const totalEl = document.getElementById(`cc-${id}-total`);
+  if (totalEl) totalEl.textContent = String(total);
+}
+async function cotizCatalogoGuardarFila(id) {
+  const val = campo => document.getElementById(`cc-${id}-${campo}`)?.value;
+  const body = {
+    marca: val('marca') || '', modelo: val('modelo') || '', codigo: val('codigo') || '', descripcion: val('descripcion') || '',
+    precio_lista: (val('precio_lista')||'') === '' ? null : Number(val('precio_lista')),
+    moneda_lista: val('moneda_lista') || 'USD',
+  };
+  COTIZ_STOCK_COLS.forEach(([campo]) => { body[campo] = Number(val(campo)) || 0; });
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${id}`, {
+  const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${id}`, {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
-    body: JSON.stringify({ [field]: val })
+    body: JSON.stringify(body)
   });
-  cotizCatalogoRender(); // recalcula el Total en pantalla si cambió una cantidad
+  if (!res.ok) { alert('No se pudo guardar.'); return; }
+  cotizCatalogoRender();
 }
 async function cotizCatalogoEliminar(id) {
   if (!confirm('¿Eliminar este producto del catálogo?')) return;
