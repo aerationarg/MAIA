@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.28</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.28</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -17134,7 +17134,7 @@ function cotizArmadoInit() {
     garantia: COTIZ_DEFAULT_GARANTIA, validez_oferta:'', observaciones: COTIZ_DEFAULT_OBSERVACIONES,
     firmante_nombre: currentUser?.nombre || '',
     items: [],
-    iva: 21, subtotal: 0, total: 0, _subtotalManual: false, _totalManual: false,
+    iva: 21, subtotal: 0, total: 0, _subtotalManual: false, _totalManual: false, _mantenerVersion: false,
   };
   // El Nº de Q se completa solo (siguiente al último del Excel de Q de
   // Imputación) — no bloquea el render, se agrega cuando resuelve.
@@ -17183,7 +17183,11 @@ function cotizArmadoRender() {
 
   el.innerHTML = `
     <button class="btn btn-secondary btn-sm" style="margin-bottom:10px" onclick="cotizArmadoNueva()">↻ Nueva cotización</button>
-    ${st._editandoId ? `<p class="hint" style="margin:-4px 0 10px;color:var(--blue)">✎ Editando ${st.q_numero?'Q-'+esc(st.q_numero):'esta cotización'} — al guardar se actualiza y queda como REV${(st._revisionAnterior||0)+1} (usá "↻ Nueva cotización" para salir sin guardar).</p>` : ''}
+    ${st._editandoId ? `<p class="hint" style="margin:-4px 0 6px;color:var(--blue)">✎ Editando ${st.q_numero?'Q-'+esc(st.q_numero):'esta cotización'} (usá "↻ Nueva cotización" para salir sin guardar).</p>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px;cursor:pointer">
+      <input type="checkbox" ${st._mantenerVersion?'checked':''} onchange="cotizArmadoSetCampo('_mantenerVersion',this.checked)" style="width:auto" />
+      Mantener el número de versión actual (sobrescribe el mismo Excel/PDF en vez de generar REV${(st._revisionAnterior||0)+1})
+    </label>` : ''}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
       <div style="position:relative">
         <label style="font-size:12px">Cliente</label>
@@ -17282,7 +17286,7 @@ function cotizArmadoRender() {
     </div>` : ''}
 
     <div class="gap"></div>
-    <button class="btn btn-green" onclick="cotizArmadoGenerar()" ${_cotizArmadoGenerando?'disabled':''}>${_cotizArmadoGenerando ? '⏳ Generando...' : (st._editandoId ? '💾 Guardar cambios (REV'+((st._revisionAnterior||0)+1)+')' : '⬇ Generar cotización (Excel)')}</button>
+    <button class="btn btn-green" onclick="cotizArmadoGenerar()" ${_cotizArmadoGenerando?'disabled':''}>${_cotizArmadoGenerando ? '⏳ Generando...' : (st._editandoId ? (st._mantenerVersion ? '💾 Guardar cambios (misma versión)' : '💾 Guardar cambios (REV'+((st._revisionAnterior||0)+1)+')') : '⬇ Generar cotización (Excel + PDF)')}</button>
     <div id="cotiz-armado-status"></div>
   `;
 }
@@ -17711,7 +17715,29 @@ async function cotizGuardarEnSharePoint(st, blob, nombreArchivo) {
   const resp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: buf });
   if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('No se pudo subir a SharePoint: ' + (e.error?.message || 'HTTP '+resp.status)); }
   const item = await resp.json();
-  return { item, ruta: `${cfg.label} › ${cotizSanitizeNombre(st.cliente)} › ${nombreCarpetaQ}` };
+  return { item, ruta: `${cfg.label} › ${cotizSanitizeNombre(st.cliente)} › ${nombreCarpetaQ}`, siteId: cfg.siteId, folderId: qFolderId };
+}
+// Convierte el Excel recién subido a PDF (vía Graph, ?format=pdf) y lo sube
+// a la misma carpeta con el mismo nombre base — no es fatal si falla, la
+// cotización ya quedó generada y guardada igual.
+async function cotizGuardarPdfEnSharePoint(guardadoSp, nombreBase) {
+  const token = await getMsToken();
+  const pdfResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${guardadoSp.siteId}/drive/items/${guardadoSp.item.id}/content?format=pdf`, { headers:{Authorization:'Bearer '+token} });
+  if (!pdfResp.ok) throw new Error('No se pudo convertir a PDF (HTTP '+pdfResp.status+').');
+  const pdfBuf = await pdfResp.arrayBuffer();
+  const uploadUrl = `https://graph.microsoft.com/v1.0/sites/${guardadoSp.siteId}/drive/items/${guardadoSp.folderId}:/${encodeURIComponent(nombreBase+'.pdf')}:/content`;
+  const putResp = await fetch(uploadUrl, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: pdfBuf });
+  if (!putResp.ok) { const e = await putResp.json().catch(()=>({})); throw new Error('No se pudo subir el PDF: ' + (e.error?.message || 'HTTP '+putResp.status)); }
+}
+// Nombre pedido: "Q-XXXX - Referencia - Cliente" (sin extensión) — se le
+// agrega " REVn" solo si esta cotización realmente quedó en esa revisión
+// (no cuando se elige mantener la versión actual, ahí el nombre sale
+// idéntico al de antes a propósito, para que la subida a SharePoint
+// sobrescriba el mismo archivo en vez de crear uno nuevo).
+function cotizNombreArchivoBase(st) {
+  const qParte = st.q_numero ? (/^q-/i.test(st.q_numero) ? st.q_numero : 'Q-'+st.q_numero) : 'Sin número';
+  const partes = [qParte, st.referencia, st.cliente].filter(Boolean);
+  return cotizSanitizeNombre(partes.join(' - '));
 }
 
 // Iniciales para la fila del Excel de Q (ej. "Federico Cherny" → "FC").
@@ -17789,12 +17815,14 @@ async function cotizArmadoGenerar() {
       if (proximoQ && proximoQ !== st.q_numero) { st.q_numero = proximoQ; cotizArmadoRender(); }
     } catch(e) { /* si falla, se sigue con el número que ya estaba cargado */ }
   }
-  const revision = editando ? (st._revisionAnterior||0) + 1 : 0;
+  const mantenerVersion = editando && !!st._mantenerVersion;
+  const revision = editando ? (mantenerVersion ? (st._revisionAnterior||0) : (st._revisionAnterior||0) + 1) : 0;
   showMsg(statusId, 'loading', 'Generando el Excel...');
   try {
     const blob = await cotizGenerarXlsxBlob(st);
-    const nombreArchivo = `Cotización - ${st.cliente}${st.q_numero?' Q-'+st.q_numero:''}${revision?' REV'+revision:''}.xlsx`;
-    let guardadoSp = null, avisoSp = '';
+    const nombreBase = cotizNombreArchivoBase(st) + (revision ? ` REV${revision}` : '');
+    const nombreArchivo = `${nombreBase}.xlsx`;
+    let guardadoSp = null, avisoSp = '', avisoPdf = '';
     try {
       guardadoSp = await cotizGuardarEnSharePoint(st, blob, nombreArchivo);
     } catch(eSp) {
@@ -17802,7 +17830,13 @@ async function cotizArmadoGenerar() {
       // descarga local y se avisa (no corta el guardado en el historial).
       avisoSp = ` (ojo: no se pudo guardar en SharePoint — ${eSp.message}, se descargó local en su lugar)`;
     }
-    if (!guardadoSp) cotizDescargarBlob(blob, nombreArchivo);
+    if (!guardadoSp) {
+      cotizDescargarBlob(blob, nombreArchivo);
+    } else {
+      showMsg(statusId, 'loading', 'Generando el PDF...');
+      try { await cotizGuardarPdfEnSharePoint(guardadoSp, nombreBase); }
+      catch(ePdf) { avisoPdf = ` (ojo: no se pudo generar el PDF — ${ePdf.message})`; }
+    }
     showMsg(statusId, 'loading', (guardadoSp ? `Guardado en SharePoint (${guardadoSp.ruta}).` : 'Descargado.') + ' Guardando en el historial...');
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -17888,7 +17922,7 @@ async function cotizArmadoGenerar() {
       }
     }
     const dondeQuedo = guardadoSp ? `guardada en SharePoint (${guardadoSp.ruta})` : 'descargada';
-    showMsg(statusId, 'success', `✓ Cotización ${editando?'actualizada (REV'+revision+')':'generada'}, ${dondeQuedo} y guardada en el historial de cotizaciones${avisoQ}${avisoSp}.`);
+    showMsg(statusId, 'success', `✓ Cotización ${editando?'actualizada ('+(mantenerVersion?'misma versión':'REV'+revision)+')':'generada'}, ${dondeQuedo} y guardada en el historial de cotizaciones${avisoQ}${avisoSp}${avisoPdf}.`);
     cotizCotizacionesRender();
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo generar: ' + e.message);
@@ -18165,7 +18199,7 @@ async function cotizCotizacionDescargar(id) {
   if (!row) return;
   try {
     const blob = await cotizGenerarXlsxBlob(row);
-    cotizDescargarBlob(blob, `Cotización - ${row.cliente}${row.q_numero?' Q-'+row.q_numero:''}${row.revision?' REV'+row.revision:''}.xlsx`);
+    cotizDescargarBlob(blob, `${cotizNombreArchivoBase(row)}${row.revision?' REV'+row.revision:''}.xlsx`);
   } catch(e) { alert('No se pudo generar el archivo: ' + e.message); }
 }
 // Carga una cotización ya generada de vuelta en el armador para editarla —
@@ -18193,7 +18227,7 @@ function cotizCotizacionEditar(id) {
     iva: row.iva != null ? row.iva : 21,
     subtotal: row.subtotal != null ? row.subtotal : 0,
     total: row.total != null ? row.total : 0,
-    _subtotalManual: false, _totalManual: false,
+    _subtotalManual: false, _totalManual: false, _mantenerVersion: false,
   };
   if (row.subtotal == null || row.total == null) cotizArmadoRecalcularTotales();
   cotizArmadoRender();
