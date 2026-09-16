@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.24</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.25</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.24</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.25</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1006,6 +1006,12 @@
           <button class="sp-browse-btn" onclick="cotizCarpetaSelect()">Vincular carpeta</button>
           <button class="sp-browse-btn" onclick="cotizCarpetaQuitar()">Quitar</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-label">Opciones de condiciones comerciales</div>
+        <p class="hint" style="margin-bottom:10px">Una opción por línea. En el armador de cotizaciones estos campos siguen admitiendo escribir cualquier texto libre — esto solo agrega sugerencias para elegir rápido, y no reemplaza el precargado automático con lo último usado para cada cliente.</p>
+        <div id="cotiz-condiciones-opciones-body">Cargando...</div>
+        <p class="hint" id="cotiz-condiciones-opciones-status"></p>
       </div>
     </div>
 
@@ -2013,7 +2019,7 @@ function switchPanel(name) {
     rendLoadSpDefaults();
     cfgRendLoadAll();
   }
-  if (name === 'cfg-comercial') { cfgClientesLoad(); cotizPlantillaRender(); }
+  if (name === 'cfg-comercial') { cfgClientesLoad(); cotizPlantillaRender(); renderCotizCondicionesOpciones(); }
   if (name === 'stock') cotizCatalogoRender();
   if (name === 'cfg-np-loc') { npLoadFieldsConfig('np-loc').then(()=>npCfgRender('np-loc')); renderAutoFields('np-loc'); }
   if (name === 'cfg-np-int') { npLoadFieldsConfig('np-int').then(()=>npCfgRender('np-int')); renderAutoFields('np-int'); }
@@ -16962,6 +16968,57 @@ function cotizSelectOpciones(opciones, valorActual, onchange, id) {
   </select>`;
 }
 
+// ── Opciones configurables (con texto libre) para Forma de pago, Forma de
+// cancelación, Plazo de entrega y Validez de la oferta — a diferencia de
+// cotizSelectOpciones (desplegable cerrado, se arma solo desde el
+// historial), acá las opciones las carga un Admin en Cfg Comercial y el
+// campo sigue siendo un <input> de texto libre con esas opciones como
+// sugerencias (<datalist>), para no perder la posibilidad de escribir
+// cualquier cosa ni el precargado automático de la última venta al cliente.
+const COTIZ_CONDICION_CAMPOS = [
+  ['forma_pago', 'Forma de pago'], ['forma_cancelacion', 'Forma de cancelación'],
+  ['plazo_entrega', 'Plazo de entrega'], ['validez_oferta', 'Validez de la oferta'],
+];
+function COTIZ_CONDICION_KEY(campo) { return `cotiz_condicion_opciones_${campo}_${currentEmpresa}`; }
+let _cotizCondicionOpciones = { forma_pago:[], forma_cancelacion:[], plazo_entrega:[], validez_oferta:[] };
+let _cotizCondicionOpcionesCargadas = false;
+async function cotizCondicionOpcionesLoad() {
+  try {
+    const raws = await Promise.all(COTIZ_CONDICION_CAMPOS.map(([campo]) => supaConfigGet(COTIZ_CONDICION_KEY(campo))));
+    COTIZ_CONDICION_CAMPOS.forEach(([campo], i) => { _cotizCondicionOpciones[campo] = raws[i] ? JSON.parse(raws[i]) : []; });
+  } catch(e) { /* se sigue con listas vacías — el campo sigue siendo texto libre igual */ }
+  _cotizCondicionOpcionesCargadas = true;
+  return _cotizCondicionOpciones;
+}
+function renderCotizCondicionesOpciones() {
+  const el = document.getElementById('cotiz-condiciones-opciones-body');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  cotizCondicionOpcionesLoad().then(() => {
+    el.innerHTML = COTIZ_CONDICION_CAMPOS.map(([campo,label]) => `
+      <label style="margin-top:8px;display:block">${esc(label)}</label>
+      <textarea rows="3" id="cotiz-condicion-opciones-${campo}" onblur="cotizCondicionOpcionesSave('${campo}')">${esc((_cotizCondicionOpciones[campo]||[]).join('\n'))}</textarea>
+    `).join('');
+  });
+}
+async function cotizCondicionOpcionesSave(campo) {
+  const el = document.getElementById(`cotiz-condicion-opciones-${campo}`);
+  const lista = (el?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+  _cotizCondicionOpciones[campo] = lista;
+  try {
+    await supaConfigSet(COTIZ_CONDICION_KEY(campo), JSON.stringify(lista));
+    showMsg('cotiz-condiciones-opciones-status', 'success', '✓ Guardado.');
+  } catch(e) { showMsg('cotiz-condiciones-opciones-status', 'error', '✕ No se pudo guardar: ' + e.message); }
+}
+// <input> de texto libre + <datalist> de sugerencias configuradas.
+function campoConSugerencias(nombre, label, valorActual) {
+  const opciones = _cotizCondicionOpciones[nombre] || [];
+  return `<div><label style="font-size:12px">${esc(label)}</label>
+    <input list="dl-${nombre}" value="${esc(valorActual||'')}" oninput="cotizArmadoSetCampo('${nombre}',this.value)" />
+    <datalist id="dl-${nombre}">${opciones.map(o => `<option value="${esc(o)}"></option>`).join('')}</datalist>
+  </div>`;
+}
+
 // ── Generador de cotizaciones ──────────────────────────
 // Arma el Excel real (plantilla F-COM-04, hoja "Modelo AA") completando los
 // campos fijos del encabezado/condiciones y las filas de ítems.
@@ -17057,6 +17114,7 @@ function cotizArmadoInit() {
   // Idem con las opciones de Tipo de venta del desplegable — se completan
   // en cuanto resuelven, sin bloquear el primer render.
   cotizObtenerOpcionesHistorial().then(() => { if (cotizArmado) cotizArmadoRender(); });
+  if (!_cotizCondicionOpcionesCargadas) cotizCondicionOpcionesLoad().then(() => { if (cotizArmado) cotizArmadoRender(); });
   return cotizArmado;
 }
 function cotizArmadoNueva() {
@@ -17137,9 +17195,9 @@ function cotizArmadoRender() {
       <div><label style="font-size:12px">Moneda</label><select onchange="cotizArmadoSetCampo('moneda',this.value)">
         <option ${st.moneda==='Dólar'?'selected':''}>Dólar</option><option ${st.moneda==='Peso'?'selected':''}>Peso</option>
       </select></div>
-      ${campo('forma_pago','Forma de pago')}
-      ${campo('forma_cancelacion','Forma de cancelación')}
-      ${campo('plazo_entrega','Plazo de entrega')}
+      ${campoConSugerencias('forma_pago','Forma de pago',st.forma_pago)}
+      ${campoConSugerencias('forma_cancelacion','Forma de cancelación',st.forma_cancelacion)}
+      ${campoConSugerencias('plazo_entrega','Plazo de entrega',st.plazo_entrega)}
       <div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
           <label style="font-size:12px">Lugar de entrega</label>
@@ -17150,7 +17208,7 @@ function cotizArmadoRender() {
         </div>
         <input value="${esc(st.lugar_entrega||'')}" oninput="cotizArmadoSetCampo('lugar_entrega',this.value)" />
       </div>
-      ${campo('validez_oferta','Validez de la oferta')}
+      ${campoConSugerencias('validez_oferta','Validez de la oferta',st.validez_oferta)}
       ${campo('firmante_nombre','Firma — Ingeniero/a')}
     </div>
     <label>Garantía</label>
