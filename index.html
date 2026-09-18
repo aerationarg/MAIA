@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.36</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.37</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.36</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.37</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -793,12 +793,15 @@
         </div>
         <div id="microo-chat" style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;max-height:480px;overflow-y:auto"></div>
         <div id="microo-imagen-preview" style="display:none;margin-bottom:8px">
-          <img id="microo-imagen-preview-img" style="max-width:180px;max-height:180px;border-radius:8px;border:1px solid var(--border)" />
-          <button class="btn btn-secondary btn-sm" onclick="microoQuitarImagen()">✕ Sacar foto</button>
+          <div id="microo-imagen-preview-thumbs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"></div>
+          <span id="microo-imagen-preview-label" class="hint"></span>
+          <button class="btn btn-secondary btn-sm" onclick="microoQuitarImagen()">✕ Quitar</button>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
           <input type="file" accept="image/*" capture="environment" id="microo-imagen-input" style="display:none" onchange="microoImagenSeleccionada(this.files[0])" />
+          <input type="file" accept="video/*" id="microo-video-input" style="display:none" onchange="microoVideoSeleccionado(this.files[0])" />
           <button class="btn btn-secondary" onclick="document.getElementById('microo-imagen-input').click()">📷 Foto</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('microo-video-input').click()">🎥 Video</button>
           <textarea id="microo-texto" rows="2" placeholder="Ej: 400x, tinción de Lugol, ¿qué es esto que se mueve?" style="flex:1;min-width:200px"></textarea>
           <button class="btn btn-primary" id="microo-enviar-btn" onclick="microoEnviarMensaje()">Enviar</button>
         </div>
@@ -16800,7 +16803,8 @@ async function clientesImportarConfirmar() {
 // puede llevar a una decisión operativa real, así que no se autoguarda).
 let _microoSesionId = null;
 let _microoMensajes = []; // {id, rol, texto, tiene_imagen}
-let _microoImagenPendiente = null; // {b64, mediaType}
+let _microoImagenesPendientes = []; // [{b64, mediaType, dataUrl}] — 1 foto, o varios frames si vino de un video
+let _microoVideoInfo = null; // {duracion, nFrames} cuando las imagenes salen de un video
 let _microoConocimientoCache = null;
 
 async function microoCargarConocimiento() {
@@ -16846,22 +16850,75 @@ async function microoCargarSesionesSelect() {
     sel.innerHTML = '<option value="">Sesiones anteriores...</option>' + rows.map(s => `<option value="${s.id}" ${s.id===_microoSesionId?'selected':''}>${esc(s.titulo||'(sin título)')} — ${new Date(s.created_at).toLocaleDateString('es-AR')}</option>`).join('');
   } catch(e) {}
 }
+function microoRenderPreviewImagenes() {
+  const prev = document.getElementById('microo-imagen-preview');
+  const thumbs = document.getElementById('microo-imagen-preview-thumbs');
+  const label = document.getElementById('microo-imagen-preview-label');
+  if (!prev || !thumbs) return;
+  if (!_microoImagenesPendientes.length) { prev.style.display = 'none'; thumbs.innerHTML = ''; return; }
+  const lado = _microoImagenesPendientes.length > 1 ? 90 : 180;
+  thumbs.innerHTML = _microoImagenesPendientes.map(im => `<img src="${im.dataUrl}" style="max-width:${lado}px;max-height:${lado}px;border-radius:8px;border:1px solid var(--border)" />`).join('');
+  label.textContent = _microoVideoInfo ? `🎥 Video de ${Math.round(_microoVideoInfo.duracion)}s — ${_microoVideoInfo.nFrames} frames extraídos` : '';
+  prev.style.display = 'block';
+}
 function microoImagenSeleccionada(file) {
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
-    _microoImagenPendiente = { b64: reader.result.split(',')[1], mediaType: file.type };
-    document.getElementById('microo-imagen-preview-img').src = reader.result;
-    document.getElementById('microo-imagen-preview').style.display = 'block';
+    _microoVideoInfo = null;
+    _microoImagenesPendientes = [{ b64: reader.result.split(',')[1], mediaType: file.type, dataUrl: reader.result }];
+    microoRenderPreviewImagenes();
   };
   reader.readAsDataURL(file);
 }
+// La API de Claude no acepta video: se sacan frames repartidos parejo a lo
+// largo del video (uno cada ~2,5 s, entre 3 y 10) y se mandan como una
+// secuencia de imágenes en orden cronológico.
+async function microoVideoSeleccionado(file) {
+  if (!file) return;
+  const statusId = 'microo-status';
+  showMsg(statusId, 'loading', 'Extrayendo frames del video...');
+  const url = URL.createObjectURL(file);
+  try {
+    const video = document.createElement('video');
+    video.muted = true; video.playsInline = true; video.preload = 'auto';
+    video.src = url;
+    await new Promise((res, rej) => { video.onloadedmetadata = res; video.onerror = () => rej(new Error('No se pudo leer el video (puede ser un formato que este navegador no soporta).')); });
+    const duracion = video.duration;
+    if (!isFinite(duracion) || duracion <= 0) throw new Error('No se pudo determinar la duración del video.');
+    const nFrames = Math.min(10, Math.max(3, Math.ceil(duracion / 2.5)));
+    const escala = Math.min(1, 1024 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * escala);
+    canvas.height = Math.round(video.videoHeight * escala);
+    const ctx = canvas.getContext('2d');
+    const frames = [];
+    for (let i = 0; i < nFrames; i++) {
+      const t = (i + 0.5) * duracion / nFrames;
+      await new Promise((res, rej) => { video.onseeked = res; video.onerror = () => rej(new Error('Falló al leer un frame del video.')); video.currentTime = t; });
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      frames.push({ b64: dataUrl.split(',')[1], mediaType: 'image/jpeg', dataUrl });
+    }
+    _microoImagenesPendientes = frames;
+    _microoVideoInfo = { duracion, nFrames };
+    microoRenderPreviewImagenes();
+    const el = document.getElementById(statusId); if (el) el.style.display = 'none';
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    URL.revokeObjectURL(url);
+    const inp = document.getElementById('microo-video-input'); if (inp) inp.value = '';
+  }
+}
 function microoQuitarImagen() {
-  _microoImagenPendiente = null;
-  const prev = document.getElementById('microo-imagen-preview');
-  if (prev) prev.style.display = 'none';
+  _microoImagenesPendientes = [];
+  _microoVideoInfo = null;
+  microoRenderPreviewImagenes();
   const input = document.getElementById('microo-imagen-input');
   if (input) input.value = '';
+  const vinput = document.getElementById('microo-video-input');
+  if (vinput) vinput.value = '';
 }
 function microoNuevaSesion() {
   _microoSesionId = null;
@@ -16891,7 +16948,7 @@ function microoRenderChat() {
   if (!_microoMensajes.length) { el.innerHTML = '<p class="hint">Sacá una foto y contame qué estás viendo para arrancar.</p>'; return; }
   el.innerHTML = _microoMensajes.map(m => `
     <div style="align-self:${m.rol==='user'?'flex-end':'flex-start'};max-width:85%">
-      <div style="background:${m.rol==='user'?'var(--primary)':'var(--card2, var(--bg2, #f0f0f0))'};color:${m.rol==='user'?'#fff':'var(--text)'};padding:8px 12px;border-radius:10px;white-space:pre-wrap;font-size:13px">${esc(m.texto||'')}${m.tiene_imagen?'<div style="font-size:11px;opacity:.8;margin-top:4px">📷 con foto</div>':''}</div>
+      <div style="background:${m.rol==='user'?'var(--primary)':'var(--card2, var(--bg2, #f0f0f0))'};color:${m.rol==='user'?'#fff':'var(--text)'};padding:8px 12px;border-radius:10px;white-space:pre-wrap;font-size:13px">${esc(m.texto||'')}${(m.tiene_imagen && !(m.texto||'').includes('🎥'))?'<div style="font-size:11px;opacity:.8;margin-top:4px">📷 con foto</div>':''}</div>
       ${m.rol==='assistant' && m.id ? `<button class="btn btn-secondary btn-sm" style="margin-top:4px" onclick="microoGuardarComoAprendizaje('${m.id}')">✓ Guardar como aprendizaje</button>` : ''}
     </div>
   `).join('');
@@ -16900,8 +16957,9 @@ function microoRenderChat() {
 async function microoEnviarMensaje() {
   const textoEl = document.getElementById('microo-texto');
   const texto = textoEl.value.trim();
-  const imagen = _microoImagenPendiente;
-  if (!texto && !imagen) { alert('Escribí algo o sacá una foto.'); return; }
+  const imagenes = _microoImagenesPendientes.slice();
+  const videoInfo = _microoVideoInfo;
+  if (!texto && !imagenes.length) { alert('Escribí algo o sacá una foto / video.'); return; }
   const btn = document.getElementById('microo-enviar-btn');
   const statusId = 'microo-status';
   btn.disabled = true;
@@ -16924,9 +16982,9 @@ async function microoEnviarMensaje() {
 
     const resUserMsg = await supaFetch('/rest/v1/microorganismos_mensajes', {
       method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-      body: JSON.stringify({ sesion_id: _microoSesionId, rol:'user', texto: texto || null, tiene_imagen: !!imagen })
+      body: JSON.stringify({ sesion_id: _microoSesionId, rol:'user', texto: ((texto || '') + (videoInfo ? `\n🎥 (video de ${Math.round(videoInfo.duracion)}s, ${videoInfo.nFrames} frames)` : '')).trim() || null, tiene_imagen: imagenes.length > 0 })
     });
-    const userMsgRow = resUserMsg.ok ? (await resUserMsg.json())[0] : { rol:'user', texto, tiene_imagen: !!imagen };
+    const userMsgRow = resUserMsg.ok ? (await resUserMsg.json())[0] : { rol:'user', texto, tiene_imagen: imagenes.length > 0 };
     _microoMensajes.push(userMsgRow);
     microoRenderChat();
 
@@ -16936,8 +16994,16 @@ async function microoEnviarMensaje() {
       content: [{ type:'text', text: m.texto || (m.tiene_imagen ? '(mandó una foto sin texto adicional)' : '(sin texto)') }]
     }));
     const contenidoActual = [];
-    if (imagen) contenidoActual.push({ type:'image', source:{ type:'base64', media_type: imagen.mediaType, data: imagen.b64 } });
-    contenidoActual.push({ type:'text', text: texto || 'Fijate esta imagen y contame qué ves.' });
+    if (videoInfo) {
+      contenidoActual.push({ type:'text', text: `Las siguientes ${imagenes.length} imágenes son frames extraídos, en orden cronológico y a intervalos parejos, de un video de ${Math.round(videoInfo.duracion)} segundos tomado por el microscopio. Analizalos como una secuencia: fijate qué cambia entre un frame y otro (movimiento, desplazamiento, comportamiento de los organismos).` });
+      imagenes.forEach((im, i) => {
+        contenidoActual.push({ type:'text', text: `Frame ${i+1}/${imagenes.length} (~${Math.round((i + 0.5) * videoInfo.duracion / imagenes.length)}s):` });
+        contenidoActual.push({ type:'image', source:{ type:'base64', media_type: im.mediaType, data: im.b64 } });
+      });
+    } else {
+      imagenes.forEach(im => contenidoActual.push({ type:'image', source:{ type:'base64', media_type: im.mediaType, data: im.b64 } }));
+    }
+    contenidoActual.push({ type:'text', text: texto || (videoInfo ? 'Fijate este video y contame qué ves.' : 'Fijate esta imagen y contame qué ves.') });
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
