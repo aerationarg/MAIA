@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.39</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.40</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.39</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.40</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6788,7 +6788,7 @@ function procesosPromptFill(template, vars) {
 // puntual (catálogo, plantas compactas) quedan en un grupo "General" al final.
 const PROCESOS_PROMPT_PASO = {
   step1_analizar: 1, tecnologia_seleccion: 1, normativa_sugerir: 1, normativa_aplicar: 1,
-  step2_elegir_hojas: 2, step2_mapeos: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
+  step2_elegir_hojas: 2, step2_tren_chat: 2, step2_mapeos: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
   step3_sugerir_equipos: 3, step3_match_catalogo: 3, step3_chat: 3,
   step4_generar: 4, step4_chat: 4,
 };
@@ -9140,6 +9140,7 @@ function procesosStep2Html(p) {
     ` : ''}
     <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto y ordenalas con las flechas (así queda el tren de tratamiento) — la IA ya sugirió una selección inicial, ajustala si hace falta. Las conexiones entre etapas se vuelven a sugerir solas cada vez que agregás, sacás o reordenás una.</p>
     <button class="btn btn-secondary btn-sm" onclick="procesosStep2ReintentarSugerencia()" style="margin-bottom:8px" title="Le vuelve a pedir a la IA que proponga el tren completo (cantidad, corriente y disposición de cada unidad) — no se aplica hasta que lo confirmes">↻ Volver a sugerir con IA</button>
+    ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenAbrirDesdeActual()" style="margin-bottom:8px;margin-left:8px" title="Abre el tren actual para preguntarle a la IA por qué está armado así o modificarlo por chat (agregar/sacar unidades, serie/paralelo, etc.) — no se aplica hasta que lo confirmes">💬 Revisar / modificar el tren con chat</button>` : ''}
     ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2DefinirTodas()" style="margin-bottom:8px;margin-left:8px">✦ Definir valores de todas las unidades</button>` : ''}
     ${ordenadas.map((nombre, i) => filaHoja(nombre, { reorder: true, numero: i+1, esPrimera: i===0, esUltima: i===ordenadas.length-1 })).join('')}
     ${noSeleccionadas.length ? `<div class="gap"></div><p class="hint">Otras hojas de la planilla, sin usar en este proyecto:</p>${noSeleccionadas.map(nombre => filaHoja(nombre, { reorder: false })).join('')}` : ''}
@@ -9702,18 +9703,10 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
           // reales es tolerante a mayúsculas/espacios (la IA a veces "corrige"
           // el nombre, ej. "Pozo cloac" -> "Pozo Cloacal") — snapea al nombre
           // EXACTO real de la planilla en vez de descartar la unidad entera.
-          const norm = s => String(s || '').trim().toLowerCase();
-          const sheetPorNombreNorm = {};
-          workbook.SheetNames.forEach(n => { sheetPorNombreNorm[norm(n)] = n; });
-          const gruposValidos = (parsed.unidades || [])
-            .map(g => Object.assign({}, g, { hojaBase: sheetPorNombreNorm[norm(g.hojaBase)] || null }))
-            .filter(g => g.hojaBase && Array.isArray(g.instancias) && g.instancias.length);
+          const gruposValidos = procesosStep2NormalizarUnidades(parsed.unidades, workbook);
           if (gruposValidos.length) {
-            st.trenPropuesto = { grupos: gruposValidos.map(g => ({
-              hojaBase: g.hojaBase, motivo: g.motivo || '', disposicion: g.disposicion === 'serie' ? 'serie' : (g.disposicion === 'paralelo' ? 'paralelo' : null),
-              tipo: g.tipo === 'auxiliar' ? 'auxiliar' : 'etapa', etapaAsociada: g.tipo === 'auxiliar' ? (g.etapaAsociada || null) : null,
-              instancias: g.instancias.map(i => ({ nombre: (i.nombre || g.hojaBase).trim(), corrientes: Array.isArray(i.corrientes) ? i.corrientes.filter(Boolean) : [] }))
-            })) };
+            st.trenPropuesto = { grupos: gruposValidos };
+            st.trenChat = []; st.trenHistorial = [];
           } else {
             console.warn('Tren propuesto: la IA no devolvió ninguna unidad usable. Respuesta cruda:', text);
             st.sugerenciaError = 'La IA no propuso ninguna unidad válida — probá reintentar. Si se repite, mirá la consola del navegador (F12) — ahí queda la respuesta cruda para revisar qué pasó.';
@@ -9735,6 +9728,160 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
     st.loading = false; st.error = e.message;
     if (procesosCurrentProyecto === p) renderProcesosStepContent();
   }
+}
+
+// Valida/normaliza una lista de "unidades" (la que devuelve la IA al proponer
+// el tren, o al modificarlo por chat) contra las hojas reales de la planilla.
+// El match de "hojaBase" es tolerante a mayúsculas/espacios (la IA a veces
+// "corrige" el nombre, ej. "Pozo cloac" -> "Pozo Cloacal") — snapea al nombre
+// EXACTO real de la planilla en vez de descartar la unidad entera.
+function procesosStep2NormalizarUnidades(unidades, workbook) {
+  const norm = s => String(s || '').trim().toLowerCase();
+  const sheetPorNombreNorm = {};
+  workbook.SheetNames.forEach(n => { sheetPorNombreNorm[norm(n)] = n; });
+  return (unidades || [])
+    .map(g => Object.assign({}, g, { hojaBase: sheetPorNombreNorm[norm(g.hojaBase)] || null }))
+    .filter(g => g.hojaBase && Array.isArray(g.instancias) && g.instancias.length)
+    .map(g => ({
+      hojaBase: g.hojaBase, motivo: g.motivo || '', disposicion: g.disposicion === 'serie' ? 'serie' : (g.disposicion === 'paralelo' ? 'paralelo' : null),
+      tipo: g.tipo === 'auxiliar' ? 'auxiliar' : 'etapa', etapaAsociada: g.tipo === 'auxiliar' ? (g.etapaAsociada || null) : null,
+      instancias: g.instancias.map(i => ({ nombre: (i.nombre || g.hojaBase).trim(), corrientes: Array.isArray(i.corrientes) ? i.corrientes.filter(Boolean) : [] }))
+    }));
+}
+
+// Chat sobre el tren propuesto: permite preguntarle a la IA por qué armó ese
+// tren, y pedirle cambios (agregar/sacar una unidad, ponerla en serie o en
+// paralelo, cambiar corrientes, etc.). Cuando pide un cambio, la IA devuelve el
+// tren COMPLETO actualizado y se reemplaza el borrador que se ve en pantalla
+// (st.trenPropuesto) — igual que si se hubiera editado a mano; no se crea
+// nada de verdad hasta "Aplicar tren propuesto". Cada cambio guarda el estado
+// anterior para poder deshacerlo.
+let _procesosTrenChatEnviando = false;
+async function procesosStep2TrenChatSend() {
+  const st = procesosStep2State;
+  const p = procesosCurrentProyecto;
+  const input = document.getElementById('procesos-step2-trenchat-input');
+  const msg = (input?.value || '').trim();
+  if (!msg || !st.trenPropuesto || _procesosTrenChatEnviando) return;
+  if (!st.workbook) { alert('Todavía no se leyó la planilla de diseño — esperá a que termine de cargar.'); return; }
+  _procesosTrenChatEnviando = true;
+  const historialPrevio = (st.trenChat || []).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+  st.trenChat = (st.trenChat || []).concat([{ role: 'user', content: msg }]);
+  st.trenChatPendiente = true;
+  renderProcesosStepContent();
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const corrientes = p.info_cliente?.corrientes || [];
+    const corrientesTxt = corrientes.length
+      ? 'Corrientes de efluente del proyecto y sus parámetros (Paso 1):\n' + corrientes.map(c => {
+        const vals = Object.entries(c.campos || {}).filter(([, v]) => v && typeof v === 'object' && v.valor != null && v.valor !== '').map(([k, v]) => `  - ${k}${v.unidad ? ' (' + v.unidad + ')' : ''}: ${v.valor}`).join('\n');
+        return `"${c.nombre}":\n${vals || '  (sin parámetros cargados)'}`;
+      }).join('\n') + '\n\n'
+      : '';
+    const tecTxt = p.tecnologia_confirmada ? `\n\nTecnología ya elegida en el Paso 1: ${procesosTecLabel(p.tecnologia_confirmada)}.` : '';
+    const firmas = st.workbook.SheetNames.map(nombre => {
+      const model = st.hojaModels[nombre] || (st.hojaModels[nombre] = procesosStep2BuildModel(st.workbook.Sheets[nombre]));
+      const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
+      return `- ${nombre}: ${labels.join(', ') || '(sin etiquetas detectadas)'}`;
+    }).join('\n');
+    const trenActual = JSON.stringify({ unidades: st.trenPropuesto.grupos.map(g => ({
+      hojaBase: g.hojaBase, cantidad: g.instancias.length, disposicion: g.disposicion, tipo: g.tipo, etapaAsociada: g.etapaAsociada,
+      instancias: g.instancias, motivo: g.motivo
+    })) }, null, 1);
+    const contexto = `Proyecto: ${p.nombre}${p.cliente ? ' — Cliente: ' + p.cliente : ''}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`;
+    const criteriosBlocks = await procesosStep2GetCriteriosBlocks(contexto);
+    const lecciones = procesosResumenLecciones(await procesosGetLecciones());
+    const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, rangos de eficiencia y de carga por tecnología) — usalos como referencia.\n\n' : '';
+    const leccionesTxt = lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa:\n' + lecciones + '\n\n' : '';
+    const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
+    const historialTxt = historialPrevio ? 'Conversación previa sobre este tren:\n' + historialPrevio + '\n\n' : '';
+    const DEFAULT_TEMPLATE_TREN_CHAT = `Estás ayudando a revisar el tren de tratamiento que se propuso para un proyecto (todavía es un BORRADOR: el usuario lo puede modificar antes de aplicarlo). Resumen del cliente/proyecto:
+{{resumenCampos}}{{tecTxt}}
+
+{{corrientesTxt}}Hojas disponibles en la planilla de diseño (cada una es un posible cálculo de una unidad/etapa), con algunas de sus etiquetas:
+{{firmas}}
+
+{{criteriosTxt}}{{leccionesTxt}}{{chatGeneralTxt}}Tren propuesto actual (JSON):
+{{trenActual}}
+
+{{historialTxt}}Mensaje del usuario: "{{msg}}"
+
+Respondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"respuesta en español, clara y breve","unidades":null}
+
+- Si el usuario pregunta algo (por qué se eligió una etapa, por qué esa cantidad o disposición, alternativas, etc.), respondé en "reply" con fundamento técnico concreto (caudal, carga orgánica, criterios adjuntos, tecnología elegida) y dejá "unidades" en null. No cambies nada si no te lo pidieron.
+- Si el usuario pide un CAMBIO (agregar, sacar o reemplazar una unidad, ponerla en serie o en paralelo, cambiar la cantidad, las corrientes, el tipo etapa/auxiliar, el orden...), devolvé en "unidades" el tren COMPLETO ya actualizado, con este formato por unidad: {"hojaBase":"NombreExactoDeUnaHoja","cantidad":1,"disposicion":null,"tipo":"etapa","etapaAsociada":null,"instancias":[{"nombre":"NombreUnico","corrientes":["NombreExactoDeCorriente"]}],"motivo":"razón breve"}. Conservá TAL CUAL todo lo que no te pidieron tocar (mismas hojas, nombres, corrientes, motivos y orden). En "reply" contá brevemente qué cambiaste y por qué.
+- Reglas del formato: "hojaBase" es el nombre EXACTO de una hoja de la lista de arriba. "cantidad" = cantidad de elementos de "instancias". "disposicion" ("paralelo"/"serie"/null) solo aplica entre instancias de la MISMA hoja base (ej. dos reactores iguales repartiéndose la carga = paralelo; uno tras otro = serie); con una sola instancia va null. Para poner una tecnología DISTINTA a continuación de otra, agregá otra unidad (otra hojaBase) en la posición correcta del array: el orden del array "unidades" ya es el orden del tren, de la primera etapa a la última. Cada "nombre" de instancia tiene que ser único en todo el tren. "corrientes" son nombres EXACTOS de las corrientes del proyecto. "tipo" es "etapa" (el efluente pasa por ahí) o "auxiliar" (cálculo de soporte de otra etapa; en ese caso "etapaAsociada" es el nombre EXACTO de la instancia de la etapa real a la que alimenta).
+- Si lo que piden no se puede hacer con las hojas disponibles (por ejemplo una tecnología que no está en la planilla), no inventes una hoja: explicalo en "reply" y dejá "unidades" en null.
+- Si el cambio pedido te parece técnicamente cuestionable (ej. sacar una etapa que los criterios marcan como necesaria), hacelo igual si el usuario lo pide de forma explícita, pero avisalo en "reply".`;
+    const templateChat = await procesosPromptText('step2_tren_chat', DEFAULT_TEMPLATE_TREN_CHAT);
+    const prompt = procesosPromptFill(templateChat, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, trenActual, historialTxt, msg });
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 6000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x => x.block), { type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+    catch (_e) { throw new Error('La respuesta de la IA llegó incompleta o mal formada — probá de nuevo.'); }
+    let reply = parsed.reply || '(sin respuesta)';
+    let cambio = false;
+    if (Array.isArray(parsed.unidades)) {
+      const grupos = procesosStep2NormalizarUnidades(parsed.unidades, st.workbook);
+      if (grupos.length) {
+        st.trenHistorial = (st.trenHistorial || []).concat([JSON.parse(JSON.stringify(st.trenPropuesto.grupos))]);
+        st.trenPropuesto = { grupos };
+        cambio = true;
+      } else {
+        reply += '\n\n(No pude aplicar el cambio: la propuesta que armé no tenía ninguna unidad válida.)';
+      }
+    }
+    st.trenChat = st.trenChat.concat([{ role: 'assistant', content: reply, cambio }]);
+  } catch (e) {
+    st.trenChat = st.trenChat.concat([{ role: 'assistant', content: '✕ ' + e.message, error: true }]);
+  } finally {
+    _procesosTrenChatEnviando = false;
+    st.trenChatPendiente = false;
+    if (procesosCurrentProyecto === p && st.trenPropuesto) renderProcesosStepContent();
+  }
+}
+function procesosStep2TrenChatDeshacer() {
+  const st = procesosStep2State;
+  if (!st.trenHistorial || !st.trenHistorial.length || _procesosTrenChatEnviando) return;
+  st.trenPropuesto = { grupos: st.trenHistorial[st.trenHistorial.length - 1] };
+  st.trenHistorial = st.trenHistorial.slice(0, -1);
+  st.trenChat = (st.trenChat || []).concat([{ role: 'assistant', content: '↶ Deshice el último cambio del chat: el tren volvió a la versión anterior.', cambio: false }]);
+  renderProcesosStepContent();
+}
+
+// Abre el chat/revisión sobre el tren que ya está aplicado en el proyecto (en
+// vez de esperar una nueva propuesta de la IA): reconstruye los "grupos" a
+// partir de las unidades seleccionadas, y de ahí se modifica con el chat o a
+// mano igual que una propuesta. Los valores ya cargados se conservan al
+// aplicar (se matchean por nombre de unidad).
+function procesosStep2TrenAbrirDesdeActual() {
+  const st = procesosStep2State;
+  const p = procesosCurrentProyecto;
+  const dd = p.diseno_data || {};
+  const orden = (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada);
+  if (!orden.length) { alert('Todavía no hay un tren aplicado para modificar.'); return; }
+  const grupos = [];
+  const porClave = {};
+  orden.forEach(nombre => {
+    const h = dd.hojas[nombre];
+    const hojaBase = h.hojaBase || nombre;
+    const clave = hojaBase + '|' + (h.grupo || nombre);
+    if (!porClave[clave]) {
+      porClave[clave] = { hojaBase, motivo: h.motivo || '', disposicion: h.grupo ? (h.disposicion || null) : null, tipo: h.tipo === 'auxiliar' ? 'auxiliar' : 'etapa', etapaAsociada: h.tipo === 'auxiliar' ? (h.etapaAsociada || null) : null, instancias: [] };
+      grupos.push(porClave[clave]);
+    }
+    porClave[clave].instancias.push({ nombre, corrientes: (h.corrientesAsignadas || []).slice() });
+  });
+  st.trenPropuesto = { grupos };
+  st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = true;
+  renderProcesosStepContent();
 }
 
 // ── Revisión del tren propuesto por IA (st.trenPropuesto) — pantalla previa
@@ -9793,13 +9940,26 @@ function procesosStep2TrenPropuestoHtml() {
   return `
     <div class="card-label">Paso 2 — Diseñar el proyecto</div>
     <div class="card" style="border-color:var(--blue);margin-bottom:12px">
-      <span class="badge" style="background:var(--blue-bg);color:var(--blue)">✦ Propuesta de IA</span>
+      <span class="badge" style="background:var(--blue-bg);color:var(--blue)">${st.trenDesdeActual ? '✎ Tren actual (en revisión)' : '✦ Propuesta de IA'}</span>
       <p class="hint" style="margin:8px 0 0">Revisá y ajustá tipo (etapa/auxiliar), cantidad, nombres, corriente y disposición de cada unidad antes de aplicar — se puede seguir editando después desde acá mismo.</p>
     </div>
     ${st.trenPropuesto.grupos.map(grupoHtml).join('')}
+    <div class="card" style="margin:12px 0">
+      <div class="card-label">Chat sobre el tren</div>
+      <p class="hint" style="margin-bottom:8px">Preguntale por qué armó este tren, o pedile cambios (ej. "agregá otro reactor en paralelo", "sacá la unidad X", "poné una etapa anaerobia en serie antes del biológico"). Los cambios se reflejan acá arriba, pero el tren no se aplica de verdad hasta que apretés "${st.trenDesdeActual ? 'Aplicar cambios al tren' : 'Aplicar tren propuesto'}".</p>
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;margin-bottom:8px">
+        ${(st.trenChat || []).map(m => `<div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:85%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap${m.error?';color:var(--red)':''}">${esc(m.content)}${m.cambio?'<div style="font-size:11px;margin-top:4px;color:var(--green)">✓ tren actualizado arriba</div>':''}</div>`).join('')}
+        ${st.trenChatPendiente ? '<div class="hint">⏳ Pensando...</div>' : ''}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="procesos-step2-trenchat-input" placeholder="Escribí acá..." style="flex:1" onkeydown="if(event.key==='Enter'){procesosStep2TrenChatSend()}" ${st.trenChatPendiente?'disabled':''} />
+        <button class="btn btn-primary btn-sm" onclick="procesosStep2TrenChatSend()" ${st.trenChatPendiente?'disabled':''}>Enviar</button>
+      </div>
+      ${(st.trenHistorial && st.trenHistorial.length) ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep2TrenChatDeshacer()">↶ Deshacer último cambio del chat</button>' : ''}
+    </div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:6px">
-      <button class="btn btn-secondary" style="width:auto" onclick="procesosStep2TrenCancelar()">Descartar y elegir a mano</button>
-      <button class="btn btn-primary" style="width:auto" onclick="procesosStep2TrenAplicar()">Aplicar tren propuesto</button>
+      <button class="btn btn-secondary" style="width:auto" onclick="procesosStep2TrenCancelar()">${st.trenDesdeActual ? 'Cancelar (dejar el tren como está)' : 'Descartar y elegir a mano'}</button>
+      <button class="btn btn-primary" style="width:auto" onclick="procesosStep2TrenAplicar()">${st.trenDesdeActual ? 'Aplicar cambios al tren' : 'Aplicar tren propuesto'}</button>
     </div>
   `;
 }
@@ -9837,7 +9997,8 @@ function procesosStep2TrenSetEtapaAsociada(gi, etapaAsociada) {
   procesosStep2State.trenPropuesto.grupos[gi].etapaAsociada = etapaAsociada || null;
 }
 function procesosStep2TrenCancelar() {
-  procesosStep2State.trenPropuesto = null;
+  const st = procesosStep2State;
+  st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false;
   renderProcesosStepContent();
 }
 async function procesosStep2TrenAplicar() {
@@ -9865,8 +10026,13 @@ async function procesosStep2TrenAplicar() {
       orden.push(nombre);
     });
   });
+  // Las unidades que estaban en el tren y ya no están (sacadas a mano o por el
+  // chat) pasan a "sin usar" — sin esto seguían marcadas como seleccionadas.
+  Object.keys(dd.hojas).forEach(nombre => {
+    if (!orden.includes(nombre) && dd.hojas[nombre]?.seleccionada) dd.hojas[nombre] = Object.assign({}, dd.hojas[nombre], { seleccionada: false });
+  });
   dd.orden = orden;
-  st.trenPropuesto = null;
+  st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false;
   await procesosSaveProyecto({ diseno_data: dd }, p);
   if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
 }
