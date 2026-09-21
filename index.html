@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.47</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.48</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.47</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.48</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1146,6 +1146,12 @@
         <div class="card-label">Plantilla de equipos por etapa</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Las etapas/unidades de tratamiento de la empresa y, dentro de cada una, qué equipos genéricos (sin marca) suele llevar, con qué cantidad sugerida y descripción — conocimiento propio de la empresa. En Paso 3, la IA usa esto para armar la lista genérica antes de buscar marca/modelo en los catálogos reales.</p>
         <div id="procesos-equipos-plantilla-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Tipos de equipo (Base de selección)</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Por cada tipo de equipo: cuándo se usa, qué información tiene que dar el agente para definirlo, un mensaje de ejemplo al proveedor y los proveedores habituales. Cada equipo de la plantilla de arriba se vincula a su tipo; en Paso 3 la IA usa esa información al especificar el equipo y para armar el mensaje al proveedor.</p>
+        <div id="procesos-equipos-tipos-list"></div>
+        <button class="btn btn-secondary" onclick="procesosEquipoTipoAdd()" style="margin-top:4px">+ Agregar tipo de equipo</button>
       </div>
       <div class="card">
         <div class="card-label">Matriz de tecnologías (MCDM)</div>
@@ -2118,7 +2124,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
-  if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosEquiposTipos(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
   if (name === 'microorganismos') microoRender();
@@ -6596,14 +6602,16 @@ async function renderProcesosEquiposPlantilla() {
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const [etapasRes, equiposRes] = await Promise.all([
+    const [etapasRes, equiposRes, tiposRes] = await Promise.all([
       supaFetch(`/rest/v1/procesos_equipos_etapas?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
-      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}})
+      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_equipos_tipos?select=id,nombre&empresa=eq.${currentEmpresa}&order=orden,nombre`, {headers:{Authorization:'Bearer '+session.token}}).catch(() => null)
     ]);
     if (!etapasRes.ok) { el.innerHTML = '<p class="hint">Error al cargar (¿falta correr la migración de procesos_equipos_etapas?).</p>'; return; }
     const etapas = await etapasRes.json();
     const equipos = equiposRes.ok ? await equiposRes.json() : [];
-    _procesosEquiposPlantillaState = { etapas, equipos, filtro: filtroPrevio, expandedEtapaId: expandedPrevio, _buscando: buscandoPrevio };
+    const tipos = (tiposRes && tiposRes.ok) ? await tiposRes.json() : [];
+    _procesosEquiposPlantillaState = { etapas, equipos, tipos, filtro: filtroPrevio, expandedEtapaId: expandedPrevio, _buscando: buscandoPrevio };
     procesosEquiposPlantillaRenderLista();
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
 }
@@ -6657,6 +6665,10 @@ function procesosEquiposPlantillaRenderLista() {
               <button class="remove-btn" onclick="procesosEquiposPlantillaEliminar('${eq.id}')">&#x2715;</button>
             </div>
             <input value="${esc(eq.cantidad_sugerida||'')}" placeholder="Cantidad sugerida (ej. 2 — 1 en uso + 1 en back-up)" oninput="procesosEquiposPlantillaUpdate('${eq.id}','cantidad_sugerida',this.value)" style="margin-bottom:6px" />
+            <select onchange="procesosEquiposPlantillaUpdate('${eq.id}','tipo_id',this.value||null)" style="margin-bottom:6px" title="Tipo de equipo de la Base de selección: define qué información pedir y a qué proveedores">
+              <option value="">Tipo de equipo (Base): sin vincular</option>
+              ${((_procesosEquiposPlantillaState.tipos)||[]).map(t => `<option value="${t.id}" ${eq.tipo_id === t.id ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+            </select>
             <textarea rows="2" placeholder="Descripción (características, capacidad, material...)" oninput="procesosEquiposPlantillaUpdate('${eq.id}','caracteristicas',this.value)" style="margin-bottom:2px">${esc(eq.caracteristicas||'')}</textarea>
           </div>`).join('') : '<p class="hint" style="margin:8px 0">Todavía no tiene equipos cargados.</p>'}
         <div style="margin-top:8px">
@@ -6734,11 +6746,68 @@ async function procesosEquiposPlantillaUpdate(id, field, val) {
     method:'PATCH', headers:{Authorization:'Bearer '+session.token},
     body: JSON.stringify({ [field]: val })
   });
+  _procesosEquiposPlantillaCache = null; // Paso 3 usa esta plantilla: que se recargue con lo editado
 }
 async function procesosEquiposPlantillaEliminar(id) {
   if (!confirm('¿Eliminar este equipo de la plantilla?')) return;
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   await supaFetch(`/rest/v1/procesos_equipos_plantilla?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderProcesosEquiposPlantilla();
+}
+
+// ── Tipos de equipo (Base de selección): cuándo, info a proveer, mensaje de
+// ejemplo y proveedores — ver procesos_equipos_tipos ──
+async function renderProcesosEquiposTipos() {
+  const el = document.getElementById('procesos-equipos-tipos-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_equipos_tipos?select=*&empresa=eq.${currentEmpresa}&order=orden,nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) { el.innerHTML = '<p class="hint">No se pudo cargar (¿corriste el SQL de procesos_equipos_tipos?).</p>'; return; }
+    const tipos = await res.json();
+    if (!tipos.length) { el.innerHTML = '<p class="hint">Todavía no hay tipos de equipo cargados.</p>'; return; }
+    const ta = (t, campo, etiqueta, filas, ayuda) => `<label style="font-size:12px;margin-top:6px">${etiqueta}</label>${ayuda ? `<p class="hint" style="margin:0 0 2px">${ayuda}</p>` : ''}<textarea rows="${filas}" onchange="procesosEquipoTipoUpdate('${t.id}','${campo}',this.value)">${esc(t[campo] || '')}</textarea>`;
+    el.innerHTML = tipos.map(t => `
+      <div class="field-row" style="padding:8px 0">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+          <input value="${esc(t.nombre)}" style="flex:1;font-weight:600" onchange="procesosEquipoTipoUpdate('${t.id}','nombre',this.value)" />
+          <input value="${esc(t.categoria || '')}" placeholder="Categoría" style="width:200px" onchange="procesosEquipoTipoUpdate('${t.id}','categoria',this.value)" />
+          <button class="remove-btn" onclick="procesosEquipoTipoEliminar('${t.id}')">&#x2715;</button>
+        </div>
+        ${ta(t, 'cuando', 'Cuándo se usa', 2, '')}
+        ${ta(t, 'info_a_proveer', 'Información a proveer por el agente', 4, 'Un dato por línea (caudal, altura, cantidad requerida, etc.).')}
+        ${ta(t, 'mensaje_ejemplo', 'Mensaje de ejemplo al proveedor', 4, 'Solo sirve de guía de formato y nivel de detalle para armar el mensaje real.')}
+        ${ta(t, 'proveedores', 'Proveedores habituales', 2, 'Uno por línea.')}
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
+}
+async function procesosEquipoTipoUpdate(id, campo, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_tipos?id=eq.${id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ [campo]: val, updated_at: new Date().toISOString() })
+  });
+  _procesosEquiposPlantillaCache = null; // se vuelve a cargar con lo nuevo
+}
+async function procesosEquipoTipoAdd() {
+  const nombre = prompt('Nombre del tipo de equipo (ej. "Bombas"):');
+  if (!nombre || !nombre.trim()) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/procesos_equipos_tipos', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.trim(), orden: 999 })
+  });
+  if (!res.ok) { alert('No se pudo agregar (¿ya existe un tipo con ese nombre?).'); return; }
+  _procesosEquiposPlantillaCache = null;
+  renderProcesosEquiposTipos();
+}
+async function procesosEquipoTipoEliminar(id) {
+  if (!confirm('¿Eliminar este tipo de equipo? Los equipos de la plantilla vinculados a él quedan sin tipo (no se borran).')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/procesos_equipos_tipos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  _procesosEquiposPlantillaCache = null;
+  renderProcesosEquiposTipos();
   renderProcesosEquiposPlantilla();
 }
 
@@ -6795,7 +6864,7 @@ function procesosPromptFill(template, vars) {
 const PROCESOS_PROMPT_PASO = {
   step1_analizar: 1, tecnologia_seleccion: 1, normativa_sugerir: 1, normativa_aplicar: 1,
   step2_elegir_hojas: 2, step2_tren_chat: 2, step2_mapeos_unidad: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
-  step3_sugerir_equipos: 3, step3_match_catalogo: 3, step3_chat: 3,
+  step3_sugerir_equipos: 3, step3_match_catalogo: 3, step3_chat: 3, step3_mensaje_proveedor: 3,
   step4_generar: 4, step4_chat: 4,
 };
 function procesosPromptPaso(key) { return PROCESOS_PROMPT_PASO[key] || 99; }
@@ -12024,6 +12093,7 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
       <input value="${esc(eq.especificacion || '')}" placeholder="Especificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','especificacion',this.value)" />
       <input value="${esc(eq.modelo || '')}" placeholder="Modelo (marca / modelo)" style="flex:1;min-width:150px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','modelo',this.value)" />
       <input value="${esc(eq.justificacion || '')}" placeholder="Justificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','justificacion',this.value)" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosStep3MensajeProveedorAbrir('${safe}','${eq.id}')" title="Armar el mensaje / pedido de cotización para el proveedor${eq.mensajeProveedor ? ' (ya hay uno guardado)' : ''}">✉ Proveedor${eq.mensajeProveedor ? ' ●' : ''}</button>
       <button class="btn btn-secondary btn-sm" onclick="procesosStep3EliminarEquipo('${safe}','${eq.id}')" title="Quitar">✕</button>
     </div>`;
 
@@ -12147,17 +12217,222 @@ async function procesosEquiposPlantillaCargar(force) {
   if (_procesosEquiposPlantillaCache && !force) return _procesosEquiposPlantillaCache;
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const [etapasRes, equiposRes] = await Promise.all([
+    const [etapasRes, equiposRes, tiposRes] = await Promise.all([
       supaFetch(`/rest/v1/procesos_equipos_etapas?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
-      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}})
+      supaFetch(`/rest/v1/procesos_equipos_plantilla?select=*&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`/rest/v1/procesos_equipos_tipos?select=*&empresa=eq.${currentEmpresa}&order=orden,nombre`, {headers:{Authorization:'Bearer '+session.token}}).catch(() => null)
     ]);
     _procesosEquiposPlantillaCache = {
       etapas: etapasRes.ok ? await etapasRes.json() : [],
-      equipos: equiposRes.ok ? await equiposRes.json() : []
+      equipos: equiposRes.ok ? await equiposRes.json() : [],
+      // Tipos de equipo de la Base de selección (si todavía no se corrió el SQL, queda vacío)
+      tipos: (tiposRes && tiposRes.ok) ? await tiposRes.json() : []
     };
-  } catch(e) { console.warn('No se pudo cargar la plantilla de equipos:', e.message); _procesosEquiposPlantillaCache = { etapas: [], equipos: [] }; }
+  } catch(e) { console.warn('No se pudo cargar la plantilla de equipos:', e.message); _procesosEquiposPlantillaCache = { etapas: [], equipos: [], tipos: [] }; }
   return _procesosEquiposPlantillaCache;
 }
+// Tipo de equipo (Base de selección) al que está vinculado un equipo de la
+// plantilla, y la lista de datos que hay que definir/pedir para ese tipo.
+function procesosEquipoTipoDe(eqPlantilla) {
+  const tipos = (_procesosEquiposPlantillaCache && _procesosEquiposPlantillaCache.tipos) || [];
+  return eqPlantilla && eqPlantilla.tipo_id ? (tipos.find(t => t.id === eqPlantilla.tipo_id) || null) : null;
+}
+function procesosEquipoInfoTipoTxt(eqPlantilla) {
+  const t = procesosEquipoTipoDe(eqPlantilla);
+  if (!t || !t.info_a_proveer) return '';
+  return ' — datos a definir en la especificación: ' + t.info_a_proveer.split(/\r?\n/).map(x => x.trim()).filter(Boolean).join('; ');
+}
+
+// ── Mensaje a proveedor (Paso 3) ────────────────────────────────────────
+// Por cada equipo de una etapa se puede armar el mensaje/pedido de cotización
+// al proveedor: la IA usa la "información a proveer" del tipo de equipo, los
+// mensajes de ejemplo que ya mandó la empresa (solo como guía de formato) y
+// los datos reales del equipo y de la etapa; lo que falta queda marcado como
+// "[completar: ...]". Se puede elegir tipo, proveedor e idioma, editar el
+// texto y copiarlo. El último mensaje queda guardado en el equipo.
+let procesosMsgProvState = null;
+function procesosStep3EquipoTipoInicial(nombreEtapa, eq) {
+  const tipos = (_procesosEquiposPlantillaCache && _procesosEquiposPlantillaCache.tipos) || [];
+  const match = procesosEquiposPlantillaDeEtapa(nombreEtapa);
+  const pe = match ? match.equipos.find(x => (x.tipo_equipo || '').trim().toLowerCase() === (eq.tipo || '').trim().toLowerCase()) : null;
+  const t = procesosEquipoTipoDe(pe);
+  if (t) return t.id;
+  const n = (eq.tipo || '').toLowerCase();
+  const porNombre = tipos.find(x => n && n.includes((x.nombre || '').toLowerCase()));
+  return porNombre ? porNombre.id : '';
+}
+async function procesosStep3MensajeProveedorAbrir(nombreEtapa, equipoId) {
+  await procesosEquiposPlantillaCargar();
+  const p = procesosCurrentProyecto;
+  const e = (p.equipos_data && p.equipos_data.etapas && p.equipos_data.etapas[nombreEtapa]) || { equipos: [] };
+  const eq = (e.equipos || []).find(x => x.id === equipoId);
+  if (!eq) return;
+  const guardado = eq.mensajeProveedor || {};
+  procesosMsgProvState = {
+    nombreEtapa, equipoId,
+    tipoId: guardado.tipoId != null ? guardado.tipoId : procesosStep3EquipoTipoInicial(nombreEtapa, eq),
+    proveedor: guardado.proveedor || '', idioma: guardado.idioma || 'es', incluirCliente: false,
+    texto: guardado.texto || '', faltantes: [], generando: false, error: ''
+  };
+  const tipo = procesosMsgProvTipo();
+  if (!procesosMsgProvState.proveedor && tipo) procesosMsgProvState.proveedor = (tipo.proveedores || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)[0] || '';
+  procesosMsgProvRender();
+}
+function procesosMsgProvTipo() {
+  const tipos = (_procesosEquiposPlantillaCache && _procesosEquiposPlantillaCache.tipos) || [];
+  return tipos.find(t => t.id === (procesosMsgProvState && procesosMsgProvState.tipoId)) || null;
+}
+function procesosMsgProvCerrar() {
+  const ov = document.getElementById('procesos-msgprov-overlay');
+  if (ov) ov.remove();
+  procesosMsgProvState = null;
+}
+function procesosMsgProvRender() {
+  const s = procesosMsgProvState;
+  if (!s) return;
+  const p = procesosCurrentProyecto;
+  const e = (p.equipos_data && p.equipos_data.etapas && p.equipos_data.etapas[s.nombreEtapa]) || { equipos: [] };
+  const eq = (e.equipos || []).find(x => x.id === s.equipoId) || {};
+  const tipos = (_procesosEquiposPlantillaCache && _procesosEquiposPlantillaCache.tipos) || [];
+  const tipo = procesosMsgProvTipo();
+  const proveedores = tipo ? (tipo.proveedores || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean) : [];
+  let ov = document.getElementById('procesos-msgprov-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'procesos-msgprov-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:24px 12px';
+    document.body.appendChild(ov);
+  }
+  const infoLineas = tipo && tipo.info_a_proveer ? tipo.info_a_proveer.split(/\r?\n/).map(x => x.trim()).filter(Boolean) : [];
+  ov.innerHTML = `
+    <div class="card" style="max-width:760px;width:100%;background:var(--surface)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+        <div class="card-label" style="margin:0">Mensaje a proveedor — ${esc(eq.cantidad != null ? eq.cantidad + 'x ' : '')}${esc(eq.tipo || '(sin tipo)')}</div>
+        <button class="btn btn-secondary btn-sm" onclick="procesosMsgProvCerrar()">✕ Cerrar</button>
+      </div>
+      <p class="hint" style="margin-bottom:10px">Etapa: ${esc(s.nombreEtapa)}${eq.especificacion ? ' · ' + esc(eq.especificacion) : ''}${eq.modelo ? ' · Modelo: ' + esc(eq.modelo) : ''}</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div><label style="font-size:12px">Tipo de equipo (Base de selección)</label>
+          <select onchange="procesosMsgProvSet('tipoId',this.value)">
+            <option value="">Genérico (sin ejemplo ni lista de datos)</option>
+            ${tipos.map(t => `<option value="${t.id}" ${t.id === s.tipoId ? 'selected' : ''}>${esc(t.nombre)}</option>`).join('')}
+          </select></div>
+        <div><label style="font-size:12px">Proveedor</label>
+          <input list="procesos-msgprov-proveedores" value="${esc(s.proveedor)}" placeholder="${proveedores.length ? 'Elegí o escribí uno' : 'Escribí el proveedor'}" oninput="procesosMsgProvSet('proveedor',this.value,true)" />
+          <datalist id="procesos-msgprov-proveedores">${proveedores.map(x => `<option value="${esc(x)}"></option>`).join('')}</datalist></div>
+      </div>
+      ${infoLineas.length ? `<p class="hint" style="margin:0 0 8px"><b>Datos que hay que dar para cotizar este equipo:</b> ${esc(infoLineas.join(' · '))}</p>` : ''}
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
+        <span>Idioma:</span>
+        <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="msgprov-idioma" ${s.idioma === 'es' ? 'checked' : ''} onchange="procesosMsgProvSet('idioma','es')" /> Español</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="msgprov-idioma" ${s.idioma === 'en' ? 'checked' : ''} onchange="procesosMsgProvSet('idioma','en')" /> English</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" ${s.incluirCliente ? 'checked' : ''} onchange="procesosMsgProvSet('incluirCliente',this.checked,true)" /> Nombrar el proyecto/cliente</label>
+      </div>
+      <button class="btn btn-primary btn-sm" ${s.generando ? 'disabled' : ''} onclick="procesosMsgProvGenerar()">${s.generando ? '⏳ Armando...' : (s.texto ? '↻ Volver a generar' : '✦ Generar mensaje')}</button>
+      ${s.error ? `<p class="hint" style="color:var(--red);margin-top:6px">✕ ${esc(s.error)}</p>` : ''}
+      ${s.faltantes.length ? `<p class="hint" style="margin-top:6px;color:var(--red)">Faltan datos para cotizar (quedaron marcados como [completar]): ${esc(s.faltantes.join(' · '))}</p>` : ''}
+      <textarea id="procesos-msgprov-texto" rows="12" style="margin-top:8px" placeholder="Acá aparece el mensaje — podés editarlo antes de copiarlo." oninput="procesosMsgProvSet('texto',this.value,true)">${esc(s.texto)}</textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="procesosMsgProvCopiar()">📋 Copiar</button>
+        <button class="btn btn-secondary btn-sm" onclick="procesosMsgProvGuardar()">💾 Guardar en el equipo</button>
+      </div>
+      <div id="procesos-msgprov-status"></div>
+    </div>`;
+}
+// sinRender: para campos de texto (no se re-arma el modal mientras se escribe)
+function procesosMsgProvSet(campo, valor, sinRender) {
+  const s = procesosMsgProvState;
+  if (!s) return;
+  s[campo] = valor;
+  if (campo === 'tipoId') {
+    const t = procesosMsgProvTipo();
+    s.proveedor = t ? ((t.proveedores || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean)[0] || '') : '';
+  }
+  if (!sinRender) procesosMsgProvRender();
+}
+async function procesosMsgProvGenerar() {
+  const s = procesosMsgProvState;
+  if (!s || s.generando) return;
+  const p = procesosCurrentProyecto;
+  const e = (p.equipos_data && p.equipos_data.etapas && p.equipos_data.etapas[s.nombreEtapa]) || { equipos: [] };
+  const eq = (e.equipos || []).find(x => x.id === s.equipoId);
+  if (!eq) return;
+  s.generando = true; s.error = ''; procesosMsgProvRender();
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const tipo = procesosMsgProvTipo();
+    const dd = p.diseno_data || {};
+    const h = dd.hojas?.[s.nombreEtapa] || {};
+    const auxiliares = procesosStep2AuxiliaresDe(p, s.nombreEtapa);
+    const valoresEtapa = [
+      Object.entries(h.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n'),
+      ...auxiliares.map(n => { const vals = Object.entries(dd.hojas[n]?.valoresConEtiqueta || {}).map(([k, v]) => `  - ${k}: ${v}`).join('\n'); return vals ? `  (cálculo auxiliar "${n}"):\n${vals}` : ''; })
+    ].filter(Boolean).join('\n');
+    const infoTxt = tipo && tipo.info_a_proveer ? 'Información que este tipo de equipo requiere para poder cotizar:\n' + tipo.info_a_proveer.split(/\r?\n/).map(x => x.trim()).filter(Boolean).map(x => '  - ' + x).join('\n') + '\n\n' : '';
+    const ejemploTxt = tipo && tipo.mensaje_ejemplo ? 'Ejemplos reales de mensajes que la empresa ya mandó para este tipo de equipo (usalos SOLO como guía de formato, nivel de detalle y tono — NO copies sus números ni sus datos):\n' + tipo.mensaje_ejemplo + '\n\n' : '';
+    const clienteTxt = s.incluirCliente
+      ? `Podés mencionar el proyecto: ${p.nombre}${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''}.\n\n`
+      : 'NO menciones el nombre del cliente ni del proyecto (podés describirlo en forma genérica, por ejemplo el tipo de industria o la provincia si aplica).\n\n';
+    const DEFAULT_TEMPLATE_MSG_PROV = `Vas a redactar el mensaje / pedido de cotización que la empresa le manda a un proveedor de equipos, para un proyecto de tratamiento de efluentes.
+
+Equipo: {{tipoNombre}} — cantidad {{cantidad}}
+Como figura en el proyecto: "{{equipoTipo}}". Especificación ya definida: {{especificacion}}. Modelo/marca sugerido: {{modelo}}. Justificación: {{justificacion}}.
+Etapa: {{etapa}}
+Valores de diseño de la etapa (y de sus cálculos auxiliares):
+{{valoresEtapa}}
+
+{{infoTxt}}{{ejemploTxt}}Proveedor destinatario: {{proveedor}}. Idioma del mensaje: {{idioma}}.
+
+{{clienteTxt}}Redactá el mensaje listo para enviar: directo y técnico, con los datos numéricos concretos que salen de los valores de diseño y de la especificación (con sus unidades). NO inventes ningún dato: si falta algo de la información requerida, dejá el lugar marcado como "[completar: qué dato]" y listalo en "faltantes". Una línea de saludo alcanza; firmá de forma genérica (sin nombre de persona) y no pongas asunto.
+
+Respondé SOLO con JSON válido (sin backticks ni texto extra): {"mensaje":"...","faltantes":["dato que falta 1","dato que falta 2"]}`;
+    const template = await procesosPromptText('step3_mensaje_proveedor', DEFAULT_TEMPLATE_MSG_PROV);
+    const prompt = procesosPromptFill(template, {
+      tipoNombre: tipo ? tipo.nombre : (eq.tipo || 'equipo'), cantidad: eq.cantidad != null ? eq.cantidad : '1', equipoTipo: eq.tipo || '', especificacion: eq.especificacion || '(sin especificar)',
+      modelo: eq.modelo || '(ninguno)', justificacion: eq.justificacion || '(sin justificación)', etapa: s.nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)',
+      infoTxt, ejemploTxt, proveedor: s.proveedor || '(a definir)', idioma: s.idioma === 'en' ? 'inglés (English)' : 'español', clienteTxt
+    });
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2500, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+    });
+    if (!resp.ok) { const eb = await resp.json().catch(() => ({})); throw new Error(eb.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+    catch (_e) { throw new Error('La respuesta de la IA llegó incompleta — probá de nuevo.'); }
+    s.texto = parsed.mensaje || '';
+    s.faltantes = Array.isArray(parsed.faltantes) ? parsed.faltantes.filter(Boolean).map(String) : [];
+    await procesosMsgProvGuardar(true);
+  } catch (err) {
+    s.error = err.message;
+  } finally {
+    s.generando = false;
+    if (procesosMsgProvState === s) procesosMsgProvRender();
+  }
+}
+async function procesosMsgProvCopiar() {
+  const s = procesosMsgProvState;
+  if (!s || !s.texto) return;
+  try { await navigator.clipboard.writeText(s.texto); showMsg('procesos-msgprov-status', 'success', '✓ Copiado.'); }
+  catch (_e) { const ta = document.getElementById('procesos-msgprov-texto'); if (ta) { ta.select(); document.execCommand('copy'); showMsg('procesos-msgprov-status', 'success', '✓ Copiado.'); } }
+}
+// Guarda el mensaje en el equipo (sin marcar la etapa como "no guardada": no cambia el diseño).
+async function procesosMsgProvGuardar(silencioso) {
+  const s = procesosMsgProvState;
+  if (!s) return;
+  const p = procesosCurrentProyecto;
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[s.nombreEtapa]);
+  e.equipos = (e.equipos || []).map(x => x.id === s.equipoId ? Object.assign({}, x, { mensajeProveedor: { tipoId: s.tipoId || '', proveedor: s.proveedor, idioma: s.idioma, texto: s.texto, fecha: new Date().toISOString() } }) : x);
+  ed.etapas[s.nombreEtapa] = e;
+  await procesosSaveProyecto({ equipos_data: ed }, p);
+  if (!silencioso) showMsg('procesos-msgprov-status', 'success', '✓ Guardado en el equipo.');
+}
+
 // Busca, dentro de la plantilla cacheada, la etapa que corresponde a un
 // nombre de etapa REAL de un proyecto (la hoja de diseño puede no llamarse
 // exactamente igual a como está en Cfg Procesos IA) — primero intenta un
@@ -12237,7 +12512,7 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
     }
     const referenciasTxt = referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : '';
     const leccionesTxt = lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : '';
-    const plantillaTxt = `\nEquipos disponibles para la etapa "${plantillaMatch.etapa.nombre}" — LISTA CERRADA de la empresa, SOLO podés elegir de acá, copiando el campo "tipo" EXACTAMENTE como figura (mismo texto, sin modificarlo ni traducirlo) y sin inventar ningún equipo que no esté en esta lista:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}`).join('\n')}\n\nElegí SOLO los que apliquen a este proyecto puntual (no hace falta usar todos). Si varios son alternativas entre sí para la misma función (ej. distintas tecnologías de deshidratación, o distintos tipos de bomba para el mismo uso), elegí SOLO UNA de esas alternativas, la más adecuada según los valores de diseño — nunca propongas dos alternativas para la misma función.\n`;
+    const plantillaTxt = `\nEquipos disponibles para la etapa "${plantillaMatch.etapa.nombre}" — LISTA CERRADA de la empresa, SOLO podés elegir de acá, copiando el campo "tipo" EXACTAMENTE como figura (mismo texto, sin modificarlo ni traducirlo) y sin inventar ningún equipo que no esté en esta lista:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}${procesosEquipoInfoTipoTxt(eq)}`).join('\n')}\n\nElegí SOLO los que apliquen a este proyecto puntual (no hace falta usar todos). Si varios son alternativas entre sí para la misma función (ej. distintas tecnologías de deshidratación, o distintos tipos de bomba para el mismo uso), elegí SOLO UNA de esas alternativas, la más adecuada según los valores de diseño — nunca propongas dos alternativas para la misma función.\n`;
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo, eso se resuelve en un paso aparte.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{plantillaTxt}}{{chatGeneralTxt}}\nSugerí la lista de equipos necesarios para esta etapa, basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica — pero SIEMPRE eligiendo exclusivamente de la lista cerrada de arriba, nunca de tu conocimiento general. Para cada equipo indicá cantidad (seguí la cantidad sugerida de la lista si la hay, ej. redundancia N+1 — no la ignores), tipo (copiado EXACTO de la lista), una especificación técnica breve (capacidad, potencia, material, etc. — usá la descripción de la lista como guía de qué datos completar) y una justificación breve.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const templateStep3Sugerir = await procesosPromptText('step3_sugerir_equipos', DEFAULT_TEMPLATE_STEP3_SUGERIR);
@@ -12415,7 +12690,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
     await procesosEquiposPlantillaCargar();
     const plantillaMatch = procesosEquiposPlantillaDeEtapa(nombreEtapa);
     const plantillaChatTxt = plantillaMatch && plantillaMatch.equipos.length
-      ? `Equipos disponibles para esta etapa — LISTA CERRADA, si agregás un equipo tiene que ser copiando el campo "tipo" EXACTAMENTE de acá, sin inventar nada que no esté:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}`).join('\n')}\n\n`
+      ? `Equipos disponibles para esta etapa — LISTA CERRADA, si agregás un equipo tiene que ser copiando el campo "tipo" EXACTAMENTE de acá, sin inventar nada que no esté:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}${procesosEquipoInfoTipoTxt(eq)}`).join('\n')}\n\n`
       : '';
     const DEFAULT_TEMPLATE_STEP3_CHAT = `Estás ayudando a definir los equipos de la etapa/unidad "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n{{valoresEtapa}}\n\nEquipos actualmente cargados para esta etapa:\n{{listado}}\n\n{{historialTxt}}{{equiposDocTxt}}{{archivosProyectoTxt}}{{plantillaChatTxt}}{{chatGeneralTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","modelo":"Marca — Modelo (solo si hay uno concreto en los catálogos adjuntos, si no vacío)","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
     const templateStep3Chat = await procesosPromptText('step3_chat', DEFAULT_TEMPLATE_STEP3_CHAT);
