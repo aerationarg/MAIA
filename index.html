@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.37</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.38</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.37</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.38</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9292,6 +9292,9 @@ function procesosStep2GetSharedHF() {
     sheetIndex[nombre] = i;
   });
   st.hfShared = HyperFormula.buildFromSheets(sheets, { licenseKey: 'gpl-v3' });
+  // El id real que le asignó HyperFormula a cada hoja (no se asume que
+  // coincida con la posición en SheetNames).
+  Object.keys(sheetIndex).forEach(nombre => { const id = st.hfShared.getSheetId(nombre); if (id != null) sheetIndex[nombre] = id; });
   st.sheetIndex = sheetIndex;
   const p = procesosCurrentProyecto;
   Object.entries(p.diseno_data?.hojas || {}).forEach(([nombreHoja, h]) => {
@@ -9300,10 +9303,37 @@ function procesosStep2GetSharedHF() {
     if (!model || idx == null) return;
     Object.entries(h.valores || {}).forEach(([cellRef, val]) => {
       const cell = model.cells.find(c => c.ref === cellRef);
-      if (cell) st.hfShared.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[val]]);
+      const seguro = procesosStep2ValorGuardable(val);
+      if (cell && seguro != null) st.hfShared.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[seguro]]);
     });
   });
   return st.hfShared;
+}
+
+// HyperFormula devuelve los errores de una celda (#NUM!, #DIV/0!, ...) como un
+// OBJETO ({type, value, message}), no como un string — así que las
+// comprobaciones tipo `typeof v === 'string' && v.startsWith('#')` nunca los
+// detectaban, y ese objeto terminaba guardado como "valor" de una celda en
+// diseno_data.valores; al reabrir la hoja, volver a cargarlo con
+// setCellContents fallaba con "Unable to parse value: {...}" y ya no se podía
+// abrir ninguna unidad del proyecto.
+function procesosStep2EsError(v) {
+  return v != null && typeof v === 'object' && typeof v.value === 'string' && v.value.startsWith('#');
+}
+// Texto legible de un valor de celda para mostrarle a la IA / a la pantalla —
+// los errores se muestran como "ERROR #NUM! (mensaje)" en vez de "[object Object]".
+function procesosStep2ValorTexto(v) {
+  if (procesosStep2EsError(v)) return `ERROR ${v.value}${v.message ? ' (' + v.message + ')' : ''}`;
+  if (typeof v === 'number' && !isFinite(v)) return 'ERROR (valor fuera de rango numérico)';
+  return v;
+}
+// Valor apto para guardar / volver a cargar como contenido de una celda: nunca
+// un error ni un número no finito (devuelve null para que el llamador lo omita).
+function procesosStep2ValorGuardable(v) {
+  if (v == null) return null;
+  if (typeof v === 'object') return null;
+  if (typeof v === 'number' && !isFinite(v)) return null;
+  return v;
 }
 
 // Wrapper liviano por hoja sobre la instancia compartida — expone la misma
@@ -9327,14 +9357,24 @@ function procesosStep2GetHF(nombreHoja) {
     const hojaBase = (h && h.hojaBase) || nombreHoja;
     const modelBase = st.hojaModels[hojaBase] || (st.workbook?.Sheets?.[hojaBase] ? (st.hojaModels[hojaBase] = procesosStep2BuildModel(st.workbook.Sheets[hojaBase])) : null);
     if (!modelBase) return null;
-    idx = sharedHf.addSheet(nombreHoja);
+    // addSheet devuelve el NOMBRE de la hoja creada (no su id numérico), y
+    // setSheetContent/setCellContents piden el id — hay que pasar por
+    // getSheetId. Si por algún intento anterior fallido la hoja ya quedó
+    // creada en la instancia compartida, se reusa en vez de intentar
+    // crearla de nuevo (HyperFormula tira error por nombre repetido).
+    idx = sharedHf.getSheetId(nombreHoja);
+    if (idx == null) {
+      const nombreCreado = sharedHf.addSheet(nombreHoja);
+      idx = sharedHf.getSheetId(nombreCreado);
+    }
     sharedHf.setSheetContent(idx, modelBase.grid);
     st.sheetIndex[nombreHoja] = idx;
     st.hojaModels[nombreHoja] = modelBase;
     if (h && h.valores) {
       Object.entries(h.valores).forEach(([cellRef, val]) => {
         const cell = modelBase.cells.find(c => c.ref === cellRef);
-        if (cell) sharedHf.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[val]]);
+        const seguro = procesosStep2ValorGuardable(val);
+        if (cell && seguro != null) sharedHf.setCellContents({ sheet: idx, row: cell.row, col: cell.col }, [[seguro]]);
       });
     }
   }
@@ -9615,7 +9655,7 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
           const corrientesTxt = corrientesProyecto.length
             ? `Corrientes de efluente de este proyecto: ${corrientesProyecto.join(', ')}.${corrientesProyecto.length > 1 ? ' Pensá en qué punto del tren se juntan (si es que no vienen ya combinadas desde el arranque).' : ''}\n\n`
             : '';
-          const DEFAULT_TEMPLATE_HOJAS = `Este es el resumen del cliente/proyecto:\n{{resumenCampos}}{{tecTxt}}\n\n{{corrientesTxt}}Esta es la lista de hojas de la planilla de diseño, cada una es un posible cálculo de una unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n{{firmas}}\n\n{{criteriosTxt}}{{leccionesTxt}}Proponé el tren de tratamiento completo para este proyecto: qué hojas aplican, cuántas instancias de cada una hacen falta y en qué orden. Respondé SOLO con JSON válido (sin backticks ni texto extra):\n{"unidades":[{"hojaBase":"NombreHoja","cantidad":1,"disposicion":null,"tipo":"etapa","etapaAsociada":null,"instancias":[{"nombre":"NombreHoja","corrientes":[]}],"motivo":"razón breve, 5-12 palabras"}]}\n\nReglas:\n- "hojaBase" tiene que ser el nombre EXACTO de una hoja de la lista de arriba (aunque sea una sigla, ej. "EQ" — nunca la traduzcas ni pongas un alias).\n- "cantidad" es cuántas instancias de esa hoja hacen falta (lo normal es 1).\n- Poné cantidad > 1 en dos casos bien distintos: (a) hay más de una corriente de entrada y esta hoja procesa cada corriente POR SEPARADO antes de que se unan (ej. un pozo de bombeo por corriente) — ahí cada instancia lleva UNA sola corriente distinta en "corrientes" y "disposicion" queda en null (no se reparte caudal entre corrientes distintas, cada una tiene la suya); (b) el caudal de una corriente (ya combinada o no) supera lo que puede manejar una sola unidad y hace falta redundancia o capacidad extra — ahí TODAS las instancias del grupo llevan las MISMAS corrientes en "corrientes", y "disposicion" es "paralelo" o "serie" según corresponda.\n- "instancias" tiene que tener exactamente "cantidad" elementos. El "nombre" de cada instancia tiene que ser único en todo el proyecto: para el caso (a) usá algo como "NombreHoja cloacal"/"NombreHoja industrial"; para el caso (b) usá "NombreHoja — Línea 1"/"NombreHoja — Línea 2". Si cantidad es 1, el nombre puede ser igual al de la hoja.\n- "corrientes" de cada instancia: nombres EXACTOS de las corrientes de arriba que la alimentan. Si el proyecto tiene una sola corriente, o esta unidad ya recibe todas las corrientes combinadas (después del punto donde se unen), poné ahí TODAS las corrientes del proyecto.\n- "tipo": "etapa" para una unidad/etapa real del tren de tratamiento, o "auxiliar" si en realidad es un CÁLCULO DE SOPORTE que no es su propia etapa (ej. "Difusores", que dimensiona la aireación de otra etapa como MBR o LA, pero no procesa efluente por sí misma — otros ejemplos típicos: cálculo de coeficientes, dotaciones, dimensionamiento de sopladores). Si dudás si algo es una etapa real (recibe y trata el efluente) o un cálculo auxiliar (calcula un dato que otra etapa necesita), pensá si el efluente "pasa por ahí" — si no pasa, es auxiliar.\n- "etapaAsociada": SOLO si tipo es "auxiliar" — el "nombre" EXACTO (tal como quedó en "instancias" de arriba) de la instancia de la etapa real a la que esta hoja auxiliar le da un dato. Si tipo es "etapa", dejalo en null.\n- Incluí en "unidades" SOLO las hojas que realmente aplican a este proyecto — las que no aplican, simplemente no las menciones.\n- El array "unidades" tiene que estar en el ORDEN real del tren, de la primera etapa a la última (el orden final de cada instancia sale de expandir "unidades" en ese orden). Las auxiliares podés ponerlas justo después de la etapa a la que están asociadas.\n- IMPORTANTE: aunque el resumen del proyecto tenga poca información todavía (recién arrancado, sin corrientes o campos cargados), IGUAL tenés que proponer un tren razonable en base al nombre y las etiquetas de cada hoja (qué función cumple típicamente) — nunca devuelvas "unidades" vacío. Proponé la estructura más común/esperable con la info que haya, dejando cantidad:1 y disposicion:null en los casos donde no tengas motivo para pensar que hace falta más de una instancia — el usuario la va a revisar y ajustar antes de aplicarla, así que ante la duda proponé algo en vez de nada.`;
+          const DEFAULT_TEMPLATE_HOJAS = `Este es el resumen del cliente/proyecto:\n{{resumenCampos}}{{tecTxt}}\n\n{{corrientesTxt}}Esta es la lista de hojas de la planilla de diseño, cada una es un posible cálculo de una unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n{{firmas}}\n\n{{criteriosTxt}}{{leccionesTxt}}Proponé el tren de tratamiento completo para este proyecto: qué hojas aplican, cuántas instancias de cada una hacen falta y en qué orden. Respondé SOLO con JSON válido (sin backticks ni texto extra):\n{"unidades":[{"hojaBase":"NombreHoja","cantidad":1,"disposicion":null,"tipo":"etapa","etapaAsociada":null,"instancias":[{"nombre":"NombreHoja","corrientes":[]}],"motivo":"razón breve, 5-12 palabras"}]}\n\nReglas:\n- "hojaBase" tiene que ser el nombre EXACTO de una hoja de la lista de arriba (aunque sea una sigla, ej. "EQ" — nunca la traduzcas ni pongas un alias).\n- "cantidad" es cuántas instancias de esa hoja hacen falta (lo normal es 1).\n- Poné cantidad > 1 en dos casos bien distintos: (a) hay más de una corriente de entrada y esta hoja procesa cada corriente POR SEPARADO antes de que se unan (ej. un pozo de bombeo por corriente) — ahí cada instancia lleva UNA sola corriente distinta en "corrientes" y "disposicion" queda en null (no se reparte caudal entre corrientes distintas, cada una tiene la suya); (b) el caudal de una corriente (ya combinada o no) supera lo que puede manejar una sola unidad y hace falta redundancia o capacidad extra — ahí TODAS las instancias del grupo llevan las MISMAS corrientes en "corrientes", y "disposicion" es "paralelo" o "serie" según corresponda.\n- "instancias" tiene que tener exactamente "cantidad" elementos. El "nombre" de cada instancia tiene que ser único en todo el proyecto: para el caso (a) usá algo como "NombreHoja cloacal"/"NombreHoja industrial"; para el caso (b) usá "NombreHoja — Línea 1"/"NombreHoja — Línea 2". Si cantidad es 1, el nombre puede ser igual al de la hoja.\n- "corrientes" de cada instancia: nombres EXACTOS de las corrientes de arriba que la alimentan. Si el proyecto tiene una sola corriente, o esta unidad ya recibe todas las corrientes combinadas (después del punto donde se unen), poné ahí TODAS las corrientes del proyecto.\n- "tipo": "etapa" para una unidad/etapa real del tren de tratamiento, o "auxiliar" si en realidad es un CÁLCULO DE SOPORTE que no es su propia etapa (ej. "Difusores", que dimensiona la aireación de otra etapa como MBR o LA, pero no procesa efluente por sí misma — otros ejemplos típicos: cálculo de coeficientes, dotaciones, dimensionamiento de sopladores). Si dudás si algo es una etapa real (recibe y trata el efluente) o un cálculo auxiliar (calcula un dato que otra etapa necesita), pensá si el efluente "pasa por ahí" — si no pasa, es auxiliar.\n- "etapaAsociada": SOLO si tipo es "auxiliar" — el "nombre" EXACTO (tal como quedó en "instancias" de arriba) de la instancia de la etapa real a la que esta hoja auxiliar le da un dato. Si tipo es "etapa", dejalo en null.\n- Sé CONSERVADOR: evaluá cada hoja de la lista contra la info del cliente y los criterios de selección adjuntos, e incluí en "unidades" SOLO las que se justifican claramente para este proyecto (por el tipo de efluente, los parámetros, la tecnología ya elegida, lo que indican los criterios). Ante la duda de si una etapa hace falta, NO la incluyas — es mucho más fácil que el usuario agregue una que falta que tener que descartar varias que sobran. Las hojas que no aplican, simplemente no las menciones.\n- Lo mismo vale para "cantidad": por defecto 1 y "disposicion" null. Solo poné más de una instancia si hay un motivo concreto y explícito en la info del proyecto (varias corrientes que se tratan por separado, o un caudal que claramente excede lo que maneja una sola unidad) — no dupliques unidades "por las dudas" ni "por redundancia" si nada lo pide.\n- Las hojas "auxiliar" incluilas solo si la etapa real a la que alimentan está incluida y de verdad necesita ese cálculo.\n- El array "unidades" tiene que estar en el ORDEN real del tren, de la primera etapa a la última (el orden final de cada instancia sale de expandir "unidades" en ese orden). Las auxiliares podés ponerlas justo después de la etapa a la que están asociadas.\n- Solo si el resumen del proyecto está prácticamente vacío (recién arrancado, sin corrientes ni campos cargados) y por eso no tenés ningún criterio para decidir, proponé el tren mínimo más común/esperable en base al nombre y las etiquetas de cada hoja (cantidad:1, disposicion:null) en vez de devolver "unidades" vacío. Si SÍ hay información, no rellenes el tren con etapas "por las dudas": el usuario va a revisar y ajustar antes de aplicarlo, pero prefiere partir de un tren corto y correcto.`;
           const templateHojas = await procesosPromptText('step2_elegir_hojas', DEFAULT_TEMPLATE_HOJAS);
           const prompt = procesosPromptFill(templateHojas, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt });
           const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -10002,7 +10042,8 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
   const faltantes = model.cells.filter(c => !celdasConMapeo.has(c.ref)).filter(c => {
     const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
     if (v == null || v === '') return true;
-    if (typeof v === 'string' && v.startsWith('#')) return true; // #DIV/0!, #REF!, #VALUE!, etc.
+    if (procesosStep2EsError(v) || (typeof v === 'string' && v.startsWith('#'))) return true; // #DIV/0!, #REF!, #NUM!, etc. (HyperFormula los devuelve como objeto)
+    if (typeof v === 'number' && !isFinite(v)) return true;
     // Una celda editable en 0 no es sospechosa (puede ser un dato real). Una
     // celda CALCULADA en 0 sí puede serlo — a veces es solo una referencia a
     // otra hoja de parámetros base que quedó sin cargar (ej. ='Bases de
@@ -10011,14 +10052,94 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
     if (c.isFormula && v === 0) return true;
     return false;
   });
-  if (!faltantes.length) { if (!esAuto) alert('No se encontraron datos vacíos, en 0 o con error para revisar.'); return; }
+  const problemasIniciales = procesosStep2DetectarProblemas(nombre);
+  if (!faltantes.length && !problemasIniciales.length) { if (!esAuto) alert('No se encontraron datos vacíos, en 0, con error ni resultados fuera de rango para revisar.'); return; }
 
   const dd = Object.assign({}, p.diseno_data);
   dd.hojas = Object.assign({}, dd.hojas);
   dd.hojas[nombre] = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre], { autoCompletado: true });
   p.diseno_data = dd; // se persiste junto con el resto en procesosStep2ChatSend
 
-  await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real. Contame brevemente qué adoptaste y por qué.');
+  if (faltantes.length) {
+    const ok = await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. IMPORTANTE: si el primer valor que adoptás para un dato de dimensionamiento (por ejemplo el volumen de un reactor, una superficie, una cantidad de unidades) hace que otros parámetros calculados queden fuera de su rango normal o límite, NO lo dejes así — adoptá un valor mayor o menor (aunque sea bastante distinto del que calculaste al principio) hasta que el conjunto cumpla; usá "buscar_objetivo" o probá varios valores en tus acciones. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real. Contame brevemente qué adoptaste y por qué.');
+    if (!ok) return;
+  }
+  await procesosStep2BarridoVerificacion(nombre);
+}
+
+// Convierte un rango escrito en texto libre en la planilla ("4-8", "0,5 a 2",
+// "≤ 3", "> 1.5", "min 20") a {min,max} (uno de los dos puede faltar). Si no
+// lo puede interpretar con seguridad devuelve null — es preferible no
+// chequear esa celda antes que marcarla mal.
+function procesosStep2ParsearRango(txt) {
+  if (txt == null) return null;
+  let s = String(txt).trim().toLowerCase();
+  if (!s) return null;
+  s = s.replace(/,/g, '.');
+  // "1.000" puede ser mil o uno con tres decimales — ambiguo, mejor no chequear.
+  if (/\d\.\d{3}(?!\d)/.test(s)) return null;
+  const nums = (s.match(/\d+(?:\.\d+)?/g) || []).map(Number).filter(n => isFinite(n));
+  if (!nums.length) return null;
+  if (/[≤]|<=|<|menor|m[aá]x|hasta/.test(s) && nums.length === 1) return { min: null, max: nums[0] };
+  if (/[≥]|>=|>|mayor|m[ií]n|desde/.test(s) && nums.length === 1) return { min: nums[0], max: null };
+  if (nums.length === 2 && /[-–—]|\ba\b|entre/.test(s)) return { min: Math.min(nums[0], nums[1]), max: Math.max(nums[0], nums[1]) };
+  return null;
+}
+
+// Celdas de la hoja que hoy están con error, fuera de su rango límite o fuera
+// de su rango normal (las que se alimentan por mapeo desde el Paso 1 / otra
+// hoja no se incluyen: no se pueden "arreglar" tocando esta hoja).
+function procesosStep2DetectarProblemas(nombre) {
+  const p = procesosCurrentProyecto;
+  const model = procesosStep2State.hojaModels[nombre];
+  const hf = procesosStep2GetHF(nombre);
+  if (!model || !hf) return [];
+  const conMapeo = new Set(((p.diseno_data?.mapeos?.[nombre]) || []).map(m => m.celda));
+  const problemas = [];
+  model.cells.forEach(c => {
+    if (conMapeo.has(c.ref)) return;
+    const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    if (procesosStep2EsError(v) || (typeof v === 'number' && !isFinite(v))) {
+      problemas.push({ ref: c.ref, label: c.label, unidad: c.unidad, tipo: 'error', valorTxt: procesosStep2ValorTexto(v) });
+      return;
+    }
+    if (typeof v !== 'number') return;
+    const lim = procesosStep2ParsearRango(c.rango_limite);
+    if (lim && ((lim.min != null && v < lim.min) || (lim.max != null && v > lim.max))) {
+      problemas.push({ ref: c.ref, label: c.label, unidad: c.unidad, tipo: 'limite', valorTxt: procesosFormatearNumero(v), rango: c.rango_limite });
+      return;
+    }
+    const nor = procesosStep2ParsearRango(c.rango);
+    if (nor && ((nor.min != null && v < nor.min) || (nor.max != null && v > nor.max))) {
+      problemas.push({ ref: c.ref, label: c.label, unidad: c.unidad, tipo: 'normal', valorTxt: procesosFormatearNumero(v), rango: c.rango });
+    }
+  });
+  return problemas;
+}
+
+// "Segundo barrido": después de que la IA completa la hoja, se revisan por
+// código los resultados calculados — si alguno quedó con error o fuera de su
+// rango, se le devuelve la lista a la IA para que ajuste los datos de entrada
+// (por ejemplo, adoptar un volumen mayor que el calculado al principio) y se
+// vuelve a revisar. Hasta 2 vueltas extra; corta antes si ya no hay problemas
+// o si una vuelta no cambió nada (mismos problemas que la anterior).
+async function procesosStep2BarridoVerificacion(nombre) {
+  const MAX_VUELTAS = 2;
+  let firmaAnterior = null;
+  for (let vuelta = 1; vuelta <= MAX_VUELTAS; vuelta++) {
+    const problemas = procesosStep2DetectarProblemas(nombre);
+    if (!problemas.length) return;
+    const firma = problemas.map(x => x.ref + ':' + x.valorTxt).join('|');
+    if (firma === firmaAnterior) return;
+    firmaAnterior = firma;
+    const lista = problemas.map(x => {
+      const desc = x.tipo === 'error' ? `dio ${x.valorTxt}` : `quedó en ${x.valorTxt}${x.unidad ? ' ' + x.unidad : ''}, fuera de su ${x.tipo === 'limite' ? 'rango límite' : 'rango normal'} (${x.rango})`;
+      return `- ${x.ref} ${x.label}: ${desc}`;
+    }).join('\n');
+    const msg = `[Revisión automática — vuelta ${vuelta} de ${MAX_VUELTAS}] Después de tus cambios, revisé los resultados de la hoja y estas celdas quedaron con error o fuera de rango:\n${lista}\n\nAjustá los datos de ENTRADA para que queden dentro de rango (por ejemplo: si el volumen, la superficie o la cantidad de unidades que adoptaste es chico y por eso otros parámetros no cumplen, adoptá uno mayor aunque sea bastante distinto del inicial; usá "buscar_objetivo" o varios "set"). Priorizá cumplir los rangos límite por sobre los rangos normales. Si de verdad no se puede cumplir todo a la vez con estos datos, dejá el mejor compromiso y explicá en "reply" qué quedó fuera de rango y por qué. Contame brevemente qué cambiaste.`;
+    const ok = await procesosStep2ChatSend(nombre, msg);
+    if (!ok) return;
+  }
 }
 
 function procesosStep2RenderHojaPanel() {
@@ -10052,7 +10173,7 @@ function procesosStep2RenderHojaPanel() {
   mapeosHoja.forEach(m => { mapaPorCelda[m.celda] = m; });
 
   const rowHtml = c => {
-    const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+    const val = procesosStep2ValorTexto(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
     const valTxt = procesosFormatearNumero(val);
     const mapeo = mapaPorCelda[c.ref];
     const fuentes = (mapeo && mapeo.fuentes) || [];
@@ -10379,7 +10500,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
       const contenido = model.grid[c.row][c.col];
       const extra = [c.rango ? 'rango normal: ' + c.rango : '', c.rango_limite ? 'rango límite: ' + c.rango_limite : '', c.notas ? 'notas: ' + c.notas : ''].filter(Boolean).join(' | ');
-      return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${val}${extra ? ' | ' + extra : ''}`;
+      return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${procesosStep2ValorTexto(val)}${extra ? ' | ' + extra : ''}`;
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const criteriosBlocks = await procesosStep2GetCriteriosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombre}\n${procesosResumenCampos(p)}\nMensaje del usuario: ${msg}`);
@@ -10457,8 +10578,19 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     });
 
     const nuevosValores = Object.assign({}, hPrev.valores);
-    model.cells.filter(c => !c.isFormula).forEach(c => { nuevosValores[c.ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
-    celdasForzadas.forEach(ref => { const c = cellByRef(ref); if (c) nuevosValores[ref] = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); });
+    model.cells.filter(c => !c.isFormula).forEach(c => {
+      const seguro = procesosStep2ValorGuardable(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
+      if (seguro != null) nuevosValores[c.ref] = seguro;
+    });
+    celdasForzadas.forEach(ref => {
+      const c = cellByRef(ref);
+      const seguro = c ? procesosStep2ValorGuardable(hf.getCellValue({ sheet: 0, row: c.row, col: c.col })) : null;
+      if (seguro != null) nuevosValores[ref] = seguro;
+    });
+    // Limpia lo que ya hubiera quedado guardado de una versión anterior con un
+    // error de HyperFormula como "valor" (objeto) — si no, seguiría trabando
+    // la apertura de la hoja.
+    Object.keys(nuevosValores).forEach(k => { if (procesosStep2ValorGuardable(nuevosValores[k]) == null) delete nuevosValores[k]; });
 
     // Se re-lee diseno_data de `p` (el proyecto capturado al empezar, NUNCA del
     // global procesosCurrentProyecto) por si el usuario ya se fue a otro
@@ -10475,8 +10607,10 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       document.getElementById(statusId) && (document.getElementById(statusId).innerHTML = '');
       procesosStep2RenderHojaPanel();
     }
+    return true;
   } catch (e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+    return false;
   } finally {
     _procesosStep2ChatEnviando[nombre] = false;
   }
@@ -10490,7 +10624,7 @@ async function procesosStep2GuardarHoja(nombre) {
     const hf = procesosStep2GetHF(nombre);
     const valoresConEtiqueta = {};
     model.cells.forEach(c => {
-      const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+      const v = procesosStep2ValorTexto(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
       valoresConEtiqueta[c.label + (c.unidad ? ' (' + c.unidad + ')' : '')] = v;
     });
     const dd = Object.assign({}, p.diseno_data);
@@ -10578,7 +10712,7 @@ async function procesosStep2ChequearCumplimiento(model, hf) {
   if (!apiKey) return [];
   try {
     const listadoParams = nombresParametros.map(n => `- ${n} (límite ${limitesPorParametro[n].limiteTexto}${limitesPorParametro[n].unidad?' '+limitesPorParametro[n].unidad:''})`).join('\n');
-    const listadoResultados = resultCells.map(c => `${c.ref}: ${c.label}${c.unidad?' ('+c.unidad+')':''} = ${hf.getCellValue({sheet:0,row:c.row,col:c.col})}`).join('\n');
+    const listadoResultados = resultCells.map(c => `${c.ref}: ${c.label}${c.unidad?' ('+c.unidad+')':''} = ${procesosStep2ValorTexto(hf.getCellValue({sheet:0,row:c.row,col:c.col}))}`).join('\n');
     const DEFAULT_TEMPLATE_CUMPLIMIENTO = `Estos son los parámetros con límite normativo definidos en el proyecto:\n{{listadoParams}}\n\nEstos son los resultados calculados en la última etapa del tren de tratamiento:\n{{listadoResultados}}\n\nPara cada parámetro con límite, identificá cuál resultado (si hay alguno) corresponde al mismo parámetro, aunque estén nombrados distinto (ej. "DBO" y "Concentración DBOs salida" son el mismo parámetro). Respondé SOLO con JSON válido (sin backticks ni texto extra): {"matches":[{"parametro":"Nombre exacto del parámetro","celda":"C9"}]}. Si un parámetro no tiene ningún resultado correspondiente, no lo incluyas.`;
     const templateCumplimiento = await procesosPromptText('step2_chequear_cumplimiento', DEFAULT_TEMPLATE_CUMPLIMIENTO);
     const prompt = procesosPromptFill(templateCumplimiento, { listadoParams, listadoResultados });
