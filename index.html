@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.46</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.47</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.46</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.47</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11419,8 +11419,10 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const model = procesosStep2State.hojaModels[nombre];
     procesosStep2PropagarCadena(nombre);
     const hf = procesosStep2GetHF(nombre);
+    const valoresPrompt = {}; // lo que la IA ve en este mensaje, para mostrar después qué cambió de verdad
     const estadoActual = model.cells.map(c => {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+      valoresPrompt[c.ref] = val;
       const contenido = model.grid[c.row][c.col];
       const extra = [c.rango ? 'rango normal: ' + c.rango : '', c.rango_limite ? 'rango límite: ' + c.rango_limite : '', c.notas ? 'notas: ' + c.notas : ''].filter(Boolean).join(' | ');
       return `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${procesosStep2ValorTexto(val)}${extra ? ' | ' + extra : ''}`;
@@ -11486,7 +11488,12 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : '';
     const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{corrientesEtapaTxt}}{{grupoTxt}}{{criteriosTxt}}{{plantasCompactasTxt}}{{archivosProyectoTxt}}{{leccionesTxt}}{{chatGeneralTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
     const templateStep2Chat = await procesosPromptText('step2_chat', DEFAULT_TEMPLATE_STEP2_CHAT);
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, historialTxt, msg });
+    // La IA no puede calcular la planilla: las celdas calculadas las recalcula
+    // el sistema DESPUÉS de aplicar sus acciones. Si cita números de resultados
+    // "de memoria" (o del estado previo a sus propios cambios) el texto no
+    // coincide con lo que después se ve en las celdas — se lo aclaramos.
+    const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, historialTxt, msg, precisionTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
@@ -11520,6 +11527,26 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       } catch (_e) { /* acción individual inválida, seguir con las demás */ }
     });
 
+    // Qué cambió de verdad en la planilla respecto de lo que la IA veía al
+    // pensar su respuesta: datos que cambió ella + resultados que se
+    // recalcularon por eso. Sirve para comparar con lo que dice el texto.
+    const fmtV = v => { const t = procesosStep2ValorTexto(v); return typeof t === 'number' ? String(procesosFormatearNumero(t)) : String(t == null || t === '' ? '(vacío)' : t); };
+    const cambiosDatos = [], cambiosResultados = [];
+    model.cells.forEach(c => {
+      const antes = valoresPrompt[c.ref];
+      const despues = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+      const cambio = (typeof antes === 'number' && typeof despues === 'number')
+        ? Math.abs(antes - despues) > Math.max(1e-6, Math.abs(antes) * 1e-4)
+        : fmtV(antes) !== fmtV(despues);
+      if (!cambio) return;
+      const linea = `• ${c.ref} ${c.label}: ${fmtV(antes)} → ${fmtV(despues)}${c.unidad ? ' ' + c.unidad : ''}`;
+      (c.isFormula ? cambiosResultados : cambiosDatos).push(linea);
+    });
+    const diffTxt = (cambiosDatos.length || cambiosResultados.length)
+      ? '\n\n📊 Lo que quedó realmente en la planilla:' +
+        (cambiosDatos.length ? '\nDatos cambiados:\n' + cambiosDatos.slice(0, 12).join('\n') : '') +
+        (cambiosResultados.length ? '\nResultados recalculados:\n' + cambiosResultados.slice(0, 14).join('\n') + (cambiosResultados.length > 14 ? `\n(+${cambiosResultados.length - 14} más)` : '') : '')
+      : '';
     const nuevosValores = Object.assign({}, hPrev.valores);
     model.cells.filter(c => !c.isFormula).forEach(c => {
       const seguro = procesosStep2ValorGuardable(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
@@ -11542,7 +11569,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, confirmada: false });
-    h.chat = hPrev.chat.concat([{ role: 'assistant', content: parsed.reply || '(sin respuesta)' }]);
+    h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + diffTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
 
@@ -11734,7 +11761,7 @@ function procesosResumenEquipos(p) {
   const etapas = procesosStep3EtapasConfirmadas(p).filter(n => ed[n]?.confirmada && (ed[n].equipos || []).length);
   if (!etapas.length) return '';
   return etapas.map(nombre => {
-    const eqs = ed[nombre].equipos.map(e => `  - ${e.cantidad || 1}x ${e.tipo || '(sin tipo)'}${e.especificacion ? ' — ' + e.especificacion : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n');
+    const eqs = ed[nombre].equipos.map(e => `  - ${e.cantidad || 1}x ${e.tipo || '(sin tipo)'}${e.especificacion ? ' — ' + e.especificacion : ''}${e.modelo ? ' — Modelo: ' + e.modelo : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n');
     return `Etapa "${nombre}":\n${eqs}`;
   }).join('\n\n');
 }
@@ -11995,6 +12022,7 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
       <input value="${esc(String(eq.cantidad ?? ''))}" placeholder="Cant." style="width:56px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','cantidad',this.value)" />
       ${tipoFieldHtml(eq)}
       <input value="${esc(eq.especificacion || '')}" placeholder="Especificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','especificacion',this.value)" />
+      <input value="${esc(eq.modelo || '')}" placeholder="Modelo (marca / modelo)" style="flex:1;min-width:150px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','modelo',this.value)" />
       <input value="${esc(eq.justificacion || '')}" placeholder="Justificación" style="flex:2;min-width:200px" onchange="procesosStep3SetEquipoCampo('${safe}','${eq.id}','justificacion',this.value)" />
       <button class="btn btn-secondary btn-sm" onclick="procesosStep3EliminarEquipo('${safe}','${eq.id}')" title="Quitar">✕</button>
     </div>`;
@@ -12014,7 +12042,7 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
       ${datalistHtml}
       ${(e.equipos || []).length ? `
         <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2);flex-wrap:wrap">
-          <span style="width:56px">Cant.</span><span style="flex:1;min-width:160px">Tipo</span><span style="flex:2;min-width:200px">Especificación</span><span style="flex:2;min-width:200px">Justificación</span>
+          <span style="width:56px">Cant.</span><span style="flex:1;min-width:160px">Tipo</span><span style="flex:2;min-width:200px">Especificación</span><span style="flex:1;min-width:150px">Modelo</span><span style="flex:2;min-width:200px">Justificación</span>
         </div>
         ${e.equipos.map(filaEquipo).join('')}
       ` : '<p class="hint">Todavía no hay equipos cargados para esta etapa.</p>'}
@@ -12091,7 +12119,7 @@ function procesosStep3AgregarEquipo(nombreEtapa) {
   const ed = Object.assign({}, p.equipos_data);
   ed.etapas = Object.assign({}, ed.etapas);
   const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
-  e.equipos = (e.equipos || []).concat([{ id: procesosNuevoId(), tipo: '', cantidad: 1, especificacion: '', justificacion: '' }]);
+  e.equipos = (e.equipos || []).concat([{ id: procesosNuevoId(), tipo: '', cantidad: 1, especificacion: '', modelo: '', justificacion: '' }]);
   e.confirmada = false;
   ed.etapas[nombreEtapa] = e;
   procesosSaveProyecto({ equipos_data: ed }, p);
@@ -12235,7 +12263,7 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
       try { parsed = await intentarSugerir(6000); }
       catch (_e2) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar con más espacio) — probá de nuevo.'); }
     }
-    let nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', justificacion: eq.justificacion || '' }));
+    let nuevos = (parsed.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', modelo: '', justificacion: eq.justificacion || '' }));
     // Filtro de seguridad: aunque el prompt ya le pide elegir solo de la
     // lista cerrada, esto es lo que REALMENTE garantiza que no se cuele un
     // equipo inventado — se descarta cualquiera cuyo "tipo" no matchee
@@ -12329,7 +12357,7 @@ async function procesosStep3MatchCatalogo(nombreEtapa, equipos, valoresEtapa) {
   return equipos.map((eq, i) => {
     const marcaModelo = porNumero[i+1];
     if (!marcaModelo) return eq;
-    return Object.assign({}, eq, { especificacion: eq.especificacion + ` — ${marcaModelo}` });
+    return Object.assign({}, eq, { modelo: marcaModelo });
   });
 }
 
@@ -12360,7 +12388,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const listado = (ePrev.equipos || []).map(e => `id ${e.id}: ${e.cantidad}x ${e.tipo}${e.especificacion ? ' — ' + e.especificacion : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n') || '(sin equipos cargados todavía)';
+    const listado = (ePrev.equipos || []).map(e => `id ${e.id}: ${e.cantidad}x ${e.tipo}${e.especificacion ? ' — ' + e.especificacion : ''}${e.modelo ? ' — Modelo: ' + e.modelo : ''}${e.justificacion ? ' [' + e.justificacion + ']' : ''}`).join('\n') || '(sin equipos cargados todavía)';
     const historialPrevio = (ePrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
     const dd = p.diseno_data || {};
     const h = dd.hojas?.[nombreEtapa] || {};
@@ -12389,7 +12417,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
     const plantillaChatTxt = plantillaMatch && plantillaMatch.equipos.length
       ? `Equipos disponibles para esta etapa — LISTA CERRADA, si agregás un equipo tiene que ser copiando el campo "tipo" EXACTAMENTE de acá, sin inventar nada que no esté:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}`).join('\n')}\n\n`
       : '';
-    const DEFAULT_TEMPLATE_STEP3_CHAT = `Estás ayudando a definir los equipos de la etapa/unidad "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n{{valoresEtapa}}\n\nEquipos actualmente cargados para esta etapa:\n{{listado}}\n\n{{historialTxt}}{{equiposDocTxt}}{{archivosProyectoTxt}}{{plantillaChatTxt}}{{chatGeneralTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
+    const DEFAULT_TEMPLATE_STEP3_CHAT = `Estás ayudando a definir los equipos de la etapa/unidad "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes.\n\nValores de diseño de esta etapa:\n{{valoresEtapa}}\n\nEquipos actualmente cargados para esta etapa:\n{{listado}}\n\n{{historialTxt}}{{equiposDocTxt}}{{archivosProyectoTxt}}{{plantillaChatTxt}}{{chatGeneralTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"agregar","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","modelo":"Marca — Modelo (solo si hay uno concreto en los catálogos adjuntos, si no vacío)","justificacion":"..."}},{"tipo":"editar","id":"eq_xxx","cambios":{"cantidad":2}},{"tipo":"eliminar","id":"eq_xxx"}]}\n\nUsá "agregar" para sumar un equipo nuevo a la lista, "editar" para modificar campos de un equipo existente (por su id, cambiando solo los campos que correspondan), y "eliminar" para sacarlo. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[].`;
     const templateStep3Chat = await procesosPromptText('step3_chat', DEFAULT_TEMPLATE_STEP3_CHAT);
     const prompt = procesosPromptFill(templateStep3Chat, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', listado, historialTxt, equiposDocTxt, archivosProyectoTxt, plantillaChatTxt, chatGeneralTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
@@ -12417,7 +12445,7 @@ async function procesosStep3ChatSend(nombreEtapa) {
             console.warn(`Chat de equipos: se descartó "${a.equipo.tipo}" propuesto fuera de la lista configurada para "${nombreEtapa}".`);
             return;
           }
-          equipos.push({ id: procesosNuevoId(), tipo: a.equipo.tipo || '', cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1, especificacion: a.equipo.especificacion || '', justificacion: a.equipo.justificacion || '' });
+          equipos.push({ id: procesosNuevoId(), tipo: a.equipo.tipo || '', cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1, especificacion: a.equipo.especificacion || '', modelo: a.equipo.modelo || '', justificacion: a.equipo.justificacion || '' });
         } else if (a.tipo === 'editar' && a.id) {
           equipos = equipos.map(eq => eq.id === a.id ? Object.assign({}, eq, a.cambios || {}) : eq);
         } else if (a.tipo === 'eliminar' && a.id) {
@@ -12977,7 +13005,7 @@ function procesosPropuestaItemsDesdeEquipos(p) {
   const items = [];
   etapas.forEach(nombre => {
     (ed[nombre].equipos || []).forEach(eq => {
-      const desc = [eq.tipo, eq.especificacion].filter(Boolean).join(' — ') || '(sin descripción)';
+      const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
       items.push({ id: procesosNuevoId(), etapa: nombre, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null });
     });
   });
