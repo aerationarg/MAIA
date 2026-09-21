@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.45</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.46</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.45</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.46</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6794,7 +6794,7 @@ function procesosPromptFill(template, vars) {
 // puntual (catálogo, plantas compactas) quedan en un grupo "General" al final.
 const PROCESOS_PROMPT_PASO = {
   step1_analizar: 1, tecnologia_seleccion: 1, normativa_sugerir: 1, normativa_aplicar: 1,
-  step2_elegir_hojas: 2, step2_tren_chat: 2, step2_mapeos: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
+  step2_elegir_hojas: 2, step2_tren_chat: 2, step2_mapeos_unidad: 2, step2_chequear_cumplimiento: 2, step2_chat: 2,
   step3_sugerir_equipos: 3, step3_match_catalogo: 3, step3_chat: 3,
   step4_generar: 4, step4_chat: 4,
 };
@@ -9125,7 +9125,8 @@ function procesosStep2Html(p) {
           ? `<span class="badge" style="background:rgba(154,107,47,.12);color:#9a6b2f;border:1px solid var(--border)" title="Línea de lodos: recibe los lodos generados por esta unidad, no el efluente líquido">🟤 Lodos de ${esc(e.nombre)}</span>`
           : `<span class="badge" style="background:var(--surface);color:var(--blue);border:1px solid var(--border)" title="Recibe la salida de esta unidad">← ${esc(e.nombre)}</span>`),
       h.grupo ? `<span class="badge" style="background:var(--blue-bg);color:var(--blue)">${h.disposicion === 'serie' ? '→ Serie' : '⇄ Paralelo'}</span>` : '',
-      h.tipo === 'auxiliar' ? `<span class="badge" style="background:var(--surface2);color:var(--text3);border:1px solid var(--border)">Auxiliar${h.etapaAsociada ? ' → '+esc(h.etapaAsociada) : ''}</span>` : ''
+      h.tipo === 'auxiliar' ? `<span class="badge" style="background:var(--surface2);color:var(--text3);border:1px solid var(--border)">Auxiliar${h.etapaAsociada ? ' → '+esc(h.etapaAsociada) : ''}</span>` : '',
+      (h.seleccionada && procesosStep2ConexionesDesactualizadas(p, nombre)) ? `<span class="badge" style="background:var(--surface);color:var(--red);border:1px solid var(--border)" title="El tren cambió y esta unidad ahora recibe su entrada de otro lado que cuando se armaron sus conexiones — abrila y tocá &quot;Actualizar conexiones&quot;">⚠ conexiones a revisar</span>` : ''
     ].filter(Boolean).join(' ');
     return `
     <div class="field-row" style="padding:8px 0">
@@ -9156,7 +9157,7 @@ function procesosStep2Html(p) {
       <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosStep2ReintentarSugerencia()">↻ Reintentar sugerencia</button>
     </div>
     ` : ''}
-    <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto y ordenalas con las flechas (así queda el tren de tratamiento) — la IA ya sugirió una selección inicial, ajustala si hace falta. Las conexiones entre etapas se vuelven a sugerir solas cada vez que agregás, sacás o reordenás una.</p>
+    <p class="hint" style="margin:6px 0">Marcá las unidades/etapas que aplican a este proyecto y ordenalas con las flechas (así queda el tren de tratamiento) — la IA ya sugirió una selección inicial, ajustala si hace falta. Las conexiones de cada unidad (qué datos se alimentan solos de la etapa anterior o del Paso 1) se arman al definir sus valores; si después cambiás el tren, las unidades afectadas se marcan "conexiones a revisar".</p>
     <button class="btn btn-secondary btn-sm" onclick="procesosStep2ReintentarSugerencia()" style="margin-bottom:8px" title="Le vuelve a pedir a la IA que proponga el tren completo (cantidad, corriente y disposición de cada unidad) — no se aplica hasta que lo confirmes">↻ Volver a sugerir con IA</button>
     ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenAbrirDesdeActual()" style="margin-bottom:8px;margin-left:8px" title="Abre el tren actual para preguntarle a la IA por qué está armado así o modificarlo por chat (agregar/sacar unidades, serie/paralelo, etc.) — no se aplica hasta que lo confirmes">💬 Revisar / modificar el tren con chat</button>` : ''}
     ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2ToggleBalanceTren()" style="margin-bottom:8px;margin-left:8px" title="Calcula cómo entra y cómo sale cada parámetro (DBO, DQO, SST...) en cada unidad y en todo el tren, con las eficiencias de remoción">📊 Balance de parámetros del tren</button>` : ''}
@@ -9569,79 +9570,150 @@ function procesosStep2PropagarCadena(hastaHoja) {
   return ponderaciones;
 }
 
-async function procesosStep2SugerirMapeos() {
+// ── Conexiones entre unidades (mapeos) ──────────────────────────────────
+// Qué celdas de una unidad se alimentan solas de un parámetro del Paso 1 o del
+// resultado de otra hoja (con ponderación por caudal si hay varias fuentes).
+// Se arman al DEFINIR LOS VALORES de cada unidad (no en una pasada global): en
+// ese momento ya se sabe exactamente de dónde recibe su entrada según el flujo
+// del tren (corriente del Paso 1, unidad anterior o lodos), así que la IA solo
+// ve como fuentes posibles las que corresponden. Se guardan en
+// diseno_data.mapeos[unidad] y la propagación entre hojas funciona igual que
+// siempre. Si después cambia de dónde recibe su entrada la unidad (se
+// reordenó o cambió el tren), queda marcada "conexiones a revisar".
+function procesosStep2FirmaConexiones(p, nombre, flujo) {
+  const h = p.diseno_data?.hojas?.[nombre] || {};
+  if (h.tipo === 'auxiliar') return 'aux|' + (h.etapaAsociada || '');
+  return (flujo.porInstancia[nombre] || []).map(e => e.tipo + ':' + e.nombre).sort().join('|');
+}
+function procesosStep2ConexionesDesactualizadas(p, nombre) {
+  const h = p.diseno_data?.hojas?.[nombre];
+  if (!h || !h.mapeosFirma) return false;
+  const flujo = procesosStep2TrenFlujo(procesosStep2GruposDesdeActual(p));
+  return h.mapeosFirma !== procesosStep2FirmaConexiones(p, nombre, flujo);
+}
+function procesosStep2NecesitaConexiones(p, nombre) {
+  return (p.diseno_data?.mapeos || {})[nombre] === undefined || procesosStep2ConexionesDesactualizadas(p, nombre);
+}
+
+async function procesosStep2SugerirMapeosUnidad(nombre) {
   const p = procesosCurrentProyecto;
-  const dd = Object.assign({}, p.diseno_data);
-  const orden = dd.orden || [];
-  if (!orden.length) { alert('Primero seleccioná al menos una unidad/etapa.'); return; }
-  const statusId = 'procesos-step2-status';
-  showMsg(statusId, 'loading', 'Sugiriendo conexiones entre etapas...');
+  const statusId = 'procesos-step2-chat-status';
+  showMsg(statusId, 'loading', 'Armando las conexiones de esta unidad...');
   try {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('API key no disponible.');
-    const corrientes = p.info_cliente?.corrientes || [];
-    const paramsPaso1 = corrientes.map(c => {
+    procesosStep2GetHF(nombre);
+    const model = procesosStep2State.hojaModels[nombre];
+    if (!model) throw new Error('No se pudo leer la hoja de esta unidad.');
+    const dd = Object.assign({}, p.diseno_data);
+    dd.hojas = Object.assign({}, dd.hojas);
+    const hUnidad = dd.hojas[nombre] || {};
+    const grupos = procesosStep2GruposDesdeActual(p);
+    const flujo = procesosStep2TrenFlujo(grupos);
+    const corrientesProyecto = p.info_cliente?.corrientes || [];
+    const esAux = hUnidad.tipo === 'auxiliar';
+    const entradas = esAux ? [] : (flujo.porInstancia[nombre] || []);
+
+    // Fuentes posibles: corrientes del Paso 1 y hojas de las que recibe su entrada
+    let nombresCorr = entradas.filter(e => e.tipo === 'corriente').map(e => e.nombre).concat(hUnidad.corrientesAsignadas || []);
+    const hojasCand = [];
+    entradas.filter(e => e.tipo === 'unidad' || e.tipo === 'lodos').forEach(e => {
+      (grupos[e.gi] ? grupos[e.gi].instancias : []).forEach(i => { if (i.nombre !== nombre && !hojasCand.includes(i.nombre)) hojasCand.push(i.nombre); });
+    });
+    if (esAux && hUnidad.etapaAsociada && hUnidad.etapaAsociada !== nombre) {
+      hojasCand.push(hUnidad.etapaAsociada);
+      nombresCorr = nombresCorr.concat(dd.hojas[hUnidad.etapaAsociada]?.corrientesAsignadas || []);
+    }
+    nombresCorr = [...new Set(nombresCorr)].filter(n => corrientesProyecto.some(c => c.nombre === n));
+    if (!nombresCorr.length) nombresCorr = corrientesProyecto.map(c => c.nombre);
+    const corrCand = corrientesProyecto.filter(c => nombresCorr.includes(c.nombre));
+
+    const paramsPaso1 = corrCand.map(c => {
       const vals = Object.entries(c.campos || {})
         .filter(([, v]) => v && typeof v === 'object' && v.valor != null && v.valor !== '')
         .map(([k, v]) => `  - ${k}${v.unidad ? ' (' + v.unidad + ')' : ''}: valor ${v.valor}`).join('\n');
       return `Corriente "${c.nombre}":\n${vals || '  (sin parámetros)'}`;
     }).join('\n\n') || '(sin corrientes definidas en el Paso 1)';
-    const descHojas = orden.map(nombre => {
-      // procesosStep2GetHF (no workbook.Sheets[nombre] directo) para que una
-      // instancia duplicada resuelva su modelo desde la hoja base.
-      procesosStep2GetHF(nombre);
-      const model = procesosStep2State.hojaModels[nombre];
-      if (!model) return `Hoja "${nombre}": (no se pudo leer)`;
-      const editables = model.cells.filter(c => !c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
-      const resultados = model.cells.filter(c => c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} [fórmula: ${model.grid[c.row][c.col]}]`).join('; ');
-      return `Hoja "${nombre}":\n  Datos editables: ${editables || '(ninguno)'}\n  Resultados/calculados (con su fórmula): ${resultados || '(ninguno)'}`;
-    }).join('\n\n');
-    // Línea de lodos: esas unidades no reciben el efluente líquido, y la línea
-    // líquida no toma datos de ellas.
-    const gruposMap = procesosStep2GruposDesdeActual(p);
-    const flujoMap = procesosStep2TrenFlujo(gruposMap);
-    const lodosNombres = new Set(gruposMap.filter(g => g.linea === 'lodos').flatMap(g => g.instancias.map(i => i.nombre)));
-    const lodosTxt = lodosNombres.size
-      ? 'LÍNEA DE LODOS: las siguientes unidades no tratan el efluente líquido sino los lodos generados por otra etapa: ' + [...lodosNombres].map(n => `"${n}" (recibe ${(flujoMap.porInstancia[n] || []).map(e => 'los lodos de "' + e.nombre + '"').join(' + ') || 'lodos'})`).join('; ') + '. Para esas unidades, una fuente de tipo "hoja" solo puede ser la unidad de la que reciben los lodos o la unidad de lodos anterior (no el efluente de la última etapa líquida), y NO les mapees parámetros de calidad del efluente del Paso 1 (DBO, DQO, etc.). Las unidades de la línea líquida NUNCA toman datos de unidades de lodos.\n\n'
+    const descCeldas = (m, conFormula) => m.cells.map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} [${c.isFormula ? 'resultado' + (conFormula ? ', fórmula: ' + m.grid[c.row][c.col] : '') : 'dato'}]`).join('; ');
+    const hojasFuenteTxt = hojasCand.map(n => {
+      procesosStep2GetHF(n);
+      const m = procesosStep2State.hojaModels[n];
+      return m ? `Hoja "${n}": ${descCeldas(m, false)}` : `Hoja "${n}": (no se pudo leer)`;
+    }).join('\n\n') || '(esta unidad no recibe datos de otra hoja)';
+    const editables = model.cells.filter(c => !c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}`).join('; ');
+    const resultados = model.cells.filter(c => c.isFormula).map(c => `${c.ref}: ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} [fórmula: ${model.grid[c.row][c.col]}]`).join('; ');
+
+    const nFuentes = entradas.filter(e => e.tipo === 'corriente' || e.tipo === 'unidad').length;
+    const variasFuentesTxt = nFuentes > 1
+      ? 'Esta unidad recibe su entrada de VARIAS fuentes a la vez (' + entradas.map(e => e.tipo === 'corriente' ? 'la corriente ' + e.nombre : e.nombre).join(' + ') + ', que se juntan acá): en las celdas de entrada que dependen del caudal o de la calidad del efluente, incluí TODAS esas fuentes en "fuentes" (el sistema las pondera por caudal).\n\n'
       : '';
-    const multiCorriente = corrientes.length > 1;
-    const multiCorrienteTxt = multiCorriente ? ' Como hay más de una corriente, es esperable que en algún punto del tren (donde se unifican los tratamientos) una misma celda tenga MÁS DE UNA fuente — por ejemplo el DBO de entrada de la etapa donde confluye el tratamiento de la corriente cloacal y de la industrial debería tener como fuentes el resultado de la última hoja de cada corriente (o el parámetro del Paso 1 de esa corriente, si esa corriente no pasa por ninguna hoja antes de unificarse). Identificá vos en qué hoja ocurre esa unificación según las etapas de cada corriente.' : '';
-    const DEFAULT_TEMPLATE_MAPEOS = `Este es el tren de tratamiento del proyecto, en orden: {{ordenTxt}}.\n\nParámetros de diseño ya definidos en el Paso 1, por corriente de efluente:\n{{paramsPaso1}}\n\nDetalle de cada hoja (datos editables que hay que completar, y resultados que calcula):\n{{descHojas}}\n\n{{lodosTxt}}Para cada hoja del tren, identificá qué datos editables deberían alimentarse automáticamente de: (a) un parámetro de alguna corriente del Paso 1 con el mismo significado, o (b) el resultado de una hoja ANTERIOR en el tren (una que aparezca antes en la lista de orden) con el mismo significado.{{multiCorrienteTxt}} Si un dato editable no tiene relación clara con ningún parámetro de arrastre (por ejemplo es una dimensión o elección de diseño propia de esa etapa), no lo incluyas — queda como dato manual.\n\nADEMÁS, revisá las celdas de RESULTADO (con fórmula) de cada hoja: algunas fórmulas no son un cálculo real a partir de otras celdas de ESA hoja, sino solo una referencia a un valor base de otra hoja de parámetros del mismo libro (por ejemplo una fórmula que apunta directo a otra hoja tipo "Bases de diseño" sin combinar nada más). Si el significado de esa celda coincide con un parámetro que ya tenés extraído en el Paso 1 (o con el resultado de una hoja anterior), incluila TAMBIÉN en los mapeos con el mismo formato — así se usa el dato real del proyecto en vez de la referencia interna del Excel. NO hagas esto con fórmulas que combinan varias celdas para calcular algo (esos son cálculos de diseño reales, no se tocan).\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"mapeos": {"NombreHoja": [{"celda":"C4","fuentes":[{"origen":"paso1","corriente":"Nombre exacto de la corriente","campo":"Nombre exacto del parámetro"}]}, {"celda":"C7","fuentes":[{"origen":"hoja","hoja":"Nombre exacto de la hoja anterior","celda_origen":"C12"}]}, {"celda":"C9","fuentes":[{"origen":"hoja","hoja":"HojaCorrienteA","celda_origen":"C5"},{"origen":"hoja","hoja":"HojaCorrienteB","celda_origen":"C6"}]}]}}. El array "fuentes" tiene un elemento salvo en un punto de unificación, donde puede tener dos o más.`;
-    const templateMapeos = await procesosPromptText('step2_mapeos', DEFAULT_TEMPLATE_MAPEOS);
-    const prompt = procesosPromptFill(templateMapeos, { ordenTxt: orden.join(' → '), paramsPaso1, descHojas, multiCorrienteTxt, lodosTxt });
+    const posicionTxt = entradas.some(e => e.tipo === 'lodos')
+      ? 'Esta unidad es de la LÍNEA DE LODOS: recibe los lodos generados por ' + entradas.filter(e => e.tipo === 'lodos').map(e => '"' + e.nombre + '"').join(' + ') + ', no el efluente líquido. NO le mapees parámetros de calidad del efluente del Paso 1 (DBO, DQO, etc.).\n\n'
+      : (entradas.some(e => e.tipo === 'unidad')
+        ? 'Esta unidad recibe como entrada la SALIDA de: ' + entradas.filter(e => e.tipo === 'unidad').map(e => '"' + e.nombre + '"').join(' + ') + '. Para todo dato de entrada que esa/s unidad/es calcula/n (caudal, concentraciones, etc.) usá SIEMPRE el resultado de esa/s hoja/s como fuente — no el parámetro crudo del Paso 1, que solo corresponde al efluente al inicio del tren. Los parámetros del Paso 1 se usan solo para lo que ninguna unidad anterior calcula (por ejemplo temperatura, pH, alcalinidad).\n\n'
+        : (esAux ? 'Esta hoja es un CÁLCULO AUXILIAR de la etapa ' + (hUnidad.etapaAsociada ? '"' + hUnidad.etapaAsociada + '"' : '(sin asociar)') + ': sus datos de entrada suelen salir de esa etapa.\n\n' : ''));
+
+    const DEFAULT_TEMPLATE_MAPEOS_UNIDAD = `Estás armando las conexiones automáticas de la unidad "{{nombre}}" de un tren de tratamiento: qué datos de su hoja de cálculo deben alimentarse solos de otra fuente en vez de cargarse a mano.
+
+{{posicionTxt}}{{variasFuentesTxt}}Hoja de esta unidad:
+  Datos editables: {{editables}}
+  Resultados/calculados (con su fórmula): {{resultados}}
+
+Fuentes posibles:
+(a) Parámetros del Paso 1 (efluente al inicio del tren), por corriente:
+{{paramsPaso1}}
+
+(b) Hojas de las que esta unidad recibe su entrada (cada celda con su etiqueta):
+{{hojasFuenteTxt}}
+
+Identificá qué datos EDITABLES de esta unidad deberían alimentarse automáticamente de (a) un parámetro del Paso 1 con el mismo significado, o (b) una celda de una de las hojas de la lista (b) con el mismo significado. Si un dato editable no tiene relación clara con ninguna fuente (por ejemplo es una dimensión o una elección de diseño propia de esta etapa), no lo incluyas — queda como dato manual.
+
+ADEMÁS, revisá las celdas de RESULTADO (con fórmula): algunas no son un cálculo real a partir de otras celdas de ESTA hoja, sino solo una referencia a un valor base de otra hoja de parámetros del mismo libro (por ejemplo una fórmula que apunta directo a otra hoja tipo "Bases de diseño" sin combinar nada más). Si el significado de esa celda coincide con un dato de las fuentes de arriba, incluila TAMBIÉN. NO hagas esto con fórmulas que combinan varias celdas para calcular algo (son cálculos de diseño reales, no se tocan).
+
+Respondé SOLO con JSON válido (sin backticks ni texto extra): {"mapeos":[{"celda":"C4","fuentes":[{"origen":"paso1","corriente":"Nombre exacto de la corriente","campo":"Nombre exacto del parámetro"}]},{"celda":"C7","fuentes":[{"origen":"hoja","hoja":"Nombre exacto de la hoja","celda_origen":"C12"}]}]}. El array "fuentes" tiene un elemento salvo cuando la celda se alimenta de varias fuentes a la vez. Si no hay ninguna conexión que hacer, devolvé {"mapeos":[]}.`;
+    const template = await procesosPromptText('step2_mapeos_unidad', DEFAULT_TEMPLATE_MAPEOS_UNIDAD);
+    const prompt = procesosPromptFill(template, { nombre, posicionTxt, variasFuentesTxt, editables: editables || '(ninguno)', resultados: resultados || '(ninguno)', paramsPaso1, hojasFuenteTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 6000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 3000, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
     });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
     const text = data.content?.find(c => c.type === 'text')?.text || '{}';
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    const nombresCorrientes = corrientes.map(c => c.nombre);
-    const mapeos = {};
-    orden.forEach((nombre, i) => {
-      const hojasAnteriores = orden.slice(0, i).filter(n => lodosNombres.has(nombre) || !lodosNombres.has(n));
-      const raw = (parsed.mapeos && parsed.mapeos[nombre]) || [];
-      mapeos[nombre] = raw.map(m => {
-        const fuentes = (m.fuentes || []).map(f => {
-          if (f.origen === 'hoja') return { origen: 'hoja', hoja: f.hoja, celda_origen: f.celda_origen };
-          return { origen: 'paso1', corriente: f.corriente, campo: f.campo };
-        }).filter(f =>
-          (f.origen === 'paso1' && f.campo && nombresCorrientes.includes(f.corriente)) ||
-          (f.origen === 'hoja' && f.celda_origen && hojasAnteriores.includes(f.hoja))
-        );
-        return { celda: m.celda, fuentes };
-      }).filter(m => m.celda && m.fuentes.length);
-    });
-    dd.mapeos = mapeos;
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+    catch (_e) { throw new Error('La respuesta de la IA con las conexiones llegó incompleta — probá de nuevo.'); }
+    const celdasUnidad = new Set(model.cells.map(c => c.ref));
+    const corrPorNombre = {}; corrCand.forEach(c => { corrPorNombre[c.nombre] = c; });
+    const celdasDeHoja = n => { const m = procesosStep2State.hojaModels[n]; return m ? new Set(m.cells.map(c => c.ref)) : new Set(); };
+    const mapeos = (Array.isArray(parsed.mapeos) ? parsed.mapeos : []).map(m => {
+      const fuentes = (m.fuentes || []).map(f => f.origen === 'hoja'
+        ? { origen: 'hoja', hoja: f.hoja, celda_origen: f.celda_origen }
+        : { origen: 'paso1', corriente: f.corriente, campo: f.campo }
+      ).filter(f =>
+        (f.origen === 'paso1' && f.campo && corrPorNombre[f.corriente] && (f.campo in (corrPorNombre[f.corriente].campos || {}))) ||
+        (f.origen === 'hoja' && f.celda_origen && hojasCand.includes(f.hoja) && celdasDeHoja(f.hoja).has(f.celda_origen))
+      );
+      return { celda: m.celda, fuentes };
+    }).filter(m => m.celda && celdasUnidad.has(m.celda) && m.fuentes.length);
+
+    dd.mapeos = Object.assign({}, dd.mapeos, { [nombre]: mapeos });
+    dd.hojas[nombre] = Object.assign({}, hUnidad, { mapeosFirma: procesosStep2FirmaConexiones(p, nombre, flujo) });
     await procesosSaveProyecto({ diseno_data: dd }, p);
-    if (procesosCurrentProyecto === p) {
-      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
-      renderProcesosStepContent();
-    }
+    const el = document.getElementById(statusId); if (el && procesosCurrentProyecto === p) el.innerHTML = '';
+    return true;
   } catch (e) {
-    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+    if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudieron armar las conexiones: ' + e.message);
+    return false;
   }
+}
+// Botón "Actualizar conexiones de esta unidad": vuelve a pedir las conexiones
+// (por ejemplo después de cambiar el tren) y re-propaga los valores.
+async function procesosStep2ActualizarConexiones(nombre) {
+  const p = procesosCurrentProyecto;
+  const ok = await procesosStep2SugerirMapeosUnidad(nombre);
+  if (ok) { try { procesosStep2PropagarCadena(nombre); } catch (_e) { /* se muestra lo que haya */ } }
+  if (procesosCurrentProyecto === p) renderProcesosStepContent();
 }
 
 function procesosStep2ReintentarSugerencia() {
@@ -10649,6 +10721,10 @@ async function procesosStep2TrenAplicar() {
   const st = procesosStep2State;
   const grupos = st.trenPropuesto?.grupos || [];
   if (!grupos.length) return;
+  // De dónde recibía su entrada cada unidad ANTES de este cambio: sirve para
+  // dejar registrado con qué flujo se armaron las conexiones ya existentes y
+  // poder marcar "conexiones a revisar" si ahora recibe de otro lado.
+  const flujoPrev = procesosStep2TrenFlujo(procesosStep2GruposDesdeActual(p));
   const dd = Object.assign({}, p.diseno_data);
   dd.hojas = Object.assign({}, dd.hojas);
   const orden = [];
@@ -10676,20 +10752,16 @@ async function procesosStep2TrenAplicar() {
   Object.keys(dd.hojas).forEach(nombre => {
     if (!orden.includes(nombre) && dd.hojas[nombre]?.seleccionada) dd.hojas[nombre] = Object.assign({}, dd.hojas[nombre], { seleccionada: false });
   });
+  orden.forEach(nombre => {
+    const hh = dd.hojas[nombre];
+    if (hh && !hh.mapeosFirma && dd.mapeos && dd.mapeos[nombre] !== undefined && flujoPrev.porInstancia[nombre]) {
+      dd.hojas[nombre] = Object.assign({}, hh, { mapeosFirma: flujoPrev.porInstancia[nombre].map(e => e.tipo + ':' + e.nombre).sort().join('|') });
+    }
+  });
   dd.orden = orden;
   st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false; st.trenEdicionManual = false;
   await procesosSaveProyecto({ diseno_data: dd }, p);
-  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
-}
-
-// Reintenta sugerir las conexiones entre etapas (mapeos) solo, sin que el
-// usuario tenga que acordarse de tocar el botón — con un pequeño debounce
-// para no disparar una llamada a la IA por cada click si reordena varias
-// veces seguidas.
-let _procesosMapeoTimeout = null;
-function procesosStep2SugerirMapeosDebounced() {
-  clearTimeout(_procesosMapeoTimeout);
-  _procesosMapeoTimeout = setTimeout(() => { procesosStep2SugerirMapeos(); }, 1200);
+  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); }
 }
 
 // Id del slot del DOM para el panel de una hoja — a partir del NOMBRE, no de
@@ -10749,7 +10821,7 @@ function procesosStep2DuplicarHoja(nombreOrigen) {
   ddN.orden = orden;
 
   procesosSaveProyecto({ diseno_data: ddN }, p).then(() => {
-    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); }
   });
 }
 
@@ -10795,7 +10867,7 @@ function procesosStep2ToggleHoja(nombre, checked) {
   else { orden = orden.filter(n => n !== nombre); }
   dd.orden = orden;
   procesosSaveProyecto({ diseno_data: dd }, p).then(() => {
-    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); if (orden.length) procesosStep2SugerirMapeosDebounced(); }
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); }
   });
 }
 
@@ -10810,7 +10882,7 @@ function procesosStep2ReorderHoja(nombre, dir) {
   const tmp = orden[idx]; orden[idx] = orden[newIdx]; orden[newIdx] = tmp;
   dd.orden = orden;
   procesosSaveProyecto({ diseno_data: dd }, p).then(() => {
-    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2SugerirMapeosDebounced(); }
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); }
   });
 }
 
@@ -10877,6 +10949,13 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
   const model = procesosStep2State.hojaModels[nombre];
   const hf = procesosStep2GetHF(nombre);
   if (!model || !hf) return;
+  // Las conexiones de esta unidad (qué celdas se alimentan solas) se arman acá,
+  // al definir sus valores, si todavía no existen o el tren cambió desde
+  // entonces — antes de calcular qué datos faltan.
+  if (procesosStep2NecesitaConexiones(p, nombre)) {
+    await procesosStep2SugerirMapeosUnidad(nombre);
+    try { procesosStep2PropagarCadena(nombre); } catch (_e) { /* se sigue con lo que haya */ }
+  }
   const mapeosHoja = (p.diseno_data?.mapeos?.[nombre]) || [];
   const celdasConMapeo = new Set(mapeosHoja.map(m => m.celda));
   const faltantes = model.cells.filter(c => !celdasConMapeo.has(c.ref)).filter(c => {
@@ -11080,6 +11159,8 @@ function procesosStep2RenderHojaPanel() {
       ${model.cells.length ? `<div class="ps2-grid">${model.cells.map(rowHtml).join('')}</div>` : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
       <div id="procesos-step2-pc-selector"></div>
       <div class="gap"></div>
+      ${procesosStep2ConexionesDesactualizadas(p, nombre) ? `<div class="card" style="margin-bottom:8px;border-color:var(--red)"><p class="hint" style="color:var(--red)">⚠ El tren cambió y esta unidad ahora recibe su entrada de otro lado que cuando se armaron sus conexiones — actualizalas para que se alimente de la fuente correcta.</p></div>` : ''}
+      <button class="btn btn-secondary btn-sm" onclick="procesosStep2ActualizarConexiones('${safe}')" style="margin-right:6px" title="Vuelve a armar qué datos de esta unidad se alimentan solos de la etapa anterior o del Paso 1, según cómo está armado el tren">🔗 Actualizar conexiones</button>
       <button class="btn btn-secondary btn-sm" onclick="procesosStep2RevisarYCompletar('${safe}', false)">↻ Revisar y completar automáticamente</button>
       <button class="btn btn-secondary btn-sm" onclick="procesosStep2ToggleBalanceUnidad('${safe}')" style="margin-left:6px" title="Resumen de los parámetros que afecta esta unidad: cómo entran y cómo salen">📊 ${(procesosStep2State.balanceAbierto && procesosStep2State.balanceAbierto[nombre]) ? 'Ocultar' : 'Ver'} balance de parámetros</button>
       ${(procesosStep2State.balanceAbierto && procesosStep2State.balanceAbierto[nombre] && procesosStep2State.balance) ? `<div class="card" style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="card-label">Balance de parámetros — ${esc(nombre)}</div><button class="btn btn-secondary btn-sm" onclick="procesosStep2BalanceRefrescar()">↻ Actualizar</button></div>${procesosStep2BalanceUnidadHtml(procesosStep2State.balance, nombre)}</div>` : ''}
