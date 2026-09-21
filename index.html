@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.44</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.45</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.44</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.45</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11762,39 +11762,94 @@ function procesosDiagramaColores() {
     text: get('--text', '#1a1a18'), text2: get('--text2', '#6b6b67'), surface: get('--surface', '#ffffff'),
   };
 }
+// Dos líneas: arriba el efluente líquido (la última unidad es el efluente
+// final, con flecha de salida) y, abajo, la línea de lodos, que arranca debajo
+// de la unidad de la que salen los lodos (ej. el sedimentador secundario) con
+// una flecha en codo desde ahí. Si no hay unidades de lodos es una sola fila.
 function procesosDiagramaFlujoSvg(p) {
-  const etapas = procesosDiagramaFlujoDatos(p);
-  if (!etapas.length) return '';
+  const todas = procesosDiagramaFlujoDatos(p);
+  if (!todas.length) return '';
+  const grupos = procesosStep2GruposDesdeActual(p);
+  const flujo = procesosStep2TrenFlujo(grupos);
+  const giDe = {};
+  grupos.forEach((g, gi) => g.instancias.forEach(i => { giDe[i.nombre] = gi; }));
+  todas.forEach(e => { e.gi = giDe[e.nombre]; e.esLodos = e.gi != null && grupos[e.gi].linea === 'lodos'; e.entradas = flujo.porInstancia[e.nombre] || []; });
+  const liq = todas.filter(e => !e.esLodos), lod = todas.filter(e => e.esLodos);
   const c = procesosDiagramaColores();
-  const boxW = 200, boxH = 132, gapX = 90, padTop = 26, padSides = 20;
-  const totalW = etapas.length * boxW + (etapas.length - 1) * gapX + padSides * 2;
-  const totalH = boxH + padTop * 2;
+  const marron = '#9a6b2f', verde = '#2e7d32';
+  const boxW = 200, boxH = 132, gapX = 90, padTop = 26, padSides = 20, filaGap = 90;
+  const xLiq = i => padSides + i * (boxW + gapX);
+  // Los lodos arrancan debajo de la unidad de la que salen.
+  let x0 = xLiq(0);
+  if (lod.length) {
+    const ent = lod[0].entradas.find(e => e.tipo === 'lodos');
+    const idxO = ent ? liq.findIndex(l => l.gi === ent.gi) : -1;
+    if (idxO >= 0) x0 = xLiq(idxO);
+  }
+  const xLod = k => x0 + k * (boxW + gapX);
+  const row2y = padTop + boxH + filaGap;
+  const anchoLiq = liq.length ? xLiq(liq.length - 1) + boxW + gapX : 0;   // incluye la flecha del efluente final
+  const anchoLod = lod.length ? xLod(lod.length - 1) + boxW : 0;
+  const totalW = Math.max(anchoLiq, anchoLod) + padSides;
+  const totalH = lod.length ? row2y + boxH + padTop + 14 : padTop + boxH + padTop;
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagrama de flujo del proceso" style="max-width:100%;height:auto;background:${c.surface}">`;
-  svg += `<defs><marker id="pfd-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c.text2}"/></marker></defs>`;
-  etapas.forEach((et, i) => {
-    const x = padSides + i * (boxW + gapX);
-    const y = padTop;
-    svg += `<rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="8" fill="${c.surface2}" stroke="${c.border}" stroke-width="1.5"/>`;
-    svg += `<text x="${x + boxW/2}" y="${y + 22}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
-    svg += `<line x1="${x+12}" y1="${y+30}" x2="${x+boxW-12}" y2="${y+30}" stroke="${c.border}"/>`;
+  svg += `<defs><marker id="pfd-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c.text2}"/></marker><marker id="pfd-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker></defs>`;
+  const caja = (x, y, et, esLodos) => {
+    let s = `<rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="8" fill="${c.surface2}" stroke="${esLodos ? marron : c.border}" stroke-width="${esLodos ? 2 : 1.5}"/>`;
+    s += `<text x="${x + boxW/2}" y="${y + 22}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
+    s += `<line x1="${x+12}" y1="${y+30}" x2="${x+boxW-12}" y2="${y+30}" stroke="${c.border}"/>`;
     let ty = y + 48;
     if (et.equipos.length) {
       et.equipos.slice(0, 4).forEach(eqTxt => {
         procesosDiagramaWrapTexto(eqTxt, 28).forEach(linea => {
-          svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">${procesosDiagramaSvgEsc(linea)}</text>`;
+          s += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">${procesosDiagramaSvgEsc(linea)}</text>`;
           ty += 14;
         });
       });
-      if (et.equipos.length > 4) svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">+${et.equipos.length - 4} más</text>`;
+      if (et.equipos.length > 4) s += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11">+${et.equipos.length - 4} más</text>`;
     } else {
-      svg += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
+      s += `<text x="${x + boxW/2}" y="${ty}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
     }
-    if (i < etapas.length - 1) {
-      const ax1 = x + boxW, ax2 = x + boxW + gapX, ay = y + boxH/2;
+    return s;
+  };
+  // Línea del efluente líquido
+  if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
+  liq.forEach((et, i) => {
+    const x = xLiq(i), y = padTop;
+    svg += caja(x, y, et, false);
+    const ax1 = x + boxW, ax2 = x + boxW + gapX, ay = y + boxH / 2;
+    if (i < liq.length - 1) {
       svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${c.text2}" stroke-width="1.5" marker-end="url(#pfd-arrow)"/>`;
       if (et.caudal) svg += `<text x="${(ax1+ax2)/2}" y="${ay-8}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.caudal)}</text>`;
+    } else {
+      // Salida de la última unidad líquida: es el efluente final (el que se compara con la normativa)
+      svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${verde}" stroke-width="2" marker-end="url(#pfd-arrow)"/>`;
+      svg += `<text x="${(ax1+ax2)/2}" y="${ay-8}" text-anchor="middle" fill="${verde}" font-size="10" font-weight="600">Efluente final</text>`;
+      if (et.caudal) svg += `<text x="${(ax1+ax2)/2}" y="${ay+16}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.caudal)}</text>`;
     }
   });
+  // Línea de lodos
+  lod.forEach((et, k) => {
+    const x = xLod(k), y = row2y;
+    svg += caja(x, y, et, true);
+    const ent = et.entradas.find(e => e.tipo === 'lodos');
+    let idxLod = ent ? lod.findIndex((l, j) => j !== k && l.nombre === ent.nombre) : -1;
+    if (ent && idxLod < 0) idxLod = lod.findIndex((l, j) => j < k && l.gi === ent.gi);
+    const idxLiq = (ent && idxLod < 0) ? liq.findIndex(l => l.gi === ent.gi) : -1;
+    if (idxLod >= 0) {
+      const sx = xLod(idxLod) + boxW, ay = y + boxH / 2;
+      svg += `<line x1="${sx}" y1="${ay}" x2="${x-8}" y2="${ay}" stroke="${marron}" stroke-width="1.5" marker-end="url(#pfd-arrow-lodos)"/>`;
+      const cau = lod[idxLod].caudal;
+      if (cau) svg += `<text x="${(sx+x)/2}" y="${ay-8}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(cau)}</text>`;
+    } else if (idxLiq >= 0) {
+      // Codo desde la unidad líquida de la que salen los lodos
+      const sx = xLiq(idxLiq) + boxW / 2, sy = padTop + boxH, tx = x + boxW / 2, mid = sy + (row2y - sy) / 2;
+      const pts = sx === tx ? `${sx},${sy} ${tx},${row2y-8}` : `${sx},${sy} ${sx},${mid} ${tx},${mid} ${tx},${row2y-8}`;
+      svg += `<polyline points="${pts}" fill="none" stroke="${marron}" stroke-width="1.5" marker-end="url(#pfd-arrow-lodos)"/>`;
+      svg += `<text x="${sx + 8}" y="${sy + 16}" fill="${marron}" font-size="10" font-weight="600">lodos</text>`;
+    }
+  });
+  if (lod.length) svg += `<text x="${x0}" y="${row2y + boxH + 18}" fill="${marron}" font-size="10" font-weight="600">LÍNEA DE LODOS — no es el efluente final</text>`;
   svg += `</svg>`;
   return svg;
 }
