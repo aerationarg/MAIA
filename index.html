@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.40</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.41</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.40</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.41</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9099,13 +9099,23 @@ function procesosStep2Html(p) {
   seleccionadas.forEach(n => { if (!ordenadas.includes(n)) ordenadas.push(n); });
   const noSeleccionadas = nombresHojas.filter(n => !hojasGuardadas[n]?.seleccionada);
 
+  const gruposActuales = procesosStep2GruposDesdeActual(p);
+  const flujoActual = procesosStep2TrenFlujo(gruposActuales);
+  const confirmadasMap = {};
+  ordenadas.forEach(n => { if (hojasGuardadas[n]?.confirmada) confirmadasMap[n] = true; });
+
   const filaHoja = (nombre, opts) => {
     const h = hojasGuardadas[nombre] || {};
     const safe = nombre.replace(/'/g,"\\'");
     const desactualizada = h.seleccionada && procesosStep2HojaDesactualizada(nombre);
-    const corrientes = h.corrientesAsignadas || [];
+    // Entrada de cada unidad según su posición en el tren: "Entra: Cloacal"
+    // solo para la primera unidad que trata esa corriente; las siguientes
+    // muestran "← <unidad anterior>" (reciben su salida, no el efluente crudo).
+    const entradas = h.tipo === 'auxiliar' ? [] : (flujoActual.porInstancia[nombre] || []);
     const badges = [
-      ...corrientes.map(c => `<span class="badge" style="background:var(--surface);color:var(--text2);border:1px solid var(--border)">${esc(c)}</span>`),
+      ...entradas.map(e => e.tipo === 'corriente'
+        ? `<span class="badge" style="background:var(--surface);color:var(--text2);border:1px solid var(--border)" title="Efluente crudo, según el Paso 1">Entra: ${esc(e.nombre)}</span>`
+        : `<span class="badge" style="background:var(--surface);color:var(--blue);border:1px solid var(--border)" title="Recibe la salida de esta unidad">← ${esc(e.nombre)}</span>`),
       h.grupo ? `<span class="badge" style="background:var(--blue-bg);color:var(--blue)">${h.disposicion === 'serie' ? '→ Serie' : '⇄ Paralelo'}</span>` : '',
       h.tipo === 'auxiliar' ? `<span class="badge" style="background:var(--surface2);color:var(--text3);border:1px solid var(--border)">Auxiliar${h.etapaAsociada ? ' → '+esc(h.etapaAsociada) : ''}</span>` : ''
     ].filter(Boolean).join(' ');
@@ -9142,6 +9152,7 @@ function procesosStep2Html(p) {
     <button class="btn btn-secondary btn-sm" onclick="procesosStep2ReintentarSugerencia()" style="margin-bottom:8px" title="Le vuelve a pedir a la IA que proponga el tren completo (cantidad, corriente y disposición de cada unidad) — no se aplica hasta que lo confirmes">↻ Volver a sugerir con IA</button>
     ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenAbrirDesdeActual()" style="margin-bottom:8px;margin-left:8px" title="Abre el tren actual para preguntarle a la IA por qué está armado así o modificarlo por chat (agregar/sacar unidades, serie/paralelo, etc.) — no se aplica hasta que lo confirmes">💬 Revisar / modificar el tren con chat</button>` : ''}
     ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2DefinirTodas()" style="margin-bottom:8px;margin-left:8px">✦ Definir valores de todas las unidades</button>` : ''}
+    ${ordenadas.length ? `<div class="card" style="margin:6px 0 12px"><div class="card-label">Diagrama del tren</div>${procesosStep2TrenDiagramaHtml(gruposActuales, { confirmadas: confirmadasMap })}</div>` : ''}
     ${ordenadas.map((nombre, i) => filaHoja(nombre, { reorder: true, numero: i+1, esPrimera: i===0, esUltima: i===ordenadas.length-1 })).join('')}
     ${noSeleccionadas.length ? `<div class="gap"></div><p class="hint">Otras hojas de la planilla, sin usar en este proyecto:</p>${noSeleccionadas.map(nombre => filaHoja(nombre, { reorder: false })).join('')}` : ''}
     ${Object.keys(ponderaciones).length ? `
@@ -9730,6 +9741,113 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
   }
 }
 
+// Reconstruye los "grupos" del tren (el mismo formato que la propuesta de la IA:
+// una hoja base con 1+ instancias) a partir de lo que está aplicado en el
+// proyecto — se usa para el diagrama de bloques, el chat sobre el tren y para
+// saber de dónde recibe su entrada cada unidad.
+function procesosStep2GruposDesdeActual(p) {
+  const dd = p.diseno_data || {};
+  const orden = (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada);
+  const grupos = [];
+  const porClave = {};
+  orden.forEach(nombre => {
+    const h = dd.hojas[nombre];
+    const hojaBase = h.hojaBase || nombre;
+    const clave = hojaBase + '|' + (h.grupo || nombre);
+    if (!porClave[clave]) {
+      porClave[clave] = { hojaBase, motivo: h.motivo || '', disposicion: h.grupo ? (h.disposicion || null) : null, tipo: h.tipo === 'auxiliar' ? 'auxiliar' : 'etapa', etapaAsociada: h.tipo === 'auxiliar' ? (h.etapaAsociada || null) : null, instancias: [] };
+      grupos.push(porClave[clave]);
+    }
+    porClave[clave].instancias.push({ nombre, corrientes: (h.corrientesAsignadas || []).slice() });
+  });
+  return grupos;
+}
+
+// De dónde recibe su entrada cada unidad del tren. La lista de "corrientes" de
+// cada unidad dice qué efluente(s) trata, pero solo la PRIMERA unidad que trata
+// una corriente la recibe directamente (del Paso 1): las siguientes reciben la
+// salida de la unidad anterior que ya la trató. Si dos corrientes se juntan en
+// una unidad, esa recibe la salida de la última unidad de cada una. Devuelve
+// {porGrupo: {índice: [entradas]}, porInstancia: {nombre: [entradas]}}, donde
+// cada entrada es {tipo:'corriente', nombre} o {tipo:'unidad', gi, nombre}.
+// Las hojas auxiliares no forman parte del flujo (solo calculan un dato para
+// otra etapa).
+function procesosStep2TrenFlujo(grupos) {
+  const porGrupo = {}, porInstancia = {};
+  const ultima = {}; // corriente -> última unidad que la trató
+  let previa = null;
+  const etiqueta = g => g.instancias.length > 1 ? `${g.hojaBase} (x${g.instancias.length})` : g.instancias[0].nombre;
+  const dedup = arr => { const vistos = new Set(); return arr.filter(e => { const k = e.tipo + '|' + (e.gi != null ? e.gi + '|' : '') + e.nombre; if (vistos.has(k)) return false; vistos.add(k); return true; }); };
+  grupos.forEach((g, gi) => {
+    if (g.tipo === 'auxiliar') return;
+    const entradasDe = corrs => {
+      if (!corrs.length) return previa ? [{ tipo: 'unidad', gi: previa.gi, nombre: previa.nombre }] : [];
+      return dedup(corrs.map(c => ultima[c] ? { tipo: 'unidad', gi: ultima[c].gi, nombre: ultima[c].nombre } : { tipo: 'corriente', nombre: c }));
+    };
+    let entradasGrupo = [];
+    g.instancias.forEach((inst, ii) => {
+      const enSerieInterna = g.disposicion === 'serie' && ii > 0;
+      const ent = enSerieInterna ? [{ tipo: 'unidad', gi, nombre: g.instancias[ii - 1].nombre }] : entradasDe(inst.corrientes || []);
+      porInstancia[inst.nombre] = ent;
+      if (!enSerieInterna) entradasGrupo = entradasGrupo.concat(ent);
+    });
+    porGrupo[gi] = dedup(entradasGrupo);
+    const me = { gi, nombre: etiqueta(g) };
+    new Set(g.instancias.flatMap(i => i.corrientes || [])).forEach(c => { ultima[c] = me; });
+    previa = me;
+  });
+  return { porGrupo, porInstancia };
+}
+
+// Diagrama de bloques del tren, en horizontal (con salto de línea si no entra):
+// un bloque por etapa con flechas entre etapas consecutivas; las instancias en
+// paralelo van apiladas, las de serie en fila; las hojas auxiliares
+// cuelgan (línea punteada) debajo de la etapa a la que alimentan. Debajo de cada
+// bloque se aclara qué entra (corriente del Paso 1) o, si no viene de la etapa
+// inmediata anterior, de cuál toma la salida.
+function procesosStep2TrenDiagramaHtml(grupos, opts) {
+  opts = opts || {};
+  const confirmadas = opts.confirmadas || {};
+  const flujo = procesosStep2TrenFlujo(grupos);
+  const etapas = grupos.map((g, gi) => ({ g, gi })).filter(x => x.g.tipo !== 'auxiliar');
+  if (!etapas.length) return '';
+  const auxiliares = grupos.filter(g => g.tipo === 'auxiliar');
+  const auxDe = g => auxiliares.filter(a => a.etapaAsociada && g.instancias.some(i => i.nombre === a.etapaAsociada));
+  const conEtapa = new Set(etapas.flatMap(e => auxDe(e.g)));
+  const sueltas = auxiliares.filter(a => !conEtapa.has(a));
+  const caja = (nombre, extra) => `<div style="border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;text-align:center;color:var(--text)${extra || ''}">${esc(nombre)}${confirmadas[nombre] ? ' <span style="color:var(--green)">✓</span>' : ''}</div>`;
+  const flecha = (txt) => `<div style="align-self:center;padding:0 4px;color:var(--text2);font-size:18px;line-height:1">${txt || '→'}</div>`;
+  let prevGi = null;
+  const bloques = etapas.map(({ g, gi }, idx) => {
+    const multiple = g.instancias.length > 1;
+    const enSerie = multiple && g.disposicion === 'serie';
+    const instHtml = multiple
+      ? `<div style="display:flex;${enSerie ? 'flex-direction:row;align-items:center' : 'flex-direction:column'};gap:4px">${g.instancias.map((i, ii) => (enSerie && ii > 0 ? flecha() : '') + caja(i.nombre)).join('')}</div>`
+      : caja(g.instancias[0].nombre);
+    const titulo = multiple ? `<div style="font-size:10px;color:var(--blue);text-align:center;margin-bottom:4px">${enSerie ? '→ en serie' : g.disposicion === 'paralelo' ? '⇄ en paralelo' : g.hojaBase}</div>` : '';
+    const entradas = flujo.porGrupo[gi] || [];
+    const lineas = [];
+    const corr = entradas.filter(e => e.tipo === 'corriente').map(e => e.nombre);
+    if (corr.length) lineas.push('▸ entra: ' + esc(corr.join(' + ')));
+    entradas.filter(e => e.tipo === 'unidad' && e.gi !== prevGi).forEach(e => lineas.push('← toma la salida de ' + esc(e.nombre)));
+    const aux = auxDe(g);
+    const html = `
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:120px;max-width:220px">
+        <div style="border:1.5px solid var(--blue);background:var(--blue-bg);border-radius:10px;padding:8px">
+          <div style="font-size:10px;color:var(--text2);text-align:center;margin-bottom:4px">${idx + 1}</div>
+          ${titulo}${instHtml}
+        </div>
+        ${aux.map(a => a.instancias.map(i => `<div style="border:1px dashed var(--border);border-radius:8px;padding:4px 8px;font-size:11px;text-align:center;color:var(--text2)">↑ ${esc(i.nombre)} <span style="font-size:10px">(auxiliar)</span></div>`).join('')).join('')}
+        ${lineas.length ? `<div style="font-size:10px;color:var(--text2);text-align:center;line-height:1.3">${lineas.join('<br>')}</div>` : ''}
+      </div>`;
+    prevGi = gi;
+    return html;
+  });
+  const sueltasHtml = sueltas.length ? `<div class="hint" style="margin:6px 0 0">Auxiliares sin etapa asociada: ${sueltas.map(a => esc(a.instancias.map(i => i.nombre).join(', '))).join(', ')}</div>` : '';
+  const flechaPrincipal = '<div style="align-self:flex-start;margin-top:30px;padding:0 5px;color:var(--blue);font-size:22px;line-height:1">→</div>';
+  return `<div style="display:flex;flex-wrap:wrap;align-items:flex-start;row-gap:14px;padding:6px 0">${bloques.join(flechaPrincipal)}</div>${sueltasHtml}`;
+}
+
 // Valida/normaliza una lista de "unidades" (la que devuelve la IA al proponer
 // el tren, o al modificarlo por chat) contra las hojas reales de la planilla.
 // El match de "hojaBase" es tolerante a mayúsculas/espacios (la IA a veces
@@ -9864,21 +9982,8 @@ function procesosStep2TrenChatDeshacer() {
 function procesosStep2TrenAbrirDesdeActual() {
   const st = procesosStep2State;
   const p = procesosCurrentProyecto;
-  const dd = p.diseno_data || {};
-  const orden = (dd.orden || []).filter(n => dd.hojas?.[n]?.seleccionada);
-  if (!orden.length) { alert('Todavía no hay un tren aplicado para modificar.'); return; }
-  const grupos = [];
-  const porClave = {};
-  orden.forEach(nombre => {
-    const h = dd.hojas[nombre];
-    const hojaBase = h.hojaBase || nombre;
-    const clave = hojaBase + '|' + (h.grupo || nombre);
-    if (!porClave[clave]) {
-      porClave[clave] = { hojaBase, motivo: h.motivo || '', disposicion: h.grupo ? (h.disposicion || null) : null, tipo: h.tipo === 'auxiliar' ? 'auxiliar' : 'etapa', etapaAsociada: h.tipo === 'auxiliar' ? (h.etapaAsociada || null) : null, instancias: [] };
-      grupos.push(porClave[clave]);
-    }
-    porClave[clave].instancias.push({ nombre, corrientes: (h.corrientesAsignadas || []).slice() });
-  });
+  const grupos = procesosStep2GruposDesdeActual(p);
+  if (!grupos.length) { alert('Todavía no hay un tren aplicado para modificar.'); return; }
   st.trenPropuesto = { grupos };
   st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = true;
   renderProcesosStepContent();
@@ -9942,6 +10047,10 @@ function procesosStep2TrenPropuestoHtml() {
     <div class="card" style="border-color:var(--blue);margin-bottom:12px">
       <span class="badge" style="background:var(--blue-bg);color:var(--blue)">${st.trenDesdeActual ? '✎ Tren actual (en revisión)' : '✦ Propuesta de IA'}</span>
       <p class="hint" style="margin:8px 0 0">Revisá y ajustá tipo (etapa/auxiliar), cantidad, nombres, corriente y disposición de cada unidad antes de aplicar — se puede seguir editando después desde acá mismo.</p>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-label">Diagrama del tren</div>
+      ${procesosStep2TrenDiagramaHtml(st.trenPropuesto.grupos)}
     </div>
     ${st.trenPropuesto.grupos.map(grupoHtml).join('')}
     <div class="card" style="margin:12px 0">
@@ -10709,7 +10818,22 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // proponer cada una como si estuviera sola y aislada.
     const hActual = ddPrev.hojas[nombre] || {};
     const corrientesHoja = hActual.corrientesAsignadas || [];
-    const corrientesEtapaTxt = corrientesHoja.length ? (() => {
+    // Posición de esta unidad en el tren: si no es la primera que trata su
+    // corriente, su entrada NO es el efluente crudo del Paso 1 sino la salida
+    // de la unidad anterior — se lo aclaramos para que no dimensione con los
+    // parámetros crudos (que se muestran abajo solo como referencia).
+    const flujoTxt = (() => {
+      if (hActual.tipo === 'auxiliar') return '';
+      const ent = procesosStep2TrenFlujo(procesosStep2GruposDesdeActual(p)).porInstancia[nombre] || [];
+      if (!ent.length) return '';
+      const unidades = ent.filter(e => e.tipo === 'unidad').map(e => e.nombre);
+      const corr = ent.filter(e => e.tipo === 'corriente').map(e => e.nombre);
+      if (unidades.length) {
+        return `Posición en el tren: esta unidad recibe como entrada la SALIDA de: ${unidades.join(' + ')}${corr.length ? ', y además directamente la/s corriente/s ' + corr.join(', ') + ' (Paso 1)' : ''}. Sus datos de entrada son los resultados ya calculados por esa/s etapa/s (que reflejan la remoción de las anteriores), NO los parámetros crudos del efluente del Paso 1 — esos aparecen más abajo solo como referencia de lo que entra al inicio del tren.\n\n`;
+      }
+      return `Posición en el tren: esta unidad recibe directamente el efluente crudo de la/s corriente/s ${corr.join(', ')} (según el Paso 1).\n\n`;
+    })();
+    const corrientesEtapaTxtBase = corrientesHoja.length ? (() => {
       const info = corrientesHoja.map(cn => {
         const c = (p.info_cliente?.corrientes || []).find(x => x.nombre === cn);
         const vals = c ? Object.entries(c.campos || {}).filter(([, v]) => v && typeof v === 'object' && v.valor != null && v.valor !== '').map(([k, v]) => `${k}: ${v.valor}${v.unidad ? ' ' + v.unidad : ''}`).join(', ') : null;
@@ -10717,6 +10841,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       }).join('\n');
       return `Esta unidad recibe específicamente la/s corriente/s: ${corrientesHoja.join(', ')} (no necesariamente todo el caudal combinado del proyecto). Parámetros de esas corrientes según el Paso 1:\n${info}\n\n`;
     })() : '';
+    const corrientesEtapaTxt = flujoTxt + corrientesEtapaTxtBase;
     const hermanasGrupo = hActual.grupo ? (ddPrev.orden || []).filter(n => n !== nombre && ddPrev.hojas?.[n]?.grupo === hActual.grupo) : [];
     const grupoTxt = hermanasGrupo.length ? (() => {
       const lista = hermanasGrupo.map(n => {
