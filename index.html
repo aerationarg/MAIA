@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.82</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.82</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12508,7 +12508,7 @@ function procesosFlowsheetExpandirIconos(lista, cap) {
 // hasta que se lo acomode.
 function procesosFlowsheetLayoutGet(p) {
   const l = (p.equipos_data && p.equipos_data.layout) || {};
-  return { etapas: l.etapas || {}, equipos: l.equipos || {} };
+  return { etapas: l.etapas || {}, equipos: l.equipos || {}, puertos: l.puertos || {} };
 }
 function procesosFlowsheetOffset(layout, tipo, id) {
   const o = layout[tipo] && layout[tipo][id];
@@ -12521,7 +12521,7 @@ function procesosFlowsheetEscala(layout, tipo, id) {
   return (o && o.escala) || 1;
 }
 function procesosFlowsheetAttrEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
-function procesosFlowsheetDragWrap(tipo, id, inner, hit) {
+function procesosFlowsheetDragWrap(tipo, id, inner, hit, noResize) {
   if (!id) return inner;
   // Los íconos se dibujan con stroke y fill="none" — sin un área de "hit"
   // rellena (aunque transparente), solo se podría arrastrar clickeando
@@ -12531,9 +12531,10 @@ function procesosFlowsheetDragWrap(tipo, id, inner, hit) {
   // Manija de redimensionado: cuadradito en la esquina inferior derecha del
   // área de "hit" — se agarra aparte del cuerpo (que mueve), y arrastrarla
   // agranda/achica en vez de mover. data-resize-* en vez de data-drag-* para
-  // que el handler de pointerdown la distinga y le dé prioridad.
+  // que el handler de pointerdown la distinga y le dé prioridad. No aplica
+  // a los puertos de entrada/salida (son un punto, no algo con tamaño).
   const HS = 9;
-  const handle = hit ? `<rect data-resize-tipo="${tipo}" data-resize-id="${procesosFlowsheetAttrEsc(id)}" x="${hit.x+hit.w-HS}" y="${hit.y+hit.h-HS}" width="${HS}" height="${HS}" fill="#ffffff" stroke="#8a8a86" stroke-width="1" style="cursor:nwse-resize"/>` : '';
+  const handle = (hit && !noResize) ? `<rect data-resize-tipo="${tipo}" data-resize-id="${procesosFlowsheetAttrEsc(id)}" x="${hit.x+hit.w-HS}" y="${hit.y+hit.h-HS}" width="${HS}" height="${HS}" fill="#ffffff" stroke="#8a8a86" stroke-width="1" style="cursor:nwse-resize"/>` : '';
   return `<g class="pf-drag" data-drag-tipo="${tipo}" data-drag-id="${procesosFlowsheetAttrEsc(id)}" style="cursor:move">${hitRect}${inner}${handle}</g>`;
 }
 // Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
@@ -12837,6 +12838,29 @@ function procesosFlowsheetSvg(p) {
     }
     return s;
   }
+  // Puertos de entrada/salida de una etapa — antes la cañería entraba
+  // siempre al centro de la unidad destino y salía siempre a media altura
+  // de la caja de origen; ahora la ENTRADA por defecto va cerca del INICIO
+  // de la unidad (no en el medio) y la SALIDA (cuando es por gravedad, sin
+  // bomba) sale de la pared lateral un poco por debajo del nivel de agua
+  // (si la figura tiene agua) en vez de a media altura de toda la caja.
+  // Ambos se pueden reacomodar a mano (arrastrando el puntito) — el offset
+  // guardado se suma sobre esta posición por defecto, igual que con
+  // equipos/unidades.
+  function puertoEntradaXY(et, etX, etY) {
+    const off = procesosFlowsheetOffset(layout, 'puertos', et.nombre + '__entrada');
+    return { x: etX + et.w * 0.2 + off.x, y: etY + HEADER_H + (et.dimsTxt ? 14 : 0) + off.y };
+  }
+  function puertoSalidaXY(et, etX, etY) {
+    const off = procesosFlowsheetOffset(layout, 'puertos', et.nombre + '__salida');
+    const tieneAgua = et.tipoFig !== 'caja' && et.tipoFig !== 'maquina';
+    const yBase = tieneAgua ? etY + HEADER_H + (et.dimsTxt ? 14 : 0) + 32 : etY + et.h / 2;
+    return { x: etX + et.w + off.x, y: yBase + off.y };
+  }
+  function puertoMarcadorSvg(id, px, py) {
+    const marker = `<circle cx="${px}" cy="${py}" r="3.5" fill="#fff" stroke="${c.text2}" stroke-width="1.2"/>`;
+    return procesosFlowsheetDragWrap('puerto', id, marker, { x: px - 9, y: py - 9, w: 18, h: 18 }, true);
+  }
   if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
   liq.forEach((et, i) => {
     const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
@@ -12844,14 +12868,22 @@ function procesosFlowsheetSvg(p) {
     const { svg: cajaSvg, bombas } = caja(x, y, et, false);
     et._bombas = bombas; et._x = x; et._y = y;
     svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
-    const ax1 = x + et.w, ax2 = x + et.w + gapX, ay = y + et.h / 2;
+    const salida = puertoSalidaXY(et, x, y);
+    const ax1 = salida.x, ax2 = x + et.w + gapX, ay = salida.y;
+    if (!bombas.length) svg += puertoMarcadorSvg(et.nombre + '__salida', ax1, ay);
     if (i < liq.length - 1) {
       const sig = liq[i + 1];
       const sigOff = procesosFlowsheetOffset(layout, 'etapas', sig.nombre);
       const sigPorArriba = !!CONTIENE_AGUA_TOP[sig.tipoFig];
       const sigX = xLiq(i + 1) + sigOff.x, sigY = padTop + profundidadPx(sig) + sigOff.y;
-      const destX = sigPorArriba ? sigX + sig.w / 2 : ax2 - 8;
-      const destY = sigPorArriba ? sigY + HEADER_H + (sig.dimsTxt ? 14 : 0) : ay;
+      let destX, destY;
+      if (sigPorArriba) {
+        const entrada = puertoEntradaXY(sig, sigX, sigY);
+        destX = entrada.x; destY = entrada.y;
+        svg += puertoMarcadorSvg(sig.nombre + '__entrada', destX, destY);
+      } else {
+        destX = ax2 - 8; destY = ay;
+      }
       svg += conectar(bombas, ax1, ay, destX, destY, sigPorArriba, magenta, 'pfd2-arrow');
     } else {
       svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${verdeOk}" stroke-width="2.5" marker-end="url(#pfd2-arrow)"/>`;
@@ -12864,16 +12896,24 @@ function procesosFlowsheetSvg(p) {
     const { svg: cajaSvg, bombas } = caja(x, y, et, true);
     et._bombas = bombas; et._x = x; et._y = y;
     svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
+    et._salida = puertoSalidaXY(et, x, y);
+    if (!bombas.length) svg += puertoMarcadorSvg(et.nombre + '__salida', et._salida.x, et._salida.y);
     const ent = et.entradas.find(e => e.tipo === 'lodos');
     let idxLod = ent ? lod.findIndex((l, j) => j !== k && l.nombre === ent.nombre) : -1;
     if (ent && idxLod < 0) idxLod = lod.findIndex((l, j) => j < k && l.gi === ent.gi);
     const idxLiq = (ent && idxLod < 0) ? liq.findIndex(l => l.gi === ent.gi) : -1;
     if (idxLod >= 0) {
       const origen = lod[idxLod];
-      const sx0 = origen._x + origen.w, ay = origen._y + origen.h / 2;
+      const sx0 = origen._salida.x, ay = origen._salida.y;
       const destPorArriba = !!CONTIENE_AGUA_TOP[et.tipoFig];
-      const destX = destPorArriba ? x + et.w / 2 : x - 8;
-      const destY = destPorArriba ? y + HEADER_H + (et.dimsTxt ? 14 : 0) : (y + et.h / 2);
+      let destX, destY;
+      if (destPorArriba) {
+        const entrada = puertoEntradaXY(et, x, y);
+        destX = entrada.x; destY = entrada.y;
+        svg += puertoMarcadorSvg(et.nombre + '__entrada', destX, destY);
+      } else {
+        destX = x - 8; destY = ay;
+      }
       svg += conectar(origen._bombas || [], sx0, ay, destX, destY, destPorArriba, marron, 'pfd2-arrow-lodos');
     } else if (idxLiq >= 0) {
       const sx = liq[idxLiq]._x + liq[idxLiq].w / 2, sy = liq[idxLiq]._y + liq[idxLiq].h, tx = x + et.w / 2, mid = sy + (y - sy) / 2;
@@ -12974,12 +13014,18 @@ function procesosFlowsheetDragEnd(ev) {
     d.el.removeAttribute('transform');
   }
 }
+// 'etapa' -> layout.etapas, 'puerto' -> layout.puertos, cualquier otro
+// ('equipo') -> layout.equipos — usado tanto al guardar offset como escala.
+function procesosFlowsheetGrupoLayout(layout, tipo) {
+  const clave = tipo === 'etapa' ? 'etapas' : tipo === 'puerto' ? 'puertos' : 'equipos';
+  return layout[clave] || (layout[clave] = {});
+}
 function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
   const a = _pfAdapter;
   if (!a) return;
   const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
-  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {} });
-  const grupo = tipo === 'etapa' ? (layout.etapas || (layout.etapas = {})) : (layout.equipos || (layout.equipos = {}));
+  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {} });
+  const grupo = procesosFlowsheetGrupoLayout(layout, tipo);
   const prev = grupo[id] || { x: 0, y: 0 };
   grupo[id] = Object.assign({}, prev, { x: Math.round((prev.x || 0) + dx), y: Math.round((prev.y || 0) + dy) });
   a.guardar();
@@ -13029,8 +13075,8 @@ function procesosFlowsheetGuardarEscala(tipo, id, dPixels) {
   const a = _pfAdapter;
   if (!a) return;
   const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
-  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {} });
-  const grupo = tipo === 'etapa' ? (layout.etapas || (layout.etapas = {})) : (layout.equipos || (layout.equipos = {}));
+  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {} });
+  const grupo = procesosFlowsheetGrupoLayout(layout, tipo);
   const prev = grupo[id] || { x: 0, y: 0 };
   const referencia = tipo === 'etapa' ? 200 : 24; // tamaño típico de referencia para convertir píxeles arrastrados en factor
   let escala = (prev.escala || 1) * (1 + dPixels / referencia);
@@ -13042,7 +13088,7 @@ function procesosFlowsheetGuardarEscala(tipo, id, dPixels) {
 function procesosFlowsheetReacomodar() {
   const a = _pfAdapter;
   if (!a || !a.modelo.equipos_data) return;
-  a.modelo.equipos_data.layout = { etapas: {}, equipos: {} };
+  a.modelo.equipos_data.layout = { etapas: {}, equipos: {}, puertos: {} };
   a.guardar();
   a.rerender();
 }
