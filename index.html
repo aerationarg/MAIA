@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.71</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.72</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.71</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.72</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -690,6 +690,45 @@
             <button class="btn btn-primary" style="width:auto;padding:12px 18px" onclick="procesosChatSend()">Enviar</button>
           </div>
           <div id="procesos-chat-status"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Flowsheets (sueltos, sin proyecto de Procesos IA) ═══ -->
+    <div class="panel" id="panel-flowsheets">
+      <div id="flowsheets-list-view">
+        <div class="card">
+          <div class="card-label">Flowsheets</div>
+          <p class="hint" style="margin-top:-6px">Armá un flowsheet a partir de texto libre y/o archivos de un proyecto ya diseñado (por vos o por otra persona) — no hace falta pasar por Procesos IA.</p>
+          <button class="btn btn-primary" onclick="flowsheetsNuevoProyecto()" style="margin-bottom:12px">+ Nuevo Flowsheet</button>
+          <div id="flowsheets-list" class="empty">Cargando...</div>
+        </div>
+      </div>
+      <div id="flowsheets-proyecto-view" style="display:none">
+        <button class="btn btn-secondary btn-sm" onclick="flowsheetsVolverALista()" style="margin-bottom:12px">← Volver a Flowsheets</button>
+        <div class="card" style="margin-bottom:12px">
+          <label class="hint" style="margin:0">Nombre</label>
+          <input id="flowsheets-proyecto-nombre" placeholder="Nombre del flowsheet" style="font-weight:600" oninput="flowsheetsProyectoUpdateNombre(this.value)" />
+        </div>
+        <div class="card" style="margin-bottom:12px">
+          <div class="card-label">Texto y archivos del proyecto</div>
+          <p class="hint" style="margin-top:-6px;margin-bottom:8px">Pegá acá cualquier texto que describa las unidades/equipos (mail, memoria de cálculo, etc.) y/o adjuntá archivos (PDF, Word, Excel, imagen) — la IA arma el flowsheet a partir de esto.</p>
+          <textarea id="flowsheets-texto" rows="6" placeholder="Pegá acá texto libre del proyecto (opcional si adjuntás archivos)..." oninput="flowsheetsProyectoUpdateTexto(this.value)" style="width:100%;resize:vertical"></textarea>
+          <div id="flowsheets-archivos-list" style="margin:10px 0"></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="file" id="flowsheets-archivo-input" accept=".pdf,.docx,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none" onchange="flowsheetsArchivoSubir(this)" />
+            <button class="btn btn-secondary" style="width:auto;padding:10px 14px" title="Adjuntar un archivo (PDF, Word, Excel o imagen)" onclick="document.getElementById('flowsheets-archivo-input').click()">📎 Adjuntar archivo</button>
+            <button class="btn btn-primary" style="width:auto;padding:10px 18px" onclick="flowsheetsGenerarClick()">✨ Generar / Actualizar Flowsheet</button>
+          </div>
+          <div id="flowsheets-status" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+            <div class="card-label" style="margin:0">Flowsheet</div>
+            <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button>
+          </div>
+          <p class="hint" style="margin-top:-4px">Arrastrá equipos o unidades para acomodarlos — se guardan solas.</p>
+          <div id="flowsheets-diagrama"></div>
         </div>
       </div>
     </div>
@@ -2118,6 +2157,7 @@ function switchPanel(name) {
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
   if (name === 'procesos') renderProcesosList();
+  if (name === 'flowsheets') renderFlowsheetsList();
   if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
@@ -12860,6 +12900,261 @@ function procesosStep3DiagramaDescargar() {
   img.src = url;
 }
 
+// ── Flowsheets sueltos (solapa aparte, sin proyecto de Procesos IA) ────
+// Reusa tal cual el motor de dibujo/arrastre de Flowsheet de equipos
+// (procesosFlowsheetSvg, procesosFlowsheetDragInit — ver el comentario
+// "GENÉRICO" arriba de procesosFlowsheetSvg): cada fila de flowsheet_proyectos
+// tiene las mismas columnas diseno_data/equipos_data que un proyecto de
+// Procesos IA, armadas acá a partir de texto libre y/o archivos con una
+// llamada a la IA en vez de con los pasos 1-3 del asistente.
+let flowsheetsCurrentProyecto = null;
+
+async function renderFlowsheetsList() {
+  const el = document.getElementById('flowsheets-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/flowsheet_proyectos?select=id,nombre,generado_en,creado_por_nombre,created_at&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<div class="empty">No hay Flowsheets todavía.</div>'; return; }
+    el.innerHTML = rows.map(p => `
+      <div class="file-item" style="cursor:pointer" onclick="flowsheetsAbrirProyecto('${p.id}')">
+        <div class="file-icon">🧭</div>
+        <div class="file-info">
+          <div class="file-name">${esc(p.nombre)}</div>
+          <div class="file-size">${p.generado_en ? 'Generado' : 'Sin generar todavía'} · ${esc(p.creado_por_nombre||'')} · ${new Date(p.created_at).toLocaleDateString('es-AR')}</div>
+        </div>
+        <button class="np-item-remove" onclick="event.stopPropagation();flowsheetsEliminarProyecto('${p.id}')">&#x2715;</button>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<div class="empty">Error al cargar Flowsheets.</div>'; }
+}
+async function flowsheetsEliminarProyecto(id) {
+  if (!confirm('¿Eliminar este Flowsheet? No se puede deshacer.')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/flowsheet_proyectos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  renderFlowsheetsList();
+}
+async function flowsheetsNuevoProyecto() {
+  const nombre = prompt('Nombre del flowsheet (ej. nombre del cliente/obra):');
+  if (!nombre) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch('/rest/v1/flowsheet_proyectos', {
+    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+    body: JSON.stringify({ empresa: currentEmpresa, nombre, creado_por: currentUser.id, creado_por_nombre: currentUser.nombre||currentUser.email })
+  });
+  const data = await res.json().catch(()=>null);
+  if (!res.ok || !data || !data.length) { alert('No se pudo crear el Flowsheet.'); return; }
+  flowsheetsAbrirProyecto(data[0].id);
+}
+async function flowsheetsAbrirProyecto(id) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/flowsheet_proyectos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+  const rows = await res.json();
+  if (!res.ok || !rows.length) { alert('No se pudo abrir el Flowsheet.'); return; }
+  flowsheetsCurrentProyecto = rows[0];
+  document.getElementById('flowsheets-list-view').style.display = 'none';
+  document.getElementById('flowsheets-proyecto-view').style.display = '';
+  document.getElementById('flowsheets-proyecto-nombre').value = flowsheetsCurrentProyecto.nombre || '';
+  document.getElementById('flowsheets-texto').value = flowsheetsCurrentProyecto.texto_libre || '';
+  document.getElementById('flowsheets-status').innerHTML = '';
+  flowsheetsArchivosRender();
+  renderFlowsheetsDiagrama();
+}
+function flowsheetsVolverALista() {
+  flowsheetsCurrentProyecto = null;
+  document.getElementById('flowsheets-proyecto-view').style.display = 'none';
+  document.getElementById('flowsheets-list-view').style.display = '';
+  renderFlowsheetsList();
+}
+// Mismo cuidado que procesosSaveProyecto/Debounced (ver comentario ahí) —
+// siempre se pasa el proyecto capturado ANTES del await, nunca se asume el
+// global "actual" en el momento en que el guardado sale de verdad.
+async function flowsheetsSaveProyecto(fields, proyecto) {
+  const target = proyecto || flowsheetsCurrentProyecto;
+  Object.assign(target, fields);
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/flowsheet_proyectos?id=eq.${target.id}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+    body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
+  });
+}
+let _flowsheetsSaveTimeout = null;
+function flowsheetsSaveProyectoDebounced(fields, proyecto) {
+  const target = proyecto || flowsheetsCurrentProyecto;
+  Object.assign(target, fields);
+  clearTimeout(_flowsheetsSaveTimeout);
+  _flowsheetsSaveTimeout = setTimeout(() => {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    supaFetch(`/rest/v1/flowsheet_proyectos?id=eq.${target.id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify(Object.assign({}, fields, {updated_at:new Date().toISOString()}))
+    });
+  }, 800);
+}
+function flowsheetsProyectoUpdateNombre(val) { flowsheetsSaveProyectoDebounced({ nombre: val }); }
+function flowsheetsProyectoUpdateTexto(val) { flowsheetsSaveProyectoDebounced({ texto_libre: val }); }
+
+// ── Archivos adjuntos: mismo flujo que procesosChatArchivo* (extracción
+// 100% cliente para xlsx/docx, transcripción con IA para pdf/imagen — ver
+// procesosArchivoLocalExtraerTexto), pero guardados en su propia tabla.
+async function flowsheetsArchivosRender() {
+  const el = document.getElementById('flowsheets-archivos-list');
+  if (!el) return;
+  const p = flowsheetsCurrentProyecto;
+  if (!p?.id) { el.innerHTML = ''; return; }
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/flowsheet_proyecto_archivos?select=id,nombre,texto_extraido&proyecto_id=eq.${p.id}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null);
+  if (!res || !res.ok || flowsheetsCurrentProyecto !== p) return;
+  const rows = await res.json().catch(()=>[]);
+  if (!rows.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap">${rows.map(r => `
+    <span class="hint" style="background:var(--surface2);border-radius:12px;padding:3px 10px;display:inline-flex;align-items:center;gap:6px">
+      📎 ${esc(r.nombre)}${r.texto_extraido?'':' (procesando...)'}
+      <span style="cursor:pointer" onclick="flowsheetsArchivoEliminar('${r.id}')" title="Quitar">&#x2715;</span>
+    </span>`).join('')}</div>`;
+}
+async function flowsheetsArchivoEliminar(id) {
+  if (!confirm('¿Quitar este archivo?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  await supaFetch(`/rest/v1/flowsheet_proyecto_archivos?id=eq.${id}`, { method:'DELETE', headers:{Authorization:'Bearer '+session.token} });
+  flowsheetsArchivosRender();
+}
+async function flowsheetsArchivoSubir(inputEl) {
+  const file = inputEl.files?.[0];
+  inputEl.value = '';
+  if (!file) return;
+  const p = flowsheetsCurrentProyecto;
+  const statusId = 'flowsheets-status';
+  if (file.size > 20*1024*1024) { showMsg(statusId, 'error', '✕ El archivo pesa más de 20 MB.'); return; }
+  showMsg(statusId, 'loading', `Analizando "${file.name}"...`);
+  try {
+    const buf = await file.arrayBuffer();
+    const extraido = await procesosArchivoLocalExtraerTexto(file.name, buf);
+    if (!extraido?.texto) throw new Error('No se pudo extraer contenido de este archivo.');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    await supaFetch('/rest/v1/flowsheet_proyecto_archivos', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ empresa: currentEmpresa, proyecto_id: p.id, nombre: file.name, mime: file.type||null, texto_extraido: extraido.texto, resumen_ia: extraido.resumen||null })
+    });
+    if (flowsheetsCurrentProyecto === p) { document.getElementById(statusId).innerHTML = ''; flowsheetsArchivosRender(); }
+  } catch(e) {
+    if (flowsheetsCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo analizar "'+file.name+'": ' + e.message);
+  }
+}
+async function flowsheetsArchivosContextoTxt(p) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const res = await supaFetch(`/rest/v1/flowsheet_proyecto_archivos?select=nombre,texto_extraido&proyecto_id=eq.${p.id}`, {headers:{Authorization:'Bearer '+session.token}}).catch(()=>null);
+  if (!res || !res.ok) return { txt: '', cantidad: 0 };
+  const rows = (await res.json().catch(()=>[])).filter(r => r.texto_extraido);
+  if (!rows.length) return { txt: '', cantidad: 0 };
+  const txt = 'Archivos adjuntos del proyecto:\n\n' + rows.map(r => `── Archivo "${r.nombre}" ──\n${r.texto_extraido}`).join('\n\n') + '\n\n';
+  return { txt, cantidad: rows.length };
+}
+
+// Confirma antes de pisar un flowsheet ya generado (arrastres manuales
+// incluidos — se pierden porque los equipos se recrean con ids nuevos).
+async function flowsheetsGenerarClick() {
+  const p = flowsheetsCurrentProyecto;
+  const yaTiene = (p.diseno_data?.orden || []).length > 0;
+  if (yaTiene && !confirm('Ya hay un flowsheet generado acá (si moviste equipos/unidades a mano, esas posiciones se pierden). ¿Generar de nuevo con el texto/archivos actuales?')) return;
+  try {
+    await flowsheetsGenerarCore(p);
+    if (flowsheetsCurrentProyecto === p) { document.getElementById('flowsheets-status').innerHTML = ''; renderFlowsheetsDiagrama(); }
+  } catch(e) {
+    if (flowsheetsCurrentProyecto === p) showMsg('flowsheets-status', 'error', '✕ ' + e.message);
+  }
+}
+async function flowsheetsGenerarCore(p) {
+  const statusId = 'flowsheets-status';
+  const textoLibre = (p.texto_libre || '').trim();
+  showMsg(statusId, 'loading', 'Leyendo archivos...');
+  const { txt: archivosTxt, cantidad: cantArchivos } = await flowsheetsArchivosContextoTxt(p);
+  if (!textoLibre && !cantArchivos) throw new Error('Pegá texto o adjuntá al menos un archivo antes de generar.');
+  showMsg(statusId, 'loading', 'Generando flowsheet con IA...');
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('API key no disponible.');
+  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3},"equipos":[{"tipo":"Bomba sumergible","cantidad":2}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores.\n- "equipos": equipos de esa unidad con su cantidad, tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
+  const intentar = async (maxTokens) => {
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:maxTokens, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
+    });
+    if (!resp.ok) { const errBody = await resp.json().catch(()=>({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
+    return JSON.parse(text.replace(/```json|```/g,'').trim());
+  };
+  let parsed;
+  try { parsed = await intentar(4000); }
+  catch(_e) {
+    if (!(_e instanceof SyntaxError)) throw _e;
+    console.warn('Respuesta de "Generar Flowsheet" cortada, reintentando con el doble de espacio...');
+    try { parsed = await intentar(8000); }
+    catch(_e2) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar) — probá de nuevo.'); }
+  }
+  const etapasIn = Array.isArray(parsed.etapas) ? parsed.etapas : [];
+  if (!etapasIn.length) throw new Error('La IA no pudo identificar ninguna etapa a partir de lo provisto — agregá más detalle en el texto o los archivos.');
+  const orden = [], hojas = {}, equiposEtapas = {};
+  etapasIn.forEach(et => {
+    const nombre = String(et.nombre || '').trim();
+    if (!nombre || hojas[nombre]) return; // evita duplicados de nombre
+    orden.push(nombre);
+    const dims = et.dimensiones || {};
+    const valoresConEtiqueta = {};
+    if (dims.largo != null) valoresConEtiqueta['Largo (m)'] = dims.largo;
+    if (dims.ancho != null) valoresConEtiqueta['Ancho (m)'] = dims.ancho;
+    if (dims.alto != null) valoresConEtiqueta['Altura (m)'] = dims.alto;
+    if (dims.diametro != null) valoresConEtiqueta['Diámetro (m)'] = dims.diametro;
+    if (dims.volumen != null) valoresConEtiqueta['Volumen (m3)'] = dims.volumen;
+    hojas[nombre] = { tipo:'etapa', hojaBase: nombre, linea: et.linea === 'lodos' ? 'lodos' : 'liquido', origenLodos: et.origenLodos || null, valoresConEtiqueta };
+    equiposEtapas[nombre] = { equipos: (et.equipos||[]).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1 })) };
+  });
+  p.diseno_data = { orden, hojas };
+  p.equipos_data = { etapas: equiposEtapas, layout: { etapas:{}, equipos:{} } };
+  await flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data, generado_en: new Date().toISOString() }, p);
+}
+
+function renderFlowsheetsDiagrama() {
+  const el = document.getElementById('flowsheets-diagrama');
+  if (!el) return;
+  const p = flowsheetsCurrentProyecto;
+  const svg = procesosFlowsheetSvg(p);
+  if (!svg) { el.innerHTML = '<p class="hint">Generá el flowsheet con el botón de arriba para verlo acá.</p>'; return; }
+  el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="flowsheetsDescargar()">⬇ Descargar como imagen (PNG)</button>`;
+  procesosFlowsheetDragInit(el, {
+    modelo: p,
+    guardar: () => flowsheetsSaveProyecto({ equipos_data: p.equipos_data }, p),
+    rerender: () => renderFlowsheetsDiagrama(),
+  });
+}
+function flowsheetsDescargar() {
+  const svgEl = document.querySelector('#flowsheets-diagrama svg');
+  if (!svgEl) return;
+  const svgStr = new XMLSerializer().serializeToString(svgEl);
+  const url = URL.createObjectURL(new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    const vb = svgEl.viewBox.baseVal;
+    canvas.width = (vb.width || img.width) * scale;
+    canvas.height = (vb.height || img.height) * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0, vb.width || img.width, vb.height || img.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob(blob => {
+      const p = flowsheetsCurrentProyecto;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `Flowsheet - ${p.nombre}.png`;
+      a.click();
+    });
+  };
+  img.src = url;
+}
+
 // Tooltip con el texto completo de un campo que no entra en su ancho.
 function procesosHoverTexto(inp) {
   const txt = inp.value || '';
@@ -21363,6 +21658,7 @@ const NAV_SECTIONS = [
   { id:'cotizaciones', label:'Cotizaciones',   area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>' },
   { id:'microorganismos', label:'Microorganismos', area:'Laboratorio', icon:'<svg viewBox="0 0 24 24"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 100-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 114 0c0 .5-.34 3-4 6"/><path d="M12 6V3a1 1 0 011-1"/></svg>' },
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
+  { id:'flowsheets', label:'Flowsheets',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M17.5 10v4"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
   { id:'cfg-rend',      label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
@@ -21424,7 +21720,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','clientes','stock','cotiz-precios','cotizaciones','microorganismos','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-comercial','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -21432,7 +21728,7 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','cfg-procesos'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','cfg-procesos'],
   'RRHH':              ['rend','viajes','hallazgos'],
   'Servicios':         ['rend','viajes','hallazgos','microorganismos'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -21638,6 +21934,7 @@ const PANEL_TITLES = {
   'cfg-np-int': 'Configuración — NP Internacional',
   'procesos': 'Procesos IA',
   'cfg-procesos': 'Configuración — Procesos IA',
+  'flowsheets': 'Flowsheets',
   'clientes': 'Clientes',
   'stock': 'Stock',
   'cotiz-precios': 'Lista de precios',
