@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.56</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.56</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5404,7 +5404,10 @@ function procesosDocumentosRenderLista() {
           ${(det.archivos_cache||[]).map((a,i) => `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;padding:2px 0">
               <span>${esc(a.carpeta ? a.carpeta+'/' : '')}${esc(a.nombre)}</span>
-              <button class="sp-browse-btn" style="flex-shrink:0" onclick="procesosDocForzarReanalisisArchivo('${d.id}','${esc(a.carpeta||'').replace(/'/g,"\\'")}','${esc(a.nombre).replace(/'/g,"\\'")}')" title="Descarta el texto/resumen en caché de este archivo puntual y lo vuelve a transcribir de cero">🔄 Reprocesar</button>
+              <span style="display:flex;gap:4px;flex-shrink:0">
+                <button class="sp-browse-btn" onclick="procesosDocForzarReanalisisArchivo('${d.id}','${esc(a.carpeta||'').replace(/'/g,"\\'")}','${esc(a.nombre).replace(/'/g,"\\'")}')" title="Descarta el texto/resumen en caché de este archivo puntual y lo vuelve a transcribir de cero">🔄 Reprocesar</button>
+                <button class="sp-browse-btn" onclick="procesosDocEliminarArchivo('${d.id}','${esc(a.carpeta||'').replace(/'/g,"\\'")}','${esc(a.nombre).replace(/'/g,"\\'")}')" title="Saca este archivo del caché — no se vuelve a analizar (si la carpeta está vinculada a SharePoint, 'Procesar pendientes' lo puede volver a traer si sigue estando ahí)">🗑 Eliminar</button>
+              </span>
             </div>`).join('')}
         </div>` : ''}
         <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosDocExpandir(null)">✕ Cerrar</button>
@@ -5688,6 +5691,30 @@ async function procesosDocForzarReanalisisArchivo(id, carpeta, nombre) {
     procesosBibliografiaCacheReset();
     showMsg(statusId, 'success', '✓ Descartado — se va a retranscribir de cero la próxima vez que se use (ej. "Procesar pendientes" o un análisis que lo necesite).');
     setTimeout(() => procesosDocExpandir(id), 1500);
+  } catch(e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+async function procesosDocEliminarArchivo(id, carpeta, nombre) {
+  const statusId = 'procesos-doc-status-' + id;
+  if (!confirm(`¿Eliminar "${nombre}" del caché? Deja de tenerse en cuenta en las consultas — si la carpeta sigue vinculada a SharePoint, "Procesar pendientes" lo puede volver a traer más adelante si el archivo sigue estando ahí.`)) return;
+  showMsg(statusId, 'loading', 'Eliminando "' + nombre + '"...');
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}&select=*`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json();
+    const doc = Array.isArray(rows) && rows[0];
+    if (!doc) throw new Error('No se encontró el documento.');
+    const clave = procesosClaveArchivoCache(carpeta, nombre);
+    const nuevoCache = (doc.archivos_cache || []).filter(a => procesosClaveArchivoCache(a.carpeta, a.nombre) !== clave);
+    await supaFetch(`/rest/v1/procesos_documentos?id=eq.${id}`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+      body: JSON.stringify({ archivos_cache: nuevoCache })
+    });
+    procesosBibliografiaCacheReset();
+    showMsg(statusId, 'success', '✓ Eliminado.');
+    setTimeout(() => procesosDocExpandir(id), 1200);
   } catch(e) {
     showMsg(statusId, 'error', '✕ ' + e.message);
   }
