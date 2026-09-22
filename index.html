@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.75</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.76</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.75</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.76</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12368,11 +12368,17 @@ function procesosFlowsheetEsSumergible(tipo) {
 // A qué altura del tanque va un sensor de nivel — "alto"/"medio"/"bajo" según
 // lo que diga su tipo (LSH/LSM/LSL, "nivel alto", etc.); si no dice nada
 // (un "Sensor de nivel" genérico) se asume alto, que es el caso más común.
+// Devuelve el nivel EXPLÍCITO que dice el texto (alto/medio/bajo), o null si
+// no lo dice — a diferencia de antes, ya no default-ea a 'alto': el default
+// ahora lo decide quien llama (ver reparto round-robin en procesosFlowsheetSvg),
+// porque "Sensor de nivel" x3 sin aclarar tiene que repartirse entre los 3
+// niveles, no amontonarse todo en uno solo.
 function procesosFlowsheetNivelDe(tipo) {
   const t = procesosNormTxt(tipo || '');
   if (/\bbaj[ao]\b|\bl\b|\blsl\b|low/.test(t)) return 'bajo';
   if (/\bmedi[ao]\b|\bm\b|\blsm\b/.test(t)) return 'medio';
-  return 'alto';
+  if (/\balt[ao]\b|\bh\b|\bhsl\b|high/.test(t)) return 'alto';
+  return null;
 }
 // Qué FIGURA dibujar para una etapa, según su nombre — "contieneAgua" decide
 // si los equipos sumergibles se dibujan adentro del contorno o no aplica
@@ -12380,7 +12386,7 @@ function procesosFlowsheetNivelDe(tipo) {
 // como un deshidratador o un tamiz).
 const PROCESOS_FLOWSHEET_FIGURAS = [
   [/pozo|camara.*bombeo|estacion.*bombeo|cisterna/, 'pozo', true],
-  [/sediment|clarific|decantador|espesador/, 'sedimentador', true],
+  [/sediment|clarific|decantador|espesador|\bsed\b/, 'sedimentador', true],
   [/deshidrat|tamiz|desarenad|reja\b|rejas|centrifug|filtro banda|prensa/, 'maquina', false],
   [/\bdaf\b|flotac/, 'daf', true],
   [/desinfec|\buv\b|clorac|contacto|flocul|reactor|\bsbr\b|\bla\b|activ|aireac|anoxic|anaerobi|ecualiz|homogeneiz|laguna|\bmbr\b|\bmbbr\b|digest|percolador|biolog|membrana/, 'tanque', true],
@@ -12652,7 +12658,22 @@ function procesosFlowsheetSvg(p) {
       if (et.techo.length) {
         const NIVEL_FRAC = { alto: 0.16, medio: 0.5, bajo: 0.82 };
         const porNivel = { alto: [], medio: [], bajo: [] };
-        et.techo.forEach(eq => porNivel[procesosFlowsheetNivelDe(eq.tipoOriginal)].push(eq));
+        // Si el texto dice el nivel (ej. "Sensor de nivel bajo"), va directo
+        // ahí. Si no lo dice (ej. "Sensor de nivel" x3, ambiguo), se reparten
+        // sus N unidades una por nivel (bajo/medio/alto) en vez de amontonarlas
+        // todas juntas — así 3 sensores sin aclarar quedan uno casi al fondo,
+        // uno a media altura y otro arriba, como van en la unidad real.
+        const ordenReparto = ['bajo', 'medio', 'alto'];
+        let _nivelRR = 0;
+        et.techo.forEach(eq => {
+          const nivelExplicito = procesosFlowsheetNivelDe(eq.tipoOriginal);
+          if (nivelExplicito) { porNivel[nivelExplicito].push(eq); return; }
+          const n = eq.cantidad || 1;
+          for (let i = 0; i < n; i++) {
+            porNivel[ordenReparto[_nivelRR % 3]].push(Object.assign({}, eq, { cantidad: 1, id: `${eq.id}_niv${i}` }));
+            _nivelRR++;
+          }
+        });
         const icS = IC_IN * 0.78;
         Object.keys(NIVEL_FRAC).forEach(nivel => {
           const arr = porNivel[nivel];
