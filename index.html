@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.64</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.65</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.64</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.65</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12199,12 +12199,16 @@ function procesosDiagramaFlujoSvg(p) {
 }
 
 // ── Flowsheet de equipos ────────────────────────────────────────────────
-// Versión más visual del diagrama de bloques: en vez de listar los equipos
-// como texto, dibuja un ícono simple por tipo de equipo (parecido a los de la
-// librería de símbolos P&ID de la empresa, sin pretender ser un plano de
-// ingeniería) con un tag genérico (BS, BD, ST...) sin numerar — pensado para
-// tener una vista rápida y prolija del tren, no para reemplazar el P&ID real.
-// El tag/ícono se adivina por palabras clave del "tipo" del equipo (texto
+// Versión más visual del diagrama de bloques: cada etapa se dibuja con su
+// propia FIGURA (tanque abierto, pozo, sedimentador, o el ícono grande del
+// equipo principal si la etapa es en sí una máquina — deshidratación,
+// tamizado, etc.), a escala relativa según las dimensiones reales cargadas en
+// el Paso 2 (largo/ancho/alto/diámetro), y los equipos de cada etapa se
+// ubican ADENTRO de la figura si son sumergibles/sumergidos (bomba
+// sumergible, aireador sumergible, mezclador sumergible, difusores) o AFUERA
+// si no (soplantes, bombas dosificadoras, tableros, etc.) — sin pretender ser
+// un plano de ingeniería real, es una vista rápida y prolija del tren.
+// El tag/ícono de cada equipo se adivina por palabras clave del "tipo" (texto
 // libre configurado en Cfg) — si no matchea nada conocido, cae en un ícono
 // genérico con el tag armado a partir de las iniciales del tipo.
 const PROCESOS_FLOWSHEET_TAGS = [
@@ -12277,69 +12281,231 @@ function procesosFlowsheetIconoSvg(icono, cx, cy, s, color) {
       return `<rect x="${cx-r*0.8}" y="${cy-r*0.6}" width="${r*1.6}" height="${r*1.2}" rx="${r*0.15}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
   }
 }
-// Misma estructura/flujo que procesosDiagramaFlujoSvg (etapas confirmadas del
-// Paso 2, línea líquida arriba y de lodos abajo), pero en vez de listar los
-// equipos como texto dibuja su ícono + tag genérico. La altura de cada caja
-// se ajusta sola según cuántos equipos tenga esa etapa.
-function procesosFlowsheetSvg(p) {
+// ¿Este tipo de equipo va sumergido/adentro de la figura de su etapa (bomba
+// sumergible, aireador sumergible, mezclador sumergible, difusores) o afuera
+// (soplantes, bombas no sumergibles, tableros, etc.)?
+function procesosFlowsheetEsSumergible(tipo) {
+  return /sumerg|difusor/.test(procesosNormTxt(tipo || ''));
+}
+// Qué FIGURA dibujar para una etapa, según su nombre — "contieneAgua" decide
+// si los equipos sumergibles se dibujan adentro del contorno o no aplica
+// (ninguna concepto de "adentro" para una etapa que es en sí una máquina,
+// como un deshidratador o un tamiz).
+const PROCESOS_FLOWSHEET_FIGURAS = [
+  [/pozo|camara.*bombeo|estacion.*bombeo|cisterna/, 'pozo', true],
+  [/sediment|clarific|decantador|espesador/, 'sedimentador', true],
+  [/deshidrat|tamiz|desarenad|reja\b|rejas|centrifug|filtro banda|prensa/, 'maquina', false],
+  [/\bdaf\b|flotac|desinfec|\buv\b|clorac|contacto|flocul|reactor|\bsbr\b|\bla\b|activ|aireac|anoxic|anaerobi|ecualiz|homogeneiz|laguna|\bmbr\b|\bmbbr\b|digest|percolador|biolog|membrana/, 'tanque', true],
+];
+function procesosFlowsheetFiguraDeEtapa(nombre) {
+  const t = procesosNormTxt(nombre);
+  for (const [re, tipoFig, contieneAgua] of PROCESOS_FLOWSHEET_FIGURAS) if (re.test(t)) return { tipoFig, contieneAgua };
+  return { tipoFig: 'caja', contieneAgua: false };
+}
+// Dimensiones reales cargadas en el Paso 2 para esa hoja (busca por palabra
+// clave en la etiqueta de cada valor — son etiquetas de texto libre de la
+// planilla de cálculo, no hay una clave fija).
+function procesosFlowsheetDimsDeEtapa(p, nombreEtapa) {
   const dd = p.diseno_data || {};
+  const vals = (dd.hojas?.[nombreEtapa] || {}).valoresConEtiqueta || {};
+  const buscar = regexes => {
+    for (const [k, v] of Object.entries(vals)) {
+      const kn = procesosNormTxt(k);
+      if (regexes.some(re => re.test(kn))) {
+        const num = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+        if (isFinite(num) && num > 0) return num;
+      }
+    }
+    return null;
+  };
+  return {
+    largo: buscar([/\blargo\b/, /\blongitud\b/]),
+    ancho: buscar([/\bancho\b/]),
+    alto: buscar([/\baltura\b/, /\bprofundidad\b/]),
+    diametro: buscar([/\bdiametro\b/, /\bdiam\b/]),
+    volumen: buscar([/\bvolumen\b/, /\bvol\.?\b/]),
+  };
+}
+function procesosFlowsheetDimsTxt(d) {
+  const n = v => procesosFormatearNumero(v);
+  if (d.diametro && d.alto) return `⌀${n(d.diametro)} m · H ${n(d.alto)} m`;
+  if (d.largo && d.ancho && d.alto) return `${n(d.largo)}×${n(d.ancho)}×${n(d.alto)} m`;
+  if (d.largo && d.alto) return `${n(d.largo)}×${n(d.alto)} m`;
+  if (d.diametro) return `⌀${n(d.diametro)} m`;
+  if (d.volumen) return `V: ${n(d.volumen)} m³`;
+  return '';
+}
+// Escala el largo/alto reales a un tamaño de dibujo razonable (mantiene la
+// proporción, entre un mínimo y un máximo de lado en px) — si no hay
+// dimensiones cargadas, usa el tamaño por defecto que le pasen.
+function procesosFlowsheetEscalar(largo, alto, defW, defH) {
+  if (!largo || !alto) return { w: defW, h: defH };
+  const maxLado = 170, minLado = 55;
+  const ratio = largo / alto;
+  let w, h;
+  if (ratio >= 1) { w = maxLado; h = Math.max(minLado, maxLado / ratio); }
+  else { h = maxLado; w = Math.max(minLado, maxLado * ratio); }
+  return { w: Math.round(w), h: Math.round(h) };
+}
+// Contorno de la figura de una etapa (no el ícono de un equipo puntual).
+function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color) {
+  switch (tipoFig) {
+    case 'pozo':
+      return `<path d="M${x},${y} L${x},${y+h} L${x+w},${y+h} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
+        `<line x1="${x+3}" y1="${y+12}" x2="${x+w-3}" y2="${y+12}" stroke="${color}" stroke-width="1" stroke-dasharray="3,2"/>`;
+    case 'sedimentador':
+      return `<path d="M${x},${y} L${x+w},${y} L${x+w*0.62},${y+h} L${x+w*0.38},${y+h} Z" fill="none" stroke="${color}" stroke-width="2"/>` +
+        `<line x1="${x+3}" y1="${y+10}" x2="${x+w-3}" y2="${y+10}" stroke="${color}" stroke-width="1" stroke-dasharray="3,2"/>`;
+    case 'tanque':
+      return `<path d="M${x},${y} L${x},${y+h} L${x+w},${y+h} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
+        `<line x1="${x+3}" y1="${y+10}" x2="${x+w-3}" y2="${y+10}" stroke="${color}" stroke-width="1" stroke-dasharray="3,2"/>`;
+    default:
+      return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  }
+}
+// Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
+// de afuera como para el grid de la etapa "caja" sin figura conocida), su
+// SVG y las dimensiones que ocupa — para poder calcular el alto de la caja
+// antes de dibujar nada.
+function procesosFlowsheetChips(equipos, x, yTop, anchoDisponible, iconoS) {
+  const celda = iconoS + 30;
+  const cols = Math.max(1, Math.min(equipos.length, Math.floor(anchoDisponible / celda) || 1));
+  const filas = Math.ceil(equipos.length / cols);
+  const anchoUsado = Math.min(equipos.length, cols) * celda;
+  const xIni = x + (anchoDisponible - anchoUsado) / 2;
+  let s = '';
+  equipos.forEach((eq, i) => {
+    const col = i % cols, fila = Math.floor(i / cols);
+    const ccx = xIni + col * celda + celda / 2, ccy = yTop + fila * celda + celda / 2 - 6;
+    s += procesosFlowsheetIconoSvg(eq.icono, ccx, ccy, iconoS, '#2e7d32');
+    const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag;
+    s += `<text x="${ccx}" y="${ccy + iconoS/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+  });
+  return { svg: s, alto: filas * celda };
+}
+// Misma estructura/flujo que procesosDiagramaFlujoSvg (etapas confirmadas del
+// Paso 2, línea líquida arriba y de lodos abajo), pero cada etapa se dibuja
+// con la figura que le corresponde (tanque/pozo/sedimentador/máquina) y sus
+// equipos ubicados adentro o afuera según si son sumergibles.
+function procesosFlowsheetSvg(p) {
   const ed = (p.equipos_data && p.equipos_data.etapas) || {};
   const nombresEtapas = procesosStep3EtapasConfirmadas(p);
   if (!nombresEtapas.length) return '';
-  const todas = nombresEtapas.map(nombre => ({
-    nombre,
-    equipos: ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ cantidad: eq.cantidad || 1 }, procesosFlowsheetInfoDe(eq.tipo))),
-  }));
+  const BOX_MIN_W = 190, PAD = 16, HEADER_H = 40, IC_OUT = 34, IC_IN = 22, IC_MAQ = 60;
+  const todas = nombresEtapas.map(nombre => {
+    const equipos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo }, procesosFlowsheetInfoDe(eq.tipo)));
+    let { tipoFig, contieneAgua } = procesosFlowsheetFiguraDeEtapa(nombre);
+    // Si el NOMBRE de la etapa no dice nada (ej. "Pretratamiento" genérico)
+    // pero adentro hay un equipo que claramente es una máquina en sí misma
+    // (tamiz, deshidratador...), se usa igual esa figura — no hace falta que
+    // el nombre de la etapa lo diga explícito.
+    if (tipoFig === 'caja') {
+      const maquinaEq = equipos.find(eq => eq.icono === 'cilindro' || eq.icono === 'tamiz');
+      if (maquinaEq) { tipoFig = 'maquina'; contieneAgua = false; }
+    }
+    const dims = procesosFlowsheetDimsDeEtapa(p, nombre);
+    const dimsTxt = procesosFlowsheetDimsTxt(dims);
+    let figW = 0, figH = 0, dominante = null, adentro = [], afuera = equipos;
+    if (tipoFig === 'maquina') {
+      dominante = equipos.find(eq => eq.icono === 'cilindro' || eq.icono === 'tamiz') || equipos[0] || null;
+      figW = IC_MAQ + 20; figH = IC_MAQ + 20;
+      afuera = dominante ? equipos.filter(eq => eq !== dominante) : equipos;
+    } else if (tipoFig !== 'caja') {
+      const base = tipoFig === 'pozo' ? procesosFlowsheetEscalar(dims.ancho || dims.diametro, dims.alto, 95, 125)
+        : tipoFig === 'sedimentador' ? procesosFlowsheetEscalar(dims.diametro || dims.largo, dims.alto, 150, 95)
+        : procesosFlowsheetEscalar(dims.largo || dims.diametro, dims.alto, 150, 100);
+      figW = base.w; figH = base.h;
+      adentro = equipos.filter(eq => procesosFlowsheetEsSumergible(eq.tipoOriginal));
+      afuera = equipos.filter(eq => !procesosFlowsheetEsSumergible(eq.tipoOriginal));
+    }
+    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro, afuera };
+  });
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
   const giDe = {};
   grupos.forEach((g, gi) => g.instancias.forEach(i => { giDe[i.nombre] = gi; }));
   todas.forEach(e => { e.gi = giDe[e.nombre]; e.esLodos = e.gi != null && grupos[e.gi].linea === 'lodos'; e.entradas = flujo.porInstancia[e.nombre] || []; });
+  // Calcula ancho/alto final de la caja de una etapa (antes de dibujar, para
+  // poder armar todo el layout general del diagrama).
+  const medir = et => {
+    const afueraCols = Math.max(1, Math.min(et.afuera.length, 3));
+    const anchoAfuera = et.afuera.length ? afueraCols * (IC_OUT + 30) : 0;
+    const w = Math.max(BOX_MIN_W, et.figW + PAD * 2, anchoAfuera + PAD * 2);
+    const filasAfuera = et.afuera.length ? Math.ceil(et.afuera.length / afueraCols) : 0;
+    const altoAfuera = filasAfuera * (IC_OUT + 30);
+    let h = HEADER_H + (et.dimsTxt ? 14 : 0);
+    if (et.tipoFig === 'caja') {
+      h += et.equipos.length ? altoAfuera || (IC_OUT + 30) : 30;
+    } else {
+      h += et.figH + 10 + (altoAfuera || (et.equipos.length ? 0 : 26));
+    }
+    return { w, h: Math.round(h) };
+  };
+  todas.forEach(et => Object.assign(et, medir(et)));
   const liq = todas.filter(e => !e.esLodos), lod = todas.filter(e => e.esLodos);
   const c = procesosDiagramaColores();
-  const magenta = '#c2185b', marron = '#9a6b2f', verdeEq = '#2e7d32', verdeOk = '#2e7d32';
-  const COLS = 3, celda = 76, iconoS = 46, boxW = COLS * celda + 24, padTop = 26, padSides = 20, gapX = 90, filaGap = 90;
-  const filasDe = et => Math.max(1, Math.ceil(et.equipos.length / COLS));
-  const boxHDe = et => 46 + filasDe(et) * celda + 10;
-  const anchoFila = arr => arr.length ? arr.length * (boxW + gapX) - gapX + padSides * 2 : 0;
-  const altoFila = arr => arr.length ? Math.max(...arr.map(boxHDe)) : 0;
-  const xAt = i => padSides + i * (boxW + gapX);
-  let x0 = xAt(0);
+  const magenta = '#c2185b', marron = '#9a6b2f', verdeOk = '#2e7d32', verdeEq = '#2e7d32';
+  const padTop = 26, padSides = 20, gapX = 90, filaGap = 90;
+  const anchoHasta = (arr, i) => arr.slice(0, i).reduce((s, e) => s + e.w + gapX, padSides);
+  const xLiq = i => anchoHasta(liq, i);
+  let x0 = liq.length ? xLiq(0) : padSides;
   if (lod.length) {
     const ent = lod[0].entradas.find(e => e.tipo === 'lodos');
     const idxO = ent ? liq.findIndex(l => l.gi === ent.gi) : -1;
-    if (idxO >= 0) x0 = xAt(idxO);
+    if (idxO >= 0) x0 = xLiq(idxO);
   }
-  const xLod = k => x0 + k * (boxW + gapX);
-  const altoLiq = altoFila(liq);
+  const xLod = i => x0 + anchoHasta(lod, i) - padSides;
+  const altoLiq = liq.length ? Math.max(...liq.map(e => e.h)) : 0;
+  const altoLod = lod.length ? Math.max(...lod.map(e => e.h)) : 0;
   const row2y = padTop + altoLiq + filaGap;
-  const totalW = Math.max(anchoFila(liq), lod.length ? xLod(lod.length - 1) + boxW + padSides : 0);
-  const totalH = lod.length ? row2y + altoFila(lod) + padTop + 14 : padTop + altoLiq + padTop;
+  const finLiq = liq.length ? xLiq(liq.length - 1) + liq[liq.length - 1].w + gapX : 0;
+  const finLod = lod.length ? xLod(lod.length - 1) + lod[lod.length - 1].w : 0;
+  const totalW = Math.max(finLiq, finLod + padSides, 260);
+  const totalH = lod.length ? row2y + altoLod + padTop + 14 : padTop + altoLiq + padTop;
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
   svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker></defs>`;
   const caja = (x, y, et, esLodos) => {
-    const h = boxHDe(et);
-    let s = `<rect x="${x}" y="${y}" width="${boxW}" height="${h}" rx="8" fill="${c.surface2}" stroke="${esLodos ? marron : c.border}" stroke-width="${esLodos ? 2 : 1.5}"/>`;
-    s += `<text x="${x + boxW/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
-    s += `<line x1="${x+12}" y1="${y+28}" x2="${x+boxW-12}" y2="${y+28}" stroke="${c.border}"/>`;
-    if (et.equipos.length) {
-      et.equipos.forEach((eq, i) => {
-        const col = i % COLS, fila = Math.floor(i / COLS);
-        const ccx = x + 12 + col * celda + celda / 2, ccy = y + 34 + fila * celda + celda / 2;
-        s += procesosFlowsheetIconoSvg(eq.icono, ccx, ccy - 6, iconoS, verdeEq);
-        const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag;
-        s += `<text x="${ccx}" y="${ccy + iconoS/2 + 8}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
-      });
-    } else {
-      s += `<text x="${x + boxW/2}" y="${y + h/2 + 10}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
+    let s = `<rect x="${x}" y="${y}" width="${et.w}" height="${et.h}" rx="8" fill="${c.surface2}" stroke="${esLodos ? marron : c.border}" stroke-width="${esLodos ? 2 : 1.5}"/>`;
+    s += `<text x="${x + et.w/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
+    if (et.dimsTxt) s += `<text x="${x + et.w/2}" y="${y + 34}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.dimsTxt)}</text>`;
+    let cy = y + HEADER_H + (et.dimsTxt ? 14 : 0);
+    if (!et.equipos.length && et.tipoFig !== 'tanque' && et.tipoFig !== 'pozo' && et.tipoFig !== 'sedimentador' && et.tipoFig !== 'maquina') {
+      s += `<text x="${x + et.w/2}" y="${y + et.h/2 + 10}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
+      return s;
+    }
+    if (et.tipoFig === 'maquina') {
+      const ccx = x + et.w / 2, ccy = cy + IC_MAQ / 2 + 6;
+      s += procesosFlowsheetIconoSvg(et.dominante ? et.dominante.icono : 'generico', ccx, ccy, IC_MAQ, verdeEq);
+      if (et.dominante) {
+        const etiqueta = et.dominante.cantidad > 1 ? `${et.dominante.cantidad}× ${et.dominante.tag}` : et.dominante.tag;
+        s += `<text x="${ccx}" y="${ccy + IC_MAQ/2 + 14}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+      }
+      cy += IC_MAQ + 22;
+    } else if (et.tipoFig !== 'caja') {
+      const fx = x + (et.w - et.figW) / 2, fy = cy;
+      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq);
+      if (et.adentro.length) {
+        const n = et.adentro.length, espacio = et.figW / (n + 1);
+        et.adentro.forEach((eq, i) => {
+          const icx = fx + espacio * (i + 1), icy = fy + et.figH - IC_IN * 0.7;
+          s += procesosFlowsheetIconoSvg(eq.icono, icx, icy, IC_IN, verdeEq);
+          const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}×${eq.tag}` : eq.tag;
+          s += `<text x="${icx}" y="${icy + IC_IN/2 + 9}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+        });
+      }
+      cy += et.figH + 10;
+    }
+    if (et.afuera.length) {
+      const { svg: chipsSvg } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT);
+      s += chipsSvg;
     }
     return s;
   };
   if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
   liq.forEach((et, i) => {
-    const x = xAt(i), y = padTop, h = boxHDe(et);
+    const x = xLiq(i), y = padTop;
     svg += caja(x, y, et, false);
-    const ax1 = x + boxW, ax2 = x + boxW + gapX, ay = y + h / 2;
+    const ax1 = x + et.w, ax2 = x + et.w + gapX, ay = y + et.h / 2;
     if (i < liq.length - 1) {
       svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${magenta}" stroke-width="2" marker-end="url(#pfd2-arrow)"/>`;
     } else {
@@ -12348,23 +12514,23 @@ function procesosFlowsheetSvg(p) {
     }
   });
   lod.forEach((et, k) => {
-    const x = xLod(k), y = row2y, h = boxHDe(et);
+    const x = xLod(k), y = row2y;
     svg += caja(x, y, et, true);
     const ent = et.entradas.find(e => e.tipo === 'lodos');
     let idxLod = ent ? lod.findIndex((l, j) => j !== k && l.nombre === ent.nombre) : -1;
     if (ent && idxLod < 0) idxLod = lod.findIndex((l, j) => j < k && l.gi === ent.gi);
     const idxLiq = (ent && idxLod < 0) ? liq.findIndex(l => l.gi === ent.gi) : -1;
     if (idxLod >= 0) {
-      const sx = xLod(idxLod) + boxW, ay = y + h / 2;
+      const sx = xLod(idxLod) + lod[idxLod].w, ay = y + et.h / 2;
       svg += `<line x1="${sx}" y1="${ay}" x2="${x-8}" y2="${ay}" stroke="${marron}" stroke-width="2" marker-end="url(#pfd2-arrow-lodos)"/>`;
     } else if (idxLiq >= 0) {
-      const sx = xAt(idxLiq) + boxW / 2, sy = padTop + boxHDe(liq[idxLiq]), tx = x + boxW / 2, mid = sy + (row2y - sy) / 2;
+      const sx = xLiq(idxLiq) + liq[idxLiq].w / 2, sy = padTop + liq[idxLiq].h, tx = x + et.w / 2, mid = sy + (row2y - sy) / 2;
       const pts = sx === tx ? `${sx},${sy} ${tx},${row2y-8}` : `${sx},${sy} ${sx},${mid} ${tx},${mid} ${tx},${row2y-8}`;
       svg += `<polyline points="${pts}" fill="none" stroke="${marron}" stroke-width="2" marker-end="url(#pfd2-arrow-lodos)"/>`;
       svg += `<text x="${sx + 8}" y="${sy + 16}" fill="${marron}" font-size="10" font-weight="600">lodos</text>`;
     }
   });
-  if (lod.length) svg += `<text x="${x0}" y="${row2y + altoFila(lod) + 18}" fill="${marron}" font-size="10" font-weight="600">LÍNEA DE LODOS — no es el efluente final</text>`;
+  if (lod.length) svg += `<text x="${x0}" y="${row2y + altoLod + 18}" fill="${marron}" font-size="10" font-weight="600">LÍNEA DE LODOS — no es el efluente final</text>`;
   svg += `</svg>`;
   return svg;
 }
