@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.80</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.81</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.80</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.81</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12432,6 +12432,7 @@ function procesosFlowsheetDimsDeEtapa(p, nombreEtapa) {
     alto: buscar([/\baltura\b/, /\bprofundidad\b/]),
     diametro: buscar([/\bdiametro\b/, /\bdiam\b/]),
     volumen: buscar([/\bvolumen\b/, /\bvol\.?\b/]),
+    acometida: buscar([/h.*acometid|cota.*acometid|profundidad.*acometid|acometid.*profund|\benterrad/]),
   };
 }
 function procesosFlowsheetDimsTxt(d) {
@@ -12610,7 +12611,7 @@ function procesosFlowsheetSvg(p) {
       fondo = equipos.filter(eq => eq.icono !== 'sensor_nivel' && procesosFlowsheetEsSumergible(eq.tipoOriginal));
       afuera = equipos.filter(eq => eq.icono !== 'sensor_nivel' && !procesosFlowsheetEsSumergible(eq.tipoOriginal));
     }
-    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, escalaEtapa };
+    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, escalaEtapa, profundidad: dims.acometida };
   });
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
@@ -12643,6 +12644,11 @@ function procesosFlowsheetSvg(p) {
   // se corten contra el borde del canvas.
   const MARGIN = 160;
   const padTop = 26 + MARGIN, padSides = 20 + MARGIN, gapX = 90, filaGap = 90;
+  // Unidades con profundidad de acometida cargada (ej. "H acometida" del
+  // pozo de bombeo) se dibujan más abajo, como si estuvieran enterradas
+  // respecto del nivel de terreno — no todas arrancan a la misma altura.
+  const PX_POR_M_PROFUNDIDAD = 26, PROFUNDIDAD_MAX_PX = 140;
+  const profundidadPx = et => et.profundidad ? Math.min(PROFUNDIDAD_MAX_PX, et.profundidad * PX_POR_M_PROFUNDIDAD) : 0;
   const anchoHasta = (arr, i) => arr.slice(0, i).reduce((s, e) => s + e.w + gapX, padSides);
   const xLiq = i => anchoHasta(liq, i);
   let x0 = liq.length ? xLiq(0) : padSides;
@@ -12652,8 +12658,11 @@ function procesosFlowsheetSvg(p) {
     if (idxO >= 0) x0 = xLiq(idxO);
   }
   const xLod = i => x0 + anchoHasta(lod, i) - padSides;
-  const altoLiq = liq.length ? Math.max(...liq.map(e => e.h)) : 0;
-  const altoLod = lod.length ? Math.max(...lod.map(e => e.h)) : 0;
+  // Alto de cada fila contando también lo que se corre hacia abajo por
+  // profundidad de acometida (si no, una unidad enterrada podría pisar la
+  // fila de lodos o cortarse contra el borde del canvas).
+  const altoLiq = liq.length ? Math.max(...liq.map(e => e.h + profundidadPx(e))) : 0;
+  const altoLod = lod.length ? Math.max(...lod.map(e => e.h + profundidadPx(e))) : 0;
   const row2y = padTop + altoLiq + filaGap;
   const finLiq = liq.length ? xLiq(liq.length - 1) + liq[liq.length - 1].w + gapX : 0;
   const finLod = lod.length ? xLod(lod.length - 1) + lod[lod.length - 1].w : 0;
@@ -12661,6 +12670,18 @@ function procesosFlowsheetSvg(p) {
   const totalH = (lod.length ? row2y + altoLod + padTop + 14 : padTop + altoLiq + padTop) + MARGIN;
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
   svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker></defs>`;
+  // Línea de nivel de terreno: solo se dibuja si al menos una unidad de la
+  // fila tiene profundidad de acometida cargada — si no, nadie está
+  // "enterrado" y no hace falta la referencia.
+  const dibujarNivelTerreno = (arr, xIni, xFin, yLinea) => {
+    if (!arr.some(e => e.profundidad)) return '';
+    let t = `<line x1="${xIni}" y1="${yLinea}" x2="${xFin}" y2="${yLinea}" stroke="${c.text2}" stroke-width="1.5" stroke-dasharray="6,3"/>`;
+    for (let tx = xIni; tx < xFin; tx += 14) t += `<line x1="${tx}" y1="${yLinea}" x2="${tx-6}" y2="${yLinea+8}" stroke="${c.text2}" stroke-width="1"/>`;
+    t += `<text x="${xIni}" y="${yLinea-4}" fill="${c.text2}" font-size="9" font-style="italic">Nivel de terreno</text>`;
+    return t;
+  };
+  svg += dibujarNivelTerreno(liq, padSides - 10, finLiq, padTop);
+  if (lod.length) svg += dibujarNivelTerreno(lod, xLod(0) - 10, finLod, row2y);
   const CONTIENE_AGUA_TOP = { tanque: 1, daf: 1, pozo: 1, sedimentador: 1 };
   const caja = (x, y, et, esLodos) => {
     let s = '';
@@ -12819,7 +12840,7 @@ function procesosFlowsheetSvg(p) {
   if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
   liq.forEach((et, i) => {
     const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
-    const x = xLiq(i) + off.x, y = padTop + off.y;
+    const x = xLiq(i) + off.x, y = padTop + profundidadPx(et) + off.y;
     const { svg: cajaSvg, bombas } = caja(x, y, et, false);
     et._bombas = bombas; et._x = x; et._y = y;
     svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
@@ -12828,7 +12849,7 @@ function procesosFlowsheetSvg(p) {
       const sig = liq[i + 1];
       const sigOff = procesosFlowsheetOffset(layout, 'etapas', sig.nombre);
       const sigPorArriba = !!CONTIENE_AGUA_TOP[sig.tipoFig];
-      const sigX = xLiq(i + 1) + sigOff.x, sigY = padTop + sigOff.y;
+      const sigX = xLiq(i + 1) + sigOff.x, sigY = padTop + profundidadPx(sig) + sigOff.y;
       const destX = sigPorArriba ? sigX + sig.w / 2 : ax2 - 8;
       const destY = sigPorArriba ? sigY + HEADER_H + (sig.dimsTxt ? 14 : 0) : ay;
       svg += conectar(bombas, ax1, ay, destX, destY, sigPorArriba, magenta, 'pfd2-arrow');
@@ -12839,7 +12860,7 @@ function procesosFlowsheetSvg(p) {
   });
   lod.forEach((et, k) => {
     const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
-    const x = xLod(k) + off.x, y = row2y + off.y;
+    const x = xLod(k) + off.x, y = row2y + profundidadPx(et) + off.y;
     const { svg: cajaSvg, bombas } = caja(x, y, et, true);
     et._bombas = bombas; et._x = x; et._y = y;
     svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
@@ -13246,7 +13267,7 @@ async function flowsheetsGenerarCore(p) {
   showMsg(statusId, 'loading', 'Generando flowsheet con IA...');
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('API key no disponible.');
-  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3},"equipos":[{"tipo":"Bomba sumergible","cantidad":2}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores.\n- "equipos": equipos de esa unidad con su cantidad, tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
+  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3,"acometida":null},"equipos":[{"tipo":"Bomba sumergible","cantidad":2}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores. "acometida" es la profundidad (m) a la que entra el caño de ingreso respecto del nivel de terreno (típico en un pozo de bombeo enterrado) — solo si el texto la menciona explícitamente (ej. "H acometida", "cota de ingreso", "profundidad de entrada"), si no dejala en null.\n- "equipos": equipos de esa unidad con su cantidad, tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
   // Timeout propio (AbortController) — sin esto, si el pedido queda colgado
   // (extensión del navegador, red rara, etc.) el botón se queda "Generando..."
   // para siempre sin ningún error visible.
@@ -13295,6 +13316,7 @@ async function flowsheetsGenerarCore(p) {
     if (dims.alto != null) valoresConEtiqueta['Altura (m)'] = dims.alto;
     if (dims.diametro != null) valoresConEtiqueta['Diámetro (m)'] = dims.diametro;
     if (dims.volumen != null) valoresConEtiqueta['Volumen (m3)'] = dims.volumen;
+    if (dims.acometida != null) valoresConEtiqueta['H acometida (m)'] = dims.acometida;
     // seleccionada/confirmada: en Procesos IA marcan que el usuario ya pasó
     // por el asistente y validó la hoja — acá no hay ese asistente, así que
     // toda etapa que la IA extrajo ya se considera "confirmada" directamente
