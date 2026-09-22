@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.72</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.73</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.72</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.73</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -718,7 +718,7 @@
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="file" id="flowsheets-archivo-input" accept=".pdf,.docx,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none" onchange="flowsheetsArchivoSubir(this)" />
             <button class="btn btn-secondary" style="width:auto;padding:10px 14px" title="Adjuntar un archivo (PDF, Word, Excel o imagen)" onclick="document.getElementById('flowsheets-archivo-input').click()">📎 Adjuntar archivo</button>
-            <button class="btn btn-primary" style="width:auto;padding:10px 18px" onclick="flowsheetsGenerarClick()">✨ Generar / Actualizar Flowsheet</button>
+            <button class="btn btn-primary" id="flowsheets-generar-btn" style="width:auto;padding:10px 18px" onclick="flowsheetsGenerarClick()">✨ Generar / Actualizar Flowsheet</button>
           </div>
           <div id="flowsheets-status" style="margin-top:8px"></div>
         </div>
@@ -13054,33 +13054,61 @@ async function flowsheetsArchivosContextoTxt(p) {
 
 // Confirma antes de pisar un flowsheet ya generado (arrastres manuales
 // incluidos — se pierden porque los equipos se recrean con ids nuevos).
+let _flowsheetsGenerando = false;
 async function flowsheetsGenerarClick() {
+  if (_flowsheetsGenerando) return; // evita doble click mientras hay un pedido en curso
   const p = flowsheetsCurrentProyecto;
   const yaTiene = (p.diseno_data?.orden || []).length > 0;
   if (yaTiene && !confirm('Ya hay un flowsheet generado acá (si moviste equipos/unidades a mano, esas posiciones se pierden). ¿Generar de nuevo con el texto/archivos actuales?')) return;
+  _flowsheetsGenerando = true;
+  const btn = document.getElementById('flowsheets-generar-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generando...'; }
+  console.log('[Flowsheets] generar: arrancando para proyecto', p.id);
   try {
     await flowsheetsGenerarCore(p);
+    console.log('[Flowsheets] generar: OK');
     if (flowsheetsCurrentProyecto === p) { document.getElementById('flowsheets-status').innerHTML = ''; renderFlowsheetsDiagrama(); }
   } catch(e) {
+    console.error('[Flowsheets] generar: ERROR', e);
     if (flowsheetsCurrentProyecto === p) showMsg('flowsheets-status', 'error', '✕ ' + e.message);
+  } finally {
+    _flowsheetsGenerando = false;
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Generar / Actualizar Flowsheet'; }
   }
 }
 async function flowsheetsGenerarCore(p) {
   const statusId = 'flowsheets-status';
   const textoLibre = (p.texto_libre || '').trim();
   showMsg(statusId, 'loading', 'Leyendo archivos...');
+  console.log('[Flowsheets] leyendo archivos adjuntos...');
   const { txt: archivosTxt, cantidad: cantArchivos } = await flowsheetsArchivosContextoTxt(p);
+  console.log('[Flowsheets] archivos leídos:', cantArchivos);
   if (!textoLibre && !cantArchivos) throw new Error('Pegá texto o adjuntá al menos un archivo antes de generar.');
   showMsg(statusId, 'loading', 'Generando flowsheet con IA...');
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('API key no disponible.');
   const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3},"equipos":[{"tipo":"Bomba sumergible","cantidad":2}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores.\n- "equipos": equipos de esa unidad con su cantidad, tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
+  // Timeout propio (AbortController) — sin esto, si el pedido queda colgado
+  // (extensión del navegador, red rara, etc.) el botón se queda "Generando..."
+  // para siempre sin ningún error visible.
   const intentar = async (maxTokens) => {
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:maxTokens, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) { const errBody = await resp.json().catch(()=>({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), 75000);
+    let resp;
+    try {
+      resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:maxTokens, messages:[{role:'user', content:[{type:'text', text:prompt}]}] }),
+        signal: ctrl.signal,
+      });
+    } catch(eFetch) {
+      if (eFetch.name === 'AbortError') throw new Error('La IA tardó demasiado en responder (más de 75s) — probá de nuevo.');
+      throw eFetch;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    console.log('[Flowsheets] respuesta IA, status:', resp.status);
+    if (!resp.ok) { const errBody = await resp.json().catch(()=>({})); throw new Error(errBody.error?.message || `Error de la IA (${resp.status})`); }
     const data = await resp.json();
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     return JSON.parse(text.replace(/```json|```/g,'').trim());
@@ -13093,6 +13121,7 @@ async function flowsheetsGenerarCore(p) {
     try { parsed = await intentar(8000); }
     catch(_e2) { throw new Error('La respuesta de la IA llegó incompleta (se cortó antes de terminar, incluso después de reintentar) — probá de nuevo.'); }
   }
+  console.log('[Flowsheets] JSON parseado, etapas:', (parsed.etapas||[]).length);
   const etapasIn = Array.isArray(parsed.etapas) ? parsed.etapas : [];
   if (!etapasIn.length) throw new Error('La IA no pudo identificar ninguna etapa a partir de lo provisto — agregá más detalle en el texto o los archivos.');
   const orden = [], hojas = {}, equiposEtapas = {};
@@ -13112,14 +13141,23 @@ async function flowsheetsGenerarCore(p) {
   });
   p.diseno_data = { orden, hojas };
   p.equipos_data = { etapas: equiposEtapas, layout: { etapas:{}, equipos:{} } };
+  console.log('[Flowsheets] guardando en Supabase...', orden);
   await flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data, generado_en: new Date().toISOString() }, p);
+  console.log('[Flowsheets] guardado OK');
 }
 
 function renderFlowsheetsDiagrama() {
   const el = document.getElementById('flowsheets-diagrama');
   if (!el) return;
   const p = flowsheetsCurrentProyecto;
-  const svg = procesosFlowsheetSvg(p);
+  let svg;
+  try {
+    svg = procesosFlowsheetSvg(p);
+  } catch(e) {
+    console.error('[Flowsheets] error dibujando el flowsheet:', e);
+    el.innerHTML = `<p class="hint">✕ Error armando el dibujo: ${esc(e.message)}</p>`;
+    return;
+  }
   if (!svg) { el.innerHTML = '<p class="hint">Generá el flowsheet con el botón de arriba para verlo acá.</p>'; return; }
   el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="flowsheetsDescargar()">⬇ Descargar como imagen (PNG)</button>`;
   procesosFlowsheetDragInit(el, {
