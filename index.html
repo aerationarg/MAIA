@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.66</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.67</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.66</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.67</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12236,6 +12236,7 @@ const PROCESOS_FLOWSHEET_TAGS = [
   [/tanque|tk\b/, 'TK', 'tanque'],
   [/sediment|clarific|decantador/, 'SED', 'sedimentador'],
   [/membrana|\bmbr\b|\buf\b|osmosis/, 'MEM', 'membrana'],
+  [/sensor.*nivel|nivel.*sensor/, 'LS', 'sensor_nivel'],
   [/tablero/, 'TE', 'generico'],
 ];
 function procesosFlowsheetInfoDe(tipo) {
@@ -12283,6 +12284,9 @@ function procesosFlowsheetIconoSvg(icono, cx, cy, s, color) {
       return `<rect x="${cx-r*0.55}" y="${cy-r*0.65}" width="${r*1.1}" height="${r*1.15}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
         [-0.25,0,0.25].map(dx => `<line x1="${cx+dx*r}" y1="${cy-r*0.65}" x2="${cx+dx*r}" y2="${cy+r*0.5}" stroke="${color}" stroke-width="${sw*0.7}"/>`).join('') +
         [-0.3,0,0.3].map(dx => `<circle cx="${cx+dx*r}" cy="${cy+r*0.72}" r="${r*0.08}" fill="none" stroke="${color}" stroke-width="${sw*0.7}"/>`).join('');
+    case 'sensor_nivel': // sonda colgando desde arriba (genérico — se afina cuando tengamos el dibujo real)
+      return `<line x1="${cx}" y1="${cy-r*0.85}" x2="${cx}" y2="${cy+r*0.15}" stroke="${color}" stroke-width="${sw}"/><rect x="${cx-r*0.18}" y="${cy+r*0.15}" width="${r*0.36}" height="${r*0.3}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
+        [-0.3,0.3].map(dx => `<path d="M${cx+dx*r-r*0.15},${cy+r*0.55} q${r*0.15},${r*0.2} ${r*0.3},0" fill="none" stroke="${color}" stroke-width="${sw*0.8}"/>`).join('');
     case 'transportador': // tubo inclinado + motor
       return `<line x1="${cx-r*0.8}" y1="${cy+r*0.6}" x2="${cx+r*0.7}" y2="${cy-r*0.55}" stroke="${color}" stroke-width="${sw*1.8}"/><rect x="${cx+r*0.45}" y="${cy-r*0.85}" width="${r*0.35}" height="${r*0.35}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
     default:
@@ -12306,9 +12310,13 @@ const PROCESOS_FLOWSHEET_FIGURAS = [
   [/\bdaf\b|flotac/, 'daf', true],
   [/desinfec|\buv\b|clorac|contacto|flocul|reactor|\bsbr\b|\bla\b|activ|aireac|anoxic|anaerobi|ecualiz|homogeneiz|laguna|\bmbr\b|\bmbbr\b|digest|percolador|biolog|membrana/, 'tanque', true],
 ];
-function procesosFlowsheetFiguraDeEtapa(nombre) {
-  const t = procesosNormTxt(nombre);
-  for (const [re, tipoFig, contieneAgua] of PROCESOS_FLOWSHEET_FIGURAS) if (re.test(t)) return { tipoFig, contieneAgua };
+// Prueba contra el nombre de la instancia Y contra el nombre "base" de la
+// hoja (el de la planilla real) — una instancia puede quedar renombrada/
+// abreviada (ej. "Sed 2°" en vez de "Sedimentador Secundario") y con el
+// nombre abreviado solo no alcanza para reconocer la figura.
+function procesosFlowsheetFiguraDeEtapa(nombre, hojaBase) {
+  const candidatos = [procesosNormTxt(nombre), procesosNormTxt(hojaBase || '')];
+  for (const [re, tipoFig, contieneAgua] of PROCESOS_FLOWSHEET_FIGURAS) if (candidatos.some(t => t && re.test(t))) return { tipoFig, contieneAgua };
   return { tipoFig: 'caja', contieneAgua: false };
 }
 // Dimensiones reales cargadas en el Paso 2 para esa hoja (busca por palabra
@@ -12375,11 +12383,27 @@ function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color) {
       return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
   }
 }
+// Convierte una lista de equipos {icono,tag,cantidad} en una lista de ítems a
+// dibujar {icono,etiqueta} — un ícono por unidad real (ej. 2 bombas = 2
+// íconos de bomba) hasta un tope ("cap"); si hay más, se deja un solo ícono
+// con "Nx TAG" (no tendría sentido, por ejemplo, dibujar 32 difusores).
+function procesosFlowsheetExpandirIconos(lista, cap) {
+  const out = [];
+  (lista || []).forEach(eq => {
+    if (eq.cantidad <= cap) {
+      for (let i = 0; i < eq.cantidad; i++) out.push({ icono: eq.icono, etiqueta: eq.tag });
+    } else {
+      out.push({ icono: eq.icono, etiqueta: `${eq.cantidad}× ${eq.tag}` });
+    }
+  });
+  return out;
+}
 // Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
 // de afuera como para el grid de la etapa "caja" sin figura conocida), su
 // SVG y las dimensiones que ocupa — para poder calcular el alto de la caja
-// antes de dibujar nada.
-function procesosFlowsheetChips(equipos, x, yTop, anchoDisponible, iconoS) {
+// antes de dibujar nada. Expande por cantidad (ver procesosFlowsheetExpandirIconos).
+function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, iconoS) {
+  const equipos = procesosFlowsheetExpandirIconos(equiposSinExpandir, 4);
   const celda = iconoS + 30;
   const cols = Math.max(1, Math.min(equipos.length, Math.floor(anchoDisponible / celda) || 1));
   const filas = Math.ceil(equipos.length / cols);
@@ -12390,8 +12414,7 @@ function procesosFlowsheetChips(equipos, x, yTop, anchoDisponible, iconoS) {
     const col = i % cols, fila = Math.floor(i / cols);
     const ccx = xIni + col * celda + celda / 2, ccy = yTop + fila * celda + celda / 2 - 6;
     s += procesosFlowsheetIconoSvg(eq.icono, ccx, ccy, iconoS, '#2e7d32');
-    const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag;
-    s += `<text x="${ccx}" y="${ccy + iconoS/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+    s += `<text x="${ccx}" y="${ccy + iconoS/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(eq.etiqueta)}</text>`;
   });
   return { svg: s, alto: filas * celda };
 }
@@ -12406,7 +12429,8 @@ function procesosFlowsheetSvg(p) {
   const BOX_MIN_W = 190, PAD = 16, HEADER_H = 40, IC_OUT = 34, IC_IN = 22, IC_MAQ = 60;
   const todas = nombresEtapas.map(nombre => {
     const equipos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo }, procesosFlowsheetInfoDe(eq.tipo)));
-    let { tipoFig, contieneAgua } = procesosFlowsheetFiguraDeEtapa(nombre);
+    const hojaBase = (p.diseno_data?.hojas?.[nombre] || {}).hojaBase || nombre;
+    let { tipoFig, contieneAgua } = procesosFlowsheetFiguraDeEtapa(nombre, hojaBase);
     // Si el NOMBRE de la etapa no dice nada (ej. "Pretratamiento" genérico)
     // pero adentro hay un equipo que claramente es una máquina en sí misma
     // (tamiz, deshidratador...), se usa igual esa figura — no hace falta que
@@ -12417,7 +12441,7 @@ function procesosFlowsheetSvg(p) {
     }
     const dims = procesosFlowsheetDimsDeEtapa(p, nombre);
     const dimsTxt = procesosFlowsheetDimsTxt(dims);
-    let figW = 0, figH = 0, dominante = null, adentro = [], afuera = equipos;
+    let figW = 0, figH = 0, dominante = null, fondo = [], techo = [], afuera = equipos;
     if (tipoFig === 'maquina') {
       dominante = equipos.find(eq => eq.icono === 'cilindro' || eq.icono === 'tamiz') || equipos[0] || null;
       figW = IC_MAQ + 20; figH = IC_MAQ + 20;
@@ -12427,10 +12451,11 @@ function procesosFlowsheetSvg(p) {
         : tipoFig === 'sedimentador' ? procesosFlowsheetEscalar(dims.diametro || dims.largo, dims.alto, 150, 95)
         : procesosFlowsheetEscalar(dims.largo || dims.diametro, dims.alto, 150, 100);
       figW = base.w; figH = base.h;
-      adentro = equipos.filter(eq => procesosFlowsheetEsSumergible(eq.tipoOriginal));
-      afuera = equipos.filter(eq => !procesosFlowsheetEsSumergible(eq.tipoOriginal));
+      techo = equipos.filter(eq => eq.icono === 'sensor_nivel');
+      fondo = equipos.filter(eq => eq.icono !== 'sensor_nivel' && procesosFlowsheetEsSumergible(eq.tipoOriginal));
+      afuera = equipos.filter(eq => eq.icono !== 'sensor_nivel' && !procesosFlowsheetEsSumergible(eq.tipoOriginal));
     }
-    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro, afuera };
+    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera };
   });
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
@@ -12440,10 +12465,11 @@ function procesosFlowsheetSvg(p) {
   // Calcula ancho/alto final de la caja de una etapa (antes de dibujar, para
   // poder armar todo el layout general del diagrama).
   const medir = et => {
-    const afueraCols = Math.max(1, Math.min(et.afuera.length, 3));
-    const anchoAfuera = et.afuera.length ? afueraCols * (IC_OUT + 30) : 0;
+    const afueraN = procesosFlowsheetExpandirIconos(et.afuera, 4).length;
+    const afueraCols = Math.max(1, Math.min(afueraN, 3));
+    const anchoAfuera = afueraN ? afueraCols * (IC_OUT + 30) : 0;
     const w = Math.max(BOX_MIN_W, et.figW + PAD * 2, anchoAfuera + PAD * 2);
-    const filasAfuera = et.afuera.length ? Math.ceil(et.afuera.length / afueraCols) : 0;
+    const filasAfuera = afueraN ? Math.ceil(afueraN / afueraCols) : 0;
     const altoAfuera = filasAfuera * (IC_OUT + 30);
     let h = HEADER_H + (et.dimsTxt ? 14 : 0);
     if (et.tipoFig === 'caja') {
@@ -12496,13 +12522,22 @@ function procesosFlowsheetSvg(p) {
     } else if (et.tipoFig !== 'caja') {
       const fx = x + (et.w - et.figW) / 2, fy = cy;
       s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq);
+      if (et.techo.length) {
+        const items = procesosFlowsheetExpandirIconos(et.techo, 3);
+        const n = items.length, espacio = et.figW / (n + 1), icS = IC_IN * 0.8;
+        items.forEach((it, i) => {
+          const icx = fx + espacio * (i + 1), icy = fy + icS * 0.65;
+          s += procesosFlowsheetIconoSvg(it.icono, icx, icy, icS, verdeEq);
+          s += `<text x="${icx}" y="${icy - icS/2 - 3}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
+        });
+      }
       if (et.adentro.length) {
-        const n = et.adentro.length, espacio = et.figW / (n + 1);
-        et.adentro.forEach((eq, i) => {
+        const items = procesosFlowsheetExpandirIconos(et.adentro, 4);
+        const n = items.length, espacio = et.figW / (n + 1);
+        items.forEach((it, i) => {
           const icx = fx + espacio * (i + 1), icy = fy + et.figH - IC_IN * 0.7;
-          s += procesosFlowsheetIconoSvg(eq.icono, icx, icy, IC_IN, verdeEq);
-          const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}×${eq.tag}` : eq.tag;
-          s += `<text x="${icx}" y="${icy + IC_IN/2 + 9}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+          s += procesosFlowsheetIconoSvg(it.icono, icx, icy, IC_IN, verdeEq);
+          s += `<text x="${icx}" y="${icy + IC_IN/2 + 9}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
         });
       }
       cy += et.figH + 10;
