@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.59</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.59</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -7667,16 +7667,38 @@ function procesosVerPaso(step) {
   renderProcesosStepContent();
 }
 
+// Reemplazar el innerHTML de un contenedor grande (como #procesos-step-content,
+// que se re-arma entero en cada mensaje de chat, cada click, etc.) hace que el
+// scroll de la página vuelva arriba de todo — molesto sobre todo en los chats
+// (Paso 2/3), donde el usuario está mirando el final de la conversación.
+// Esto guarda y restaura el scroll del contenedor principal alrededor de un
+// re-render, así la posición no se mueve sola.
+function procesosConservarScroll(fn) {
+  const scroller = document.querySelector('.content');
+  const y = scroller ? scroller.scrollTop : null;
+  fn();
+  if (scroller && y != null) scroller.scrollTop = y;
+}
+
 function renderProcesosStepContent() {
-  const p = procesosCurrentProyecto;
-  const step = p._viewingStep || p.paso_actual;
-  const el = document.getElementById('procesos-step-content');
-  el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStep4Html(p);
-  if (step === 2) procesosStep2AfterRender();
-  if (step === 3) {
-    procesosStep3DiagramaRender();
-    if (!_procesosEquiposPlantillaCache) procesosEquiposPlantillaCargar().then(() => { if (procesosCurrentProyecto === p) renderProcesosStepContent(); });
-  }
+  procesosConservarScroll(() => {
+    const p = procesosCurrentProyecto;
+    const step = p._viewingStep || p.paso_actual;
+    const el = document.getElementById('procesos-step-content');
+    el.innerHTML = step === 1 ? procesosStep1Html(p) : step === 2 ? procesosStep2Html(p) : step === 3 ? procesosStep3Html(p) : procesosStep4Html(p);
+    // Los mini-chats de cada unidad (Paso 2) y de cada etapa de equipos (Paso 3)
+    // se re-arman enteros en cada mensaje — sin esto, siempre quedan mostrando
+    // desde el principio en vez del último intercambio.
+    ['procesos-step2-chat-box', 'procesos-step3-chat-box'].forEach(id => {
+      const box = document.getElementById(id);
+      if (box) box.scrollTop = box.scrollHeight;
+    });
+    if (step === 2) procesosStep2AfterRender();
+    if (step === 3) {
+      procesosStep3DiagramaRender();
+      if (!_procesosEquiposPlantillaCache) procesosEquiposPlantillaCargar().then(() => { if (procesosCurrentProyecto === p) renderProcesosStepContent(); });
+    }
+  });
 }
 
 // Descarga hasta 50 archivos de una carpeta de SharePoint (convirtiendo a PDF si
@@ -12217,7 +12239,7 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
 
       <label style="margin-top:14px">Chat de esta etapa</label>
       <p class="hint" style="margin-bottom:6px">Pedile que agregue, saque o ajuste equipos (ej: "agregá una bomba de reserva", "sacá el soplador y poné dos de menor capacidad").</p>
-      <div style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;margin-bottom:8px">
+      <div id="procesos-step3-chat-box" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;margin-bottom:8px">
         ${(e.chat || []).map(m => `<div style="align-self:${m.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%;background:${m.role === 'user' ? 'var(--blue-bg)' : 'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('') || '<div class="hint">Sin mensajes todavía.</div>'}
       </div>
       <div style="display:flex;gap:8px">
@@ -13762,17 +13784,19 @@ async function procesosStep4Descargar() {
 
 // ── Chat del proyecto ───────────────────────────────────
 function renderProcesosChat() {
-  const el = document.getElementById('procesos-chat-messages');
-  const p = procesosCurrentProyecto;
-  const hist = p.chat_historial || [];
-  if (!hist.length) { el.innerHTML = '<div class="empty">Todavía no chateaste sobre este proyecto.</div>'; }
-  else {
-    el.innerHTML = hist.map(m => `
-      <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:80%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>
-    `).join('');
-    el.scrollTop = el.scrollHeight;
-  }
-  procesosChatArchivosRender();
+  procesosConservarScroll(() => {
+    const el = document.getElementById('procesos-chat-messages');
+    const p = procesosCurrentProyecto;
+    const hist = p.chat_historial || [];
+    if (!hist.length) { el.innerHTML = '<div class="empty">Todavía no chateaste sobre este proyecto.</div>'; }
+    else {
+      el.innerHTML = hist.map(m => `
+        <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:80%;background:${m.role==='user'?'var(--blue-bg)':'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>
+      `).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+    procesosChatArchivosRender();
+  });
 }
 
 // Archivos propios del proyecto (subidos acá o traídos de mails) — se
