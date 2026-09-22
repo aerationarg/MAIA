@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.60</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.61</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.60</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.61</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11926,6 +11926,61 @@ function procesosStep2AuxiliaresDe(p, nombreEtapa) {
 }
 
 // Resumen en texto de los equipos definidos, para usar como contexto del Paso 4.
+// Aplica las "acciones_equipos" que puede devolver el chat GENERAL del
+// proyecto (agregar/editar/eliminar un equipo de cualquier etapa, sin tener
+// que entrar al chat puntual de esa etapa) — mismo formato de acción que usa
+// procesosStep3ChatSend, pero identificando el equipo a editar/eliminar por
+// su "tipo" (equipoTipo) en vez de por id, porque el chat general no conoce
+// los ids internos de cada equipo. Devuelve el nuevo equipos_data si hubo
+// algún cambio real, o null si no se tocó nada (etapas/equipos no
+// encontrados, o "acciones_equipos" vacío).
+function procesosAplicarAccionesEquiposChat(p, acciones) {
+  if (!acciones || !acciones.length) return null;
+  const edBase = (p.equipos_data && p.equipos_data.etapas) || {};
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, edBase);
+  const plantillaEquipos = _procesosEquiposPlantillaCache ? _procesosEquiposPlantillaCache.equipos : [];
+  let cambios = false;
+  acciones.forEach(a => {
+    try {
+      const nombreEtapa = a.etapa;
+      const prevEtapa = nombreEtapa && ed.etapas[nombreEtapa];
+      if (!prevEtapa) return; // etapa inexistente para este proyecto — se ignora esta acción puntual
+      const e = Object.assign({}, prevEtapa);
+      e.equipos = (e.equipos || []).slice();
+      if (a.tipo === 'agregar' && a.equipo && a.equipo.tipo) {
+        const plantillaMatch = procesosEquiposPlantillaDeEtapa(nombreEtapa);
+        const permitidos = plantillaMatch ? new Set(plantillaMatch.equipos.map(x => x.tipo_equipo.trim().toLowerCase())) : null;
+        if (permitidos && !permitidos.has(String(a.equipo.tipo).trim().toLowerCase())) {
+          console.warn(`Chat general: se descartó "${a.equipo.tipo}" propuesto fuera de la lista configurada para "${nombreEtapa}".`);
+          return;
+        }
+        e.equipos.push({ id: procesosNuevoId(), tipo: a.equipo.tipo || '', cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1, especificacion: a.equipo.especificacion || '', modelo: a.equipo.modelo || '', justificacion: a.equipo.justificacion || '' });
+        cambios = true;
+      } else if (a.tipo === 'editar' && a.equipoTipo && a.cambios) {
+        const n = String(a.equipoTipo).trim().toLowerCase();
+        let tocado = false;
+        e.equipos = e.equipos.map(eq => {
+          if ((eq.tipo || '').trim().toLowerCase() !== n) return eq;
+          tocado = true;
+          return Object.assign({}, eq, a.cambios);
+        });
+        if (tocado) cambios = true;
+      } else if (a.tipo === 'eliminar' && a.equipoTipo) {
+        const n = String(a.equipoTipo).trim().toLowerCase();
+        const antes = e.equipos.length;
+        e.equipos = e.equipos.filter(eq => (eq.tipo || '').trim().toLowerCase() !== n);
+        if (e.equipos.length !== antes) cambios = true;
+      } else {
+        return;
+      }
+      e.confirmada = false; // vuelve a marcarse para revisión, como cualquier edición manual/por chat de esa etapa
+      ed.etapas[nombreEtapa] = e;
+    } catch (_e) { /* acción individual inválida, seguir con las demás */ }
+  });
+  return cambios ? ed : null;
+}
+
 function procesosResumenEquipos(p) {
   const ed = (p.equipos_data && p.equipos_data.etapas) || {};
   const etapas = procesosStep3EtapasConfirmadas(p).filter(n => ed[n]?.confirmada && (ed[n].equipos || []).length);
@@ -13899,6 +13954,20 @@ async function procesosChatSend() {
     const archivosProyectoTxt = archivosProyectoBlocks.length
       ? `\n\nArchivos propios de este proyecto (subidos a mano o traídos de mails categorizados):\n${archivosProyectoBlocks.map(b=>b.block.text).join('\n\n---\n\n')}`
       : '';
+    // Equipos de cualquier etapa (Paso 3): permite agregar/editar/eliminar
+    // equipos SIN tener que entrar al chat puntual de esa etapa — mismas
+    // reglas y catálogos que usa procesosStep3ChatSend, para no tener dos
+    // comportamientos distintos según desde dónde se pida el cambio.
+    await procesosEquiposPlantillaCargar();
+    const edGeneral = (p.equipos_data && p.equipos_data.etapas) || {};
+    const etapasConEquipos = procesosStep3EtapasConfirmadas(p).filter(n => edGeneral[n]?.confirmada && (edGeneral[n].equipos || []).length);
+    const todosLosEquiposGeneral = etapasConEquipos.flatMap(n => edGeneral[n].equipos || []);
+    const proveedoresPreferidosGeneral = procesosStep3ProveedoresDeEquipos(_procesosEquiposPlantillaCache ? _procesosEquiposPlantillaCache.equipos : [], todosLosEquiposGeneral);
+    const equiposDocBlocksGeneral = etapasConEquipos.length ? await procesosStep3GetEquiposBlocks(contexto, proveedoresPreferidosGeneral) : [];
+    const equiposDocTxtGeneral = equiposDocBlocksGeneral.length
+      ? `\n\nCatálogos/fichas técnicas de equipos disponibles (usalos si el usuario te pide elegir o revisar un modelo puntual):\n${equiposDocBlocksGeneral.map(b=>b.block.text).join('\n\n---\n\n')}`
+      : '';
+    const etapasTxt = etapasConEquipos.length ? etapasConEquipos.map(n => `"${n}"`).join(', ') : '(ninguna etapa tiene equipos cargados todavía)';
     // Directorio de TODOS los documentos de referencia de Cfg Procesos IA
     // (todas las categorías salvo las plantillas de generación) — solo
     // nombre + si ya está analizado o no, así la IA puede decir "existe pero
@@ -13946,7 +14015,7 @@ async function procesosChatSend() {
     // proyecto tal cual (comportamiento de antes, para no romper proyectos
     // que ya vienen categorizando por nombre).
     const categoriaMail = p.categoria || p.nombre;
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{}}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con la categoría exacta ("${categoriaMail}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}${equiposDocTxtGeneral}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{},"acciones_equipos":[]}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con la categoría exacta ("${categoriaMail}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n- Etapas del Paso 3 con equipos cargados: ${etapasTxt}. Si el usuario te pide agregar, sacar o ajustar un equipo de alguna de esas etapas (ej. "cambiá el modelo del soplador de LA", "sacá la bomba de reserva de SBR"), hacelo con "acciones_equipos": [{"etapa":"<nombre EXACTO de la etapa>","tipo":"agregar"|"editar"|"eliminar","equipoTipo":"<tipo EXACTO del equipo ya cargado, para editar/eliminar>","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","modelo":"...","justificacion":"..."} (solo para agregar),"cambios":{...} (solo para editar, los campos que cambian)}]. Para "agregar", el "tipo" tiene que ser EXACTAMENTE uno de los ya configurados como equipo posible para esa etapa (los mismos que ya aparecen en "Equipos definidos por etapa" de arriba u otros de la misma lista cerrada de esa etapa) — si no estás seguro de cuáles son válidos para esa etapa, no agregues nada y sugerile al usuario ir al chat de esa etapa puntual en Paso 3. Para "editar"/"eliminar", "equipoTipo" tiene que matchear el "tipo" de un equipo que YA figura en esa etapa (ver "Equipos definidos por etapa"). Cada acción se aplica sola — si una etapa no existe o un equipo no matchea, esa acción en particular no hace nada (no rompe las demás). Cuando hagas una acción, contale al usuario qué cambiaste en "respuesta".\n${PROCESOS_STEP3_REGLAS_ESPECIFICACION}\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
     // "instrucciones" es idéntico entre mensajes de la MISMA charla (mismo
     // proyecto, misma info ya extraída) — con cache_control, Anthropic lo
     // guarda de su lado y cobra bastante menos por él del segundo mensaje
@@ -13955,7 +14024,7 @@ async function procesosChatSend() {
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
-      catch(_e) { return { respuesta: raw, necesita_documentos:false, necesita_mails:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{} }; }
+      catch(_e) { return { respuesta: raw, necesita_documentos:false, necesita_mails:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{}, acciones_equipos:[] }; }
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -14035,8 +14104,14 @@ async function procesosChatSend() {
       }
       fieldsToSave.info_cliente = info;
     }
+    const edNuevo = procesosAplicarAccionesEquiposChat(p, parsed.acciones_equipos);
+    if (edNuevo) fieldsToSave.equipos_data = edNuevo;
     await procesosSaveProyecto(fieldsToSave, p);
-    if (procesosCurrentProyecto === p) { renderProcesosChat(); document.getElementById(statusId).innerHTML = ''; }
+    if (procesosCurrentProyecto === p) {
+      renderProcesosChat();
+      if (edNuevo) renderProcesosStepContent(); // por si está mirando el Paso 3 de la etapa que cambió
+      document.getElementById(statusId).innerHTML = '';
+    }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
   } finally {
