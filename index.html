@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -6255,11 +6255,33 @@ async function procesosSeleccionarRelevantes(conTexto, contextoTexto) {
   }
 }
 
-async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto, soloCache) {
+// Filtra candidatos a los que vienen de la carpeta de alguno de los
+// proveedores preferidos (matcheando contra el nombre, que trae el prefijo
+// de carpeta — ej. "Aerzen/DELTA BLOWER G5 ES.pdf") — determinístico, sin
+// pasar por una IA, para no depender de que un filtro de relevancia "adivine"
+// que el catálogo del proveedor que vos ya elegiste aplica.
+function procesosFiltrarPorProveedor(candidatos, proveedoresPreferidos) {
+  if (!proveedoresPreferidos || !proveedoresPreferidos.length) return null;
+  const normas = proveedoresPreferidos.map(p => String(p).trim().toLowerCase()).filter(Boolean);
+  if (!normas.length) return null;
+  const match = candidatos.filter(c => {
+    const carpetaRaiz = String(c.nombre || '').split('/')[0].trim().toLowerCase();
+    return normas.some(p => carpetaRaiz === p || carpetaRaiz.includes(p) || p.includes(carpetaRaiz));
+  });
+  return match.length ? match : null;
+}
+
+async function procesosObtenerBibliografiaRelevante(categorias, contextoTexto, soloCache, proveedoresPreferidos) {
   try {
     const candidatos = await procesosObtenerCandidatosBibliografia(categorias, soloCache);
-    const conTexto = candidatos.filter(c => c.texto);
+    let conTexto = candidatos.filter(c => c.texto);
     if (!conTexto.length) return [];
+    // Si hay proveedores preferidos y tenemos documentos de esa carpeta,
+    // se trabaja SOLO con esos (evita que el filtro de relevancia por IA
+    // tenga que elegir entre cientos de documentos de otras marcas) — si no
+    // hay nada cargado de esos proveedores, se sigue con todos como antes.
+    const porProveedor = procesosFiltrarPorProveedor(conTexto, proveedoresPreferidos);
+    if (porProveedor) conTexto = porProveedor;
     const seleccionados = await procesosSeleccionarRelevantes(conTexto, contextoTexto);
     return seleccionados.map(c => ({ block: {type:'text', text:`Documento: ${c.nombre}\n\n${c.texto}`}, nombre: c.nombre }));
   } catch(e) { console.warn('No se pudo obtener la bibliografía:', e.message); return []; }
@@ -11847,8 +11869,17 @@ function procesosNuevoId() { return 'eq_' + Date.now().toString(36) + Math.rando
 // pendientes" en Cfg Procesos IA), nunca dispara una transcripción nueva
 // en medio de un click de "Sugerir equipos"/chat (antes sí lo hacía, y con
 // varios catálogos sin cachear se sentía como que la app se colgaba).
-async function procesosStep3GetEquiposBlocks(contextoTexto) {
-  return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto, true);
+async function procesosStep3GetEquiposBlocks(contextoTexto, proveedoresPreferidos) {
+  return await procesosObtenerBibliografiaRelevante(['equipos'], contextoTexto, true, proveedoresPreferidos);
+}
+// Unión de los proveedores preferidos de una lista de equipos ya armados
+// (por su "tipo", buscando el ítem de la plantilla con el mismo nombre) —
+// para pasarle a procesosStep3GetEquiposBlocks cuando hay más de un equipo
+// en juego (ej. todos los de una etapa).
+function procesosStep3ProveedoresDeEquipos(plantillaEquipos, equipos) {
+  const set = new Set();
+  (equipos || []).forEach(eq => procesosStep3ProveedoresDeTipo(plantillaEquipos, eq.tipo).forEach(p => set.add(p)));
+  return Array.from(set);
 }
 
 // Hojas confirmadas que cuentan como una ETAPA propia (con su propia unidad
@@ -12688,7 +12719,8 @@ async function procesosStep3SugerirTodas() {
 // la IA de nuevo — devuelve la lista tal cual vino.
 async function procesosStep3MatchCatalogo(nombreEtapa, equipos, valoresEtapa, plantillaEquipos) {
   const p = procesosCurrentProyecto;
-  const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`);
+  const proveedoresPreferidos = procesosStep3ProveedoresDeEquipos(plantillaEquipos, equipos);
+  const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`, proveedoresPreferidos);
   if (!equiposBlocks.length || !equipos.length) return equipos;
   const apiKey = getApiKey();
   if (!apiKey) return equipos;
@@ -12756,19 +12788,24 @@ async function procesosStep3ChatSend(nombreEtapa) {
         return vals ? `  (cálculo auxiliar "${nombreAux}"):\n${vals}` : '';
       })
     ].filter(Boolean).join('\n');
-    const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
-    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
-    const historialTxt = historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : '';
-    const equiposDocTxt = equiposBlocks.length ? 'Adjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala si aplica.\n\n' : '';
-    const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta etapa.\n\n' : '';
-    const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     // Misma lista cerrada que usa "Sugerir equipos con IA" (ver
     // procesosStep3SugerirEquiposCore) — si hay una etapa configurada que
     // coincide, cualquier "agregar" tiene que salir de ahí. Si no hay
     // ninguna, no hay lista con la que restringir (se avisa y se deja
-    // libre, como funcionaba antes).
+    // libre, como funcionaba antes). Se carga ACÁ (antes de pedir los
+    // documentos de catálogo) para poder priorizar los proveedores
+    // preferidos de los equipos ya cargados al elegir qué catálogos adjuntar.
     await procesosEquiposPlantillaCargar();
     const plantillaMatch = procesosEquiposPlantillaDeEtapa(nombreEtapa);
+    const proveedoresPreferidos = procesosStep3ProveedoresDeEquipos(plantillaMatch ? plantillaMatch.equipos : [], ePrev.equipos);
+    const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`, proveedoresPreferidos);
+    const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}\nPedido del usuario: ${msg}`);
+    const historialTxt = historialPrevio ? 'Conversación previa sobre esta etapa:\n' + historialPrevio + '\n\n' : '';
+    const equiposDocTxt = equiposBlocks.length
+      ? 'Adjunto documentación de referencia de equipos (catálogos, fichas técnicas) — usala si aplica.\n\n'
+      : 'No hay ningún catálogo/ficha técnica de equipos adjunto a este mensaje. Si el usuario te pide elegir o analizar un modelo puntual, respondé que no tenés ningún catálogo cargado para eso — NO inventes ni menciones marcas/modelos de memoria como si los hubieras revisado.\n\n';
+    const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta etapa.\n\n' : '';
+    const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     const plantillaChatTxt = plantillaMatch && plantillaMatch.equipos.length
       ? `Equipos disponibles para esta etapa — LISTA CERRADA, si agregás un equipo tiene que ser copiando el campo "tipo" EXACTAMENTE de acá, sin inventar nada que no esté:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}${procesosEquipoInfoTipoTxt(eq)}`).join('\n')}\n\n`
       : '';
