@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.70</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.71</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.70</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.71</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12489,6 +12489,13 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
 // Paso 2, línea líquida arriba y de lodos abajo), pero cada etapa se dibuja
 // con la figura que le corresponde (tanque/pozo/sedimentador/máquina) y sus
 // equipos ubicados adentro o afuera según si son sumergibles.
+//
+// GENÉRICO: a pesar del nombre del parámetro, esta función (y todo lo que
+// llama) no depende de que "p" sea un proyecto de Procesos IA — solo lee
+// p.diseno_data.{orden,hojas[nombre].{tipo,hojaBase,linea,origenLodos,
+// valoresConEtiqueta}} y p.equipos_data.{etapas[nombre].equipos[],layout}.
+// Cualquier objeto con esa forma sirve de entrada (ver procesosFlowsheetDragInit
+// para el mismo criterio del lado del guardado de posiciones arrastradas).
 function procesosFlowsheetSvg(p) {
   const ed = (p.equipos_data && p.equipos_data.etapas) || {};
   const layout = procesosFlowsheetLayoutGet(p);
@@ -12734,15 +12741,32 @@ function procesosStep3DiagramaRender() {
   const svg = _procesosDiagramaModo === 'flowsheet' ? procesosFlowsheetSvg(procesosCurrentProyecto) : procesosDiagramaFlujoSvg(procesosCurrentProyecto);
   if (!svg) { el.innerHTML = '<p class="hint">Confirmá al menos una etapa para ver el diagrama.</p>'; return; }
   el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>`;
-  if (_procesosDiagramaModo === 'flowsheet') procesosFlowsheetDragInit(el);
+  if (_procesosDiagramaModo === 'flowsheet') {
+    procesosFlowsheetDragInit(el, {
+      modelo: procesosCurrentProyecto,
+      guardar: () => procesosSaveProyecto({ equipos_data: procesosCurrentProyecto.equipos_data }, procesosCurrentProyecto),
+      rerender: () => procesosStep3DiagramaRender(),
+    });
+  }
 }
 // ── Flowsheet: arrastrar equipos/unidades ──────────────
 // Cada elemento arrastrable (envuelto en <g data-drag-tipo data-drag-id> por
 // procesosFlowsheetDragWrap) puede moverse con el mouse/touch; el offset
 // acumulado se guarda en equipos_data.layout y se suma a la posición
 // automática en cada render siguiente (ver procesosFlowsheetOffset).
+//
+// procesosFlowsheetSvg() y el resto del motor de dibujo trabajan sobre
+// cualquier objeto con la forma { diseno_data:{orden,hojas}, equipos_data:
+// {etapas,layout} } — no dependen de que sea un proyecto de Procesos IA. Lo
+// único atado a Procesos IA es CÓMO se guarda: por eso procesosFlowsheetDragInit
+// recibe un "adaptador" { modelo, guardar(), rerender() } en vez de asumir
+// procesosCurrentProyecto/procesosSaveProyecto — así otra pantalla (ej. la
+// futura solapa de Flowsheets sueltos) puede reusar el mismo motor con su
+// propio modelo y su propio guardado.
 let _pfDrag = null;
-function procesosFlowsheetDragInit(container) {
+let _pfAdapter = null;
+function procesosFlowsheetDragInit(container, adapter) {
+  _pfAdapter = adapter;
   const svgEl = container.querySelector('svg');
   if (!svgEl) return;
   svgEl.style.touchAction = 'none';
@@ -12792,21 +12816,22 @@ function procesosFlowsheetDragEnd(ev) {
   }
 }
 function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
-  const p = procesosCurrentProyecto;
-  const ed = p.equipos_data || (p.equipos_data = {});
+  const a = _pfAdapter;
+  if (!a) return;
+  const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
   const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {} });
   const grupo = tipo === 'etapa' ? (layout.etapas || (layout.etapas = {})) : (layout.equipos || (layout.equipos = {}));
   const prev = grupo[id] || { x: 0, y: 0 };
   grupo[id] = { x: Math.round((prev.x || 0) + dx), y: Math.round((prev.y || 0) + dy) };
-  procesosSaveProyecto({ equipos_data: ed }, p);
-  procesosStep3DiagramaRender();
+  a.guardar();
+  a.rerender();
 }
 function procesosFlowsheetReacomodar() {
-  const p = procesosCurrentProyecto;
-  if (!p.equipos_data) return;
-  p.equipos_data.layout = { etapas: {}, equipos: {} };
-  procesosSaveProyecto({ equipos_data: p.equipos_data }, p);
-  procesosStep3DiagramaRender();
+  const a = _pfAdapter;
+  if (!a || !a.modelo.equipos_data) return;
+  a.modelo.equipos_data.layout = { etapas: {}, equipos: {} };
+  a.guardar();
+  a.rerender();
 }
 function procesosStep3DiagramaDescargar() {
   const svgEl = document.querySelector('#procesos-step3-diagrama svg');
