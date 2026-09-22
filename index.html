@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.69</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.70</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.69</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.70</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12054,9 +12054,10 @@ function procesosStep3Html(p) {
     <div class="gap"></div>
     <label>Diagrama de flujo</label>
     <p class="hint" style="margin-bottom:6px">Diagrama esquemático (no a escala) armado con las etapas y equipos ya definidos.</p>
-    <div style="display:flex;gap:6px;margin-bottom:8px">
+    <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
       <button class="btn ${_procesosDiagramaModo === 'bloques' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('bloques')">Diagrama de bloques</button>
       <button class="btn ${_procesosDiagramaModo === 'flowsheet' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('flowsheet')">Flowsheet de equipos</button>
+      ${_procesosDiagramaModo === 'flowsheet' ? '<button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button><span class="hint" style="margin:0">Arrastrá equipos o unidades para acomodarlos</span>' : ''}
     </div>
     <div id="procesos-step3-diagrama"></div>
   `;
@@ -12431,18 +12432,40 @@ function procesosFlowsheetExpandirIconos(lista, cap) {
   const out = [];
   (lista || []).forEach(eq => {
     if (eq.cantidad <= cap) {
-      for (let i = 0; i < eq.cantidad; i++) out.push({ icono: eq.icono, etiqueta: eq.tag });
+      for (let i = 0; i < eq.cantidad; i++) out.push({ icono: eq.icono, etiqueta: eq.tag, id: eq.cantidad > 1 ? `${eq.id}_${i}` : eq.id });
     } else {
-      out.push({ icono: eq.icono, etiqueta: `${eq.cantidad}× ${eq.tag}` });
+      out.push({ icono: eq.icono, etiqueta: `${eq.cantidad}× ${eq.tag}`, id: eq.id });
     }
   });
   return out;
+}
+// Posiciones de equipos/etapas que el usuario movió a mano en el Flowsheet
+// (arrastre) — un offset {x,y} sumado a la posición calculada automáticamente,
+// para que un equipo/etapa nuevo siga apareciendo en su lugar automático
+// hasta que se lo acomode.
+function procesosFlowsheetLayoutGet(p) {
+  const l = (p.equipos_data && p.equipos_data.layout) || {};
+  return { etapas: l.etapas || {}, equipos: l.equipos || {} };
+}
+function procesosFlowsheetOffset(layout, tipo, id) {
+  const o = layout[tipo] && layout[tipo][id];
+  return o ? { x: o.x || 0, y: o.y || 0 } : { x: 0, y: 0 };
+}
+function procesosFlowsheetAttrEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+function procesosFlowsheetDragWrap(tipo, id, inner, hit) {
+  if (!id) return inner;
+  // Los íconos se dibujan con stroke y fill="none" — sin un área de "hit"
+  // rellena (aunque transparente), solo se podría arrastrar clickeando
+  // justo sobre la línea del dibujo. El rect transparente cubre todo el
+  // ícono+etiqueta para que se pueda agarrar desde cualquier punto.
+  const hitRect = hit ? `<rect x="${hit.x}" y="${hit.y}" width="${hit.w}" height="${hit.h}" fill="transparent"/>` : '';
+  return `<g class="pf-drag" data-drag-tipo="${tipo}" data-drag-id="${procesosFlowsheetAttrEsc(id)}" style="cursor:move">${hitRect}${inner}</g>`;
 }
 // Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
 // de afuera como para el grid de la etapa "caja" sin figura conocida), su
 // SVG y las dimensiones que ocupa — para poder calcular el alto de la caja
 // antes de dibujar nada. Expande por cantidad (ver procesosFlowsheetExpandirIconos).
-function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, iconoS) {
+function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, iconoS, layout) {
   const equipos = procesosFlowsheetExpandirIconos(equiposSinExpandir, 4);
   const celda = iconoS + 30;
   const cols = Math.max(1, Math.min(equipos.length, Math.floor(anchoDisponible / celda) || 1));
@@ -12453,9 +12476,11 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
   const bombas = [];
   equipos.forEach((eq, i) => {
     const col = i % cols, fila = Math.floor(i / cols);
-    const ccx = xIni + col * celda + celda / 2, ccy = yTop + fila * celda + celda / 2 - 6;
-    s += procesosFlowsheetIconoSvg(eq.icono, ccx, ccy, iconoS, '#2e7d32');
-    s += `<text x="${ccx}" y="${ccy + iconoS/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(eq.etiqueta)}</text>`;
+    const off = layout ? procesosFlowsheetOffset(layout, 'equipos', eq.id) : { x: 0, y: 0 };
+    const ccx = xIni + col * celda + celda / 2 + off.x, ccy = yTop + fila * celda + celda / 2 - 6 + off.y;
+    let item = procesosFlowsheetIconoSvg(eq.icono, ccx, ccy, iconoS, '#2e7d32');
+    item += `<text x="${ccx}" y="${ccy + iconoS/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(eq.etiqueta)}</text>`;
+    s += procesosFlowsheetDragWrap('equipo', eq.id, item, { x: ccx - iconoS/2 - 8, y: ccy - iconoS/2 - 8, w: iconoS + 16, h: iconoS + 30 });
     if (eq.icono.startsWith('bomba')) bombas.push({ x: ccx, y: ccy });
   });
   return { svg: s, alto: filas * celda, bombas };
@@ -12466,11 +12491,12 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
 // equipos ubicados adentro o afuera según si son sumergibles.
 function procesosFlowsheetSvg(p) {
   const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const layout = procesosFlowsheetLayoutGet(p);
   const nombresEtapas = procesosStep3EtapasConfirmadas(p);
   if (!nombresEtapas.length) return '';
   const BOX_MIN_W = 190, PAD = 16, HEADER_H = 40, IC_OUT = 34, IC_IN = 22, IC_MAQ = 60;
   const todas = nombresEtapas.map(nombre => {
-    const equipos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo }, procesosFlowsheetInfoDe(eq.tipo)));
+    const equipos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ id: eq.id, cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo }, procesosFlowsheetInfoDe(eq.tipo)));
     const hojaBase = (p.diseno_data?.hojas?.[nombre] || {}).hojaBase || nombre;
     let { tipoFig, contieneAgua } = procesosFlowsheetFiguraDeEtapa(nombre, hojaBase);
     // Si el NOMBRE de la etapa no dice nada (ej. "Pretratamiento" genérico)
@@ -12525,7 +12551,11 @@ function procesosFlowsheetSvg(p) {
   const liq = todas.filter(e => !e.esLodos), lod = todas.filter(e => e.esLodos);
   const c = procesosDiagramaColores();
   const magenta = '#c2185b', marron = '#9a6b2f', verdeOk = '#2e7d32', verdeEq = '#2e7d32';
-  const padTop = 26, padSides = 20, gapX = 90, filaGap = 90;
+  // MARGIN: espacio extra alrededor de todo el layout automático para poder
+  // arrastrar equipos/unidades hacia afuera de su posición calculada sin que
+  // se corten contra el borde del canvas.
+  const MARGIN = 160;
+  const padTop = 26 + MARGIN, padSides = 20 + MARGIN, gapX = 90, filaGap = 90;
   const anchoHasta = (arr, i) => arr.slice(0, i).reduce((s, e) => s + e.w + gapX, padSides);
   const xLiq = i => anchoHasta(liq, i);
   let x0 = liq.length ? xLiq(0) : padSides;
@@ -12540,8 +12570,8 @@ function procesosFlowsheetSvg(p) {
   const row2y = padTop + altoLiq + filaGap;
   const finLiq = liq.length ? xLiq(liq.length - 1) + liq[liq.length - 1].w + gapX : 0;
   const finLod = lod.length ? xLod(lod.length - 1) + lod[lod.length - 1].w : 0;
-  const totalW = Math.max(finLiq, finLod + padSides, 260);
-  const totalH = lod.length ? row2y + altoLod + padTop + 14 : padTop + altoLiq + padTop;
+  const totalW = Math.max(finLiq, finLod + padSides, 260) + MARGIN;
+  const totalH = (lod.length ? row2y + altoLod + padTop + 14 : padTop + altoLiq + padTop) + MARGIN;
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
   svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker></defs>`;
   const CONTIENE_AGUA_TOP = { tanque: 1, daf: 1, pozo: 1, sedimentador: 1 };
@@ -12556,13 +12586,15 @@ function procesosFlowsheetSvg(p) {
       return { svg: s, bombas };
     }
     if (et.tipoFig === 'maquina') {
-      const ccx = x + et.w / 2, ccy = cy + IC_MAQ / 2 + 6;
-      s += procesosFlowsheetIconoSvg(et.dominante ? et.dominante.icono : 'generico', ccx, ccy, IC_MAQ, verdeEq);
+      const domOff = et.dominante ? procesosFlowsheetOffset(layout, 'equipos', et.dominante.id) : { x: 0, y: 0 };
+      const ccx = x + et.w / 2 + domOff.x, ccy = cy + IC_MAQ / 2 + 6 + domOff.y;
+      let item = procesosFlowsheetIconoSvg(et.dominante ? et.dominante.icono : 'generico', ccx, ccy, IC_MAQ, verdeEq);
       if (et.dominante) {
         const etiqueta = et.dominante.cantidad > 1 ? `${et.dominante.cantidad}× ${et.dominante.tag}` : et.dominante.tag;
-        s += `<text x="${ccx}" y="${ccy + IC_MAQ/2 + 14}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+        item += `<text x="${ccx}" y="${ccy + IC_MAQ/2 + 14}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
         if (et.dominante.tag[0] === 'B') bombas.push({ x: ccx, y: ccy });
       }
+      s += procesosFlowsheetDragWrap('equipo', et.dominante && et.dominante.id, item, { x: ccx - IC_MAQ/2 - 10, y: ccy - IC_MAQ/2 - 10, w: IC_MAQ + 20, h: IC_MAQ + 40 });
       cy += IC_MAQ + 22;
     } else if (et.tipoFig !== 'caja') {
       const fx = x + (et.w - et.figW) / 2, fy = cy;
@@ -12579,12 +12611,15 @@ function procesosFlowsheetSvg(p) {
           const arr = porNivel[nivel];
           if (!arr.length) return;
           const items = procesosFlowsheetExpandirIconos(arr, 3);
-          const icy = fy + et.figH * NIVEL_FRAC[nivel];
+          const icyBase = fy + et.figH * NIVEL_FRAC[nivel];
           const espacio = et.figW / (items.length + 1);
           items.forEach((it, i) => {
-            const icx = fx + et.figW * 0.86 - (items.length > 1 ? espacio * 0.3 * i : 0);
-            s += procesosFlowsheetIconoSvg(it.icono, icx, icy, icS, verdeEq);
-            s += `<text x="${icx}" y="${icy - icS/2 - 3}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="7">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
+            const off = procesosFlowsheetOffset(layout, 'equipos', it.id);
+            const icx = fx + et.figW * 0.86 - (items.length > 1 ? espacio * 0.3 * i : 0) + off.x;
+            const icy = icyBase + off.y;
+            let item = procesosFlowsheetIconoSvg(it.icono, icx, icy, icS, verdeEq);
+            item += `<text x="${icx}" y="${icy - icS/2 - 3}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="7">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
+            s += procesosFlowsheetDragWrap('equipo', it.id, item, { x: icx - icS/2 - 8, y: icy - icS/2 - 16, w: icS + 16, h: icS + 24 });
           });
         });
       }
@@ -12592,16 +12627,18 @@ function procesosFlowsheetSvg(p) {
         const items = procesosFlowsheetExpandirIconos(et.adentro, 4);
         const n = items.length, espacio = et.figW / (n + 1);
         items.forEach((it, i) => {
-          const icx = fx + espacio * (i + 1), icy = fy + et.figH - IC_IN * 0.7;
-          s += procesosFlowsheetIconoSvg(it.icono, icx, icy, IC_IN, verdeEq);
-          s += `<text x="${icx}" y="${icy + IC_IN/2 + 9}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
+          const off = procesosFlowsheetOffset(layout, 'equipos', it.id);
+          const icx = fx + espacio * (i + 1) + off.x, icy = fy + et.figH - IC_IN * 0.7 + off.y;
+          let item = procesosFlowsheetIconoSvg(it.icono, icx, icy, IC_IN, verdeEq);
+          item += `<text x="${icx}" y="${icy + IC_IN/2 + 9}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="8">${procesosDiagramaSvgEsc(it.etiqueta)}</text>`;
+          s += procesosFlowsheetDragWrap('equipo', it.id, item, { x: icx - IC_IN/2 - 8, y: icy - IC_IN/2 - 8, w: IC_IN + 16, h: IC_IN + 26 });
           if (it.icono.startsWith('bomba')) bombas.push({ x: icx, y: icy });
         });
       }
       cy += et.figH + 10;
     }
     if (et.afuera.length) {
-      const { svg: chipsSvg, bombas: chipBombas } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT);
+      const { svg: chipsSvg, bombas: chipBombas } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT, layout);
       s += chipsSvg;
       bombas.push(...chipBombas);
     }
@@ -12638,15 +12675,17 @@ function procesosFlowsheetSvg(p) {
   }
   if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
   liq.forEach((et, i) => {
-    const x = xLiq(i), y = padTop;
+    const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
+    const x = xLiq(i) + off.x, y = padTop + off.y;
     const { svg: cajaSvg, bombas } = caja(x, y, et, false);
-    et._bombas = bombas;
-    svg += cajaSvg;
+    et._bombas = bombas; et._x = x; et._y = y;
+    svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
     const ax1 = x + et.w, ax2 = x + et.w + gapX, ay = y + et.h / 2;
     if (i < liq.length - 1) {
       const sig = liq[i + 1];
+      const sigOff = procesosFlowsheetOffset(layout, 'etapas', sig.nombre);
       const sigPorArriba = !!CONTIENE_AGUA_TOP[sig.tipoFig];
-      const sigX = xLiq(i + 1), sigY = padTop;
+      const sigX = xLiq(i + 1) + sigOff.x, sigY = padTop + sigOff.y;
       const destX = sigPorArriba ? sigX + sig.w / 2 : ax2 - 8;
       const destY = sigPorArriba ? sigY + HEADER_H + (sig.dimsTxt ? 14 : 0) : ay;
       svg += conectar(bombas, ax1, ay, destX, destY, sigPorArriba, magenta, 'pfd2-arrow');
@@ -12656,24 +12695,25 @@ function procesosFlowsheetSvg(p) {
     }
   });
   lod.forEach((et, k) => {
-    const x = xLod(k), y = row2y;
+    const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
+    const x = xLod(k) + off.x, y = row2y + off.y;
     const { svg: cajaSvg, bombas } = caja(x, y, et, true);
-    et._bombas = bombas;
-    svg += cajaSvg;
+    et._bombas = bombas; et._x = x; et._y = y;
+    svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
     const ent = et.entradas.find(e => e.tipo === 'lodos');
     let idxLod = ent ? lod.findIndex((l, j) => j !== k && l.nombre === ent.nombre) : -1;
     if (ent && idxLod < 0) idxLod = lod.findIndex((l, j) => j < k && l.gi === ent.gi);
     const idxLiq = (ent && idxLod < 0) ? liq.findIndex(l => l.gi === ent.gi) : -1;
     if (idxLod >= 0) {
       const origen = lod[idxLod];
-      const sx0 = xLod(idxLod) + origen.w, ay = row2y + origen.h / 2;
+      const sx0 = origen._x + origen.w, ay = origen._y + origen.h / 2;
       const destPorArriba = !!CONTIENE_AGUA_TOP[et.tipoFig];
       const destX = destPorArriba ? x + et.w / 2 : x - 8;
       const destY = destPorArriba ? y + HEADER_H + (et.dimsTxt ? 14 : 0) : (y + et.h / 2);
       svg += conectar(origen._bombas || [], sx0, ay, destX, destY, destPorArriba, marron, 'pfd2-arrow-lodos');
     } else if (idxLiq >= 0) {
-      const sx = xLiq(idxLiq) + liq[idxLiq].w / 2, sy = padTop + liq[idxLiq].h, tx = x + et.w / 2, mid = sy + (row2y - sy) / 2;
-      const pts = sx === tx ? `${sx},${sy} ${tx},${row2y-8}` : `${sx},${sy} ${sx},${mid} ${tx},${mid} ${tx},${row2y-8}`;
+      const sx = liq[idxLiq]._x + liq[idxLiq].w / 2, sy = liq[idxLiq]._y + liq[idxLiq].h, tx = x + et.w / 2, mid = sy + (y - sy) / 2;
+      const pts = sx === tx ? `${sx},${sy} ${tx},${y-8}` : `${sx},${sy} ${sx},${mid} ${tx},${mid} ${tx},${y-8}`;
       svg += `<polyline points="${pts}" fill="none" stroke="${marron}" stroke-width="2" marker-end="url(#pfd2-arrow-lodos)"/>`;
       svg += `<text x="${sx + 8}" y="${sy + 16}" fill="${marron}" font-size="10" font-weight="600">lodos</text>`;
     }
@@ -12694,6 +12734,79 @@ function procesosStep3DiagramaRender() {
   const svg = _procesosDiagramaModo === 'flowsheet' ? procesosFlowsheetSvg(procesosCurrentProyecto) : procesosDiagramaFlujoSvg(procesosCurrentProyecto);
   if (!svg) { el.innerHTML = '<p class="hint">Confirmá al menos una etapa para ver el diagrama.</p>'; return; }
   el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>`;
+  if (_procesosDiagramaModo === 'flowsheet') procesosFlowsheetDragInit(el);
+}
+// ── Flowsheet: arrastrar equipos/unidades ──────────────
+// Cada elemento arrastrable (envuelto en <g data-drag-tipo data-drag-id> por
+// procesosFlowsheetDragWrap) puede moverse con el mouse/touch; el offset
+// acumulado se guarda en equipos_data.layout y se suma a la posición
+// automática en cada render siguiente (ver procesosFlowsheetOffset).
+let _pfDrag = null;
+function procesosFlowsheetDragInit(container) {
+  const svgEl = container.querySelector('svg');
+  if (!svgEl) return;
+  svgEl.style.touchAction = 'none';
+  svgEl.addEventListener('pointerdown', procesosFlowsheetDragStart);
+}
+function procesosFlowsheetDragStart(ev) {
+  const g = ev.target.closest('[data-drag-tipo]');
+  if (!g) return;
+  const svgEl = g.ownerSVGElement;
+  const ctm = svgEl && svgEl.getScreenCTM();
+  if (!ctm) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  _pfDrag = {
+    tipo: g.getAttribute('data-drag-tipo'),
+    id: g.getAttribute('data-drag-id'),
+    el: g,
+    scaleX: 1 / ctm.a, scaleY: 1 / ctm.d,
+    startX: ev.clientX, startY: ev.clientY,
+    dx: 0, dy: 0,
+  };
+  g.style.opacity = '0.85';
+  try { g.setPointerCapture(ev.pointerId); } catch (e) {}
+  g.addEventListener('pointermove', procesosFlowsheetDragMove);
+  g.addEventListener('pointerup', procesosFlowsheetDragEnd);
+  g.addEventListener('pointercancel', procesosFlowsheetDragEnd);
+}
+function procesosFlowsheetDragMove(ev) {
+  if (!_pfDrag) return;
+  const d = _pfDrag;
+  d.dx = (ev.clientX - d.startX) * d.scaleX;
+  d.dy = (ev.clientY - d.startY) * d.scaleY;
+  d.el.setAttribute('transform', `translate(${d.dx},${d.dy})`);
+}
+function procesosFlowsheetDragEnd(ev) {
+  if (!_pfDrag) return;
+  const d = _pfDrag;
+  d.el.removeEventListener('pointermove', procesosFlowsheetDragMove);
+  d.el.removeEventListener('pointerup', procesosFlowsheetDragEnd);
+  d.el.removeEventListener('pointercancel', procesosFlowsheetDragEnd);
+  d.el.style.opacity = '';
+  _pfDrag = null;
+  if (Math.abs(d.dx) > 1 || Math.abs(d.dy) > 1) {
+    procesosFlowsheetGuardarOffset(d.tipo, d.id, d.dx, d.dy);
+  } else {
+    d.el.removeAttribute('transform');
+  }
+}
+function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
+  const p = procesosCurrentProyecto;
+  const ed = p.equipos_data || (p.equipos_data = {});
+  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {} });
+  const grupo = tipo === 'etapa' ? (layout.etapas || (layout.etapas = {})) : (layout.equipos || (layout.equipos = {}));
+  const prev = grupo[id] || { x: 0, y: 0 };
+  grupo[id] = { x: Math.round((prev.x || 0) + dx), y: Math.round((prev.y || 0) + dy) };
+  procesosSaveProyecto({ equipos_data: ed }, p);
+  procesosStep3DiagramaRender();
+}
+function procesosFlowsheetReacomodar() {
+  const p = procesosCurrentProyecto;
+  if (!p.equipos_data) return;
+  p.equipos_data.layout = { etapas: {}, equipos: {} };
+  procesosSaveProyecto({ equipos_data: p.equipos_data }, p);
+  procesosStep3DiagramaRender();
 }
 function procesosStep3DiagramaDescargar() {
   const svgEl = document.querySelector('#procesos-step3-diagrama svg');
