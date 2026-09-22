@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.64</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.64</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12054,6 +12054,10 @@ function procesosStep3Html(p) {
     <div class="gap"></div>
     <label>Diagrama de flujo</label>
     <p class="hint" style="margin-bottom:6px">Diagrama esquemático (no a escala) armado con las etapas y equipos ya definidos.</p>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button class="btn ${_procesosDiagramaModo === 'bloques' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('bloques')">Diagrama de bloques</button>
+      <button class="btn ${_procesosDiagramaModo === 'flowsheet' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('flowsheet')">Flowsheet de equipos</button>
+    </div>
     <div id="procesos-step3-diagrama"></div>
   `;
 }
@@ -12193,10 +12197,187 @@ function procesosDiagramaFlujoSvg(p) {
   svg += `</svg>`;
   return svg;
 }
+
+// ── Flowsheet de equipos ────────────────────────────────────────────────
+// Versión más visual del diagrama de bloques: en vez de listar los equipos
+// como texto, dibuja un ícono simple por tipo de equipo (parecido a los de la
+// librería de símbolos P&ID de la empresa, sin pretender ser un plano de
+// ingeniería) con un tag genérico (BS, BD, ST...) sin numerar — pensado para
+// tener una vista rápida y prolija del tren, no para reemplazar el P&ID real.
+// El tag/ícono se adivina por palabras clave del "tipo" del equipo (texto
+// libre configurado en Cfg) — si no matchea nada conocido, cae en un ícono
+// genérico con el tag armado a partir de las iniciales del tipo.
+const PROCESOS_FLOWSHEET_TAGS = [
+  [/bomba.*sumerg|sumerg.*bomba/, 'BS', 'bomba'],
+  [/bomba.*centrifug/, 'BC', 'bomba'],
+  [/bomba.*tornillo/, 'BT', 'bomba'],
+  [/bomba.*dosif|dosif.*bomba/, 'BD', 'bomba'],
+  [/bomba/, 'BC', 'bomba'],
+  [/soplante|soplador|blower/, 'SOP', 'blower'],
+  [/compresor/, 'COMP', 'blower'],
+  [/aireador.*sumerg|sumerg.*aireador/, 'AIS', 'aireador'],
+  [/aireador.*superfic/, 'ASUP', 'aireador'],
+  [/aireador/, 'AIS', 'aireador'],
+  [/difusor/, 'DIF', 'difusor'],
+  [/mezclador|agitador|mixer/, 'MEZ', 'mezclador'],
+  [/deshidratador/, 'DESH', 'cilindro'],
+  [/centrifug/, 'CENT', 'cilindro'],
+  [/decanter/, 'DEC', 'cilindro'],
+  [/filtro banda|prensa/, 'FB', 'cilindro'],
+  [/tamiz|reja/, 'TAM', 'tamiz'],
+  [/\bdaf\b|flotac/, 'DAF', 'tanque'],
+  [/floculador/, 'FLOC', 'tanque'],
+  [/preparador.*polimero|polimero/, 'PP', 'tanque'],
+  [/tornillo transportador|transportador/, 'TT', 'transportador'],
+  [/tanque|tk\b/, 'TK', 'tanque'],
+  [/sediment|clarific|decantador/, 'SED', 'sedimentador'],
+  [/membrana|\bmbr\b|\buf\b|osmosis/, 'MEM', 'membrana'],
+  [/tablero/, 'TE', 'generico'],
+];
+function procesosFlowsheetInfoDe(tipo) {
+  const t = procesosNormTxt(tipo || '');
+  for (const [re, tag, icono] of PROCESOS_FLOWSHEET_TAGS) if (re.test(t)) return { tag, icono };
+  const iniciales = String(tipo || '?').trim().split(/\s+/).map(w => w[0]).filter(Boolean).slice(0, 3).join('').toUpperCase();
+  return { tag: iniciales || 'EQ', icono: 'generico' };
+}
+// Cada ícono se dibuja en un cuadrado de lado "s" centrado en (cx,cy), en
+// trazo verde (mismo tono que usa la empresa para equipos en sus P&ID).
+function procesosFlowsheetIconoSvg(icono, cx, cy, s, color) {
+  const r = s / 2;
+  const sw = Math.max(1.2, s / 22);
+  switch (icono) {
+    case 'bomba':
+      return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${sw}"/><path d="M${cx-r*0.35},${cy-r*0.5} L${cx+r*0.55},${cy} L${cx-r*0.35},${cy+r*0.5} Z" fill="${color}"/>`;
+    case 'blower': {
+      const pts = [0,60,120,180,240,300].map(a => { const rad=a*Math.PI/180; return `${cx+r*Math.cos(rad)},${cy+r*Math.sin(rad)}`; }).join(' ');
+      return `<polygon points="${pts}" fill="none" stroke="${color}" stroke-width="${sw}"/><circle cx="${cx}" cy="${cy}" r="${r*0.22}" fill="${color}"/>`;
+    }
+    case 'aireador':
+      return `<circle cx="${cx}" cy="${cy+r*0.4}" r="${r*0.4}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
+        [-0.5,0,0.5].map(dx => `<path d="M${cx+dx*r-r*0.25},${cy-r*0.3} q${r*0.25},${-r*0.35} ${r*0.5},0" fill="none" stroke="${color}" stroke-width="${sw}"/>`).join('');
+    case 'difusor':
+      return [-0.4,0,0.4].map(dx => `<circle cx="${cx+dx*r}" cy="${cy+r*0.3-Math.abs(dx)*r*0.5}" r="${r*0.18}" fill="none" stroke="${color}" stroke-width="${sw}"/>`).join('');
+    case 'mezclador':
+      return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${sw}"/><line x1="${cx-r*0.6}" y1="${cy-r*0.6}" x2="${cx+r*0.6}" y2="${cy+r*0.6}" stroke="${color}" stroke-width="${sw}"/><line x1="${cx-r*0.6}" y1="${cy+r*0.6}" x2="${cx+r*0.6}" y2="${cy-r*0.6}" stroke="${color}" stroke-width="${sw}"/>`;
+    case 'cilindro':
+      return `<rect x="${cx-r*0.9}" y="${cy-r*0.5}" width="${s*0.9}" height="${r}" rx="${r*0.5}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+    case 'tamiz':
+      return `<rect x="${cx-r*0.8}" y="${cy-r*0.6}" width="${r*1.6}" height="${r*1.2}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
+        [-0.4,0,0.4].map(dx => `<line x1="${cx+dx*r-r*0.5}" y1="${cy-r*0.6}" x2="${cx+dx*r+r*0.5}" y2="${cy+r*0.6}" stroke="${color}" stroke-width="${sw*0.7}"/>`).join('');
+    case 'tanque':
+      return `<path d="M${cx-r*0.8},${cy-r*0.6} L${cx-r*0.8},${cy+r*0.6} L${cx+r*0.8},${cy+r*0.6} L${cx+r*0.8},${cy-r*0.6}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+    case 'sedimentador':
+      return `<path d="M${cx-r*0.85},${cy-r*0.6} L${cx+r*0.85},${cy-r*0.6} L${cx+r*0.3},${cy+r*0.6} L${cx-r*0.3},${cy+r*0.6} Z" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+    case 'membrana':
+      return `<rect x="${cx-r*0.8}" y="${cy-r*0.6}" width="${r*1.6}" height="${r*1.2}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
+        [-0.4,0,0.4].map(dx => `<line x1="${cx+dx*r}" y1="${cy-r*0.6}" x2="${cx+dx*r}" y2="${cy+r*0.6}" stroke="${color}" stroke-width="${sw*0.7}"/>`).join('');
+    case 'transportador':
+      return `<rect x="${cx-r*0.9}" y="${cy-r*0.35}" width="${s*0.9}" height="${r*0.7}" fill="none" stroke="${color}" stroke-width="${sw}"/><path d="M${cx-r*0.7},${cy} q${r*0.35},${-r*0.5} ${r*0.7},0 q${r*0.35},${r*0.5} ${r*0.7},0" fill="none" stroke="${color}" stroke-width="${sw*0.7}"/>`;
+    default:
+      return `<rect x="${cx-r*0.8}" y="${cy-r*0.6}" width="${r*1.6}" height="${r*1.2}" rx="${r*0.15}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
+  }
+}
+// Misma estructura/flujo que procesosDiagramaFlujoSvg (etapas confirmadas del
+// Paso 2, línea líquida arriba y de lodos abajo), pero en vez de listar los
+// equipos como texto dibuja su ícono + tag genérico. La altura de cada caja
+// se ajusta sola según cuántos equipos tenga esa etapa.
+function procesosFlowsheetSvg(p) {
+  const dd = p.diseno_data || {};
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const nombresEtapas = procesosStep3EtapasConfirmadas(p);
+  if (!nombresEtapas.length) return '';
+  const todas = nombresEtapas.map(nombre => ({
+    nombre,
+    equipos: ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ cantidad: eq.cantidad || 1 }, procesosFlowsheetInfoDe(eq.tipo))),
+  }));
+  const grupos = procesosStep2GruposDesdeActual(p);
+  const flujo = procesosStep2TrenFlujo(grupos);
+  const giDe = {};
+  grupos.forEach((g, gi) => g.instancias.forEach(i => { giDe[i.nombre] = gi; }));
+  todas.forEach(e => { e.gi = giDe[e.nombre]; e.esLodos = e.gi != null && grupos[e.gi].linea === 'lodos'; e.entradas = flujo.porInstancia[e.nombre] || []; });
+  const liq = todas.filter(e => !e.esLodos), lod = todas.filter(e => e.esLodos);
+  const c = procesosDiagramaColores();
+  const magenta = '#c2185b', marron = '#9a6b2f', verdeEq = '#2e7d32', verdeOk = '#2e7d32';
+  const COLS = 3, celda = 76, iconoS = 46, boxW = COLS * celda + 24, padTop = 26, padSides = 20, gapX = 90, filaGap = 90;
+  const filasDe = et => Math.max(1, Math.ceil(et.equipos.length / COLS));
+  const boxHDe = et => 46 + filasDe(et) * celda + 10;
+  const anchoFila = arr => arr.length ? arr.length * (boxW + gapX) - gapX + padSides * 2 : 0;
+  const altoFila = arr => arr.length ? Math.max(...arr.map(boxHDe)) : 0;
+  const xAt = i => padSides + i * (boxW + gapX);
+  let x0 = xAt(0);
+  if (lod.length) {
+    const ent = lod[0].entradas.find(e => e.tipo === 'lodos');
+    const idxO = ent ? liq.findIndex(l => l.gi === ent.gi) : -1;
+    if (idxO >= 0) x0 = xAt(idxO);
+  }
+  const xLod = k => x0 + k * (boxW + gapX);
+  const altoLiq = altoFila(liq);
+  const row2y = padTop + altoLiq + filaGap;
+  const totalW = Math.max(anchoFila(liq), lod.length ? xLod(lod.length - 1) + boxW + padSides : 0);
+  const totalH = lod.length ? row2y + altoFila(lod) + padTop + 14 : padTop + altoLiq + padTop;
+  let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
+  svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker></defs>`;
+  const caja = (x, y, et, esLodos) => {
+    const h = boxHDe(et);
+    let s = `<rect x="${x}" y="${y}" width="${boxW}" height="${h}" rx="8" fill="${c.surface2}" stroke="${esLodos ? marron : c.border}" stroke-width="${esLodos ? 2 : 1.5}"/>`;
+    s += `<text x="${x + boxW/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
+    s += `<line x1="${x+12}" y1="${y+28}" x2="${x+boxW-12}" y2="${y+28}" stroke="${c.border}"/>`;
+    if (et.equipos.length) {
+      et.equipos.forEach((eq, i) => {
+        const col = i % COLS, fila = Math.floor(i / COLS);
+        const ccx = x + 12 + col * celda + celda / 2, ccy = y + 34 + fila * celda + celda / 2;
+        s += procesosFlowsheetIconoSvg(eq.icono, ccx, ccy - 6, iconoS, verdeEq);
+        const etiqueta = eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag;
+        s += `<text x="${ccx}" y="${ccy + iconoS/2 + 8}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(etiqueta)}</text>`;
+      });
+    } else {
+      s += `<text x="${x + boxW/2}" y="${y + h/2 + 10}" text-anchor="middle" fill="${c.text2}" font-size="11" font-style="italic">Sin equipos definidos</text>`;
+    }
+    return s;
+  };
+  if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
+  liq.forEach((et, i) => {
+    const x = xAt(i), y = padTop, h = boxHDe(et);
+    svg += caja(x, y, et, false);
+    const ax1 = x + boxW, ax2 = x + boxW + gapX, ay = y + h / 2;
+    if (i < liq.length - 1) {
+      svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${magenta}" stroke-width="2" marker-end="url(#pfd2-arrow)"/>`;
+    } else {
+      svg += `<line x1="${ax1}" y1="${ay}" x2="${ax2-8}" y2="${ay}" stroke="${verdeOk}" stroke-width="2.5" marker-end="url(#pfd2-arrow)"/>`;
+      svg += `<text x="${(ax1+ax2)/2}" y="${ay-8}" text-anchor="middle" fill="${verdeOk}" font-size="10" font-weight="600">Efluente final</text>`;
+    }
+  });
+  lod.forEach((et, k) => {
+    const x = xLod(k), y = row2y, h = boxHDe(et);
+    svg += caja(x, y, et, true);
+    const ent = et.entradas.find(e => e.tipo === 'lodos');
+    let idxLod = ent ? lod.findIndex((l, j) => j !== k && l.nombre === ent.nombre) : -1;
+    if (ent && idxLod < 0) idxLod = lod.findIndex((l, j) => j < k && l.gi === ent.gi);
+    const idxLiq = (ent && idxLod < 0) ? liq.findIndex(l => l.gi === ent.gi) : -1;
+    if (idxLod >= 0) {
+      const sx = xLod(idxLod) + boxW, ay = y + h / 2;
+      svg += `<line x1="${sx}" y1="${ay}" x2="${x-8}" y2="${ay}" stroke="${marron}" stroke-width="2" marker-end="url(#pfd2-arrow-lodos)"/>`;
+    } else if (idxLiq >= 0) {
+      const sx = xAt(idxLiq) + boxW / 2, sy = padTop + boxHDe(liq[idxLiq]), tx = x + boxW / 2, mid = sy + (row2y - sy) / 2;
+      const pts = sx === tx ? `${sx},${sy} ${tx},${row2y-8}` : `${sx},${sy} ${sx},${mid} ${tx},${mid} ${tx},${row2y-8}`;
+      svg += `<polyline points="${pts}" fill="none" stroke="${marron}" stroke-width="2" marker-end="url(#pfd2-arrow-lodos)"/>`;
+      svg += `<text x="${sx + 8}" y="${sy + 16}" fill="${marron}" font-size="10" font-weight="600">lodos</text>`;
+    }
+  });
+  if (lod.length) svg += `<text x="${x0}" y="${row2y + altoFila(lod) + 18}" fill="${marron}" font-size="10" font-weight="600">LÍNEA DE LODOS — no es el efluente final</text>`;
+  svg += `</svg>`;
+  return svg;
+}
+
+let _procesosDiagramaModo = 'bloques';
+function procesosDiagramaCambiarModo(modo) {
+  _procesosDiagramaModo = modo;
+  renderProcesosStepContent();
+}
 function procesosStep3DiagramaRender() {
   const el = document.getElementById('procesos-step3-diagrama');
   if (!el) return;
-  const svg = procesosDiagramaFlujoSvg(procesosCurrentProyecto);
+  const svg = _procesosDiagramaModo === 'flowsheet' ? procesosFlowsheetSvg(procesosCurrentProyecto) : procesosDiagramaFlujoSvg(procesosCurrentProyecto);
   if (!svg) { el.innerHTML = '<p class="hint">Confirmá al menos una etapa para ver el diagrama.</p>'; return; }
   el.innerHTML = `<div style="overflow-x:auto">${svg}</div><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>`;
 }
