@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.82</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.83</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.82</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.83</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -729,6 +729,16 @@
           </div>
           <p class="hint" style="margin-top:-4px">Arrastrá equipos o unidades para acomodarlos — se guardan solas.</p>
           <div id="flowsheets-diagrama"></div>
+        </div>
+        <div class="card">
+          <div class="card-label">💬 Modificar el flow charlando</div>
+          <p class="hint" style="margin-top:-6px;margin-bottom:10px">Pedile cambios en lenguaje natural — agregar/sacar equipos o etapas, reordenar, o mover/agrandar algo del dibujo (ej. "agregale una bomba de reserva al pozo", "corré el sedimentador más a la derecha").</p>
+          <div id="flowsheets-chat-messages" style="max-height:320px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:8px"></div>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="flowsheets-chat-input" placeholder="Escribí tu pedido..." onkeydown="if(event.key==='Enter')flowsheetsChatSend()" style="flex:1" />
+            <button class="btn btn-primary" style="width:auto;padding:12px 18px" onclick="flowsheetsChatSend()">Enviar</button>
+          </div>
+          <div id="flowsheets-chat-status"></div>
         </div>
       </div>
     </div>
@@ -13092,6 +13102,52 @@ function procesosFlowsheetReacomodar() {
   a.guardar();
   a.rerender();
 }
+// Acciones de layout que un chat (el general de Procesos IA o el de la
+// solapa Flowsheets) puede pedir sobre un modelo — mover/escalar una etapa
+// o un equipo (identificado por etapa+tipo, porque el chat no conoce los
+// ids internos), o reacomodar todo. Solo tocan equipos_data.layout (la
+// posición/tamaño VISUAL) — nunca el diseño/cálculo real de la etapa, por
+// eso son seguras de exponer en las dos solapas por igual, a diferencia de
+// mover/agregar/sacar una ETAPA entera (eso sí puede pisar un cálculo real
+// en Procesos IA, así que esa acción no se ofrece ahí — ver comentario en
+// flowsheetsChatSend).
+function procesosFlowsheetAplicarAccionesLayout(modelo, acciones) {
+  if (!acciones || !acciones.length) return false;
+  const ed = modelo.equipos_data || (modelo.equipos_data = {});
+  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {} });
+  let cambios = false;
+  // equipos_data.etapas puede no tener entrada para una etapa que existe
+  // pero todavía no tiene equipos cargados — el registro real de qué
+  // etapas existen es diseno_data.hojas, no equipos_data.etapas.
+  const existeEtapa = nombreEtapa => !!(modelo.diseno_data && modelo.diseno_data.hojas && modelo.diseno_data.hojas[nombreEtapa]);
+  const idsDeEquipo = (nombreEtapa, equipoTipo) => {
+    const et = ed.etapas && ed.etapas[nombreEtapa];
+    if (!et) return [];
+    const n = String(equipoTipo || '').trim().toLowerCase();
+    return (et.equipos || []).filter(eq => (eq.tipo || '').trim().toLowerCase().includes(n)).map(eq => eq.id);
+  };
+  const mover = (grupoNombre, id, dx, dy) => {
+    const grupo = layout[grupoNombre] || (layout[grupoNombre] = {});
+    const prev = grupo[id] || { x: 0, y: 0 };
+    grupo[id] = Object.assign({}, prev, { x: Math.round((prev.x || 0) + (dx || 0)), y: Math.round((prev.y || 0) + (dy || 0)) });
+  };
+  const escalar = (grupoNombre, id, factor) => {
+    const grupo = layout[grupoNombre] || (layout[grupoNombre] = {});
+    const prev = grupo[id] || { x: 0, y: 0 };
+    const nueva = Math.max(0.4, Math.min(3, (prev.escala || 1) * factor));
+    grupo[id] = Object.assign({}, prev, { escala: nueva });
+  };
+  acciones.forEach(a => {
+    try {
+      if (a.tipo === 'mover_etapa' && a.etapa && existeEtapa(a.etapa)) { mover('etapas', a.etapa, a.dx, a.dy); cambios = true; }
+      else if (a.tipo === 'escalar_etapa' && a.etapa && a.factor && existeEtapa(a.etapa)) { escalar('etapas', a.etapa, a.factor); cambios = true; }
+      else if (a.tipo === 'mover_equipo' && a.etapa && a.equipoTipo) { idsDeEquipo(a.etapa, a.equipoTipo).forEach(id => mover('equipos', id, a.dx, a.dy)); cambios = true; }
+      else if (a.tipo === 'escalar_equipo' && a.etapa && a.equipoTipo && a.factor) { idsDeEquipo(a.etapa, a.equipoTipo).forEach(id => escalar('equipos', id, a.factor)); cambios = true; }
+      else if (a.tipo === 'reacomodar_todo') { ed.layout = { etapas: {}, equipos: {}, puertos: {} }; cambios = true; }
+    } catch (e) { console.warn('Acción de layout inválida, se ignora:', a, e.message); }
+  });
+  return cambios;
+}
 function procesosStep3DiagramaDescargar() {
   const svgEl = document.querySelector('#procesos-step3-diagrama svg');
   if (!svgEl) return;
@@ -13172,13 +13228,16 @@ async function flowsheetsAbrirProyecto(id) {
   const rows = await res.json();
   if (!res.ok || !rows.length) { alert('No se pudo abrir el Flowsheet.'); return; }
   flowsheetsCurrentProyecto = rows[0];
+  if (!flowsheetsCurrentProyecto.chat_historial) flowsheetsCurrentProyecto.chat_historial = [];
   document.getElementById('flowsheets-list-view').style.display = 'none';
   document.getElementById('flowsheets-proyecto-view').style.display = '';
   document.getElementById('flowsheets-proyecto-nombre').value = flowsheetsCurrentProyecto.nombre || '';
   document.getElementById('flowsheets-texto').value = flowsheetsCurrentProyecto.texto_libre || '';
   document.getElementById('flowsheets-status').innerHTML = '';
+  document.getElementById('flowsheets-chat-status').innerHTML = '';
   flowsheetsArchivosRender();
   renderFlowsheetsDiagrama();
+  renderFlowsheetsChat();
 }
 function flowsheetsVolverALista() {
   flowsheetsCurrentProyecto = null;
@@ -13425,6 +13484,144 @@ function flowsheetsDescargar() {
     });
   };
   img.src = url;
+}
+// ── Chat de la solapa Flowsheets: modificar el flow charlando ──────────
+// A diferencia del chat general de Procesos IA (que solo puede tocar
+// equipos, porque las etapas salen de una planilla de cálculo real del
+// Paso 2 — reestructurarlas por chat podría pisar un cálculo real), acá NO
+// hay ningún cálculo detrás: las etapas las arma la IA a partir de texto/
+// archivos, así que el chat puede agregar, sacar, reordenar o editar
+// etapas enteras sin ese riesgo — además de mover/escalar (acciones_layout,
+// compartida con Procesos IA — ver procesosFlowsheetAplicarAccionesLayout).
+function flowsheetsDimsAValoresConEtiqueta(dims, base) {
+  const v = Object.assign({}, base);
+  if (!dims) return v;
+  if (dims.largo != null) v['Largo (m)'] = dims.largo;
+  if (dims.ancho != null) v['Ancho (m)'] = dims.ancho;
+  if (dims.alto != null) v['Altura (m)'] = dims.alto;
+  if (dims.diametro != null) v['Diámetro (m)'] = dims.diametro;
+  if (dims.volumen != null) v['Volumen (m3)'] = dims.volumen;
+  if (dims.acometida != null) v['H acometida (m)'] = dims.acometida;
+  return v;
+}
+function flowsheetsAplicarAcciones(p, acciones) {
+  if (!acciones || !acciones.length) return null;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  dd.orden = (dd.orden || []).slice();
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  let cambios = false;
+  const equiposDe = nombre => Object.assign({ equipos: [] }, ed.etapas[nombre]);
+  acciones.forEach(a => {
+    try {
+      if (a.tipo === 'agregar_equipo' && a.etapa && a.equipo && a.equipo.tipo && dd.hojas[a.etapa]) {
+        const e = equiposDe(a.etapa);
+        e.equipos = e.equipos.concat([{ id: procesosNuevoId(), tipo: a.equipo.tipo, cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1 }]);
+        ed.etapas[a.etapa] = e;
+        cambios = true;
+      } else if (a.tipo === 'editar_equipo' && a.etapa && a.equipoTipo && a.cambios && dd.hojas[a.etapa]) {
+        const e = equiposDe(a.etapa);
+        const n = String(a.equipoTipo).trim().toLowerCase();
+        let tocado = false;
+        e.equipos = e.equipos.map(eq => {
+          if ((eq.tipo || '').trim().toLowerCase() !== n) return eq;
+          tocado = true;
+          return Object.assign({}, eq, a.cambios.tipo != null ? { tipo: a.cambios.tipo } : {}, a.cambios.cantidad != null ? { cantidad: Number(a.cambios.cantidad) } : {});
+        });
+        if (tocado) { ed.etapas[a.etapa] = e; cambios = true; }
+      } else if (a.tipo === 'eliminar_equipo' && a.etapa && a.equipoTipo && dd.hojas[a.etapa]) {
+        const e = equiposDe(a.etapa);
+        const n = String(a.equipoTipo).trim().toLowerCase();
+        const antes = e.equipos.length;
+        e.equipos = e.equipos.filter(eq => (eq.tipo || '').trim().toLowerCase() !== n);
+        if (e.equipos.length !== antes) { ed.etapas[a.etapa] = e; cambios = true; }
+      } else if (a.tipo === 'agregar_etapa' && a.nombre && !dd.hojas[a.nombre]) {
+        dd.hojas[a.nombre] = { tipo: 'etapa', hojaBase: a.nombre, seleccionada: true, confirmada: true, linea: a.linea === 'lodos' ? 'lodos' : 'liquido', origenLodos: a.origenLodos || null, valoresConEtiqueta: flowsheetsDimsAValoresConEtiqueta(a.dimensiones, {}) };
+        const idxDespues = a.despues_de ? dd.orden.indexOf(a.despues_de) : -1;
+        if (idxDespues >= 0) dd.orden.splice(idxDespues + 1, 0, a.nombre); else dd.orden.push(a.nombre);
+        ed.etapas[a.nombre] = { equipos: (a.equipos || []).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1 })) };
+        cambios = true;
+      } else if (a.tipo === 'eliminar_etapa' && a.nombre && dd.hojas[a.nombre]) {
+        delete dd.hojas[a.nombre];
+        dd.orden = dd.orden.filter(n => n !== a.nombre);
+        delete ed.etapas[a.nombre];
+        Object.keys(dd.hojas).forEach(n => { if (dd.hojas[n].origenLodos === a.nombre) dd.hojas[n] = Object.assign({}, dd.hojas[n], { origenLodos: null }); });
+        cambios = true;
+      } else if (a.tipo === 'editar_etapa' && a.nombre && dd.hojas[a.nombre] && a.cambios) {
+        const h = Object.assign({}, dd.hojas[a.nombre]);
+        if (a.cambios.linea) h.linea = a.cambios.linea === 'lodos' ? 'lodos' : 'liquido';
+        if ('origenLodos' in a.cambios) h.origenLodos = a.cambios.origenLodos || null;
+        if (a.cambios.dimensiones) h.valoresConEtiqueta = flowsheetsDimsAValoresConEtiqueta(a.cambios.dimensiones, h.valoresConEtiqueta);
+        dd.hojas[a.nombre] = h;
+        cambios = true;
+      }
+    } catch (e) { console.warn('Acción de Flowsheets inválida, se ignora:', a, e.message); }
+  });
+  if (!cambios) return null;
+  return { diseno_data: dd, equipos_data: ed };
+}
+function renderFlowsheetsChat() {
+  const el = document.getElementById('flowsheets-chat-messages');
+  if (!el) return;
+  const p = flowsheetsCurrentProyecto;
+  const hist = (p && p.chat_historial) || [];
+  el.innerHTML = hist.map(m => `
+    <div style="align-self:${m.role==='user'?'flex-end':'flex-start'};max-width:85%;background:${m.role==='user'?'var(--accent, #2e7d32)':'var(--surface2)'};color:${m.role==='user'?'#fff':'inherit'};border-radius:10px;padding:8px 12px;white-space:pre-wrap">${esc(typeof m.content === 'string' ? m.content : '(adjunto)')}</div>
+  `).join('');
+  el.scrollTop = el.scrollHeight;
+}
+let _flowsheetsChatEnviando = false;
+async function flowsheetsChatSend() {
+  const input = document.getElementById('flowsheets-chat-input');
+  const msg = (input.value || '').trim();
+  if (!msg || _flowsheetsChatEnviando) return;
+  const p = flowsheetsCurrentProyecto;
+  input.value = '';
+  p.chat_historial = (p.chat_historial || []).concat([{ role: 'user', content: msg }]);
+  renderFlowsheetsChat();
+  flowsheetsSaveProyecto({ chat_historial: p.chat_historial }, p).catch(() => {});
+  _flowsheetsChatEnviando = true;
+  const statusId = 'flowsheets-chat-status';
+  showMsg(statusId, 'loading', 'Pensando...');
+  try {
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('API key no disponible.');
+    const resumen = (p.diseno_data?.orden || []).map(nombre => {
+      const h = p.diseno_data.hojas[nombre] || {};
+      const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad})`).join(', ') || '(sin equipos)';
+      return `- "${nombre}" — línea ${h.linea || 'liquido'}${h.origenLodos ? `, recibe lodos de "${h.origenLodos}"` : ''} — dimensiones: ${JSON.stringify(h.valoresConEtiqueta || {})} — equipos: ${eqs}`;
+    }).join('\n') || '(sin etapas todavía — generá el flowsheet primero con texto/archivos)';
+    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoTipo":"<tipo EXACTO ya cargado>","cambios":{"tipo":"...","cantidad":...}} (poné solo los campos que cambian)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
+    const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, system: [{ type: 'text', text: instrucciones }], messages }),
+    });
+    if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || `Error de la IA (${resp.status})`); }
+    const data = await resp.json();
+    const raw = data.content?.find(c => c.type === 'text')?.text || '{}';
+    let parsed;
+    try { parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()); }
+    catch (_e) { parsed = { respuesta: raw, acciones: [], acciones_layout: [] }; }
+    p.chat_historial = p.chat_historial.concat([{ role: 'assistant', content: parsed.respuesta || '(sin respuesta)' }]);
+    const fieldsToSave = { chat_historial: p.chat_historial };
+    const nuevo = flowsheetsAplicarAcciones(p, parsed.acciones);
+    if (nuevo) { p.diseno_data = nuevo.diseno_data; p.equipos_data = nuevo.equipos_data; fieldsToSave.diseno_data = nuevo.diseno_data; fieldsToSave.equipos_data = nuevo.equipos_data; }
+    const modeloLayout = { diseno_data: p.diseno_data, equipos_data: fieldsToSave.equipos_data || p.equipos_data };
+    const huboLayout = procesosFlowsheetAplicarAccionesLayout(modeloLayout, parsed.acciones_layout);
+    if (huboLayout) { p.equipos_data = modeloLayout.equipos_data; fieldsToSave.equipos_data = modeloLayout.equipos_data; }
+    await flowsheetsSaveProyecto(fieldsToSave, p);
+    if (flowsheetsCurrentProyecto === p) {
+      document.getElementById(statusId).innerHTML = '';
+      renderFlowsheetsChat();
+      if (nuevo || huboLayout) renderFlowsheetsDiagrama();
+    }
+  } catch (e) {
+    if (flowsheetsCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    _flowsheetsChatEnviando = false;
+  }
 }
 
 // Tooltip con el texto completo de un campo que no entra en su ancho.
@@ -15222,7 +15419,7 @@ async function procesosChatSend() {
     // proyecto tal cual (comportamiento de antes, para no romper proyectos
     // que ya vienen categorizando por nombre).
     const categoriaMail = p.categoria || p.nombre;
-    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}${equiposDocTxtGeneral}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{},"acciones_equipos":[],"derivar_a_step2":null}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con la categoría exacta ("${categoriaMail}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n- Etapas del Paso 3 con equipos cargados: ${etapasTxt}. Si el usuario te pide agregar, sacar o ajustar un equipo de alguna de esas etapas (ej. "cambiá el modelo del soplador de LA", "sacá la bomba de reserva de SBR"), hacelo con "acciones_equipos": [{"etapa":"<nombre EXACTO de la etapa>","tipo":"agregar"|"editar"|"eliminar","equipoTipo":"<tipo EXACTO del equipo ya cargado, para editar/eliminar>","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","modelo":"...","justificacion":"..."} (solo para agregar),"cambios":{...} (solo para editar, los campos que cambian)}]. Para "agregar", el "tipo" tiene que ser EXACTAMENTE uno de los ya configurados como equipo posible para esa etapa (los mismos que ya aparecen en "Equipos definidos por etapa" de arriba u otros de la misma lista cerrada de esa etapa) — si no estás seguro de cuáles son válidos para esa etapa, no agregues nada y sugerile al usuario ir al chat de esa etapa puntual en Paso 3. Para "editar"/"eliminar", "equipoTipo" tiene que matchear el "tipo" de un equipo que YA figura en esa etapa (ver "Equipos definidos por etapa"). Cada acción se aplica sola — si una etapa no existe o un equipo no matchea, esa acción en particular no hace nada (no rompe las demás). Cuando hagas una acción, contale al usuario qué cambiaste en "respuesta". NUNCA digas en "respuesta" que ya actualizaste, agregaste o corregiste un equipo (ni des un detalle del equipo "actualizado" como si ya estuviera guardado) salvo que hayas puesto la acción correspondiente en "acciones_equipos" en ESTA MISMA respuesta — si te falta un dato para poder hacerlo (ej. no sabés la lista cerrada de tipos válidos de esa etapa), decilo explícitamente y no apliques nada, en vez de inventar que ya quedó hecho.\n${PROCESOS_STEP3_REGLAS_ESPECIFICACION}\n- Si el pedido es sobre los VALORES DE DISEÑO de una unidad del Paso 2 (una celda de la planilla de cálculo — caudal, dimensión, eficiencia, cualquier dato o resultado que veas en "Diseño del proyecto definido" más arriba), no lo resuelvas vos acá: usá "derivar_a_step2":{"hoja":"<nombre EXACTO de la unidad, tal como figura en 'Diseño del proyecto definido'>","mensaje":"<el pedido del usuario, reformulado en una instrucción autosuficiente — sin referencias tipo 'eso' o 'lo de antes' a esta conversación>"}. Eso se lo pasa directo al chat de esa unidad puntual, que tiene el detalle celda por celda de su planilla — vos no tenés esa información acá, así que no inventes ni calcules el valor vos mismo. Dejá "derivar_a_step2" en null si no aplica. Solo se puede derivar a una unidad que YA figura en "Diseño del proyecto definido" (si el Paso 2 todavía no está armado, avisale al usuario que primero tiene que terminarlo desde la pantalla de Paso 2).\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
+    const instrucciones = `Este es el contexto del proyecto sobre el que vamos a chatear:\n${contexto}${plantasCompactasTxt}${archivosProyectoTxt}${docsRefTxt}${catalogoTxt}${equiposDocTxtGeneral}\nA partir de ahora respondeme como asistente de este proyecto, en español.\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional...","necesita_documentos":false,"necesita_mails":false,"proyecto_catalogo_solicitado":null,"actualizaciones_generales":{},"actualizaciones_corrientes":{},"acciones_equipos":[],"acciones_layout":[],"derivar_a_step2":null}. Este formato es obligatorio en TODAS tus respuestas de este chat, sin excepción, sin importar cuántos mensajes lleve la conversación — nunca respondas en texto plano suelto.\n${puedePedirDocs ? `- Si para responder necesitás revisar el contenido completo de ${carpeta ? 'los documentos originales del cliente, ' : ''}algún documento de referencia de la lista de arriba que ya esté analizado, o los documentos de un proyecto puntual de la base de proyectos anteriores (si tiene carpeta vinculada y ya analizada), poné "necesita_documentos":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje para que respondas de nuevo con este mismo formato. Si es un proyecto de la base de proyectos anteriores, poné además su nombre EXACTO (tal como figura en la lista de arriba) en "proyecto_catalogo_solicitado"; si no, dejalo en null.\n- Si algo que te piden figura en las listas de arriba pero está marcado como "SIN analizar todavía" (o sin descripción/resumen ni carpeta con contenido cacheado), NO lo inventes ni digas que no existe — contale al usuario que existe pero todavía no fue analizado, y que alguien tiene que abrirlo/correr "Generar resumen" o "Procesar pendientes" en Cfg Procesos IA para que vos puedas leerlo.\n` : ''}${puedePedirMails ? `- Este proyecto puede tener mails de Outlook categorizados con la categoría exacta ("${categoriaMail}"). Si para responder te serviría revisar esos mails (para saber qué pidió o aclaró el cliente, el estado de una consulta a un proveedor, etc.), poné "necesita_mails":true y dejá "respuesta" vacío — te los voy a adjuntar en un segundo mensaje (con el texto de sus adjuntos PDF/Word/Excel/imagen si tienen) para que respondas de nuevo con este mismo formato. No lo pidas si la consulta no tiene nada que ver con la correspondencia del proyecto.\n` : ''}- Los campos generales ya extraídos son: ${nombresGenerales}. Si alguno cambió o estaba mal, corregilo en "actualizaciones_generales" (string por campo).\n- Las corrientes de efluente ya extraídas son: ${descCorrientes}. Si un parámetro de alguna corriente cambió o estaba mal, corregilo en "actualizaciones_corrientes" con la forma {"NombreCorriente":{"NombreParametro":{"valor":...,"unidad":...,"limite_normativo":...,"fuente":"..."}}} — en "fuente" indicá de dónde salió el nuevo valor (ej. "corregido por el usuario en el chat" si te lo dijo directamente, o el documento puntual si lo vino a buscar ahí). En ambos casos contale al usuario qué actualizaste en "respuesta". Si no hay nada para actualizar, dejá ambos objetos vacíos.\n- Etapas del Paso 3 con equipos cargados: ${etapasTxt}. Si el usuario te pide agregar, sacar o ajustar un equipo de alguna de esas etapas (ej. "cambiá el modelo del soplador de LA", "sacá la bomba de reserva de SBR"), hacelo con "acciones_equipos": [{"etapa":"<nombre EXACTO de la etapa>","tipo":"agregar"|"editar"|"eliminar","equipoTipo":"<tipo EXACTO del equipo ya cargado, para editar/eliminar>","equipo":{"tipo":"...","cantidad":1,"especificacion":"...","modelo":"...","justificacion":"..."} (solo para agregar),"cambios":{...} (solo para editar, los campos que cambian)}]. Para "agregar", el "tipo" tiene que ser EXACTAMENTE uno de los ya configurados como equipo posible para esa etapa (los mismos que ya aparecen en "Equipos definidos por etapa" de arriba u otros de la misma lista cerrada de esa etapa) — si no estás seguro de cuáles son válidos para esa etapa, no agregues nada y sugerile al usuario ir al chat de esa etapa puntual en Paso 3. Para "editar"/"eliminar", "equipoTipo" tiene que matchear el "tipo" de un equipo que YA figura en esa etapa (ver "Equipos definidos por etapa"). Cada acción se aplica sola — si una etapa no existe o un equipo no matchea, esa acción en particular no hace nada (no rompe las demás). Cuando hagas una acción, contale al usuario qué cambiaste en "respuesta". NUNCA digas en "respuesta" que ya actualizaste, agregaste o corregiste un equipo (ni des un detalle del equipo "actualizado" como si ya estuviera guardado) salvo que hayas puesto la acción correspondiente en "acciones_equipos" en ESTA MISMA respuesta — si te falta un dato para poder hacerlo (ej. no sabés la lista cerrada de tipos válidos de esa etapa), decilo explícitamente y no apliques nada, en vez de inventar que ya quedó hecho.\n- Si el usuario te pide mover, correr, agrandar o achicar algo del FLOWSHEET (el dibujo de "Flowsheet de equipos" del Paso 3 — ej. "corré el sedimentador más a la derecha", "achicá el pozo de bombeo", "agrandá la bomba del reactor anóxico"), usá "acciones_layout": [{"tipo":"mover_etapa","etapa":"<nombre EXACTO de la etapa>","dx":40,"dy":0}] para mover una unidad entera (dx/dy en píxeles aproximados, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} para agrandar (factor>1) o achicar (factor<1) una unidad entera, {"tipo":"mover_equipo","etapa":"...","equipoTipo":"<tipo EXACTO o parte del tipo del equipo>","dx":...,"dy":...} o {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...} para un equipo puntual dentro de una etapa, o {"tipo":"reacomodar_todo"} si te piden resetear todos los movimientos manuales. Estas acciones son solo de POSICIÓN/TAMAÑO visual del dibujo — nunca cambian el diseño ni los equipos en sí. No inventes nombres de etapa o equipo: usá los que ya figuran en "Etapas del Paso 3 con equipos cargados" de arriba.\n${PROCESOS_STEP3_REGLAS_ESPECIFICACION}\n- Si el pedido es sobre los VALORES DE DISEÑO de una unidad del Paso 2 (una celda de la planilla de cálculo — caudal, dimensión, eficiencia, cualquier dato o resultado que veas en "Diseño del proyecto definido" más arriba), no lo resuelvas vos acá: usá "derivar_a_step2":{"hoja":"<nombre EXACTO de la unidad, tal como figura en 'Diseño del proyecto definido'>","mensaje":"<el pedido del usuario, reformulado en una instrucción autosuficiente — sin referencias tipo 'eso' o 'lo de antes' a esta conversación>"}. Eso se lo pasa directo al chat de esa unidad puntual, que tiene el detalle celda por celda de su planilla — vos no tenés esa información acá, así que no inventes ni calcules el valor vos mismo. Dejá "derivar_a_step2" en null si no aplica. Solo se puede derivar a una unidad que YA figura en "Diseño del proyecto definido" (si el Paso 2 todavía no está armado, avisale al usuario que primero tiene que terminarlo desde la pantalla de Paso 2).\n\nATENCIÓN especial si vas a completar o corregir un "limite_normativo" a partir de un documento de normativa: esos documentos suelen tener tablas con columnas distintas según el tipo de vuelco/destino (ej. "Colectora Cloacal", "Cond. Pluv. o cuerpo de agua superficial", "Absorción por el suelo"). Fijate primero cuál es el "Tipo de vuelco" de este proyecto (está en el contexto de arriba) y usá EXCLUSIVAMENTE el valor de esa columna en la fila de ese parámetro — verificá letra por letra que el número que vas a poner esté realmente en esa intersección fila×columna, no en una fila o columna vecina. NUNCA agregues condiciones ni valores que no estén escritos literalmente en el documento, y NUNCA uses un valor de tu conocimiento previo sobre esa normativa aunque te resulte familiar — usá exclusivamente lo que está escrito en el texto del documento que te adjunte. Si no podés identificar con certeza la columna correcta, no completes ese campo — explicaselo al usuario en "respuesta" en vez de adivinar.`;
     // "instrucciones" es idéntico entre mensajes de la MISMA charla (mismo
     // proyecto, misma info ya extraída) — con cache_control, Anthropic lo
     // guarda de su lado y cobra bastante menos por él del segundo mensaje
@@ -15231,7 +15428,7 @@ async function procesosChatSend() {
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const parseRespuesta = raw => {
       try { return JSON.parse(raw.replace(/```json|```/g,'').trim()); }
-      catch(_e) { return { respuesta: raw, necesita_documentos:false, necesita_mails:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{}, acciones_equipos:[], derivar_a_step2:null }; }
+      catch(_e) { return { respuesta: raw, necesita_documentos:false, necesita_mails:false, proyecto_catalogo_solicitado:null, actualizaciones_generales:{}, actualizaciones_corrientes:{}, acciones_equipos:[], acciones_layout:[], derivar_a_step2:null }; }
     };
     let resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -15340,10 +15537,16 @@ async function procesosChatSend() {
     }
     const edNuevo = procesosAplicarAccionesEquiposChat(p, parsed.acciones_equipos);
     if (edNuevo) fieldsToSave.equipos_data = edNuevo;
+    // Acciones de layout (mover/escalar en el Flowsheet): se aplican sobre
+    // edNuevo si ya se tocó equipos_data en este mismo turno, o directo
+    // sobre p si no — en cualquier caso terminan en fieldsToSave.equipos_data.
+    const modeloParaLayout = { diseno_data: p.diseno_data, equipos_data: edNuevo || p.equipos_data };
+    const huboLayout = procesosFlowsheetAplicarAccionesLayout(modeloParaLayout, parsed.acciones_layout);
+    if (huboLayout) fieldsToSave.equipos_data = modeloParaLayout.equipos_data;
     await procesosSaveProyecto(fieldsToSave, p);
     if (procesosCurrentProyecto === p) {
       renderProcesosChat();
-      if (edNuevo || resultadoStep2Txt) renderProcesosStepContent(); // por si está mirando el Paso 2/3 de la unidad que cambió
+      if (edNuevo || huboLayout || resultadoStep2Txt) renderProcesosStepContent(); // por si está mirando el Paso 2/3 de la unidad que cambió
       document.getElementById(statusId).innerHTML = '';
     }
   } catch(e) {
