@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.95</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.96</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.95</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.96</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12538,24 +12538,6 @@ function procesosFlowsheetEsQuimico(eq) {
   }
   return false;
 }
-// Busca el nombre de alguna etapa mencionado en el texto de un equipo,
-// con una preposición justo antes ("para"/"en"/"a"/"hacia") para no
-// confundir, por ejemplo, una etapa llamada "LA" con el artículo "la" de
-// cualquier otra frase. Genérico — lo usan tanto el soplante que además
-// alimenta difusores de OTRA etapa (procesosFlowsheetAireDestino) como,
-// antes, la dosificadora (ver comentario de esa función, ya no lo
-// necesita para su propio destino pero sigue sirviendo para casos donde
-// SÍ hace falta detectar una etapa nombrada en el texto).
-function procesosFlowsheetDestinoEnTexto(eq, nombresEtapas) {
-  const texto = procesosNormTxt(`${eq.tipoOriginal || ''} ${eq.especificacion || ''}`);
-  for (const nombre of nombresEtapas) {
-    const t = procesosNormTxt(nombre);
-    if (!t) continue;
-    const escapado = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (new RegExp(`\\b(?:para|hacia|en|al?|de|del)\\s+${escapado}\\b`).test(texto)) return nombre;
-  }
-  return null;
-}
 // Para una bomba dosificadora, a qué etapa dosifica y qué químico. El
 // destino NO hace falta buscarlo en el texto: es simplemente la etapa
 // donde está cargado el equipo (eq.origenEtapa, seteado al armar
@@ -12938,21 +12920,33 @@ function procesosFlowsheetSvg(p) {
     }
   });
   quimicosGlobal.push(...contenedoresDetectados);
-  // Un soplante que además alimenta difusores de OTRA etapa (a diferencia
-  // de la dosificadora, acá SÍ hace falta el texto — no hay forma
-  // "obvia" de saber a qué otra etapa manda aire) — mismo patrón de
-  // número compartido bomba/destino que la dosificadora, en su propio
-  // color (aire, celeste) para no confundirse con la Zona de químicos.
-  // La cañería física soplante→difusor de la MISMA etapa (ver caja(), más
-  // abajo) sigue igual — esto es solo para el caso de OTRA etapa.
+  // Difusores en una etapa que no tiene soplante propio: en este flujo de
+  // trabajo el soplante se carga UNA sola vez (en la etapa donde vive
+  // físicamente, ej. LA) y los difusores se repiten en cada etapa que
+  // realmente airea (ej. Digestor) — nunca se vuelve a cargar el
+  // soplante ahí. Así que a diferencia de la dosificadora, acá NO hay
+  // texto que lo diga (ni hace falta): la regla es estructural. Si hay
+  // una sola etapa con soplante en todo el proyecto, se linkea con TODAS
+  // las etapas que tienen difusor pero no soplante propio; si hay más de
+  // una etapa con soplante, es ambiguo (¿cuál alimenta a cuál?) y no se
+  // adivina nada. La cañería física soplante→difusor de la MISMA etapa
+  // (ver caja(), más abajo) sigue igual — esto es solo para el caso de
+  // difusores en OTRA etapa.
   let _pfAireNum = 0;
-  todas.forEach(et => {
-    et.equipos.forEach(eq => {
+  const etapasConSoplante = todas.filter(et => et.equipos.some(eq => eq.icono === 'blower'));
+  const etapasConDifusorSolo = todas.filter(et => et.equipos.some(eq => eq.icono === 'difusor') && !et.equipos.some(eq => eq.icono === 'blower'));
+  if (etapasConSoplante.length === 1 && etapasConDifusorSolo.length) {
+    _pfAireNum++;
+    const numero = _pfAireNum;
+    const destinos = etapasConDifusorSolo.map(et => et.nombre);
+    etapasConSoplante[0].equipos.forEach(eq => {
       if (eq.icono !== 'blower') return;
-      const destino = procesosFlowsheetDestinoEnTexto(eq, nombresEtapas);
-      if (destino && destino !== et.nombre) { _pfAireNum++; eq.aireNumero = _pfAireNum; eq.aireEtapa = destino; }
+      eq.aireNumero = numero;
+      eq.aireEtapas = destinos;
+      eq.aireEtapa = destinos.join(', ');
     });
-  });
+    etapasConDifusorSolo.forEach(et => { et._aireEntraNumeros = (et._aireEntraNumeros || []).concat([numero]); });
+  }
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
   const giDe = {};
@@ -13385,22 +13379,22 @@ function procesosFlowsheetSvg(p) {
     svg += `<text x="${bx}" y="${by+3}" text-anchor="middle" fill="${colorDosif}" font-weight="700" font-size="9">${eq.dosifNumero}</text>`;
     svg += `<text x="${bx+12}" y="${by+3}" fill="${colorDosif}" font-size="8">dosif.${eq.dosifQuimico ? ' ' + procesosDiagramaSvgEsc(eq.dosifQuimico) : ''}</text>`;
   });
-  // Marca de "acá entra aire" en la unidad destino de un soplante que
-  // alimenta difusores de OTRA etapa (ver procesosFlowsheetDestinoEnTexto,
-  // más arriba) — mismo patrón que la dosificación pero en su propio
-  // color (celeste, el mismo que la cañería de aire dentro de una misma
-  // etapa) y un poco más abajo para no pisarse si la misma unidad también
-  // recibe una dosificación.
+  // Marca de "acá entra aire" en cada etapa con difusor propio pero sin
+  // soplante propio (ver el loop de _pfAireNum, más arriba) — mismo
+  // patrón que la dosificación pero en su propio color (celeste, el
+  // mismo que la cañería de aire dentro de una misma etapa) y un poco
+  // más abajo para no pisarse si la misma unidad también recibe una
+  // dosificación.
   const colorAireRef = '#0d8fa3';
-  todas.forEach(et => et.equipos.forEach(eq => {
-    if (!eq.aireNumero) return;
-    const destino = todas.find(d => d.nombre === eq.aireEtapa);
-    if (!destino || destino._x == null) return;
-    const bx = destino._x + 16, by = destino._y + HEADER_H + (destino.dimsTxt ? 14 : 0) + 26;
-    svg += `<circle cx="${bx}" cy="${by}" r="8" fill="${c.surface}" stroke="${colorAireRef}" stroke-width="1.4"/>`;
-    svg += `<text x="${bx}" y="${by+3}" text-anchor="middle" fill="${colorAireRef}" font-weight="700" font-size="9">${eq.aireNumero}</text>`;
-    svg += `<text x="${bx+12}" y="${by+3}" fill="${colorAireRef}" font-size="8">entra aire</text>`;
-  }));
+  todas.forEach(destino => {
+    (destino._aireEntraNumeros || []).forEach((numero, i) => {
+      if (destino._x == null) return;
+      const bx = destino._x + 16, by = destino._y + HEADER_H + (destino.dimsTxt ? 14 : 0) + 26 + i * 16;
+      svg += `<circle cx="${bx}" cy="${by}" r="8" fill="${c.surface}" stroke="${colorAireRef}" stroke-width="1.4"/>`;
+      svg += `<text x="${bx}" y="${by+3}" text-anchor="middle" fill="${colorAireRef}" font-weight="700" font-size="9">${numero}</text>`;
+      svg += `<text x="${bx+12}" y="${by+3}" fill="${colorAireRef}" font-size="8">entra aire</text>`;
+    });
+  });
   if (etapaQuimicos) {
     const off = procesosFlowsheetOffset(layout, 'etapas', etapaQuimicos.nombre);
     const xQ = xQuim + off.x, yQ = floorYQuim - etapaQuimicos.hFigura + off.y;
