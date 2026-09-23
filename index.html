@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.93</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.93</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12280,10 +12280,15 @@ function procesosDiagramaFlujoSvg(p) {
 // libre configurado en Cfg) — si no matchea nada conocido, cae en un ícono
 // genérico con el tag armado a partir de las iniciales del tipo.
 const PROCESOS_FLOWSHEET_TAGS = [
+  // "airlift" va primero de todo: la especificación de un airlift suele
+  // mencionar "soplante" (el que le da el aire) o "bomba" de referencia —
+  // si el chequeo de esas palabras fuera antes, un airlift terminaría
+  // clasificado como soplante/bomba por culpa de su propio texto.
+  [/airlift|air.?lift|mamut/, 'ALF', 'airlift'],
   [/bomba.*sumerg|sumerg.*bomba/, 'BS', 'bomba_sumerg'],
   [/bomba.*centrifug/, 'BC', 'bomba_centrifuga'],
   [/bomba.*tornillo/, 'BT', 'bomba_tornillo'],
-  [/bomba.*dosif|dosif.*bomba/, 'BD', 'bomba_dosif'],
+  [/bomba.*dosif|dosif.*bomba|equipo.*dosif|dosif.*equipo|\bdosificador\b/, 'BD', 'bomba_dosif'],
   [/bomba/, 'BC', 'bomba_centrifuga'],
   [/soplante|soplador|blower/, 'SOP', 'blower'],
   [/compresor/, 'COMP', 'blower'],
@@ -12314,6 +12319,7 @@ const PROCESOS_FLOWSHEET_TAGS = [
   [/membrana|\bmbr\b|\buf\b|osmosis/, 'MEM', 'membrana'],
   [/sensor.*nivel|nivel.*sensor/, 'LS', 'sensor_nivel'],
   [/canasto|cesta.*retenc|rejilla.*pozo|cesta.*pozo/, 'CST', 'canasto'],
+  [/puente.*barredor|barredor|rastra\b|rastrillo/, 'PBD', 'barredor'],
   [/tablero/, 'TE', 'generico'],
 ];
 // Catálogo para agregar un equipo a mano desde el botón "Equipos" del
@@ -12434,6 +12440,11 @@ function procesosFlowsheetIconoSvg(icono, cx, cy, s, color) {
       });
       return s2;
     }
+    case 'airlift': // caño vertical + burbujas subiendo (bombeo por aire, sin bloque STD)
+      return `<line x1="${cx}" y1="${cy-r*0.9}" x2="${cx}" y2="${cy+r*0.85}" stroke="${color}" stroke-width="${sw}"/><path d="M${cx-r*0.35},${cy-r*0.95} L${cx},${cy-r*0.9} L${cx+r*0.35},${cy-r*0.95}" fill="none" stroke="${color}" stroke-width="${sw}"/>` +
+        [-0.18,0.18].map(dx => `<circle cx="${cx+dx*r}" cy="${cy+r*0.5-Math.abs(dx)*r*1.4}" r="${r*0.08}" fill="none" stroke="${color}" stroke-width="${sw*0.8}"/>`).join('');
+    case 'barredor': // puente + brazo + motor central (mecanismo de sedimentador, sin bloque STD)
+      return `<line x1="${cx-r*0.8}" y1="${cy-r*0.4}" x2="${cx+r*0.8}" y2="${cy-r*0.4}" stroke="${color}" stroke-width="${sw}"/><line x1="${cx}" y1="${cy-r*0.4}" x2="${cx-r*0.4}" y2="${cy+r*0.35}" stroke="${color}" stroke-width="${sw*0.8}" stroke-dasharray="2,2"/><circle cx="${cx}" cy="${cy-r*0.4}" r="${r*0.16}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
     case 'mezclador': // poste vertical + motor arriba (mezclador vertical)
       return `<line x1="${cx}" y1="${cy-r*0.75}" x2="${cx}" y2="${cy+r*0.6}" stroke="${color}" stroke-width="${sw}"/><rect x="${cx-r*0.24}" y="${cy-r*0.95}" width="${r*0.48}" height="${r*0.34}" fill="none" stroke="${color}" stroke-width="${sw}"/>`;
     case 'cilindro': // cuerpo horizontal (deshidratador/centrífuga) + motor lateral
@@ -12548,6 +12559,23 @@ function procesosFlowsheetDosificaInfo(eq, nombresEtapas) {
   const quimico = m ? m[0].charAt(0).toUpperCase() + m[0].slice(1) : null;
   return { etapaDestino, quimico };
 }
+// Muchos proyectos cargan UN solo equipo por químico ("Equipo de
+// dosificación de hipoclorito") y el contenedor/maxibidón/tanque de
+// almacenamiento queda descripto adentro de la ESPECIFICACIÓN de ESE
+// mismo equipo, en vez de como una fila aparte — así que en vez de
+// pedirle al usuario que cargue el contenedor a mano, se detecta acá y
+// se agrega solo a la Zona de químicos (ver más abajo, después del loop
+// que numera destinos de dosificación).
+const PROCESOS_FLOWSHEET_CONTENEDOR_KEYWORDS = [
+  [/maxibidon|maxi.?bidon|\bibc\b/, 'maxibidon', 'Maxibidón'],
+  [/contenedor/, 'contenedor', 'Contenedor'],
+  [/tanque|tk\b/, 'tanque_real', 'Tanque'],
+];
+function procesosFlowsheetContenedorDetectado(eq) {
+  const texto = procesosNormTxt(`${eq.tipoOriginal || ''} ${eq.especificacion || ''}`);
+  for (const [re, icono, label] of PROCESOS_FLOWSHEET_CONTENEDOR_KEYWORDS) if (re.test(texto)) return { icono, label };
+  return null;
+}
 // Una bomba "de recirculación" (interna, RAS, de lodos, etc.) NO manda su
 // caudal a la SIGUIENTE etapa del tren — vuelve a una unidad anterior (ej.
 // LA recircula al anóxico, el sedimentador recircula lodos activados al
@@ -12651,7 +12679,7 @@ function procesosFlowsheetEscalar(largo, alto, defW, defH) {
   return { w: Math.round(w), h: Math.round(h) };
 }
 // Contorno de la figura de una etapa (no el ícono de un equipo puntual).
-function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color) {
+function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor) {
   switch (tipoFig) {
     case 'pozo':
       return `<path d="M${x},${y} L${x},${y+h} L${x+w},${y+h} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
@@ -12671,7 +12699,8 @@ function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color) {
         return `<g transform="translate(${cx2},${y+h/2}) scale(${w},${h})"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/></g>` +
           `<line x1="${x+w*0.08}" y1="${yPuente}" x2="${x+w*0.92}" y2="${yPuente}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>` +
           `<line x1="${cx2}" y1="${yPuente}" x2="${x+w*0.22}" y2="${y+h*0.4}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>` +
-          `<circle cx="${cx2}" cy="${yPuente}" r="${r}" fill="none" stroke="${color}" stroke-width="1.4"/>`;
+          `<circle cx="${cx2}" cy="${yPuente}" r="${r}" fill="none" stroke="${color}" stroke-width="1.4"/>` +
+          (etiquetaBarredor ? `<text x="${cx2+r+3}" y="${yPuente+3}" fill="${color}" font-size="8" font-weight="600">${procesosDiagramaSvgEsc(etiquetaBarredor)}</text>` : '');
       }
       const y1 = y + h * 0.6, cx2 = x + w / 2, vTop = y - h * 0.14, r = Math.max(3, w * 0.08);
       return `<path d="M${x},${y} L${x},${y1} L${cx2},${y+h} L${x+w},${y1} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
@@ -12796,8 +12825,11 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
       item += `<text x="${ccx}" y="${ccy + iconoR/2 + 23}" text-anchor="middle" fill="${colorDosif}" font-size="8">→ ${procesosDiagramaSvgEsc(eq.dosifEtapa)}</text>`;
     }
     s += procesosFlowsheetDragWrap('equipo', eq.id, item, { x: ccx - iconoR/2 - 8, y: ccy - iconoR/2 - 8, w: iconoR + 16, h: iconoR + (eq.dosifNumero ? 42 : 30) });
-    if (eq.icono.startsWith('bomba')) {
-      if (procesosFlowsheetEsRecirculacion(eq.tipoOriginal, tipoFig)) bombasRecirc.push({ x: ccx, y: ccy });
+    // El airlift SIEMPRE es para recircular lodos (bombeo por aire, sin
+    // partes móviles) — a diferencia de una bomba común, no hace falta
+    // que el texto diga "recirculación" para tratarlo como tal.
+    if (eq.icono.startsWith('bomba') || eq.icono === 'airlift') {
+      if (eq.icono === 'airlift' || procesosFlowsheetEsRecirculacion(eq.tipoOriginal, tipoFig)) bombasRecirc.push({ x: ccx, y: ccy });
       else bombas.push({ x: ccx, y: ccy });
     }
     if (eq.icono === 'blower') blowers.push({ x: ccx, y: ccy });
@@ -12860,7 +12892,17 @@ function procesosFlowsheetSvg(p) {
       fondo = equipos.filter(eq => eq.icono !== 'sensor_nivel' && procesosFlowsheetEsSumergible(eq));
       afuera = equipos.filter(eq => eq.icono !== 'sensor_nivel' && !procesosFlowsheetEsSumergible(eq));
     }
-    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, escalaEtapa, profundidad: dims.acometida };
+    // El barredor del sedimentador ya se dibuja como parte fija de la
+    // FIGURA (puente+brazo+motor, ver procesosFlowsheetFiguraSvg) — si
+    // además hay un equipo "Puente barredor" cargado, no tiene sentido
+    // dibujarlo TAMBIÉN como chip aparte (queda duplicado/confuso); se
+    // saca de "afuera" y su tag se imprime sobre el propio dibujo.
+    let barredorTags = [];
+    if (tipoFig === 'sedimentador') {
+      barredorTags = afuera.filter(eq => eq.icono === 'barredor').map(eq => eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag);
+      afuera = afuera.filter(eq => eq.icono !== 'barredor');
+    }
+    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, barredorTags, escalaEtapa, profundidad: dims.acometida };
   });
   // Numera las bombas dosificadoras cuyo destino se pudo detectar en el
   // texto (ver procesosFlowsheetDosificaInfo) — el mismo número se dibuja
@@ -12868,11 +12910,18 @@ function procesosFlowsheetSvg(p) {
   // unidad destino (ver más abajo, después de dibujar liq/lod), así se
   // puede seguir la referencia sin cruzar una flecha larga por el dibujo.
   let _pfDosifNum = 0;
+  const contenedoresDetectados = [];
   quimicosGlobal.forEach(eq => {
     if (eq.icono !== 'bomba_dosif') return;
     const info = procesosFlowsheetDosificaInfo(eq, nombresEtapas);
     if (info) { _pfDosifNum++; eq.dosifNumero = _pfDosifNum; eq.dosifEtapa = info.etapaDestino; eq.dosifQuimico = info.quimico; }
+    const cont = procesosFlowsheetContenedorDetectado(eq);
+    if (cont) {
+      const tipoSint = cont.label + (info && info.quimico ? ` de ${info.quimico}` : '');
+      contenedoresDetectados.push(Object.assign({ id: eq.id + '__cont', cantidad: 1, tipoOriginal: tipoSint, especificacion: '' }, procesosFlowsheetInfoDe(tipoSint, '')));
+    }
   });
+  quimicosGlobal.push(...contenedoresDetectados);
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
   const giDe = {};
@@ -13027,7 +13076,7 @@ function procesosFlowsheetSvg(p) {
       cy += icMaqR + 22;
     } else if (et.tipoFig !== 'caja') {
       const fx = x + (et.w - et.figW) / 2, fy = cy;
-      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq);
+      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq, et.barredorTags && et.barredorTags.join(', '));
       // Sensores de nivel: se ubican a la altura real a la que van (alto,
       // medio o bajo del tanque), no todos arriba — se agrupan por nivel
       // para no superponerlos si hay más de uno al mismo nivel.
