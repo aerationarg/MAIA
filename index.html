@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.98</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.98</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -730,6 +730,7 @@
               <div id="pf-equipos-panel-flowsheets" class="pf-equipos-panel" style="display:none;position:absolute;top:32px;right:0;z-index:20"></div>
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetDeshacer()" title="Deshace el último cambio (arrastre, chat o generar)">↩ Deshacer</button>
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button>
+              <button class="btn btn-secondary btn-sm" onclick="flowsheetsBorrarTodo()" title="Borra todas las etapas/equipos de este flowsheet para empezar de cero">🗑 Borrar todo</button>
             </div>
           </div>
           <div class="pf-placing-hint" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--text);margin:-4px 0 8px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px">
@@ -13235,12 +13236,12 @@ function procesosFlowsheetSvg(p) {
   const railGap = 26;
   function conectar(bombas, x1, ay, destX, destY, destPorArriba, color, marcador) {
     if (!bombas.length) {
-      // Sin bomba (pasa por gravedad): va derecho hacia la unidad
-      // siguiente, sin "subir" a un colector antes — no tendría sentido
-      // que el líquido suba solo. Un codo simple (horizontal y después
-      // vertical) alcanza para entrar por arriba; por el costado ya era
-      // una línea derecha.
-      if (destPorArriba) return `<path d="M${x1},${ay} L${destX},${ay} L${destX},${destY-8}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marcador})"/>`;
+      // Sin bomba (pasa por gravedad): línea derecha a la unidad
+      // siguiente, sin ningún tramo vertical de más — ni "sube a un
+      // colector" ni un codo al final — no tendría sentido que el
+      // líquido suba solo. Entre por arriba o por el costado, es la
+      // misma línea directa (el sedimentador, que sí entra por abajo,
+      // nunca llega acá — usa conectarSedimentador aparte).
       return `<line x1="${x1}" y1="${ay}" x2="${destX}" y2="${destY}" stroke="${color}" stroke-width="2" marker-end="url(#${marcador})"/>`;
     }
     // Con bomba(s) si tiene sentido subir a un colector — puede haber más
@@ -14085,6 +14086,19 @@ async function flowsheetsGenerarCore(p) {
   await flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data, generado_en: new Date().toISOString() }, p);
   console.log('[Flowsheets] guardado OK');
 }
+// Vacía el flowsheet actual (etapas y equipos) para arrancar de cero sin
+// tener que borrar el proyecto entero — con "↩ Deshacer" se puede volver
+// atrás si fue sin querer, igual que cualquier otro cambio del flow.
+async function flowsheetsBorrarTodo() {
+  const p = flowsheetsCurrentProyecto;
+  if (!p || !(p.diseno_data?.orden || []).length) return;
+  if (!confirm('¿Borrar todas las etapas y equipos de este flowsheet? Se puede deshacer con "↩ Deshacer" después.')) return;
+  procesosFlowsheetUndoPush(p);
+  p.diseno_data = { orden: [], hojas: {} };
+  p.equipos_data = { etapas: {}, layout: { etapas: {}, equipos: {}, puertos: {} } };
+  await flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data }, p);
+  if (flowsheetsCurrentProyecto === p) renderFlowsheetsDiagrama();
+}
 
 function renderFlowsheetsDiagrama() {
   const el = document.getElementById('flowsheets-diagrama');
@@ -14241,7 +14255,7 @@ async function flowsheetsChatSend() {
       const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad})`).join(', ') || '(sin equipos)';
       return `- "${nombre}" — línea ${h.linea || 'liquido'}${h.origenLodos ? `, recibe lodos de "${h.origenLodos}"` : ''} — dimensiones: ${JSON.stringify(h.valoresConEtiqueta || {})} — equipos: ${eqs}`;
     }).join('\n') || '(sin etapas todavía — generá el flowsheet primero con texto/archivos)';
-    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoTipo":"<tipo EXACTO ya cargado>","cambios":{"tipo":"...","cantidad":...}} (poné solo los campos que cambian)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
+    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoTipo":"<tipo EXACTO ya cargado>","cambios":{"tipo":"...","cantidad":...}} (poné solo los campos que cambian)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
