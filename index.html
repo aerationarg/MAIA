@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.100</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.101</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.100</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.101</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -21529,9 +21529,25 @@ async function cotizCondicionOpcionesSave(campo) {
 function campoConSugerencias(nombre, label, valorActual) {
   const opciones = _cotizCondicionOpciones[nombre] || [];
   return `<div><label style="font-size:12px">${esc(label)}</label>
-    <input list="dl-${nombre}" value="${esc(valorActual||'')}" oninput="cotizArmadoSetCampo('${nombre}',this.value)" />
+    <input list="dl-${nombre}" value="${esc(valorActual||'')}" oninput="cotizArmadoSetCampo('${nombre}',this.value)" onblur="cotizCondicionOfrecerGuardar('${nombre}',this.value)" />
     <datalist id="dl-${nombre}">${opciones.map(o => `<option value="${esc(o)}"></option>`).join('')}</datalist>
   </div>`;
+}
+// Si lo que se tipeó no está entre las opciones guardadas (Cfg Comercial),
+// ofrece agregarlo — así no hay que ir a Cfg Comercial a mano cada vez que
+// aparece una condición nueva. Se dispara al salir del campo (blur), no en
+// cada tecla.
+function cotizCondicionOfrecerGuardar(campo, valor) {
+  const v = (valor || '').trim();
+  if (!v) return;
+  const opciones = _cotizCondicionOpciones[campo] || [];
+  if (opciones.some(o => o.trim().toLowerCase() === v.toLowerCase())) return;
+  const label = (COTIZ_CONDICION_CAMPOS.find(([c]) => c === campo) || [])[1] || campo;
+  if (!confirm(`"${v}" no está entre las opciones guardadas de "${label}" — ¿agregarla para poder elegirla la próxima vez?`)) return;
+  _cotizCondicionOpciones[campo] = opciones.concat([v]);
+  supaConfigSet(COTIZ_CONDICION_KEY(campo), JSON.stringify(_cotizCondicionOpciones[campo]))
+    .then(() => { if (cotizArmado) cotizArmadoRender(); })
+    .catch(e => alert('No se pudo guardar la opción: ' + e.message));
 }
 
 // ── % de descuento de la Lista de precios (PV1/PV2/PV AS) — 3 números
@@ -21748,7 +21764,7 @@ function cotizArmadoRender() {
             ${st._sucursales.map(s => `<option value="${s.id}" ${s.id===st.sucursal_id?'selected':''}>${esc(s.nombre||'(sin nombre)')}</option>`).join('')}
           </select>` : ''}
         </div>
-        <input value="${esc(st.sucursal||'')}" oninput="cotizArmadoSetCampo('sucursal',this.value)" />
+        <input value="${esc(st.sucursal||'')}" oninput="cotizArmadoSetCampo('sucursal',this.value)" onblur="cotizArmadoOfrecerGuardarSucursal(this.value)" />
       </div>
       ${campo('fecha','Fecha','date')}
       ${campo('telefono','Teléfono')}
@@ -21768,10 +21784,10 @@ function cotizArmadoRender() {
             ${st._lugares.map(l => `<option value="${l.id}" ${l.texto===st.lugar_entrega?'selected':''}>${esc((l.texto||'(sin texto)').slice(0,30))}</option>`).join('')}
           </select>` : ''}
         </div>
-        <input value="${esc(st.lugar_entrega||'')}" oninput="cotizArmadoSetCampo('lugar_entrega',this.value)" />
+        <input value="${esc(st.lugar_entrega||'')}" oninput="cotizArmadoSetCampo('lugar_entrega',this.value)" onblur="cotizArmadoOfrecerGuardarLugar(this.value)" />
       </div>
       ${campoConSugerencias('validez_oferta','Validez de la oferta',st.validez_oferta)}
-      ${campo('firmante_nombre','Firma — Ingeniero/a')}
+      ${campo('firmante_nombre','Responsable')}
     </div>
     <label>Garantía</label>
     <textarea rows="2" oninput="cotizArmadoSetCampo('garantia',this.value)">${esc(st.garantia)}</textarea>
@@ -21783,11 +21799,22 @@ function cotizArmadoRender() {
     <input id="cotiz-armado-buscar" placeholder="Buscar por ítem, marca, modelo..." oninput="cotizArmadoBuscarItemsDebounced()" />
     <div id="cotiz-armado-sugerencias" style="max-height:280px;overflow-y:auto"></div>
     <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="cotizArmadoAgregarManual()">+ Agregar ítem manual</button>
+    <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="cotizArmadoAgregarDescuento()">+ Agregar dto especial</button>
 
     <div class="gap"></div>
     <label>Ítems de la cotización (${st.items.length}/${COTIZ_MAX_ITEMS})</label>
     ${st.items.length > COTIZ_MAX_ITEMS ? `<p class="hint" style="color:var(--red)">La plantilla solo tiene lugar para ${COTIZ_MAX_ITEMS} ítems — sacá alguno antes de generar.</p>` : ''}
-    ${st.items.length ? st.items.map(it => `
+    ${st.items.length ? st.items.map(it => it.tipo === 'descuento' ? `
+      <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;background:var(--surface2)">
+        <span style="width:56px;font-size:12px;color:var(--text2);align-self:center">Dto.</span>
+        <input value="${esc(it.descripcion)}" placeholder="Descripción" style="flex:2;min-width:220px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)" />
+        <div style="display:flex;align-items:center;gap:3px;width:120px">
+          <input type="number" min="1" max="100" value="${esc(String(it.dto_pct))}" style="width:70px" onchange="cotizArmadoSetItemCampo('${it.id}','dto_pct',this.value)" />
+          <span style="font-size:13px">%</span>
+        </div>
+        <span style="width:100px;font-size:13px;align-self:center;color:var(--red)">${procesosFormatearNumero(it.precio_unitario)}</span>
+        <button class="btn btn-secondary btn-sm" onclick="cotizArmadoEliminarItem('${it.id}')">✕</button>
+      </div>` : `
       <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
         <input value="${esc(String(it.cantidad))}" placeholder="Cant." style="width:56px" onchange="cotizArmadoSetItemCampo('${it.id}','cantidad',this.value)" />
         <input value="${esc(it.descripcion)}" placeholder="Descripción" style="flex:2;min-width:220px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)" />
@@ -21830,8 +21857,20 @@ function cotizArmadoSetCampo(campo, val) {
 // Subtotal + IVA% (a menos que se haya pisado a mano). Se llama cada vez que
 // cambian los ítems o el % de IVA — "↺" en el armador vuelve a modo
 // automático si se había tocado a mano.
+// Los ítems de descuento especial se recalculan PRIMERO, acá mismo: cada
+// uno vale -(dto_pct% de la suma de los ítems NORMALES) — así "aplicado
+// sobre el subtotal" son los productos/servicios reales, no otro
+// descuento (varios descuentos son aditivos, no se componen entre sí) —
+// y el resto del código (Excel, snapshot, historial) sigue leyendo
+// cantidad*precio_unitario sin saber que es un descuento.
 function cotizArmadoRecalcularTotales() {
   const st = cotizArmadoInit();
+  const sumaNormales = (st.items||[]).filter(it => it.tipo !== 'descuento').reduce((a,it) => a + (Number(it.cantidad)||0)*(Number(it.precio_unitario)||0), 0);
+  (st.items||[]).forEach(it => {
+    if (it.tipo !== 'descuento') return;
+    const pct = Math.max(1, Math.min(100, Number(it.dto_pct) || 0));
+    it.precio_unitario = -(sumaNormales * pct / 100);
+  });
   const sumaItems = (st.items||[]).reduce((a,it) => a + (Number(it.cantidad)||0)*(Number(it.precio_unitario)||0), 0);
   if (!st._subtotalManual) st.subtotal = sumaItems;
   if (!st._totalManual) st.total = (Number(st.subtotal)||0) * (1 + (Number(st.iva)||0)/100);
@@ -21945,6 +21984,46 @@ function cotizArmadoSeleccionarSucursal(sucursalId) {
   st.sucursal = suc ? (suc.nombre || '') : '';
   cotizArmadoRender();
 }
+// Si lo que se tipeó en "Lugar de entrega"/"Sucursal" no es ninguno de los
+// ya guardados para ESTE cliente (tablas clientes_lugares_entrega/
+// clientes_sucursales, mismas que usa la solapa Clientes), ofrece
+// guardarlo ahí — así no hay que ir a Clientes a cargarlo a mano. Sin
+// cliente seleccionado no hay dónde guardarlo, así que no ofrece nada.
+function cotizArmadoOfrecerGuardarLugar(valor) {
+  const st = cotizArmadoInit();
+  const v = (valor || '').trim();
+  if (!v || !st.cliente_id) return;
+  if ((st._lugares || []).some(l => (l.texto || '').trim().toLowerCase() === v.toLowerCase())) return;
+  if (!confirm(`"${v}" no es un lugar de entrega guardado de ${st.cliente || 'este cliente'} — ¿guardarlo para la próxima vez?`)) return;
+  cotizArmadoGuardarLugarOSucursal('lugar', v);
+}
+function cotizArmadoOfrecerGuardarSucursal(valor) {
+  const st = cotizArmadoInit();
+  const v = (valor || '').trim();
+  if (!v || !st.cliente_id) return;
+  if ((st._sucursales || []).some(s => (s.nombre || '').trim().toLowerCase() === v.toLowerCase())) return;
+  if (!confirm(`"${v}" no es una sucursal guardada de ${st.cliente || 'este cliente'} — ¿guardarla para la próxima vez?`)) return;
+  cotizArmadoGuardarLugarOSucursal('sucursal', v);
+}
+async function cotizArmadoGuardarLugarOSucursal(tipo, valor) {
+  const st = cotizArmadoInit();
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const tabla = tipo === 'lugar' ? 'clientes_lugares_entrega' : 'clientes_sucursales';
+  const body = tipo === 'lugar' ? { cliente_id: st.cliente_id, texto: valor } : { cliente_id: st.cliente_id, nombre: valor };
+  try {
+    const res = await supaFetch(`/rest/v1/${tabla}`, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + session.token, Prefer: 'return=representation' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error('No se pudo guardar (¿corriste el SQL que crea la tabla "' + tabla + '"?)');
+    const nuevo = (await res.json().catch(() => []))[0];
+    if (nuevo) {
+      if (tipo === 'lugar') st._lugares = (st._lugares || []).concat([nuevo]);
+      else st._sucursales = (st._sucursales || []).concat([nuevo]);
+    }
+    cotizArmadoRender();
+  } catch (e) { alert('No se pudo guardar: ' + e.message); }
+}
 function cotizArmadoAplicarContacto(ct) {
   const st = cotizArmadoInit();
   st.contacto_id = ct.id;
@@ -21986,8 +22065,32 @@ async function cotizArmadoAgregarManual() {
     } catch(e) { alert('No se pudo crear el producto en Stock: ' + e.message + ' — se agrega igual el ítem a la cotización.'); }
   }
   st.items.push(item);
+  cotizArmadoOrdenarItems(st);
   cotizArmadoRecalcularTotales();
   cotizArmadoRender();
+}
+// Un "ítem" de descuento especial (no es un producto — no tiene cantidad
+// ni precio unitario propio): un % que se descuenta del subtotal de los
+// ítems normales (nunca de otro descuento — varios descuentos son
+// aditivos sobre la misma base, no se componen entre sí). Se guarda como
+// cualquier otro ítem (misma fila en el snapshot/Excel: cantidad=1,
+// precio_unitario=el monto ya calculado y negativo) para no tener que
+// tocar todo lo que ya lee "cantidad*precio_unitario" — dto_pct es el
+// único campo de más, y se recalcula el precio_unitario en
+// cotizArmadoRecalcularTotales() cada vez que cambia algo.
+function cotizArmadoAgregarDescuento() {
+  const st = cotizArmadoInit();
+  st.items.push({ id: procesosNuevoId(), tipo: 'descuento', descripcion: 'Descuento especial', cantidad: 1, dto_pct: 10, precio_unitario: 0 });
+  cotizArmadoOrdenarItems(st);
+  cotizArmadoRecalcularTotales();
+  cotizArmadoRender();
+}
+// Los ítems de descuento siempre van al final de la lista — no importa
+// en qué orden se hayan agregado ni si se edita algo de los de arriba.
+function cotizArmadoOrdenarItems(st) {
+  const normales = st.items.filter(it => it.tipo !== 'descuento');
+  const descuentos = st.items.filter(it => it.tipo === 'descuento');
+  st.items = normales.concat(descuentos);
 }
 function cotizArmadoEliminarItem(id) {
   const st = cotizArmadoInit();
@@ -22098,6 +22201,7 @@ function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   // ítem vino de Stock (no del historial ni cargado a mano) — es lo que
   // permite descontar stock automáticamente al marcar vendida.
   st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null });
+  cotizArmadoOrdenarItems(st);
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
   cotizArmadoRecalcularTotales();
@@ -22646,7 +22750,7 @@ const COTIZ_CAMPOS_HISTORIAL = [
   ['referencia','Referencia'], ['tipo_venta','Tipo de venta'], ['moneda','Moneda'],
   ['forma_pago','Forma de pago'], ['forma_cancelacion','Forma de cancelación'], ['plazo_entrega','Plazo de entrega'],
   ['lugar_entrega','Lugar de entrega'], ['garantia','Garantía'], ['validez_oferta','Validez de la oferta'],
-  ['observaciones','Observaciones'], ['firmante_nombre','Firma'],
+  ['observaciones','Observaciones'], ['firmante_nombre','Responsable'],
   ['iva','IVA %'], ['subtotal','Subtotal'], ['total','Total'],
 ];
 // Compara dos estados de una cotización (campo por campo + un resumen de
