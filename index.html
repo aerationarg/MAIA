@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.96</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.97</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.96</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.97</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12803,7 +12803,7 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
   const anchoUsado = Math.min(equipos.length, cols) * celda;
   const xIni = x + (anchoDisponible - anchoUsado) / 2;
   let s = '';
-  const bombas = [], blowers = [], bombasRecirc = [];
+  const bombas = [], bombasRecirc = [];
   equipos.forEach((eq, i) => {
     const col = i % cols, fila = Math.floor(i / cols);
     const off = layout ? procesosFlowsheetOffset(layout, 'equipos', eq.id) : { x: 0, y: 0 };
@@ -12828,9 +12828,8 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
       if (eq.icono === 'airlift' || procesosFlowsheetEsRecirculacion(eq.tipoOriginal, tipoFig)) bombasRecirc.push({ x: ccx, y: ccy });
       else bombas.push({ x: ccx, y: ccy });
     }
-    if (eq.icono === 'blower') blowers.push({ x: ccx, y: ccy });
   });
-  return { svg: s, alto: filas * celda, bombas, blowers, bombasRecirc };
+  return { svg: s, alto: filas * celda, bombas, bombasRecirc };
 }
 // Misma estructura/flujo que procesosDiagramaFlujoSvg (etapas confirmadas del
 // Paso 2, línea líquida arriba y de lodos abajo), pero cada etapa se dibuja
@@ -12849,15 +12848,21 @@ function procesosFlowsheetSvg(p) {
   const nombresEtapas = procesosStep3EtapasConfirmadas(p);
   if (!nombresEtapas.length) return '';
   const BOX_MIN_W = 190, PAD = 16, HEADER_H = 40, IC_OUT = 34, IC_IN = 22, IC_MAQ = 60;
-  // Equipos de químicos de TODAS las etapas se sacan acá y se juntan en una
-  // sola "Zona de químicos" aparte (ver procesosFlowsheetEsQuimico) — el
-  // resto de este closure (figW/figH/afuera/medir...) ya no los ve, así
-  // que no ocupan lugar en la etapa a la que originalmente pertenecían.
+  // Equipos de químicos, y por separado los soplantes, de TODAS las
+  // etapas se sacan acá y se juntan cada uno en su propia zona aparte
+  // (Zona de químicos / Zona de soplantes, ver más abajo) — el resto de
+  // este closure (figW/figH/afuera/medir...) ya no los ve, así que no
+  // ocupan lugar en la etapa a la que originalmente pertenecían. Los
+  // soplantes SIEMPRE se sacan (no solo si sirven a otra etapa): en la
+  // planta real están en la sala de sopladores, no adentro de cada
+  // tanque que airean.
   const quimicosGlobal = [];
+  const soplantesGlobal = [];
   const todas = nombresEtapas.map(nombre => {
     const equiposCrudos = ((ed[nombre] && ed[nombre].equipos) || []).map(eq => Object.assign({ id: eq.id, cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo, especificacion: eq.especificacion, origenEtapa: nombre }, procesosFlowsheetInfoDe(eq.tipo, eq.especificacion)));
-    const equipos = equiposCrudos.filter(eq => !procesosFlowsheetEsQuimico(eq));
+    const equipos = equiposCrudos.filter(eq => !procesosFlowsheetEsQuimico(eq) && eq.icono !== 'blower');
     quimicosGlobal.push(...equiposCrudos.filter(eq => procesosFlowsheetEsQuimico(eq)));
+    soplantesGlobal.push(...equiposCrudos.filter(eq => eq.icono === 'blower'));
     const hojaBase = (p.diseno_data?.hojas?.[nombre] || {}).hojaBase || nombre;
     let { tipoFig, contieneAgua } = procesosFlowsheetFiguraDeEtapa(nombre, hojaBase);
     // Si el NOMBRE de la etapa no dice nada (ej. "Pretratamiento" genérico)
@@ -12920,33 +12925,41 @@ function procesosFlowsheetSvg(p) {
     }
   });
   quimicosGlobal.push(...contenedoresDetectados);
-  // Difusores en una etapa que no tiene soplante propio: en este flujo de
-  // trabajo el soplante se carga UNA sola vez (en la etapa donde vive
-  // físicamente, ej. LA) y los difusores se repiten en cada etapa que
-  // realmente airea (ej. Digestor) — nunca se vuelve a cargar el
-  // soplante ahí. Así que a diferencia de la dosificadora, acá NO hay
-  // texto que lo diga (ni hace falta): la regla es estructural. Si hay
-  // una sola etapa con soplante en todo el proyecto, se linkea con TODAS
-  // las etapas que tienen difusor pero no soplante propio; si hay más de
-  // una etapa con soplante, es ambiguo (¿cuál alimenta a cuál?) y no se
-  // adivina nada. La cañería física soplante→difusor de la MISMA etapa
-  // (ver caja(), más abajo) sigue igual — esto es solo para el caso de
-  // difusores en OTRA etapa.
+  // Todos los soplantes se sacaron a Zona de soplantes (ver arriba) — así
+  // que TODA etapa que airea (incluida la etapa donde el soplante estaba
+  // originalmente cargado, ej. LA) necesita ahora su marca de "entra
+  // aire" con flecha numerada, no solo las que no tenían soplante propio.
+  // El destino "obvio" de cada soplante es la etapa donde fue cargado
+  // (mismo criterio que la dosificadora, ver procesosFlowsheetDosificaInfo)
+  // — un soplante = un grupo = un número. Además, una etapa con difusor
+  // que NUNCA tuvo su propio soplante cargado (ej. Digestor) se linkea
+  // con el ÚNICO grupo de soplantes del proyecto, si no es ambiguo (más
+  // de un grupo → no se adivina cuál alimenta a cuál).
   let _pfAireNum = 0;
-  const etapasConSoplante = todas.filter(et => et.equipos.some(eq => eq.icono === 'blower'));
-  const etapasConDifusorSolo = todas.filter(et => et.equipos.some(eq => eq.icono === 'difusor') && !et.equipos.some(eq => eq.icono === 'blower'));
-  if (etapasConSoplante.length === 1 && etapasConDifusorSolo.length) {
-    _pfAireNum++;
-    const numero = _pfAireNum;
-    const destinos = etapasConDifusorSolo.map(et => et.nombre);
-    etapasConSoplante[0].equipos.forEach(eq => {
-      if (eq.icono !== 'blower') return;
-      eq.aireNumero = numero;
-      eq.aireEtapas = destinos;
-      eq.aireEtapa = destinos.join(', ');
+  const gruposSoplante = new Map(); // origenEtapa -> { numero, destinos: [...] }
+  soplantesGlobal.forEach(eq => {
+    if (!gruposSoplante.has(eq.origenEtapa)) {
+      _pfAireNum++;
+      gruposSoplante.set(eq.origenEtapa, { numero: _pfAireNum, destinos: [eq.origenEtapa] });
+    }
+  });
+  if (gruposSoplante.size === 1) {
+    const [[, unicoGrupo]] = gruposSoplante;
+    todas.forEach(et => {
+      if (et.equipos.some(eq => eq.icono === 'difusor') && !gruposSoplante.has(et.nombre)) unicoGrupo.destinos.push(et.nombre);
     });
-    etapasConDifusorSolo.forEach(et => { et._aireEntraNumeros = (et._aireEntraNumeros || []).concat([numero]); });
   }
+  soplantesGlobal.forEach(eq => {
+    const grupo = gruposSoplante.get(eq.origenEtapa);
+    eq.aireNumero = grupo.numero;
+    eq.aireEtapa = grupo.destinos.join(', ');
+  });
+  gruposSoplante.forEach(grupo => {
+    grupo.destinos.forEach(nombre => {
+      const et = todas.find(t => t.nombre === nombre);
+      if (et) et._aireEntraNumeros = (et._aireEntraNumeros || []).concat([grupo.numero]);
+    });
+  });
   const grupos = procesosStep2GruposDesdeActual(p);
   const flujo = procesosStep2TrenFlujo(grupos);
   const giDe = {};
@@ -12991,6 +13004,11 @@ function procesosFlowsheetSvg(p) {
   if (quimicosGlobal.length) {
     etapaQuimicos = { nombre: 'Zona de químicos', equipos: quimicosGlobal, tipoFig: 'caja', contieneAgua: false, dimsTxt: '', figW: 0, figH: 0, dominante: null, adentro: [], techo: [], afuera: quimicosGlobal, escalaEtapa: procesosFlowsheetEscala(layout, 'etapas', 'Zona de químicos'), profundidad: null };
     Object.assign(etapaQuimicos, medir(etapaQuimicos));
+  }
+  let etapaSoplantes = null;
+  if (soplantesGlobal.length) {
+    etapaSoplantes = { nombre: 'Zona de soplantes', equipos: soplantesGlobal, tipoFig: 'caja', contieneAgua: false, dimsTxt: '', figW: 0, figH: 0, dominante: null, adentro: [], techo: [], afuera: soplantesGlobal, escalaEtapa: procesosFlowsheetEscala(layout, 'etapas', 'Zona de soplantes'), profundidad: null };
+    Object.assign(etapaSoplantes, medir(etapaSoplantes));
   }
   const liq = todas.filter(e => !e.esLodos), lod = todas.filter(e => e.esLodos);
   const c = procesosDiagramaColores();
@@ -13046,14 +13064,28 @@ function procesosFlowsheetSvg(p) {
   const row2y = floorYLod; // nombre corto reusado más abajo (ver comentario histórico "row2y")
   const finLiq = liq.length ? xLiq(liq.length - 1) + liq[liq.length - 1].w + gapX : 0;
   const finLod = lod.length ? xLod(lod.length - 1) + lod[lod.length - 1].w : 0;
-  // "Zona de químicos": su propia fila, siempre debajo de todo lo demás —
-  // no tiene flechas de proceso, así que no necesita estar alineada con
-  // ninguna unidad en particular, alcanza con ir después de la última fila
-  // usada (lodos si hay, si no líquida).
-  const xQuim = padSides;
-  const floorYQuim = etapaQuimicos ? (lod.length ? floorYLod + debajoMaxLod : floorYLiq + debajoMaxLiq) + filaGap + etapaQuimicos.hFigura : 0;
-  const totalW = Math.max(finLiq, finLod + padSides, etapaQuimicos ? xQuim + etapaQuimicos.w + padSides : 0, 260) + MARGIN;
-  const totalH = (etapaQuimicos ? floorYQuim + padTop : (lod.length ? floorYLod + debajoMaxLod + padTop + 14 : floorYLiq + debajoMaxLiq + padTop)) + MARGIN;
+  // "Zona de químicos" y "Zona de soplantes" van juntas, una al lado de
+  // la otra — ninguna tiene flechas de proceso, así que no necesitan
+  // estar alineadas con ninguna unidad en particular. La fila de lodos
+  // no siempre arranca en padSides (arranca alineada bajo la unidad de
+  // la que salen los lodos, ver x0) — si queda lugar libre a su
+  // izquierda se ubican ahí, a la MISMA altura que esa fila, en vez de
+  // vivir siempre en un "piso" aparte mucho más abajo de todo el dibujo.
+  // Si no entran (o no hay fila de lodos), caen a un piso aparte, después
+  // de la última fila usada.
+  const zonas = [etapaQuimicos, etapaSoplantes].filter(Boolean);
+  const anchoZonas = zonas.reduce((s, z) => s + z.w, 0) + gapX * Math.max(0, zonas.length - 1);
+  const espacioIzquierdaLod = lod.length ? Math.max(0, x0 - gapX - padSides) : 0;
+  const zonasJuntoALod = zonas.length > 0 && lod.length > 0 && espacioIzquierdaLod >= anchoZonas;
+  if (zonas.length) {
+    const floorYZonas = zonasJuntoALod ? floorYLod
+      : (lod.length ? floorYLod + debajoMaxLod : floorYLiq + debajoMaxLiq) + filaGap + Math.max(...zonas.map(z => z.hFigura));
+    let xCursor = padSides;
+    zonas.forEach(z => { z._zx = xCursor; z._zy = floorYZonas; xCursor += z.w + gapX; });
+  }
+  const totalW = Math.max(finLiq, finLod + padSides, (zonas.length && !zonasJuntoALod) ? padSides * 2 + anchoZonas : 0, 260) + MARGIN;
+  let totalH = (lod.length ? floorYLod + debajoMaxLod + padTop + 14 : floorYLiq + debajoMaxLiq + padTop) + MARGIN;
+  if (zonas.length && !zonasJuntoALod) totalH = Math.max(totalH, zonas[0]._zy + padTop + MARGIN);
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
   const colorRecirc = '#7b4fa3';
   svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker><marker id="pfd2-arrow-recirc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colorRecirc}"/></marker></defs>`;
@@ -13068,14 +13100,17 @@ function procesosFlowsheetSvg(p) {
     return t;
   };
   svg += dibujarNivelTerreno(liq, padSides - 10, finLiq, floorYLiq);
-  if (lod.length) svg += dibujarNivelTerreno(lod, xLod(0) - 10, finLod, floorYLod);
-  if (etapaQuimicos) svg += dibujarNivelTerreno([etapaQuimicos], xQuim - 10, xQuim + etapaQuimicos.w, floorYQuim);
+  // Si las zonas quedaron junto a la fila de lodos (misma altura), se
+  // extiende esa MISMA línea de nivel de terreno para que las cubra
+  // también, en vez de dibujar otra aparte pegada al lado (se vería como
+  // dos líneas partidas con dos carteles "Nivel de terreno").
+  if (lod.length) svg += dibujarNivelTerreno(lod, (zonasJuntoALod ? padSides : xLod(0)) - 10, finLod, floorYLod);
+  if (zonas.length && !zonasJuntoALod) zonas.forEach(z => { svg += dibujarNivelTerreno([z], z._zx - 10, z._zx + z.w, z._zy); });
   const CONTIENE_AGUA_TOP = { tanque: 1, daf: 1, pozo: 1, sedimentador: 1, desinfeccion: 1 };
   const caja = (x, y, et, esLodos) => {
     let s = '';
     const bombas = []; // posiciones reales {x,y} de cada ícono de bomba dibujado (que manda a la SIGUIENTE etapa), para las cañerías
     const bombasRecirc = []; // bombas "de recirculación" (interna, RAS, lodos...) — NO van a la siguiente etapa, vuelven a una anterior
-    const difusores = []; // posiciones reales {x,y} de cada ícono de difusor, para la cañería de aire desde el soplante
     s += `<text x="${x + et.w/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13">${procesosDiagramaSvgEsc(et.nombre)}</text>`;
     if (et.dimsTxt) s += `<text x="${x + et.w/2}" y="${y + 34}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.dimsTxt)}</text>`;
     let cy = y + HEADER_H + (et.dimsTxt ? 14 : 0);
@@ -13174,33 +13209,19 @@ function procesosFlowsheetSvg(p) {
             if (procesosFlowsheetEsRecirculacion(it.tipoOriginal, et.tipoFig)) bombasRecirc.push({ x: icx, y: icy });
             else bombas.push({ x: icx, y: icy });
           }
-          if (it.icono === 'difusor') difusores.push({ x: icx, y: icy });
         });
       }
       cy += et.figH + 10;
     }
-    let afueraBlowers = [];
+    // Los soplantes ya no se dibujan acá (siempre se sacaron a Zona de
+    // soplantes, ver más arriba) — el difusor ahora siempre recibe su
+    // aire marcado con la flecha numerada (ver "entra aire" más abajo),
+    // nunca con una cañería física local.
     if (et.afuera.length) {
-      const { svg: chipsSvg, bombas: chipBombas, blowers: chipBlowers, bombasRecirc: chipBombasRecirc } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT, layout, et.tipoFig);
+      const { svg: chipsSvg, bombas: chipBombas, bombasRecirc: chipBombasRecirc } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT, layout, et.tipoFig);
       s += chipsSvg;
       bombas.push(...chipBombas);
       bombasRecirc.push(...(chipBombasRecirc || []));
-      afueraBlowers = chipBlowers || [];
-    }
-    // Cañería de aire soplante → difusores: el soplante queda afuera (no es
-    // sumergible) y el difusor adentro, al fondo de la unidad — se conecta
-    // con un caño en escuadra que "atraviesa" la pared hasta el difusor,
-    // como en un P&ID real de aireación. Color propio (celeste, línea de
-    // aire) para que no se confunda con la cañería de proceso (magenta) ni
-    // se pierda contra el contorno del equipo (verde) cuando coinciden en X.
-    if (afueraBlowers.length && difusores.length) {
-      const colorAire = '#0d8fa3';
-      const dx0 = difusores.reduce((sum, d) => sum + d.x, 0) / difusores.length;
-      const dy0 = Math.min(...difusores.map(d => d.y));
-      afueraBlowers.forEach(b => {
-        const midY = (b.y + dy0) / 2;
-        s += `<path d="M${b.x},${b.y} L${b.x},${midY} L${dx0},${midY} L${dx0},${dy0}" fill="none" stroke="${colorAire}" stroke-width="1.4" stroke-dasharray="3,2"/>`;
-      });
     }
     return { svg: s, bombas, bombasRecirc };
   };
@@ -13213,12 +13234,19 @@ function procesosFlowsheetSvg(p) {
   // si es una etapa "máquina" o sin figura reconocida, entra por el costado.
   const railGap = 26;
   function conectar(bombas, x1, ay, destX, destY, destPorArriba, color, marcador) {
-    if (!bombas.length && !destPorArriba) {
+    if (!bombas.length) {
+      // Sin bomba (pasa por gravedad): va derecho hacia la unidad
+      // siguiente, sin "subir" a un colector antes — no tendría sentido
+      // que el líquido suba solo. Un codo simple (horizontal y después
+      // vertical) alcanza para entrar por arriba; por el costado ya era
+      // una línea derecha.
+      if (destPorArriba) return `<path d="M${x1},${ay} L${destX},${ay} L${destX},${destY-8}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marcador})"/>`;
       return `<line x1="${x1}" y1="${ay}" x2="${destX}" y2="${destY}" stroke="${color}" stroke-width="2" marker-end="url(#${marcador})"/>`;
     }
-    // Puntos de salida: uno por bomba real, o el borde de la caja de origen
-    // (a media altura) si no hay ninguna — siempre suben hasta el colector.
-    const salidas = bombas.length ? bombas : [{ x: x1, y: ay }];
+    // Con bomba(s) si tiene sentido subir a un colector — puede haber más
+    // de una bomba en paralelo, que se juntan en una sola línea antes de
+    // seguir (y una bomba real, a diferencia de la gravedad, sí sube).
+    const salidas = bombas;
     const railY = Math.min(...salidas.map(b => b.y), destPorArriba ? destY : ay) - railGap;
     let s = '';
     salidas.forEach(b => { s += `<line x1="${b.x}" y1="${b.y}" x2="${b.x}" y2="${railY}" stroke="${color}" stroke-width="1.4"/>`; });
@@ -13395,12 +13423,12 @@ function procesosFlowsheetSvg(p) {
       svg += `<text x="${bx+12}" y="${by+3}" fill="${colorAireRef}" font-size="8">entra aire</text>`;
     });
   });
-  if (etapaQuimicos) {
-    const off = procesosFlowsheetOffset(layout, 'etapas', etapaQuimicos.nombre);
-    const xQ = xQuim + off.x, yQ = floorYQuim - etapaQuimicos.hFigura + off.y;
-    const { svg: cajaSvg } = caja(xQ, yQ, etapaQuimicos, false);
-    svg += procesosFlowsheetDragWrap('etapa', etapaQuimicos.nombre, cajaSvg, { x: xQ, y: yQ, w: etapaQuimicos.w, h: etapaQuimicos.h });
-  }
+  zonas.forEach(z => {
+    const off = procesosFlowsheetOffset(layout, 'etapas', z.nombre);
+    const xZ = z._zx + off.x, yZ = z._zy - z.hFigura + off.y;
+    const { svg: cajaSvg } = caja(xZ, yZ, z, false);
+    svg += procesosFlowsheetDragWrap('etapa', z.nombre, cajaSvg, { x: xZ, y: yZ, w: z.w, h: z.h });
+  });
   svg += `</svg>`;
   return svg;
 }
@@ -13656,13 +13684,14 @@ function procesosFlowsheetEquipoColocarClick(ev) {
   const g = ev.target.closest('[data-drag-tipo="etapa"]');
   if (!g) return;
   const nombreEtapa = g.getAttribute('data-drag-id');
-  // "Zona de químicos" no es una etapa real (es un agrupamiento automático
-  // armado al dibujar, ver procesosFlowsheetEsQuimico) — no tiene
-  // equipos_data.etapas propio, así que un equipo agregado ahí se perdería
-  // en silencio. Un equipo de químico llega solo a esa zona sin importar
-  // en qué etapa real se lo coloque.
-  if (nombreEtapa === 'Zona de químicos') {
-    alert('"Zona de químicos" se arma sola con los equipos de químicos de las demás etapas — elegí la etapa real a la que corresponde (igual va a aparecer ahí si es de químicos).');
+  // "Zona de químicos"/"Zona de soplantes" no son etapas reales (son
+  // agrupamientos automáticos armados al dibujar, ver
+  // procesosFlowsheetEsQuimico y la extracción de soplantesGlobal) — no
+  // tienen equipos_data.etapas propio, así que un equipo agregado ahí se
+  // perdería en silencio. Un equipo de químico/soplante llega solo a su
+  // zona sin importar en qué etapa real se lo coloque.
+  if (nombreEtapa === 'Zona de químicos' || nombreEtapa === 'Zona de soplantes') {
+    alert(`"${nombreEtapa}" se arma sola con los equipos de las demás etapas — elegí la etapa real a la que corresponde (igual va a aparecer ahí si corresponde).`);
     return;
   }
   ev.preventDefault();
