@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.87</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.87</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -725,7 +725,10 @@
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
             <div class="card-label" style="margin:0">Flowsheet</div>
-            <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetDeshacer()" title="Deshace el último cambio (arrastre, chat o generar)">↩ Deshacer</button>
+              <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button>
+            </div>
           </div>
           <p class="hint" style="margin-top:-4px">Arrastrá equipos o unidades para acomodarlos — se guardan solas.</p>
           <div id="flowsheets-diagrama"></div>
@@ -12107,7 +12110,7 @@ function procesosStep3Html(p) {
     <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
       <button class="btn ${_procesosDiagramaModo === 'bloques' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('bloques')">Diagrama de bloques</button>
       <button class="btn ${_procesosDiagramaModo === 'flowsheet' ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="procesosDiagramaCambiarModo('flowsheet')">Flowsheet de equipos</button>
-      ${_procesosDiagramaModo === 'flowsheet' ? '<button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button><span class="hint" style="margin:0">Arrastrá equipos o unidades para acomodarlos</span>' : ''}
+      ${_procesosDiagramaModo === 'flowsheet' ? '<button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetDeshacer()" title="Deshace el último cambio (arrastre o chat)">↩ Deshacer</button><button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetReacomodar()" title="Vuelve equipos y unidades a su posición automática">↺ Reacomodar automático</button><span class="hint" style="margin:0">Arrastrá equipos o unidades para acomodarlos</span>' : ''}
     </div>
     <div id="procesos-step3-diagrama"></div>
   `;
@@ -12559,7 +12562,11 @@ function procesosFlowsheetDragWrap(tipo, id, inner, hit, noResize) {
   // que el handler de pointerdown la distinga y le dé prioridad. No aplica
   // a los puertos de entrada/salida (son un punto, no algo con tamaño).
   const HS = 9;
-  const handle = (hit && !noResize) ? `<rect data-resize-tipo="${tipo}" data-resize-id="${procesosFlowsheetAttrEsc(id)}" x="${hit.x+hit.w-HS}" y="${hit.y+hit.h-HS}" width="${HS}" height="${HS}" fill="#ffffff" stroke="#8a8a86" stroke-width="1" style="cursor:nwse-resize"/>` : '';
+  // data-anchor-x/y: centro del área de "hit" — punto fijo alrededor del
+  // cual se escala en vivo mientras se arrastra la manija (ver
+  // procesosFlowsheetResizeMove), para que la vista previa crezca/achique
+  // sobre el lugar en vez de salir volando desde el origen del SVG.
+  const handle = (hit && !noResize) ? `<rect data-resize-tipo="${tipo}" data-resize-id="${procesosFlowsheetAttrEsc(id)}" data-anchor-x="${hit.x+hit.w/2}" data-anchor-y="${hit.y+hit.h/2}" x="${hit.x+hit.w-HS}" y="${hit.y+hit.h-HS}" width="${HS}" height="${HS}" fill="#ffffff" stroke="#8a8a86" stroke-width="1" style="cursor:nwse-resize"/>` : '';
   return `<g class="pf-drag" data-drag-tipo="${tipo}" data-drag-id="${procesosFlowsheetAttrEsc(id)}" style="cursor:move">${hitRect}${inner}${handle}</g>`;
 }
 // Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
@@ -13100,6 +13107,7 @@ function procesosFlowsheetGrupoLayout(layout, tipo) {
 function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
   const a = _pfAdapter;
   if (!a) return;
+  procesosFlowsheetUndoPush(a.modelo);
   const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
   const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {} });
   const grupo = procesosFlowsheetGrupoLayout(layout, tipo);
@@ -13108,20 +13116,30 @@ function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
   a.guardar();
   a.rerender();
 }
-// Redimensionado (manija de la esquina): sin vista previa en vivo (requeriría
-// re-renderizar todo el SVG en cada pointermove) — el gesto se completa al
-// soltar, momento en el que sí se recalcula y se ve el resultado.
+// Redimensionado (manija de la esquina): la vista previa en vivo escala el
+// grupo entero con un transform (barato) durante el arrastre — el
+// resultado FINAL (con la figura/cañerías recalculadas de verdad) recién
+// se ve al soltar, que es cuando se re-renderiza todo el SVG.
 let _pfResize = null;
+// Tamaño típico de referencia para convertir píxeles arrastrados en un
+// factor de escala — compartido entre la vista previa en vivo (Move) y el
+// guardado final (GuardarEscala), para que lo que se ve mientras se
+// arrastra coincida con el tamaño que efectivamente queda al soltar.
+function procesosFlowsheetEscalaReferencia(tipo) { return tipo === 'etapa' ? 200 : 24; }
 function procesosFlowsheetResizeStart(ev, handle) {
   const svgEl = handle.ownerSVGElement;
   const ctm = svgEl && svgEl.getScreenCTM();
   if (!ctm) return;
   ev.preventDefault();
   ev.stopPropagation();
+  const grupo = handle.closest('[data-drag-tipo]');
   _pfResize = {
     tipo: handle.getAttribute('data-resize-tipo'),
     id: handle.getAttribute('data-resize-id'),
     el: handle,
+    grupo,
+    anchorX: parseFloat(handle.getAttribute('data-anchor-x')) || 0,
+    anchorY: parseFloat(handle.getAttribute('data-anchor-y')) || 0,
     scaleX: 1 / ctm.a, scaleY: 1 / ctm.d,
     startX: ev.clientX, startY: ev.clientY,
     d: 0,
@@ -13138,6 +13156,14 @@ function procesosFlowsheetResizeMove(ev) {
   const dx = (ev.clientX - r.startX) * r.scaleX;
   const dy = (ev.clientY - r.startY) * r.scaleY;
   r.d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+  // Vista previa en vivo: escala el grupo entero alrededor de su propio
+  // centro (data-anchor-x/y), con el mismo factor que va a terminar
+  // guardándose — así se ve crecer/achicar en el lugar mientras se arrastra,
+  // en vez de recién mostrar el resultado al soltar.
+  if (r.grupo) {
+    const factor = Math.max(0.3, 1 + r.d / procesosFlowsheetEscalaReferencia(r.tipo));
+    r.grupo.setAttribute('transform', `translate(${r.anchorX},${r.anchorY}) scale(${factor}) translate(${-r.anchorX},${-r.anchorY})`);
+  }
 }
 function procesosFlowsheetResizeEnd(ev) {
   if (!_pfResize) return;
@@ -13145,17 +13171,19 @@ function procesosFlowsheetResizeEnd(ev) {
   r.el.removeEventListener('pointermove', procesosFlowsheetResizeMove);
   r.el.removeEventListener('pointerup', procesosFlowsheetResizeEnd);
   r.el.removeEventListener('pointercancel', procesosFlowsheetResizeEnd);
+  if (r.grupo) r.grupo.removeAttribute('transform');
   _pfResize = null;
   if (Math.abs(r.d) > 3) procesosFlowsheetGuardarEscala(r.tipo, r.id, r.d);
 }
 function procesosFlowsheetGuardarEscala(tipo, id, dPixels) {
   const a = _pfAdapter;
   if (!a) return;
+  procesosFlowsheetUndoPush(a.modelo);
   const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
   const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {} });
   const grupo = procesosFlowsheetGrupoLayout(layout, tipo);
   const prev = grupo[id] || { x: 0, y: 0 };
-  const referencia = tipo === 'etapa' ? 200 : 24; // tamaño típico de referencia para convertir píxeles arrastrados en factor
+  const referencia = procesosFlowsheetEscalaReferencia(tipo);
   let escala = (prev.escala || 1) * (1 + dPixels / referencia);
   escala = Math.max(0.4, Math.min(3, escala));
   grupo[id] = Object.assign({}, prev, { escala });
@@ -13165,9 +13193,45 @@ function procesosFlowsheetGuardarEscala(tipo, id, dPixels) {
 function procesosFlowsheetReacomodar() {
   const a = _pfAdapter;
   if (!a || !a.modelo.equipos_data) return;
+  procesosFlowsheetUndoPush(a.modelo);
   a.modelo.equipos_data.layout = { etapas: {}, equipos: {}, puertos: {} };
   a.guardar();
   a.rerender();
+}
+// ── Deshacer (Ctrl+Z de los flows) ──────────────────────
+// Una pila de snapshots {diseno_data, equipos_data} por proyecto — tomados
+// SIEMPRE antes de cualquier cambio real (arrastrar, redimensionar,
+// reacomodar, chat, generar), sea en Procesos IA o en Flowsheets. Se guarda
+// como JSON (copia profunda desconectada) para que un cambio posterior en
+// el objeto real no altere el snapshot ya guardado. WeakMap por objeto de
+// proyecto — se limpia solo si el proyecto deja de existir, y no mezcla
+// historial entre dos proyectos distintos.
+const _procesosFlowsheetUndoStacks = new WeakMap();
+function procesosFlowsheetUndoPush(p) {
+  if (!p) return;
+  if (!_procesosFlowsheetUndoStacks.has(p)) _procesosFlowsheetUndoStacks.set(p, []);
+  const pila = _procesosFlowsheetUndoStacks.get(p);
+  pila.push(JSON.stringify({ diseno_data: p.diseno_data, equipos_data: p.equipos_data }));
+  if (pila.length > 20) pila.shift(); // tope razonable, no crece sin límite en una sesión larga
+}
+async function procesosFlowsheetUndoPop(p, guardarFn, rerenderFn) {
+  const pila = p && _procesosFlowsheetUndoStacks.get(p);
+  if (!pila || !pila.length) return false;
+  const snap = JSON.parse(pila.pop());
+  p.diseno_data = snap.diseno_data;
+  p.equipos_data = snap.equipos_data;
+  await guardarFn({ diseno_data: p.diseno_data, equipos_data: p.equipos_data }, p);
+  rerenderFn();
+  return true;
+}
+// Botón "↩ Deshacer" del toolbar del Flowsheet — usa el adaptador activo
+// (ver _pfAdapter), así sirve igual desde Procesos IA o desde Flowsheets
+// sin duplicar la función.
+async function procesosFlowsheetDeshacer() {
+  const a = _pfAdapter;
+  if (!a) return;
+  const hubo = await procesosFlowsheetUndoPop(a.modelo, a.guardar, a.rerender);
+  if (!hubo) alert('No hay cambios para deshacer.');
 }
 // Acciones de layout que un chat (el general de Procesos IA o el de la
 // solapa Flowsheets) puede pedir sobre un modelo — mover/escalar una etapa
@@ -13497,6 +13561,10 @@ async function flowsheetsGenerarCore(p) {
     hojas[nombre] = { tipo:'etapa', hojaBase: nombre, seleccionada: true, confirmada: true, linea: et.linea === 'lodos' ? 'lodos' : 'liquido', origenLodos: et.origenLodos || null, valoresConEtiqueta };
     equiposEtapas[nombre] = { equipos: (et.equipos||[]).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1 })) };
   });
+  // Deshacer: guarda el estado ANTERIOR a pisarlo con lo recién generado —
+  // "↩ Deshacer" tiene que poder volver al flowsheet de antes de este
+  // "Generar", no solo a la última posición arrastrada.
+  procesosFlowsheetUndoPush(p);
   p.diseno_data = { orden, hojas };
   p.equipos_data = { etapas: equiposEtapas, layout: { etapas:{}, equipos:{} } };
   console.log('[Flowsheets] guardando en Supabase...', orden);
@@ -13673,6 +13741,9 @@ async function flowsheetsChatSend() {
     catch (_e) { parsed = { respuesta: raw, acciones: [], acciones_layout: [] }; }
     p.chat_historial = p.chat_historial.concat([{ role: 'assistant', content: parsed.respuesta || '(sin respuesta)' }]);
     const fieldsToSave = { chat_historial: p.chat_historial };
+    if ((parsed.acciones && parsed.acciones.length) || (parsed.acciones_layout && parsed.acciones_layout.length)) {
+      procesosFlowsheetUndoPush(p);
+    }
     const nuevo = flowsheetsAplicarAcciones(p, parsed.acciones);
     if (nuevo) { p.diseno_data = nuevo.diseno_data; p.equipos_data = nuevo.equipos_data; fieldsToSave.diseno_data = nuevo.diseno_data; fieldsToSave.equipos_data = nuevo.equipos_data; }
     const modeloLayout = { diseno_data: p.diseno_data, equipos_data: fieldsToSave.equipos_data || p.equipos_data };
@@ -15601,6 +15672,14 @@ async function procesosChatSend() {
         info.corrientes = corrientes;
       }
       fieldsToSave.info_cliente = info;
+    }
+    // Deshacer: un solo snapshot para las dos tandas de acciones de este
+    // turno (equipos + layout) — así "↩ Deshacer" revierte el mensaje
+    // completo de una, no cada acción suelta. Solo si hay algo que de
+    // verdad podría cambiar algo (la mayoría de los mensajes del chat
+    // general no tocan ni equipos ni layout).
+    if ((parsed.acciones_equipos && parsed.acciones_equipos.length) || (parsed.acciones_layout && parsed.acciones_layout.length)) {
+      procesosFlowsheetUndoPush(p);
     }
     const edNuevo = procesosAplicarAccionesEquiposChat(p, parsed.acciones_equipos);
     if (edNuevo) fieldsToSave.equipos_data = edNuevo;
