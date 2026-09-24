@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.102</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.103</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.102</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.103</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -20759,6 +20759,25 @@ async function microoVideoSeleccionado(file) {
     const inp = document.getElementById('microo-video-input'); if (inp) inp.value = '';
   }
 }
+// Miniatura liviana para guardar junto al mensaje (lo que se manda a Claude
+// sigue siendo la imagen original en _microoImagenesPendientes) — así el
+// historial del chat puede mostrar la foto que mandó el usuario sin guardar
+// el archivo pesado original en la base.
+function microoComprimirImagenParaGuardar(dataUrl, maxDim, calidad) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const escala = Math.min(1, (maxDim||480) / Math.max(img.width, img.height));
+      const w = Math.round(img.width * escala), h = Math.round(img.height * escala);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', calidad||0.7));
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
 function microoQuitarImagen() {
   _microoImagenesPendientes = [];
   _microoVideoInfo = null;
@@ -20798,7 +20817,7 @@ function microoRenderChat() {
     const matches = m.rol === 'assistant' ? microoOrganismosMencionados(m.texto, _microoConocimientoCache || []) : [];
     return `
     <div style="align-self:${m.rol==='user'?'flex-end':'flex-start'};max-width:85%">
-      <div style="background:${m.rol==='user'?'var(--primary)':'var(--card2, var(--bg2, #f0f0f0))'};color:${m.rol==='user'?'#fff':'var(--text)'};padding:8px 12px;border-radius:10px;white-space:pre-wrap;font-size:13px">${esc(m.texto||'')}${(m.tiene_imagen && !(m.texto||'').includes('🎥'))?'<div style="font-size:11px;opacity:.8;margin-top:4px">📷 con foto</div>':''}</div>
+      <div style="background:${m.rol==='user'?'var(--primary)':'var(--card2, var(--bg2, #f0f0f0))'};color:${m.rol==='user'?'#fff':'var(--text)'};padding:8px 12px;border-radius:10px;white-space:pre-wrap;font-size:13px">${esc(m.texto||'')}${m.imagen_data_url ? `<img src="${m.imagen_data_url}" style="max-width:180px;max-height:180px;border-radius:8px;margin-top:6px;display:block;object-fit:cover" />` : ((m.tiene_imagen && !(m.texto||'').includes('🎥'))?'<div style="font-size:11px;opacity:.8;margin-top:4px">📷 con foto</div>':'')}</div>
       ${matches.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${matches.map(o => `
         <div style="text-align:center;width:76px">
           <img src="${microoImagenUrl(o)}" title="${esc(o.nombre)}" style="width:76px;height:76px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" onerror="this.parentElement.style.display='none'" />
@@ -20836,11 +20855,12 @@ async function microoEnviarMensaje() {
       _microoSesionId = nueva[0].id;
     }
 
+    const imagenParaGuardar = imagenes.length ? await microoComprimirImagenParaGuardar(imagenes[0].dataUrl) : null;
     const resUserMsg = await supaFetch('/rest/v1/microorganismos_mensajes', {
       method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-      body: JSON.stringify({ sesion_id: _microoSesionId, rol:'user', texto: ((texto || '') + (videoInfo ? `\n🎥 (video de ${Math.round(videoInfo.duracion)}s, ${videoInfo.nFrames} frames)` : '')).trim() || null, tiene_imagen: imagenes.length > 0 })
+      body: JSON.stringify({ sesion_id: _microoSesionId, rol:'user', texto: ((texto || '') + (videoInfo ? `\n🎥 (video de ${Math.round(videoInfo.duracion)}s, ${videoInfo.nFrames} frames)` : '')).trim() || null, tiene_imagen: imagenes.length > 0, imagen_data_url: imagenParaGuardar })
     });
-    const userMsgRow = resUserMsg.ok ? (await resUserMsg.json())[0] : { rol:'user', texto, tiene_imagen: imagenes.length > 0 };
+    const userMsgRow = resUserMsg.ok ? (await resUserMsg.json())[0] : { rol:'user', texto, tiene_imagen: imagenes.length > 0, imagen_data_url: imagenParaGuardar };
     _microoMensajes.push(userMsgRow);
     microoRenderChat();
 
