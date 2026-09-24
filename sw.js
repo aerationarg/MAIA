@@ -1,4 +1,4 @@
-const CACHE = 'maia-v111';
+const CACHE = 'maia-v112';
 const ASSETS = [
   './',
   './index.html',
