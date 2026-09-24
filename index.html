@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.101</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.102</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.101</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.102</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -20652,6 +20652,17 @@ async function microoCargarConocimiento() {
   } catch(e) { _microoConocimientoCache = []; }
   return _microoConocimientoCache;
 }
+function microoImagenUrl(row) {
+  return row && row.imagen_url ? `${SUPA_URL}/storage/v1/object/public/microorganismos/${row.imagen_url}` : null;
+}
+// Busca, entre los organismos con imagen cargada, cuáles menciona el texto de
+// una respuesta del asistente (match por nombre completo, no por género solo,
+// para no mostrar una foto de otra especie del mismo género).
+function microoOrganismosMencionados(texto, conocimiento) {
+  if (!texto || !conocimiento?.length) return [];
+  const t = texto.toLowerCase();
+  return conocimiento.filter(c => c.imagen_url && c.nombre && t.includes(c.nombre.toLowerCase()));
+}
 function microoSystemPrompt(conocimiento) {
   const fecha = new Date().toLocaleDateString('es-AR', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
   const base = conocimiento.length
@@ -20673,6 +20684,7 @@ ${base}`;
 }
 
 async function microoRender() {
+  await microoCargarConocimiento();
   await microoCargarSesionesSelect();
   microoRenderChat();
 }
@@ -20782,12 +20794,20 @@ function microoRenderChat() {
   const el = document.getElementById('microo-chat');
   if (!el) return;
   if (!_microoMensajes.length) { el.innerHTML = '<p class="hint">Sacá una foto y contame qué estás viendo para arrancar.</p>'; return; }
-  el.innerHTML = _microoMensajes.map(m => `
+  el.innerHTML = _microoMensajes.map(m => {
+    const matches = m.rol === 'assistant' ? microoOrganismosMencionados(m.texto, _microoConocimientoCache || []) : [];
+    return `
     <div style="align-self:${m.rol==='user'?'flex-end':'flex-start'};max-width:85%">
       <div style="background:${m.rol==='user'?'var(--primary)':'var(--card2, var(--bg2, #f0f0f0))'};color:${m.rol==='user'?'#fff':'var(--text)'};padding:8px 12px;border-radius:10px;white-space:pre-wrap;font-size:13px">${esc(m.texto||'')}${(m.tiene_imagen && !(m.texto||'').includes('🎥'))?'<div style="font-size:11px;opacity:.8;margin-top:4px">📷 con foto</div>':''}</div>
+      ${matches.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${matches.map(o => `
+        <div style="text-align:center;width:76px">
+          <img src="${microoImagenUrl(o)}" title="${esc(o.nombre)}" style="width:76px;height:76px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" onerror="this.parentElement.style.display='none'" />
+          <div style="font-size:10px;color:var(--text2);line-height:1.2;margin-top:2px"><i>${esc(o.nombre)}</i>${o.imagen_credito ? `<br>© ${esc(o.imagen_credito)}` : ''}</div>
+        </div>`).join('')}</div>` : ''}
       ${m.rol==='assistant' && m.id ? `<button class="btn btn-secondary btn-sm" style="margin-top:4px" onclick="microoGuardarComoAprendizaje('${m.id}')">✓ Guardar como aprendizaje</button>` : ''}
     </div>
-  `).join('');
+  `;
+  }).join('');
   el.scrollTop = el.scrollHeight;
 }
 async function microoEnviarMensaje() {
@@ -20926,6 +20946,11 @@ async function microoConocimientoRender() {
         <textarea rows="2" style="margin-bottom:8px" onchange="microoConocimientoUpdate('${c.id}','implicancias_proceso',this.value)">${esc(c.implicancias_proceso||'')}</textarea>
         <label style="font-size:12px">Fuente</label>
         <input value="${esc(c.fuente||'')}" style="margin-bottom:8px" onchange="microoConocimientoUpdate('${c.id}','fuente',this.value)" />
+        ${c.imagen_url ? `<img src="${microoImagenUrl(c)}" style="max-width:130px;max-height:130px;border-radius:8px;border:1px solid var(--border);margin-bottom:8px;display:block" onerror="this.style.display='none'" />` : ''}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div><label style="font-size:12px">Archivo de imagen (bucket "microorganismos")</label><input value="${esc(c.imagen_url||'')}" placeholder="001_chaos_sp.png" onchange="microoConocimientoUpdate('${c.id}','imagen_url',this.value)" /></div>
+          <div><label style="font-size:12px">Crédito de la foto</label><input value="${esc(c.imagen_credito||'')}" onchange="microoConocimientoUpdate('${c.id}','imagen_credito',this.value)" /></div>
+        </div>
         <button class="btn btn-secondary btn-sm" onclick="microoConocimientoEliminar('${c.id}')" style="color:var(--red)">Eliminar</button>
       </div>`).join('');
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar.</p>'; }
