@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -22780,22 +22780,30 @@ async function cotizArmadoGenerar() {
     const blob = await cotizGenerarXlsxBlob(st);
     const nombreBase = cotizNombreArchivoBase(st) + (revision ? ` REV${revision}` : '');
     const nombreArchivo = `${nombreBase}.xlsx`;
-    let guardadoSp = null, avisoSp = '', avisoPdf = '';
+    let guardadoSp = null, avisoSp = '', avisoPdf = '', descargado = false;
     try {
       guardadoSp = await cotizGuardarEnSharePoint(st, blob, nombreArchivo);
+      if (!guardadoSp) {
+        // No hay carpeta vinculada para esta empresa (se configura por
+        // empresa en Cfg Comercial): descarga local como siempre, pero se
+        // avisa por qué para que no parezca un error silencioso.
+        avisoSp = ` (aviso: no hay una carpeta de cotizaciones de SharePoint vinculada para ${currentEmpresa}, por eso se descargó local — se vincula en Cfg Comercial)`;
+        cotizDescargarBlob(blob, nombreArchivo); descargado = true;
+      }
     } catch(eSp) {
-      // No se pudo subir a SharePoint — no se pierde el trabajo, cae a
-      // descarga local y se avisa (no corta el guardado en el historial).
-      avisoSp = ` (ojo: no se pudo guardar en SharePoint — ${eSp.message}, se descargó local en su lugar)`;
+      // No se pudo subir a SharePoint — se avisa el motivo y se pregunta si
+      // descargar el archivo local (no corta el guardado en el historial: la
+      // cotización igual queda registrada y se puede bajar desde el listado).
+      const bajar = confirm(`⚠ No se pudo guardar la cotización en SharePoint.\n\nMotivo: ${eSp.message}\n\n¿Querés descargar el Excel en tu computadora?\n\nSi cancelás, la cotización igual queda guardada en el historial de cotizaciones y la podés descargar desde el listado.`);
+      if (bajar) { cotizDescargarBlob(blob, nombreArchivo); descargado = true; }
+      avisoSp = ` (ojo: no se pudo guardar en SharePoint — ${eSp.message}; ${bajar ? 'se descargó local en su lugar' : 'el archivo NO se descargó, bajalo desde el listado'})`;
     }
-    if (!guardadoSp) {
-      cotizDescargarBlob(blob, nombreArchivo);
-    } else {
+    if (guardadoSp) {
       showMsg(statusId, 'loading', 'Generando el PDF...');
       try { await cotizGuardarPdfEnSharePoint(guardadoSp, nombreBase); }
       catch(ePdf) { avisoPdf = ` (ojo: no se pudo generar el PDF — ${ePdf.message})`; }
     }
-    showMsg(statusId, 'loading', (guardadoSp ? `Guardado en SharePoint (${guardadoSp.ruta}).` : 'Descargado.') + ' Guardando en el historial...');
+    showMsg(statusId, 'loading', (guardadoSp ? `Guardado en SharePoint (${guardadoSp.ruta}).` : (descargado ? 'Descargado.' : 'Sin archivo.')) + ' Guardando en el historial...');
 
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const camposComunes = {
@@ -22879,7 +22887,7 @@ async function cotizArmadoGenerar() {
         }
       }
     }
-    const dondeQuedo = guardadoSp ? `guardada en SharePoint (${guardadoSp.ruta})` : 'descargada';
+    const dondeQuedo = guardadoSp ? `guardada en SharePoint (${guardadoSp.ruta})` : (descargado ? 'descargada' : 'sin descargar');
     showMsg(statusId, 'success', `✓ Cotización ${editando?'actualizada ('+(mantenerVersion?'misma versión':'REV'+revision)+')':'generada'}, ${dondeQuedo} y guardada en el historial de cotizaciones${avisoQ}${avisoSp}${avisoPdf}.`);
     cotizCotizacionesRender();
   } catch(e) {
