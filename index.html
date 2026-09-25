@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.16</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.17</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.16</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.17</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1291,7 +1291,7 @@
       </div>
       <div class="card">
         <div class="card-label">Base de proyectos anteriores</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usa para que la IA detecte automáticamente proyectos parecidos al analizar un cliente nuevo. Cargá acá los proyectos ya hechos por la empresa: nombre, rubro/tags y una breve descripción alcanzan para que la IA los compare.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usa para que la IA detecte automáticamente proyectos parecidos al analizar un cliente nuevo. Cargá acá los proyectos ya hechos por la empresa: nombre, rubro/tags y una breve descripción alcanzan para que la IA los compare. Además, cada proyecto puede tener una <b>ficha estructurada</b> (tren de tratamiento con material y forma de las unidades, valores adoptados, equipos, textos de la propuesta y lecciones) que la IA usa como antecedente en todos los pasos, sin limitarse a ella.</p>
         <div id="procesos-catalogo-list"></div>
         <button class="btn btn-secondary" onclick="procesosCatalogoAdd()" style="margin-top:4px">+ Agregar proyecto al catálogo</button>
         <button class="btn btn-secondary" onclick="procesosCatalogoSelectCarpetaMadre()" style="margin-top:4px">📁 Cargar todos desde una carpeta</button>
@@ -6512,7 +6512,8 @@ async function renderProcesosCatalogo() {
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_path,carpeta_item_id&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    let res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_path,carpeta_item_id,ficha,ficha_estado&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,cliente,rubro,tags,descripcion,resumen_ia,carpeta_path,carpeta_item_id&empresa=eq.${currentEmpresa}&order=nombre`, {headers:{Authorization:'Bearer '+session.token}}); // antes de correr el SQL de fichas
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; return; }
     _procesosCatalogoState = { rows, filtro: filtroPrevio, expandedId: expandedPrevio };
@@ -6556,7 +6557,7 @@ function procesosCatalogoRenderLista() {
       return `
       <div class="field-row" style="cursor:pointer" onclick="procesosCatalogoExpandir('${p.id}')">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <span><b>${esc(p.nombre)}</b>${p.cliente?' — '+esc(p.cliente):''}${p.rubro?' <span style="color:var(--text2)">· '+esc(p.rubro)+'</span>':''}</span>
+          <span><b>${esc(p.nombre)}</b>${p.cliente?' — '+esc(p.cliente):''}${p.rubro?' <span style="color:var(--text2)">· '+esc(p.rubro)+'</span>':''}${p.ficha?' <span class="badge" style="font-size:10px;background:#e6eefc;color:#1f4e78">📋 ficha</span>':''}</span>
           <button class="remove-btn" onclick="event.stopPropagation();procesosCatalogoEliminar('${p.id}')">&#x2715;</button>
         </div>
       </div>`;
@@ -6577,6 +6578,7 @@ function procesosCatalogoRenderLista() {
           <button class="sp-browse-btn" onclick="procesosCatalogoSelectFolder('${p.id}')">Vincular carpeta</button>
           ${p.carpeta_item_id ? `<button class="sp-browse-btn" onclick="procesosCatalogoRegenerarResumen('${p.id}')">${p.resumen_ia?'↻ Regenerar':'✦ Generar'} resumen con IA</button>` : ''}
         </div>
+        ${procesosFichaCfgHtml(p)}
         <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="procesosCatalogoExpandir(null)">✕ Cerrar</button>
       </div>`;
   }).join('') + (filtrados.length > LIMITE ? `<p class="hint">Mostrando ${LIMITE} de ${filtrados.length} — afiná la búsqueda para ver el resto.</p>` : '');
@@ -8487,10 +8489,13 @@ async function procesosDetectarSimilares() {
     // de filas todavía vacías eso disparaba varios dólares de costo extra por
     // cada análisis de cliente nuevo. Ahora esos se completan a mano o con el
     // botón "Generar resumen con IA" de cada proyecto, no automáticamente acá.
-    const catalogo = catalogoAll.filter(c => c.descripcion || c.resumen_ia);
+    // Fichas estructuradas (si ya se corrió el SQL de fichas): también cuentan para comparar y aportan tecnología, caudal y tren
+    const fichasMap = {};
+    try { const rf = await supaFetch(`/rest/v1/procesos_catalogo?select=id,ficha&ficha=not.is.null&empresa=eq.${currentEmpresa}`, {headers:{Authorization:'Bearer '+session.token}}); const rowsF = await rf.json(); if (rf.ok && Array.isArray(rowsF)) rowsF.forEach(r => { if (r.ficha) fichasMap[r.id] = fichaResumenLinea(r.ficha); }); } catch (e) { /* sin fichas */ }
+    const catalogo = catalogoAll.filter(c => c.descripcion || c.resumen_ia || fichasMap[c.id]);
     if (!catalogo.length) { if(hasEl) showMsg(statusId,'error','Todavía no hay proyectos con descripción/resumen cargados en el catálogo.'); return; }
 
-    const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion || c.resumen_ia || ''}`).join('\n');
+    const listado = catalogo.map((c,i) => `${i+1}. ${c.nombre} — Cliente: ${c.cliente||'—'} — Rubro: ${c.rubro||'—'} — Tags: ${c.tags||'—'} — ${c.descripcion || c.resumen_ia || ''}${fichasMap[c.id] ? ' — FICHA: ' + fichasMap[c.id] : ''}`).join('\n');
     // Se compara en estos 4 puntos puntuales (no "relevancia" en general) y se
     // ordena por CANTIDAD de puntos en los que coincide — primero los que
     // coinciden en todos o casi todos, después los que coinciden en menos.
@@ -10015,10 +10020,11 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
             ? `Corrientes de efluente de este proyecto: ${corrientesProyecto.join(', ')}.${corrientesProyecto.length > 1 ? ' Pensá en qué punto del tren se juntan (si es que no vienen ya combinadas desde el arranque).' : ''}\n\n`
             : '';
           const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
+          const fichasTxt = await procesosFichasTxt(p, ['tren']);
           const materialGeometriaTxt = '- "material" (uno de "hormigon","chapa","prfv","planta_compacta") y "geometria" (uno de "rectangular","circular") para cada instancia de tipo "etapa" (para las "auxiliar" dejalos en null, no aplica). Proponé un estilo constructivo para TODA la planta y mantenelo consistente en la mayoría de las unidades — no vayas cambiando de material/geometría unidad por unidad sin motivo. Apartate del estilo general solo cuando algo puntual lo justifique, y en ese caso decilo en el "motivo" de esa unidad. Guía para elegir: "hormigon" es obra civil — se puede enterrar total o parcialmente si hace falta por diferencia de alturas entre etapas (para que el tren funcione por gravedad) o por poco espacio en el terreno. "chapa" y "prfv" son tanques prefabricados que van SOBRE el nivel de terreno (no se entierran) y están sujetos a límites de dimensión por transporte (ancho/alto de carga en ruta) y por capacidad de fabricación — para caudales grandes esto puede obligar a varias unidades en paralelo en vez de una sola de gran tamaño. "planta_compacta" es un equipo de dimensiones ya fijas de fábrica: se elige el modelo según el caudal, no se dimensiona libremente — tiene más sentido para caudales chicos/medianos. "circular" es más típico en tanques prefabricados (chapa/prfv) y en algunos de hormigón (sedimentadores); "rectangular" es más común en hormigón cuando conviene aprovechar el espacio en planta o compartir muros entre unidades contiguas. Si no tenés información del terreno o del espacio disponible para decidir con confianza, proponé la opción más común para esa tecnología (por defecto: hormigón rectangular para las unidades de proceso principales) — es un punto de partida que el usuario puede ajustar.\n';
           const DEFAULT_TEMPLATE_HOJAS = `Este es el resumen del cliente/proyecto:\n{{resumenCampos}}{{tecTxt}}\n\n{{corrientesTxt}}Esta es la lista de hojas de la planilla de diseño, cada una es un posible cálculo de una unidad/etapa de tratamiento, con algunas de sus etiquetas de celdas para orientarte de qué trata:\n{{firmas}}\n\n{{criteriosTxt}}{{leccionesTxt}}{{chatGeneralTxt}}Proponé el tren de tratamiento completo para este proyecto: qué hojas aplican, cuántas instancias de cada una hacen falta, en qué orden, y de qué material/geometría constructiva. Respondé SOLO con JSON válido (sin backticks ni texto extra):\n{"unidades":[{"hojaBase":"NombreHoja","cantidad":1,"disposicion":null,"tipo":"etapa","etapaAsociada":null,"linea":"liquido","origenLodos":null,"instancias":[{"nombre":"NombreHoja","corrientes":[],"material":"hormigon","geometria":"rectangular"}],"motivo":"razón breve, 5-12 palabras"}]}\n\nReglas:\n- "hojaBase" tiene que ser el nombre EXACTO de una hoja de la lista de arriba (aunque sea una sigla, ej. "EQ" — nunca la traduzcas ni pongas un alias).\n- "cantidad" es cuántas instancias de esa hoja hacen falta (lo normal es 1).\n- Poné cantidad > 1 en dos casos bien distintos: (a) hay más de una corriente de entrada y esta hoja procesa cada corriente POR SEPARADO antes de que se unan (ej. un pozo de bombeo por corriente) — ahí cada instancia lleva UNA sola corriente distinta en "corrientes" y "disposicion" queda en null (no se reparte caudal entre corrientes distintas, cada una tiene la suya); (b) el caudal de una corriente (ya combinada o no) supera lo que puede manejar una sola unidad y hace falta redundancia o capacidad extra — ahí TODAS las instancias del grupo llevan las MISMAS corrientes en "corrientes", y "disposicion" es "paralelo" o "serie" según corresponda.\n- "instancias" tiene que tener exactamente "cantidad" elementos. El "nombre" de cada instancia tiene que ser único en todo el proyecto: para el caso (a) usá algo como "NombreHoja cloacal"/"NombreHoja industrial"; para el caso (b) usá "NombreHoja — Línea 1"/"NombreHoja — Línea 2". Si cantidad es 1, el nombre puede ser igual al de la hoja.\n- "corrientes" de cada instancia: nombres EXACTOS de las corrientes de arriba que la alimentan. Si el proyecto tiene una sola corriente, o esta unidad ya recibe todas las corrientes combinadas (después del punto donde se unen), poné ahí TODAS las corrientes del proyecto.\n- "tipo": "etapa" para una unidad/etapa real del tren de tratamiento, o "auxiliar" si en realidad es un CÁLCULO DE SOPORTE que no es su propia etapa (ej. "Difusores", que dimensiona la aireación de otra etapa como MBR o LA, pero no procesa efluente por sí misma — otros ejemplos típicos: cálculo de coeficientes, dotaciones, dimensionamiento de sopladores). Si dudás si algo es una etapa real (recibe y trata el efluente) o un cálculo auxiliar (calcula un dato que otra etapa necesita), pensá si el efluente "pasa por ahí" — si no pasa, es auxiliar.\n- "etapaAsociada": SOLO si tipo es "auxiliar" — el "nombre" EXACTO (tal como quedó en "instancias" de arriba) de la instancia de la etapa real a la que esta hoja auxiliar le da un dato. Si tipo es "etapa", dejalo en null.\n- "linea": "liquido" para las unidades que tratan el efluente líquido (el efluente final —el que se compara con la normativa— sale de la ÚLTIMA unidad de esta línea, típicamente la desinfección o el último tratamiento terciario), o "lodos" para las que tratan los lodos generados por el tratamiento (digestión, espesamiento, deshidratación, etc.): esas NO reciben el efluente líquido sino lodos que salen de otra etapa, y su salida no es el efluente final. "origenLodos": SOLO para la primera unidad de la línea de lodos — el "nombre" EXACTO de la instancia (de las de línea "liquido") de la que salen los lodos (típicamente el sedimentador secundario, o el DAF / el reactor si no hay sedimentador); en las demás unidades de lodos, null (cada una recibe la salida de la unidad de lodos anterior, en el orden de "unidades"). Las unidades de lodos ponelas en su orden lógico (ej. espesamiento → digestión → deshidratación) y su posición en el array respecto de la línea líquida no cambia nada de esto.\n${materialGeometriaTxt}- Sé CONSERVADOR: evaluá cada hoja de la lista contra la info del cliente y los criterios de selección adjuntos, e incluí en "unidades" SOLO las que se justifican claramente para este proyecto (por el tipo de efluente, los parámetros, la tecnología ya elegida, lo que indican los criterios). Ante la duda de si una etapa hace falta, NO la incluyas — es mucho más fácil que el usuario agregue una que falta que tener que descartar varias que sobran. Las hojas que no aplican, simplemente no las menciones.\n- Lo mismo vale para "cantidad": por defecto 1 y "disposicion" null. Solo poné más de una instancia si hay un motivo concreto y explícito en la info del proyecto (varias corrientes que se tratan por separado, un caudal que claramente excede lo que maneja una sola unidad, o una carga orgánica que excede lo que puede tratar una sola unidad de esa tecnología) — no dupliques unidades "por las dudas" ni "por redundancia" si nada lo pide.\n- Además del caudal, mirá la CARGA ORGÁNICA (DBO/DQO en kg/día, y la concentración) y comparala con lo que puede tratar razonablemente UNA unidad de esa tecnología (según los criterios de selección adjuntos y el conocimiento típico de cada tecnología: rangos de carga volumétrica y másica, edad del barro, etc.). Si la carga es demasiado elevada para una sola unidad, resolvelo de la forma que tenga más sentido técnico: (a) más instancias de la misma hoja en "paralelo", repartiendo la carga entre ellas; o (b) combinar tecnologías DISTINTAS en "serie" usando otras hojas de la lista (por ejemplo una etapa de alta carga que reduzca la carga orgánica antes de una etapa biológica de pulido), con el orden correcto en "unidades". Si en el Paso 1 ya se eligió una tecnología, respetala como base: solo combiná con otra si la carga hace inviable resolverlo con una sola tecnología, y en ese caso decilo explícitamente en el "motivo" (ej. "carga alta: pre-tratamiento + biológico").\n- Las hojas "auxiliar" incluilas solo si la etapa real a la que alimentan está incluida y de verdad necesita ese cálculo.\n- El array "unidades" tiene que estar en el ORDEN real del tren, de la primera etapa a la última (el orden final de cada instancia sale de expandir "unidades" en ese orden). Las auxiliares podés ponerlas justo después de la etapa a la que están asociadas.\n- Solo si el resumen del proyecto está prácticamente vacío (recién arrancado, sin corrientes ni campos cargados) y por eso no tenés ningún criterio para decidir, proponé el tren mínimo más común/esperable en base al nombre y las etiquetas de cada hoja (cantidad:1, disposicion:null) en vez de devolver "unidades" vacío. Si SÍ hay información, no rellenes el tren con etapas "por las dudas": el usuario va a revisar y ajustar antes de aplicarlo, pero prefiere partir de un tren corto y correcto.`;
           const templateHojas = await procesosPromptText('step2_elegir_hojas', DEFAULT_TEMPLATE_HOJAS);
-          const prompt = procesosPromptFill(templateHojas, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt });
+          const prompt = procesosPromptFill(templateHojas, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, fichasTxt });
           const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
             body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 5000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x=>x.block), { type: 'text', text: prompt }] }] })
@@ -10795,6 +10801,7 @@ async function procesosStep2TrenChatSend() {
     const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, rangos de eficiencia y de carga por tecnología) — usalos como referencia.\n\n' : '';
     const leccionesTxt = lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa:\n' + lecciones + '\n\n' : '';
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
+    const fichasTxt = await procesosFichasTxt(p, ['tren']);
     const historialTxt = historialPrevio ? 'Conversación previa sobre este tren:\n' + historialPrevio + '\n\n' : '';
     const DEFAULT_TEMPLATE_TREN_CHAT = `Estás ayudando a revisar el tren de tratamiento que se propuso para un proyecto (todavía es un BORRADOR: el usuario lo puede modificar antes de aplicarlo). Resumen del cliente/proyecto:
 {{resumenCampos}}{{tecTxt}}
@@ -10817,7 +10824,7 @@ Respondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"respue
 - Si lo que piden no se puede hacer con las hojas disponibles (por ejemplo una tecnología que no está en la planilla), no inventes una hoja: explicalo en "reply" y dejá "unidades" en null.
 - Si el cambio pedido te parece técnicamente cuestionable (ej. sacar una etapa que los criterios marcan como necesaria), hacelo igual si el usuario lo pide de forma explícita, pero avisalo en "reply".`;
     const templateChat = await procesosPromptText('step2_tren_chat', DEFAULT_TEMPLATE_TREN_CHAT);
-    const prompt = procesosPromptFill(templateChat, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, trenActual, historialTxt, msg });
+    const prompt = procesosPromptFill(templateChat, { resumenCampos: procesosResumenCampos(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, fichasTxt, trenActual, historialTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 6000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x => x.block), { type: 'text', text: prompt }] }] })
@@ -11883,6 +11890,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta unidad.\n\n' : '';
     const leccionesTxt = lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : '';
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
+    const fichasTxt = await procesosFichasTxt(p, ['unidad'], nombre);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : '';
     const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{materialGeometriaUnidadTxt}}{{corrientesEtapaTxt}}{{grupoTxt}}{{criteriosTxt}}{{plantasCompactasTxt}}{{archivosProyectoTxt}}{{leccionesTxt}}{{chatGeneralTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé llamando a la herramienta "aplicar_cambios" — es la ÚNICA forma de que tus cambios se apliquen de verdad a la planilla; si solo los describís en "reply" pero no los incluís también en "acciones" de esa llamada, en los hechos NO pasa nada (la celda queda como estaba). Usá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, dejá "acciones" vacío. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply" y dejá "acciones" vacío.`;
     const templateStep2Chat = await procesosPromptText('step2_chat', DEFAULT_TEMPLATE_STEP2_CHAT);
@@ -11891,7 +11899,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // "de memoria" (o del estado previo a sus propios cambios) el texto no
     // coincide con lo que después se ve en las celdas — se lo aclaramos.
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, historialTxt, msg, precisionTxt });
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, tools: [PROCESOS_STEP2_TOOL], tool_choice: { type: 'tool', name: PROCESOS_STEP2_TOOL.name }, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
@@ -14993,6 +15001,7 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
       })
     ].filter(Boolean).join('\n');
     const referencias = await procesosGetResumenesReferencias();
+    const fichasTxt = await procesosFichasTxt(p, ['equipos'], nombreEtapa);
     const lecciones = procesosResumenLecciones(await procesosGetLecciones());
     // Lista CERRADA: solo se puede elegir equipos configurados en Cfg
     // Procesos IA para la etapa que coincida con "nombreEtapa" — si no hay
@@ -15009,7 +15018,7 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo, eso se resuelve en un paso aparte.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{plantillaTxt}}{{chatGeneralTxt}}\nSugerí la lista de equipos necesarios para esta etapa, basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica — pero SIEMPRE eligiendo exclusivamente de la lista cerrada de arriba, nunca de tu conocimiento general. Para cada equipo indicá cantidad (seguí la cantidad sugerida de la lista si la hay, ej. redundancia N+1 — no la ignores), tipo (copiado EXACTO de la lista), una especificación técnica breve (capacidad, potencia, material, etc. — usá la descripción de la lista como guía de qué datos completar) y una justificación breve.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
     const templateStep3Sugerir = await procesosPromptText('step3_sugerir_equipos', DEFAULT_TEMPLATE_STEP3_SUGERIR);
-    const prompt = procesosPromptFill(templateStep3Sugerir, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', resumenCampos: procesosResumenCampos(p), referenciasTxt, leccionesTxt, plantillaTxt, chatGeneralTxt });
+    const prompt = procesosPromptFill(templateStep3Sugerir, { nombreEtapa, valoresEtapa: valoresEtapa || '(sin valores)', resumenCampos: procesosResumenCampos(p), referenciasTxt, leccionesTxt, plantillaTxt, chatGeneralTxt, fichasTxt });
     // Si se corta (max_tokens insuficiente), reintenta sola una vez con el
     // doble antes de rendirse — ver mismo patrón en procesosStep1EjecutarAnalisis.
     const intentarSugerir = async (maxTokens) => {
@@ -15336,6 +15345,8 @@ async function procesosBuildContexto(hastaStep, incluirChatGeneral, incluirEquip
   if (p.info_cliente?.campos || p.info_cliente?.corrientes?.length) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
   const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
+  const fichasCtx = await procesosFichasTxt(p, hastaStep >= 4 ? ['general', 'propuesta'] : ['general']);
+  if (fichasCtx) ctx += fichasCtx + '\n';
   if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
   if (hastaStep > 3) { const equipos = procesosResumenEquipos(p, incluirEquiposNoConfirmados); if (equipos) ctx += `Equipos definidos por etapa:\n${equipos}\n\n`; }
   // Listado liviano (sin el contenido completo) de archivos propios del
@@ -25483,6 +25494,134 @@ async function refsEliminar(id) {
   if (!confirm(`¿Sacar "${r ? r.nombre : 'esta referencia'}" de la biblioteca?`)) return;
   await supaFetch(`/rest/v1/doc_referencias?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
   refsCfgRender();
+}
+
+// ══ Fichas estructuradas de proyectos anteriores (Base de proyectos anteriores de Cfg Procesos IA) ══
+// Cada proyecto del catálogo puede tener una "ficha": lo que se resolvió en esa obra, ya en el formato de MAIA —
+// datos generales y cargas, tren de tratamiento (material y forma de cada unidad), valores adoptados y equipos
+// por unidad, textos de la propuesta y lecciones. Se carga por SQL (extraída de los documentos de la obra) y se
+// revisa/valida en Cfg Procesos IA. Los pasos de Procesos IA la usan como antecedente para proponer, sin
+// limitarse a ella: son ejemplos y punto de partida, no un molde.
+const FICHAS_INTRO = 'OBRAS ANTERIORES SIMILARES (fichas estructuradas de proyectos ya ejecutados por la empresa). Usalas como antecedente y punto de partida: adaptá, agregá, sacá o mejorá lo que necesite ESTE proyecto — el criterio técnico es tuyo y no estás limitado a lo que aparece acá. Los valores, equipos y marcas de otra obra son antecedentes, no datos de este proyecto: no los copies como definitivos; si los usás, decilo (por ejemplo "en obras similares se adoptó…").';
+const FICHAS_STOP = new Set(['de', 'del', 'la', 'las', 'el', 'los', 'con', 'para', 'por', 'sistema', 'unidad', 'etapa', 'tanque', 'equipo', 'equipos', 'and', 'en', 'al', 'existente']);
+const FICHAS_SINONIMOS = [['daf', 'flotacion'], ['deshidratacion', 'deshidratador', 'prensa', 'centrifuga', 'decanter', 'filtro'], ['ph', 'neutralizacion', 'ajuste'], ['coagulacion', 'floculacion', 'quimico'], ['aireacion', 'aireador', 'aireadores', 'soplante', 'difusores', 'laguna'], ['lodos', 'barros', 'lodo', 'barro'], ['sedimentador', 'clarificador', 'decantador'], ['reactor', 'biologico', 'mbbr', 'mbr', 'cas'], ['ecualizador', 'ecualizacion'], ['desinfeccion', 'cloro']];
+let _fichasCache = {};
+function procesosFichasInvalidar() { _fichasCache = {}; }
+function fichaTokens(s) {
+  const base = String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/).filter(t => t.length >= 2 && !FICHAS_STOP.has(t));
+  const set = new Set(base);
+  FICHAS_SINONIMOS.forEach(g => { if (g.some(x => set.has(x))) g.forEach(x => set.add(x)); });
+  return set;
+}
+function fichaCoincide(nombre, u) {
+  const a = fichaTokens(nombre), b = fichaTokens((u.nombre || '') + ' ' + (u.tipo || ''));
+  for (const t of b) if (a.has(t)) return true;
+  return false;
+}
+// Fichas de los proyectos de referencia incluidos en el proyecto actual (con caché de 5 min)
+async function procesosFichasRefs(p) {
+  const ids = ((p && p.proyectos_referencia) || []).filter(r => r.incluido).map(r => r.id);
+  if (!ids.length) return [];
+  const ahora = Date.now();
+  const faltan = ids.filter(id => !_fichasCache[id] || ahora - _fichasCache[id].t > 300000);
+  if (faltan.length) {
+    try {
+      const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+      const res = await supaFetch(`/rest/v1/procesos_catalogo?select=id,nombre,ficha,ficha_estado&id=in.(${faltan.join(',')})`, { headers: { Authorization: 'Bearer ' + session.token } });
+      const rows = await res.json();
+      if (res.ok && Array.isArray(rows)) rows.forEach(r => { _fichasCache[r.id] = { t: ahora, nombre: r.nombre, ficha: r.ficha || null, estado: r.ficha_estado }; });
+      else faltan.forEach(id => { _fichasCache[id] = { t: ahora, ficha: null }; }); // p. ej. todavía no se corrió el SQL de fichas
+    } catch (e) { return []; }
+  }
+  return ids.map(id => _fichasCache[id]).filter(x => x && x.ficha);
+}
+function fichaLineaTren(u, i) {
+  const est = [u.material, u.geometria].filter(Boolean).join(', ');
+  return `${i + 1}. ${u.nombre}${u.existente ? ' [existente]' : ''}${est ? ' (' + est + ')' : ''}${u.nota ? ': ' + u.nota : ''}`;
+}
+function fichaUnidadTxt(u) {
+  const ad = (u.adoptados || []).map(a => `  - ${a.parametro}: ${a.valor}${a.unidad ? ' ' + a.unidad : ''}${a.nota ? ' (' + a.nota + ')' : ''}`).join('\n');
+  const eq = (u.equipos || []).map(e => `  - ${e.cantidad || 1}x ${e.tipo}${e.especificacion ? ' — ' + e.especificacion : ''}${e.modelo ? ' — ' + e.modelo : ''}${e.justificacion ? ' — ' + e.justificacion : ''}`).join('\n');
+  return `Unidad "${u.nombre}":${u.nota ? '\n  Nota: ' + u.nota : ''}${ad ? '\n Valores adoptados:\n' + ad : ''}${eq ? '\n Equipos:\n' + eq : ''}`;
+}
+// temas: 'general' (datos + tren), 'tren' (+ lecciones), 'unidad' (valores y equipos de la unidad equivalente),
+// 'equipos' (equipos de la unidad equivalente), 'propuesta' (textos de la propuesta como estilo)
+function procesosFichaTexto(item, temas, nombreUnidad) {
+  const f = item.ficha, g = f.general || {}, tren = f.tren || [], unidades = f.unidades || [];
+  let t = `### ${item.nombre} (${item.estado === 'validado' ? 'ficha validada' : 'ficha sin validar'})\n`;
+  const cab = [g.tecnologia && 'Tecnología: ' + g.tecnologia, g.tipo_obra && 'Tipo de obra: ' + g.tipo_obra, g.vuelco && 'Vuelco: ' + g.vuelco, g.caudal && 'Caudal: ' + g.caudal].filter(Boolean);
+  t += cab.join('\n') + '\n';
+  const coinciden = nombreUnidad ? unidades.filter(u => fichaCoincide(nombreUnidad, u)) : [];
+  if (temas.includes('general') || temas.includes('tren')) {
+    if (g.alcance && temas.includes('tren')) t += 'Alcance: ' + g.alcance + '\n';
+    if ((g.cargas || []).length && temas.includes('general')) t += 'Cargas de diseño: ' + g.cargas.map(c => `${c.parametro} ${c.valor} ${c.unidad || ''}`.trim()).join('; ') + '\n';
+    if (tren.length) t += 'Tren de tratamiento (con material y geometría de cada unidad):\n' + tren.map(fichaLineaTren).join('\n') + '\n';
+    if (temas.includes('tren') && (f.lecciones || []).length) t += 'Lecciones de esa obra:\n' + f.lecciones.map(l => '- ' + l).join('\n') + '\n';
+  }
+  if (temas.includes('unidad')) {
+    if (tren.length) t += 'Tren: ' + tren.map(u => u.nombre).join(' → ') + '\n';
+    t += coinciden.length ? coinciden.map(fichaUnidadTxt).join('\n') + '\n' : '(Esa obra no tiene una unidad equivalente a "' + nombreUnidad + '".)\n';
+  }
+  if (temas.includes('equipos')) {
+    const lista = coinciden.length ? coinciden : unidades;
+    t += (coinciden.length ? '' : '(Sin unidad equivalente a "' + nombreUnidad + '"; equipos de la obra en general:)\n') + lista.map(u => `Unidad "${u.nombre}": ` + (u.equipos || []).map(e => `${e.cantidad || 1}x ${e.tipo}${e.especificacion ? ' — ' + e.especificacion : ''}${e.modelo ? ' (' + e.modelo + ')' : ''}`).join('; ')).join('\n') + '\n';
+  }
+  if (temas.includes('propuesta') && f.propuesta) {
+    const pr = f.propuesta;
+    t += 'Textos de la propuesta técnica de esa obra (como ejemplo de estilo y nivel de detalle):\n' + (pr.secciones || []).map(s => `[${s.titulo}] ${String(s.texto || '').slice(0, 900)}`).join('\n') + '\n';
+    if ((pr.suministro || []).length) t += 'Lista de suministro: ' + pr.suministro.map(s => `${s.cant} ${s.detalle}`).join('; ') + '\n';
+    if ((pr.limite_suministro || []).length) t += 'Límite de suministro: ' + pr.limite_suministro.join(' ') + '\n';
+    if (pr.garantias) t += 'Garantías: ' + pr.garantias + '\n';
+  }
+  return t.slice(0, 9000);
+}
+// Bloque listo para agregar a un prompt ('' si el proyecto no tiene referencias con ficha)
+async function procesosFichasTxt(p, temas, nombreUnidad) {
+  try {
+    const items = (await procesosFichasRefs(p)).slice(0, 3);
+    if (!items.length) return '';
+    return FICHAS_INTRO + '\n\n' + items.map(it => procesosFichaTexto(it, temas, nombreUnidad)).join('\n') + '\n';
+  } catch (e) { return ''; }
+}
+// Resumen de una línea para comparar proyectos en el Paso 1
+function fichaResumenLinea(f) {
+  const g = f.general || {};
+  return [g.tecnologia && 'Tecnología: ' + g.tecnologia, g.caudal && 'Caudal: ' + g.caudal, (f.tren || []).length && 'Tren: ' + f.tren.map(u => u.nombre).join(' → ')].filter(Boolean).join(' · ');
+}
+
+// ── Cfg Procesos IA: ficha dentro de cada proyecto de la base ──
+function procesosFichaCfgHtml(p) {
+  const f = p.ficha;
+  if (!f) return `<div class="hint" style="margin:8px 0">📋 Sin ficha estructurada todavía. Las fichas se preparan a partir de los documentos de la obra (flowsheet, diseño, manual, DFS, oferta) y se cargan por SQL.</div>`;
+  const g = f.general || {}, ok = p.ficha_estado === 'validado';
+  const det = (titulo, cuerpo) => `<details style="margin:4px 0"><summary style="cursor:pointer;font-size:13px"><b>${titulo}</b></summary><div style="white-space:pre-wrap;font-size:12px;margin:6px 0;max-height:300px;overflow:auto">${cuerpo}</div></details>`;
+  return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap">
+      <div><b>📋 Ficha estructurada</b> <span class="badge" style="font-size:10px;${ok ? 'background:#e3f4e3;color:#1b7f1b' : 'background:#fff3cd;color:#8a6d00'}">${ok ? 'validada' : 'a validar'}</span></div>
+      <div style="display:flex;gap:6px"><button class="btn btn-secondary btn-sm" onclick="procesosFichaValidar('${p.id}')">${ok ? 'Marcar a validar' : '✓ Marcar validada'}</button><button class="btn btn-secondary btn-sm" onclick="procesosFichaQuitar('${p.id}')">Quitar ficha</button></div>
+    </div>
+    <div style="font-size:12px;margin-top:6px">${esc(g.tecnologia || '')}</div>
+    <div class="hint" style="margin:4px 0 6px">${(f.tren || []).length} unidades en el tren · ${(f.unidades || []).length} con valores y equipos · ${((f.propuesta || {}).secciones || []).length} secciones de propuesta · ${(f.lecciones || []).length} lecciones${f.fuente ? ' · ' + esc(f.fuente) : ''}</div>
+    ${det('Datos generales y cargas', esc([g.tipo_obra, 'Rubro: ' + (g.rubro || '-'), 'Ubicación: ' + (g.ubicacion || '-'), 'Vuelco: ' + (g.vuelco || '-'), 'Caudal: ' + (g.caudal || '-'), '', ...(g.cargas || []).map(c => `${c.parametro}: ${c.valor} ${c.unidad || ''}${c.nota ? ' — ' + c.nota : ''}`), '', g.alcance || ''].join('\n')))}
+    ${det('Tren de tratamiento', esc((f.tren || []).map(fichaLineaTren).join('\n')))}
+    ${det('Valores adoptados y equipos por unidad', esc((f.unidades || []).map(fichaUnidadTxt).join('\n\n')))}
+    ${det('Propuesta (textos, suministro, límites)', esc(((f.propuesta || {}).secciones || []).map(s => `[${s.titulo}]\n${s.texto}`).join('\n\n')))}
+    ${det('Lecciones de la obra', esc((f.lecciones || []).map(l => '- ' + l).join('\n')))}
+  </div>`;
+}
+async function procesosFichaValidar(id) {
+  const row = (_procesosCatalogoState.rows || []).find(r => r.id === id); if (!row) return;
+  const nuevo = row.ficha_estado === 'validado' ? 'a validar' : 'validado';
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + session.token }, body: JSON.stringify({ ficha_estado: nuevo }) });
+  row.ficha_estado = nuevo; procesosFichasInvalidar(); procesosCatalogoRenderLista();
+}
+async function procesosFichaQuitar(id) {
+  if (!confirm('¿Quitar la ficha estructurada de este proyecto? El proyecto sigue en la base; solo se pierde la ficha.')) return;
+  const row = (_procesosCatalogoState.rows || []).find(r => r.id === id); if (!row) return;
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  await supaFetch(`/rest/v1/procesos_catalogo?id=eq.${id}`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + session.token }, body: JSON.stringify({ ficha: null }) });
+  row.ficha = null; procesosFichasInvalidar(); procesosCatalogoRenderLista();
 }
 
 // ── Sidebar: secciones agrupadas por área ───────────────
