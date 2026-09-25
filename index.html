@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.117</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.118</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.117</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.118</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -21370,7 +21370,8 @@ const COTIZ_LIM_LETRA = 'A-Za-z0-9\\u00C0-\\u00FF';
 function cotizLimRegex(valor) {
   const v = String(valor || '').trim();
   if (v.length < 2 || /^\d$/.test(v)) return null;
-  const patron = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  // los espacios del valor son opcionales en la descripción ("CR 5-4" ≈ "CR5-4")
+  const patron = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
   return new RegExp(`(?<![${COTIZ_LIM_LETRA}])${patron}(?![${COTIZ_LIM_LETRA}])`, 'gi');
 }
 function cotizLimQuitar(texto, valor) {
@@ -21392,16 +21393,30 @@ function cotizLimLimpiarSeparadores(s) {
 function cotizLimProponer(r) {
   const orig = String(r.descripcion || '');
   if (!orig.trim()) return null;
+  // Se prueban los dos órdenes y se queda el que más saca: a veces la marca
+  // parte al modelo en dos ("AIREADOR AireO2 50HP" con modelo "AIREADOR 50HP":
+  // hay que sacar la marca primero), y a veces el modelo contiene la marca
+  // ("Tsurumi B Series": hay que sacar el modelo primero).
+  const sinMarca = cotizLimQuitar(orig, r.marca);
+  const ordenA = cotizLimQuitar(sinMarca, r.modelo);
   const sinModelo = cotizLimQuitar(orig, r.modelo);
-  const sinAmbos = cotizLimQuitar(sinModelo, r.marca);
+  const ordenB = cotizLimQuitar(sinModelo, r.marca);
+  const norm = s => s.replace(/\s+/g, '');
+  const sinAmbos = norm(ordenA).length <= norm(ordenB).length ? ordenA : ordenB;
   if (sinAmbos === orig) return null;
+  const sacoModelo = sinModelo !== orig || ordenA !== sinMarca;
   let nueva = cotizLimLimpiarSeparadores(sinAmbos);
+  // si todo lo que quedó está entre paréntesis (ej. "(Nº parte fabricante: 5101660)"), se sacan
+  const envuelta = nueva.match(/^\(([^()]*)\)$/);
+  if (envuelta) nueva = envuelta[1].trim();
   // si la descripción arrancaba con mayúscula (ej. con la marca) y ahora
   // empieza con otra palabra, se mantiene la mayúscula inicial
   if (/^[A-ZÁÉÍÓÚÑ]/.test(orig.trim()) && /^[a-záéíóúñ]/.test(nueva)) nueva = nueva.charAt(0).toUpperCase() + nueva.slice(1);
   if (nueva === orig.trim()) return null;
   const modeloNum = /^[\d.,\s]+$/.test(String(r.modelo || '').trim()) && String(r.modelo || '').trim() !== '';
-  return { id: r.id, marca: r.marca || '', modelo: r.modelo || '', antes: orig, nueva, vacia: nueva.length < 4, revisar: sinModelo !== orig && modeloNum };
+  // la descripción era básicamente la marca + el modelo: quedaría vacía
+  const igualModelo = nueva.length < 4 && sacoModelo;
+  return { id: r.id, marca: r.marca || '', modelo: r.modelo || '', antes: orig, nueva, vacia: nueva.length < 4, igualModelo, revisar: sacoModelo && modeloNum };
 }
 function cotizLimResaltar(orig, marca, modelo) {
   const rangos = [];
@@ -21434,10 +21449,11 @@ function cotizLimRender(total) {
   const nSel = props.filter(p => sel[p.id]).length;
   box.innerHTML = `<div class="card" style="margin-bottom:12px;border-color:var(--blue)">
     <div class="card-label">Limpiar descripciones — ${props.length} producto${props.length === 1 ? '' : 's'} para revisar (de ${total})</div>
-    <p class="hint" style="margin-bottom:8px">Lo tachado es lo que se saca de la descripción. Vienen tildados los que quedan bien; quedan <b>sin tildar</b> los de modelo numérico (podría ser una medida, ej. "150 litros") y los que quedarían casi vacíos — revisalos a mano. Antes de aplicar se descarga un respaldo con las descripciones originales.</p>
+    <p class="hint" style="margin-bottom:8px">Lo tachado es lo que se saca de la descripción. Vienen tildados los que quedan bien; quedan <b>sin tildar</b> los de modelo numérico (podría ser una medida, ej. "150 litros") y los que quedarían vacíos o casi vacíos (cuando la descripción era igual a la marca + el modelo) — revisalos a mano, o tildalos con el botón de abajo si querés dejar esas descripciones vacías. Antes de aplicar se descarga un respaldo con las descripciones originales.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcar(true)">Tildar todos</button>
       <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcar(false)">Destildar todos</button>
+      <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcarVacios()" title="Tilda también los que quedarían con la descripción vacía porque era igual a la marca + el modelo">Tildar también los que quedan vacíos (${props.filter(p => p.vacia).length})</button>
       <button class="btn btn-primary btn-sm" onclick="cotizLimAplicar()">Aplicar a los ${nSel} tildados</button>
       <button class="btn btn-secondary btn-sm" onclick="cotizLimCerrar()">Cerrar</button>
       <span id="cotiz-lim-status"></span>
@@ -21448,11 +21464,12 @@ function cotizLimRender(total) {
         <td style="${PROCESOS_EQ_TD}"><input type="checkbox" style="width:auto" ${sel[p.id] ? 'checked' : ''} onchange="cotizLimToggle('${p.id}',this.checked)" /></td>
         <td style="${PROCESOS_EQ_TD}">${esc(p.marca)}</td><td style="${PROCESOS_EQ_TD}">${esc(p.modelo)}</td>
         <td style="${PROCESOS_EQ_TD}">${cotizLimResaltar(p.antes, p.marca, p.modelo)}</td>
-        <td style="${PROCESOS_EQ_TD}"><b>${esc(p.nueva) || '<i>(vacía)</i>'}</b>${p.vacia ? ' <span class="badge" style="background:#ffe8cc;color:#a85a00">quedaría casi vacía</span>' : ''}${p.revisar ? ' <span class="badge" style="background:#ffe8cc;color:#a85a00">modelo numérico</span>' : ''}</td></tr>`).join('')}
+        <td style="${PROCESOS_EQ_TD}"><b>${esc(p.nueva) || '<i>(vacía)</i>'}</b>${p.vacia ? ` <span class="badge" style="background:#ffe8cc;color:#a85a00">${p.igualModelo ? 'la descripción es igual al modelo: quedaría vacía' : 'quedaría casi vacía'}</span>` : ''}${p.revisar ? ' <span class="badge" style="background:#ffe8cc;color:#a85a00">modelo numérico</span>' : ''}</td></tr>`).join('')}
     </table></div></div>`;
 }
 function cotizLimToggle(id, v) { _cotizLim.sel[id] = v; const b = document.querySelector('#cotiz-limpiar-desc .btn-primary'); if (b) b.textContent = `Aplicar a los ${_cotizLim.props.filter(p => _cotizLim.sel[p.id]).length} tildados`; }
 function cotizLimMarcar(v) { _cotizLim.props.forEach(p => { _cotizLim.sel[p.id] = v; }); cotizLimRender(_cotizLim.props.length); }
+function cotizLimMarcarVacios() { _cotizLim.props.forEach(p => { if (p.vacia) _cotizLim.sel[p.id] = true; }); cotizLimRender(_cotizLim.props.length); }
 function cotizLimCerrar() { const box = document.getElementById('cotiz-limpiar-desc'); if (box) box.innerHTML = ''; _cotizLim = { props: [], sel: {} }; }
 async function cotizLimAplicar() {
   const aplicar = _cotizLim.props.filter(p => _cotizLim.sel[p.id]);
