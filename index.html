@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.12</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.13</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.12</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.13</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -718,6 +718,19 @@
         </div>
       </div>
       <div id="dfs-doc-view" style="display:none"></div>
+    </div>
+
+    <!-- ═══ PANEL: Manual de operación (área Documentación) ═══ -->
+    <div class="panel" id="panel-manual-operacion">
+      <div id="man-list-view">
+        <div class="card">
+          <div class="card-label">Manual de operación</div>
+          <p class="hint" style="margin-top:-6px">Armá el manual de operación de una planta a partir de su DFS, de un proyecto de Procesos IA o Flowsheet, de un mensaje y/o de documentos. Después lo ajustás con el chat y lo exportás a Word.</p>
+          <button class="btn btn-primary" onclick="manNuevo()" style="margin-bottom:12px">+ Nuevo manual</button>
+          <div id="man-list" class="empty">Cargando...</div>
+        </div>
+      </div>
+      <div id="man-doc-view" style="display:none"></div>
     </div>
 
     <!-- ═══ PANEL: Cfg Documentación ═══ -->
@@ -2234,6 +2247,7 @@ function switchPanel(name) {
   if (name === 'cfg-microorganismos') { microoConocimientoRender(); microoAprendizajeRender(); }
   if (name === 'mantenimiento') mantPlanesRender();
   if (name === 'dfs') dfsListaRender();
+  if (name === 'manual-operacion') manListaRender();
   if (name === 'cfg-documentacion') mantCfgRender();
 }
 
@@ -24495,8 +24509,8 @@ function dfsAdjuntar(input) {
 function dfsQuitarArchivo(i) { _dfsIa.archivos.splice(i, 1); dfsRender(); }
 
 // ── Contexto del proyecto elegido ──
-async function dfsContextoProyecto() {
-  const d = _dfsDoc;
+async function dfsContextoProyecto(doc) {
+  const d = doc || _dfsDoc;
   if (!d.origen_id || (d.origen !== 'procesos' && d.origen !== 'flowsheet')) return '';
   if (d.origen === 'procesos') {
     const r = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${d.origen_id}&select=*`, { headers: mantH() });
@@ -24820,6 +24834,475 @@ async function dfsExportarWord() {
   } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
 }
 
+// ══ Manual de operación (área Documentación) ══
+// Documento por planta, con la estructura del manual estándar de Aeration (Lamb Weston Rev1):
+// 1 Objetivo · 2 Alcance · 3 Definiciones · 4 Referencias (normativa y datos de diseño) ·
+// 5 Responsabilidades · 6 Procedimiento (inicio, unidades, paro de emergencia, mantenimiento) ·
+// 7 Anexos (listados, alarmas, guía HMI, otros) · 8 Registro de modificaciones.
+// Se arma con IA desde un proyecto de Procesos IA / Flowsheet, un DFS ya armado, un mensaje y/o
+// documentos; se ajusta a mano o por chat (con deshacer) y se exporta a Word. Tabla doc_documentos, tipo 'manual'.
+const MAN_TEXTOS = [['objetivo', '1. Objetivo'], ['alcance', '2. Alcance'], ['responsabilidades', '5. Responsabilidades'], ['inicio', '6.1. Inicio del sistema'], ['emergencia', '6.3. Paro de emergencia'], ['mantenimiento', '6.4. Mantenimiento preventivo']];
+const MAN_HMI_ESTANDAR = `Existen dos perfiles de usuario en el HMI: operador y administrador. El administrador puede modificar los parámetros de funcionamiento de la planta; el operador solo puede visualizarlos. Sin ingresar ningún usuario se puede navegar por todas las pantallas y acusar alarmas, pero no se puede acceder a los comandos (encender/apagar equipos).
+Todas las pantallas tienen una barra superior con el usuario activo, los indicadores de estado (al menos un elemento en modo manual o en modo simulación), el cierre de sesión y el acceso a la configuración; y una barra inferior para navegar entre pantallas, con el botón "Acusar alarmas" y el indicador de comunicación con el PLC. La barra de comunicación muestra un incremento secuencial mientras hay comunicación; si permanece fija hay pérdida de comunicación con el PLC.
+En el diagrama de flujo, cada equipo se representa por color: gris = detenido, verde = en marcha, rojo = en falla. Al tocar un equipo se abre su ventana de comando (marcha/parada, modo manual/automático y estado). Los parámetros de operación (set points, tiempos y niveles) se cambian desde la pantalla de Parámetros con usuario administrador. Las alarmas activas se ven en la pantalla de Alarmas, con su historial; el botón "Acusar alarmas" reconoce las vigentes y, si la condición de falla desapareció, permite rearrancar el equipo afectado.`;
+const MAN_ESTILO = `ESTILO DEL MANUAL DE OPERACIÓN DE AERATION — seguilo:
+- Es un documento para el OPERADOR de la planta (y el supervisor del cliente): qué es cada unidad, cómo funciona, qué tiene que revisar, cómo operarla y qué hacer ante una alarma o falla. Lenguaje claro, en presente y tercera persona / imperativo en las rutinas, sin promesas comerciales.
+- Descripción de cada unidad: qué hace en el proceso; de dónde recibe y adónde envía el flujo; equipos que la componen con cantidad, TAG, marca y modelo (solo si figuran en las fuentes; si no, describilos por su función); cómo se comanda cada uno (automático por sensor, por tablero local, manual), enclavamientos y qué ocurre ante fallas. Debe ser coherente con el DFS cuando se aporta.
+- Operación (rutinas del operador) de cada unidad: verificaciones diarias in situ y desde tablero, posición de válvulas manuales, arranque/parada manual, ajustes que sí hace el operador (p. ej. regular caudal de una bomba dosificadora, jar test), limpiezas periódicas, y qué revisar ante cada alarma. Escribí los pasos como líneas que empiezan con "- ".
+- Nada de inventar: marcas, modelos, TAGs, valores, contraseñas, nombres de personas o teléfonos que no estén en las fuentes se dejan como "[completar]" o "A definir".
+- Alarmas: PRIORITARIA = afecta de forma crítica al proceso o a la seguridad; MEDIA = hay respaldo o no detiene el proceso; BAJA = informativa.`;
+
+let _manDoc = null, _manHist = [], _manBusy = false;
+let _manIa = { texto: '', archivos: [], ocupado: false, dfsId: '' };
+let _manProyectos = {}, _manDfsLista = [];
+function manDatosVacios() {
+  return { portada: { titulo: 'MANUAL DE OPERACIÓN Y MANTENIMIENTO DE PLANTA DE TRATAMIENTO DE EFLUENTES', cliente: '', proyecto: '', ubicacion: '', codigo: '', anio: String(new Date().getFullYear()), vigente_desde: new Date().toLocaleDateString('es-AR'), version: '01', elaboro: '', reviso: '', aprobo: '', confidencial: '' },
+    objetivo: '', alcance: '', definiciones: [], normativa_texto: '', normativa: [], diseno_texto: '', diseno: [], responsabilidades: '', inicio: '', resumen_operacion: [], unidades: [], equipos: [], sensores: [], alarmas_texto: 'Las alarmas se dividen según su criticidad para el proceso y los equipos: Prioritaria, Media o Baja. Se detallan por unidad.', incluir_hmi: true, hmi: MAN_HMI_ESTANDAR, emergencia: '- Accionar el interruptor de paro de emergencia.\n- Notificar al supervisor y registrar el evento.', mantenimiento: '- Realizar inspecciones periódicas según lo indiquen los manuales de cada uno de los equipos de planta y el plan de mantenimiento.', anexos: [],
+    modificaciones: [{ fecha: new Date().toLocaleDateString('es-AR'), version: '1', item: '----', cambio: 'Versión inicial.', responsable: '' }] };
+}
+function manNormalizar(d) {
+  const v = manDatosVacios(); d = d && typeof d === 'object' ? d : {};
+  const out = Object.assign(v, d); out.portada = Object.assign(manDatosVacios().portada, d.portada || {});
+  ['definiciones', 'normativa', 'diseno', 'resumen_operacion', 'unidades', 'equipos', 'sensores', 'anexos', 'modificaciones'].forEach(k => { if (!Array.isArray(out[k])) out[k] = []; });
+  out.unidades.forEach(u => { if (!u.id) u.id = dfsId(); if (!Array.isArray(u.alarmas)) u.alarmas = []; u.descripcion = u.descripcion || ''; u.operacion = u.operacion || ''; u.grupo = u.grupo || ''; });
+  out.anexos.forEach(a => { if (!a.id) a.id = dfsId(); });
+  return out;
+}
+
+// ── Lista ──
+async function manListaRender() {
+  manVolver(true);
+  const el = document.getElementById('man-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const rows = await mantFetchAll(`/rest/v1/doc_documentos?select=id,nombre,origen_nombre,creado_por_nombre,updated_at&empresa=eq.${currentEmpresa}&tipo=eq.manual&order=updated_at.desc`);
+    if (!rows.length) { el.innerHTML = '<div class="empty">No hay manuales todavía.</div>'; return; }
+    el.innerHTML = rows.map(p => `<div class="file-item" style="cursor:pointer" onclick="manAbrir('${p.id}')"><div class="file-icon">📘</div><div class="file-info"><div class="file-name">${esc(p.nombre)}</div><div class="file-size">${esc(p.origen_nombre || 'Sin proyecto asociado')} · ${esc(p.creado_por_nombre || '')} · ${new Date(p.updated_at).toLocaleDateString('es-AR')}</div></div><button class="remove-btn" onclick="event.stopPropagation();manEliminar('${p.id}')">&#x2715;</button></div>`).join('');
+  } catch (e) { el.innerHTML = '<div class="empty">No se pudo cargar — ¿corriste el SQL de DFS (tabla doc_documentos)?</div>'; }
+}
+async function manNuevo() {
+  const r = await supaFetch('/rest/v1/doc_documentos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, tipo: 'manual', nombre: 'Manual nuevo', origen: 'ninguno', datos: manDatosVacios(), creado_por_nombre: currentUser?.nombre || currentUser?.email || null }) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows?.length) { alert('No se pudo crear el manual — ¿corriste el SQL de DFS (tabla doc_documentos)?'); return; }
+  manAbrir(rows[0].id);
+}
+async function manEliminar(id) {
+  if (!confirm('¿Eliminar este manual?')) return;
+  await supaFetch(`/rest/v1/doc_documentos?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
+  manListaRender();
+}
+async function manAbrir(id) {
+  const r = await supaFetch(`/rest/v1/doc_documentos?id=eq.${id}&select=*`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  if (!r.ok || !rows.length) { alert('No se pudo abrir el manual.'); return; }
+  _manDoc = rows[0]; _manHist = [];
+  _manDoc.datos = manNormalizar(_manDoc.datos);
+  if (!Array.isArray(_manDoc.chat_historial)) _manDoc.chat_historial = [];
+  _manIa = { texto: '', archivos: [], ocupado: false, dfsId: '' };
+  document.getElementById('man-list-view').style.display = 'none';
+  document.getElementById('man-doc-view').style.display = '';
+  manCargarFuentes();
+  manRender();
+}
+function manVolver(silencioso) {
+  _manDoc = null;
+  const a = document.getElementById('man-list-view'), b = document.getElementById('man-doc-view');
+  if (a) a.style.display = ''; if (b) b.style.display = 'none';
+  if (!silencioso) manListaRender();
+}
+function manGuardar() {
+  if (!_manDoc) return Promise.resolve();
+  const p = _manDoc;
+  return supaFetch(`/rest/v1/doc_documentos?id=eq.${p.id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ nombre: p.nombre, origen: p.origen || 'ninguno', origen_id: p.origen_id || null, origen_nombre: p.origen_nombre || null, datos: p.datos, chat_historial: p.chat_historial, updated_at: new Date().toISOString() }) }).catch(() => {});
+}
+async function manCargarFuentes() {
+  try {
+    if (!_manProyectos.procesos) _manProyectos.procesos = await mantFetchAll(`/rest/v1/procesos_proyectos?select=id,nombre,cliente&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+    if (!_manProyectos.flowsheet) _manProyectos.flowsheet = await mantFetchAll(`/rest/v1/flowsheet_proyectos?select=id,nombre&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+    _manDfsLista = await mantFetchAll(`/rest/v1/doc_documentos?select=id,nombre&empresa=eq.${currentEmpresa}&tipo=eq.dfs&order=updated_at.desc`);
+  } catch (e) { _manProyectos.procesos = _manProyectos.procesos || []; _manProyectos.flowsheet = _manProyectos.flowsheet || []; }
+  if (_manDoc) manRender();
+}
+function manSetNombre(v) { if (_manDoc && v.trim()) { _manDoc.nombre = v.trim(); manGuardar(); } }
+function manSetOrigen(tipo) { _manDoc.origen = tipo; _manDoc.origen_id = null; _manDoc.origen_nombre = null; manGuardar(); manRender(); }
+function manSetOrigenProyecto(id) {
+  const p = (_manProyectos[_manDoc.origen] || []).find(x => x.id === id);
+  _manDoc.origen_id = id || null; _manDoc.origen_nombre = p ? (_manDoc.origen === 'procesos' ? 'Procesos IA: ' : 'Flowsheet: ') + p.nombre : null;
+  manGuardar(); manRender();
+}
+function manAdjuntar(input) {
+  const nuevos = [...input.files]; input.value = ''; const errores = [];
+  nuevos.forEach(f => {
+    if (!MANT_IA_EXT.test(f.name)) errores.push(`"${f.name}": tipo no soportado (usá PDF, Word .docx, Excel, CSV, TXT o imagen)`);
+    else if (f.size > 20 * 1024 * 1024) errores.push(`"${f.name}": pesa más de 20 MB`);
+    else _manIa.archivos.push(f);
+  });
+  if (errores.length) alert('No se pudieron adjuntar:\n\n' + errores.join('\n'));
+  manRender();
+}
+function manQuitarArchivo(i) { _manIa.archivos.splice(i, 1); manRender(); }
+
+// ── Texto del DFS como fuente ──
+async function manContextoDfs() {
+  if (!_manIa.dfsId) return '';
+  const r = await supaFetch(`/rest/v1/doc_documentos?id=eq.${_manIa.dfsId}&select=nombre,datos`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  if (!rows[0]) throw new Error('No se pudo leer el DFS elegido.');
+  const dt = dfsNormalizar(rows[0].datos);
+  return `DFS "${rows[0].nombre}" (descripción funcional ya armada; el manual debe ser coherente con ella):\nOBJETIVO: ${dt.objetivo}\n\n` + dt.etapas.map(e => `UNIDAD: ${e.nombre}\n${e.texto}\nAlarmas: ${e.alarmas.map(a => `${a.nombre} [${a.clasificacion}]`).join('; ') || '(ninguna)'}`).join('\n\n')
+    + `\n\nPARÁMETROS DEL DFS (parámetro | unidad | rango | valor):\n` + dt.parametros.map(p => `${p.parametro} | ${p.unidad} | ${p.rango} | ${p.valor}`).join('\n') + '\n\n';
+}
+
+// ── Generación con IA ──
+const MAN_TOOL_ESTRUCTURA = {
+  name: 'estructura_manual',
+  description: 'Estructura y secciones generales del manual de operación, más la lista de unidades de proceso con su ficha técnica.',
+  input_schema: { type: 'object', properties: {
+    cliente: { type: 'string' }, proyecto: { type: 'string', description: 'Nombre/código del proyecto (ej. "411 - Planta de Tratamiento de Efluentes").' }, ubicacion: { type: 'string' },
+    objetivo: { type: 'string', description: 'Objetivo del manual (1–2 párrafos): directrices para la operación segura y eficiente del sistema de tratamiento, desarrollado por Aeration para el cliente en su planta.' },
+    alcance: { type: 'string', description: 'Qué cubre el manual: desde dónde hasta dónde llega la planta (primer y último punto), y una mención a que los equipos, sensores y válvulas tienen sus propios manuales de operación y mantenimiento (y al manual general de mantenimiento). Líneas con "- " para listas.' },
+    definiciones: { type: 'array', description: 'Glosario de los términos técnicos que aparecen en el manual (10–25): procesos, equipos, siglas, magnitudes, conceptos de control (enclavado, auto-alternado, etc.).', items: { type: 'object', properties: { termino: { type: 'string' }, definicion: { type: 'string' } }, required: ['termino', 'definicion'] } },
+    normativa_texto: { type: 'string', description: 'Texto introductorio de la normativa de vuelco aplicable (norma, autoridad, destino del vuelco). Vacío si no hay datos.' },
+    normativa: { type: 'array', description: 'Límites de vuelco: solo los que figuren en las fuentes.', items: { type: 'object', properties: { parametro: { type: 'string' }, unidad: { type: 'string' }, limite: { type: 'string' } }, required: ['parametro', 'unidad', 'limite'] } },
+    diseno_texto: { type: 'string', description: 'Texto de datos de entrada del diseño (sistemas en serie, caudales por línea, qué significa crudo/primario, etc.).' },
+    diseno: { type: 'array', description: 'Datos de diseño de ingreso (caudales, DQO, DBO, SST, aceites y grasas, etc.), solo los que figuren en las fuentes.', items: { type: 'object', properties: { parametro: { type: 'string' }, unidad: { type: 'string' }, valor: { type: 'string' } }, required: ['parametro', 'unidad', 'valor'] } },
+    responsabilidades: { type: 'string', description: 'Puestos responsables por parte del proveedor de operación y del cliente, y a quién contactar ante problemas. Lo que no esté en las fuentes: "[completar]".' },
+    inicio: { type: 'string', description: 'Procedimiento de inicio del sistema: verificaciones previas (equipos energizados, sin alarmas, acusar desde panel local y HMI) y qué hacer tras un corte de energía. Pasos como líneas con "- ".' },
+    resumen_operacion: { type: 'array', description: 'Resumen por TIPO de equipo de la planta: si requiere operación activa en operación normal (todos se controlan diariamente in situ y desde tablero).', items: { type: 'object', properties: { equipo: { type: 'string' }, operacion: { type: 'string', description: '"No", "Sí", "Solo durante calibración", "No, pero se debe verificar…", etc.' } }, required: ['equipo', 'operacion'] } },
+    equipos: { type: 'array', description: 'Listado de equipos con TAG. SOLO si los TAGs figuran en las fuentes; si no, vacío.', items: { type: 'object', properties: { tag: { type: 'string' }, equipo: { type: 'string' }, ubicacion: { type: 'string' } }, required: ['tag', 'equipo'] } },
+    sensores: { type: 'array', description: 'Listado de sensores/instrumentos y tableros con TAG. SOLO si figuran en las fuentes.', items: { type: 'object', properties: { tag: { type: 'string' }, equipo: { type: 'string' }, ubicacion: { type: 'string' } }, required: ['tag', 'equipo'] } },
+    unidades: { type: 'array', description: 'Unidades de proceso en orden hidráulico.', items: { type: 'object', properties: {
+      nombre: { type: 'string', description: 'Nombre de la unidad (con TAG entre paréntesis si figura).' },
+      grupo: { type: 'string', description: 'Agrupación (ej. "Tratamiento primario", "Tratamiento secundario o biológico", "Sistema de barros", "General"). Repetí el mismo texto para las de un mismo grupo.' },
+      ficha: { type: 'string', description: 'FICHA TÉCNICA (200–450 palabras): equipos con cantidad/TAG/marca/modelo, sensores, válvulas, cómo se comanda cada uno, enclavamientos, fallas y alarmas, valores y tiempos, tareas del operador que se mencionen, de dónde recibe y adónde envía. Solo hechos de las fuentes; "(no definido en las fuentes)" en lo que falte.' }
+    }, required: ['nombre', 'ficha'] } }
+  }, required: ['objetivo', 'alcance', 'definiciones', 'responsabilidades', 'inicio', 'resumen_operacion', 'unidades'] }
+};
+const MAN_TOOL_UNIDAD = {
+  name: 'unidad_manual',
+  description: 'Sección del manual para una unidad de proceso.',
+  input_schema: { type: 'object', properties: {
+    descripcion: { type: 'string', description: 'Descripción y funcionamiento de la unidad (varios párrafos separados por una línea en blanco). Sin título.' },
+    operacion: { type: 'string', description: 'Operación y controles del operador: rutinas y verificaciones, una por línea empezando con "- ". Puede llevar una frase introductoria previa. Vacío solo si de verdad no hay nada que hacer.' },
+    alarmas: { type: 'array', items: { type: 'object', properties: { nombre: { type: 'string' }, clasificacion: { type: 'string', enum: DFS_CLASIF } }, required: ['nombre', 'clasificacion'] } }
+  }, required: ['descripcion', 'operacion', 'alarmas'] }
+};
+async function manGenerar() {
+  if (_manIa.ocupado || !_manDoc) return;
+  const st = 'man-status', d = _manDoc;
+  const texto = (_manIa.texto || '').trim();
+  if (!texto && !_manIa.archivos.length && !d.origen_id && !_manIa.dfsId) { showMsg(st, 'error', '✕ Elegí un DFS o un proyecto, escribí un mensaje o adjuntá documentos.'); return; }
+  if (d.datos.unidades.length && !confirm('Ya hay un manual armado. ¿Reemplazarlo por uno nuevo? (Podés deshacerlo con el botón de deshacer del chat.)')) return;
+  try {
+    _manIa.ocupado = true; manRender();
+    showMsg(st, 'loading', 'Leyendo el DFS, el proyecto y los documentos...');
+    const dfsTxt = await manContextoDfs();
+    const ctx = await dfsContextoProyecto(d);
+    const bloques = await mantIaBloques(_manIa.archivos);
+    const fuentes = dfsTxt + (ctx ? `DATOS DEL PROYECTO (MAIA):\n${ctx}\n` : '') + (texto ? `MENSAJE DEL USUARIO:\n${texto}\n\n` : '');
+    const p1 = `Vas a redactar el Manual de Operación de una planta de tratamiento de efluentes. Primero definí la estructura y las secciones generales (objetivo, alcance, glosario, normativa y datos de diseño, responsabilidades, inicio del sistema, resumen de operación por tipo de equipo, listados con TAG si existen) y las unidades de proceso en orden hidráulico con la ficha técnica de cada una (los datos duros que después se usan para redactarlas). Usá SOLO lo que figura en las fuentes; no inventes equipos, marcas, modelos, TAGs, valores ni nombres.\n\n${MAN_ESTILO}\n\n${fuentes}Si hay documentos adjuntos están a continuación (pueden ser un manual de otro proyecto como ejemplo, manuales de equipos, memoria descriptiva o listado de equipos: usá su contenido según corresponda a ESTA planta).`;
+    const est = await dfsLlamar([{ type: 'text', text: p1 }, ...bloques], MAN_TOOL_ESTRUCTURA, 12000);
+    const unidadesIn = (est.unidades || []).filter(u => u && u.nombre);
+    if (!unidadesIn.length) throw new Error('La IA no identificó unidades de proceso. Sumá más información (DFS, proyecto o descripción del tratamiento).');
+    const nuevo = manDatosVacios();
+    nuevo.portada = Object.assign(nuevo.portada, d.datos.portada, { cliente: est.cliente || d.datos.portada.cliente, proyecto: est.proyecto || d.datos.portada.proyecto || d.origen_nombre || d.nombre, ubicacion: est.ubicacion || d.datos.portada.ubicacion });
+    ['objetivo', 'alcance', 'normativa_texto', 'diseno_texto', 'responsabilidades', 'inicio'].forEach(k => { nuevo[k] = est[k] || ''; });
+    nuevo.definiciones = est.definiciones || []; nuevo.normativa = est.normativa || []; nuevo.diseno = est.diseno || [];
+    nuevo.resumen_operacion = est.resumen_operacion || []; nuevo.equipos = est.equipos || []; nuevo.sensores = est.sensores || [];
+    const listado = unidadesIn.map((u, i) => `${i + 1}. ${u.nombre}`).join('\n');
+    for (let i = 0; i < unidadesIn.length; i++) {
+      const u = unidadesIn[i];
+      showMsg(st, 'loading', `Redactando unidad ${i + 1} de ${unidadesIn.length}: ${u.nombre}...`);
+      const p2 = `Redactá la sección del Manual de Operación de UNA unidad de la planta.\n\nPlanta: ${nuevo.portada.proyecto}\nUnidades de la planta, en orden:\n${listado}\n\nUNIDAD A REDACTAR: ${u.nombre}\nFicha técnica (fuente de verdad):\n${u.ficha || '(sin datos)'}\n\n${dfsTxt ? dfsTxt.slice(0, 40000) : ''}${MAN_ESTILO}${texto ? `\n\nInstrucciones del usuario a respetar:\n${texto}` : ''}`;
+      const out = await dfsLlamar([{ type: 'text', text: p2 }], MAN_TOOL_UNIDAD, 6000);
+      nuevo.unidades.push({ id: dfsId(), nombre: u.nombre, grupo: u.grupo || '', descripcion: out.descripcion || '', operacion: out.operacion || '', alarmas: (out.alarmas || []).filter(a => a && a.nombre).map(a => ({ nombre: a.nombre, clasificacion: DFS_CLASIF.includes(a.clasificacion) ? a.clasificacion : 'Media' })) });
+    }
+    _manHist.push(JSON.parse(JSON.stringify(d.datos)));
+    d.datos = nuevo;
+    if (!d.nombre || d.nombre === 'Manual nuevo') d.nombre = 'Manual de operación ' + (nuevo.portada.proyecto || '').slice(0, 60);
+    _manIa = { texto: '', archivos: [], ocupado: false, dfsId: _manIa.dfsId };
+    await manGuardar(); manRender();
+    showMsg(st, 'success', `✓ Manual armado con ${nuevo.unidades.length} unidades y ${nuevo.definiciones.length} definiciones. Revisalo: lo que figura como "[completar]" o "A definir" no estaba en las fuentes.`);
+  } catch (e) { _manIa.ocupado = false; manRender(); showMsg(st, 'error', '✕ ' + e.message); }
+}
+
+// ── Edición manual ──
+function manCampo(ruta, valor) {
+  const partes = ruta.split('.'); let o = _manDoc.datos;
+  for (let i = 0; i < partes.length - 1; i++) o = o[partes[i]];
+  o[partes[partes.length - 1]] = valor; manGuardar();
+}
+function manTablaCampo(ruta, i, k, v) { const f = _manDoc.datos[ruta][i]; if (f) { f[k] = v; manGuardar(); } }
+function manTablaAdd(ruta) { const cols = MAN_TABLAS[ruta].cols; const f = {}; cols.forEach(c => { f[c.k] = ''; }); _manDoc.datos[ruta].push(f); manGuardar(); manRender(); }
+function manTablaDel(ruta, i) { _manDoc.datos[ruta].splice(i, 1); manGuardar(); manRender(); }
+const MAN_TABLAS = {
+  definiciones: { label: 'Definiciones', cols: [{ k: 'termino', l: 'Término', w: '200px' }, { k: 'definicion', l: 'Definición' }] },
+  normativa: { label: 'Límites de vuelco', cols: [{ k: 'parametro', l: 'Parámetro' }, { k: 'unidad', l: 'Unidad', w: '100px' }, { k: 'limite', l: 'Límite', w: '160px' }] },
+  diseno: { label: 'Datos de diseño', cols: [{ k: 'parametro', l: 'Parámetro' }, { k: 'unidad', l: 'Unidad', w: '100px' }, { k: 'valor', l: 'Valor', w: '160px' }] },
+  resumen_operacion: { label: 'Resumen de operación por equipo', cols: [{ k: 'equipo', l: 'Equipo' }, { k: 'operacion', l: 'Operación necesaria durante operación normal' }] },
+  equipos: { label: 'Listado de equipos', cols: [{ k: 'tag', l: 'TAG', w: '130px' }, { k: 'equipo', l: 'Equipo' }, { k: 'ubicacion', l: 'Ubicación' }] },
+  sensores: { label: 'Listado de sensores', cols: [{ k: 'tag', l: 'TAG', w: '130px' }, { k: 'equipo', l: 'Equipo' }, { k: 'ubicacion', l: 'Ubicación' }] },
+  modificaciones: { label: 'Registro de modificaciones', cols: [{ k: 'fecha', l: 'Fecha', w: '110px' }, { k: 'version', l: 'Versión', w: '80px' }, { k: 'item', l: 'Ítem', w: '80px' }, { k: 'cambio', l: 'Cambio' }, { k: 'responsable', l: 'Responsable', w: '120px' }] },
+};
+function manTablaHtml(ruta) {
+  const t = MAN_TABLAS[ruta], filas = _manDoc.datos[ruta];
+  return `<div style="overflow-x:auto">${filas.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px"><tr>${t.cols.map(c => `<th style="${PROCESOS_EQ_TH}">${c.l}</th>`).join('')}<th></th></tr>
+    ${filas.map((f, i) => `<tr>${t.cols.map(c => `<td style="${PROCESOS_EQ_TD}${c.w ? ';width:' + c.w : ';min-width:160px'}"><input value="${esc(f[c.k])}" onchange="manTablaCampo('${ruta}',${i},'${c.k}',this.value)" /></td>`).join('')}<td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="manTablaDel('${ruta}',${i})">&#x2715;</button></td></tr>`).join('')}</table>` : '<p class="hint" style="margin:4px 0">Vacío.</p>'}</div>
+    <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="manTablaAdd('${ruta}')">+ Fila</button>`;
+}
+function manUnidad(id) { return _manDoc.datos.unidades.find(u => u.id === id); }
+function manUnidadCampo(id, k, v) { const u = manUnidad(id); if (u) { u[k] = v; manGuardar(); } }
+function manUnidadAdd() { _manDoc.datos.unidades.push({ id: dfsId(), nombre: 'Nueva unidad', grupo: '', descripcion: '', operacion: '', alarmas: [] }); manGuardar(); manRender(); }
+function manUnidadDel(id) { if (!confirm('¿Quitar esta unidad del manual?')) return; _manDoc.datos.unidades = _manDoc.datos.unidades.filter(u => u.id !== id); manGuardar(); manRender(); }
+function manUnidadMover(id, dir) { const a = _manDoc.datos.unidades, i = a.findIndex(u => u.id === id), j = i + dir; if (i < 0 || j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; manGuardar(); manRender(); }
+function manAlarmaAdd(id) { const u = manUnidad(id); if (u) { u.alarmas.push({ nombre: '', clasificacion: 'Media' }); manGuardar(); manRender(); } }
+function manAlarmaCampo(id, i, k, v) { const u = manUnidad(id); if (u && u.alarmas[i]) { u.alarmas[i][k] = v; manGuardar(); } }
+function manAlarmaDel(id, i) { const u = manUnidad(id); if (u) { u.alarmas.splice(i, 1); manGuardar(); manRender(); } }
+function manAnexoAdd() { _manDoc.datos.anexos.push({ id: dfsId(), titulo: 'Nuevo anexo', texto: '' }); manGuardar(); manRender(); }
+function manAnexoCampo(id, k, v) { const a = _manDoc.datos.anexos.find(x => x.id === id); if (a) { a[k] = v; manGuardar(); } }
+function manAnexoDel(id) { _manDoc.datos.anexos = _manDoc.datos.anexos.filter(a => a.id !== id); manGuardar(); manRender(); }
+
+// ── Render ──
+function manRender() {
+  const el = document.getElementById('man-doc-view');
+  if (!el || !_manDoc) return;
+  const d = _manDoc, dt = d.datos, po = dt.portada, hay = dt.unidades.length > 0;
+  const lista = _manProyectos[d.origen] || [];
+  const inp = (ruta, val, ph, ancho) => `<input value="${esc(val)}" placeholder="${esc(ph)}" onchange="manCampo('${ruta}',this.value)" style="${ancho ? 'max-width:' + ancho + ';' : ''}" />`;
+  const area = (ruta, val, min) => `<textarea rows="${dfsFilas(val, min || 3)}" style="width:100%;resize:vertical" onchange="manCampo('${ruta}',this.value)">${esc(val)}</textarea>`;
+  const chatHtml = (d.chat_historial || []).map(m => `<div style="align-self:${m.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%;background:${m.role === 'user' ? 'var(--blue-bg)' : 'var(--surface2)'};padding:6px 10px;border-radius:8px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('');
+  el.innerHTML = `
+    <button class="btn btn-secondary btn-sm" onclick="manVolver()" style="margin-bottom:12px">← Volver a Manuales</button>
+    <input value="${esc(d.nombre)}" placeholder="Nombre del manual" style="font-weight:700;font-size:18px;margin-bottom:12px" onchange="manSetNombre(this.value)" />
+    <div class="card" style="border-color:var(--blue)">
+      <div class="card-label">✨ Armar el manual con IA</div>
+      <p class="hint" style="margin-bottom:8px">Lo ideal: elegí el <b>DFS</b> de la planta (así el manual es coherente con la descripción funcional) y el <b>proyecto</b> de Procesos IA (datos de diseño y normativa). También podés contar la planta en un mensaje y/o adjuntar documentos (manuales de equipos, memoria descriptiva, listado de equipos, un manual de otro proyecto como ejemplo). La IA arma la estructura del manual estándar de Aeration —objetivo, alcance, definiciones, referencias, responsabilidades, procedimiento por unidad, anexos— y lo que no figure en las fuentes queda como "[completar]".</p>
+      <textarea rows="3" placeholder="Ej: El operador es de la empresa X, turno de 8 a 16. El cliente es Y. Sumá un anexo con el procedimiento de jar test..." oninput="_manIa.texto=this.value" style="width:100%;resize:vertical;margin-bottom:8px">${esc(_manIa.texto)}</textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input type="file" id="man-file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.jpg,.jpeg,.png" style="display:none" onchange="manAdjuntar(this)" />
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('man-file').click()">📎 Adjuntar documentos</button>
+        <select onchange="_manIa.dfsId=this.value" style="max-width:260px"><option value="">Sin DFS de base</option>${_manDfsLista.map(x => `<option value="${x.id}" ${_manIa.dfsId === x.id ? 'selected' : ''}>DFS: ${esc(x.nombre)}</option>`).join('')}</select>
+        <select onchange="manSetOrigen(this.value)" style="max-width:250px"><option value="ninguno" ${!d.origen || d.origen === 'ninguno' ? 'selected' : ''}>Sin proyecto</option><option value="procesos" ${d.origen === 'procesos' ? 'selected' : ''}>Desde un proyecto de Procesos IA</option><option value="flowsheet" ${d.origen === 'flowsheet' ? 'selected' : ''}>Desde un Flowsheet</option></select>
+        ${d.origen === 'procesos' || d.origen === 'flowsheet' ? `<select onchange="manSetOrigenProyecto(this.value)" style="flex:1;min-width:200px"><option value="">-- Elegir --</option>${lista.map(x => `<option value="${x.id}" ${d.origen_id === x.id ? 'selected' : ''}>${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</select>` : ''}
+        <button class="btn btn-primary btn-sm" onclick="manGenerar()" ${_manIa.ocupado ? 'disabled' : ''}>${hay ? 'Volver a generar el manual' : 'Generar manual'}</button>
+      </div>
+      ${_manIa.archivos.length ? `<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px">${_manIa.archivos.map((a, i) => `<span class="badge" style="background:var(--surface2);border:1px solid var(--border)">📄 ${esc(a.name)} <span style="cursor:pointer" onclick="manQuitarArchivo(${i})">✕</span></span>`).join('')}</div>` : ''}
+      <div id="man-status"></div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <div class="card-label" style="margin:0">Portada</div>
+        <button class="btn btn-primary btn-sm" onclick="manExportarWord()" ${hay ? '' : 'disabled'}>⬇ Exportar Word</button>
+      </div>
+      <div class="field-row" style="gap:8px;flex-wrap:wrap">${inp('portada.titulo', po.titulo, 'Título', '100%')}${inp('portada.cliente', po.cliente, 'Cliente', '220px')}${inp('portada.proyecto', po.proyecto, 'Proyecto', '280px')}${inp('portada.ubicacion', po.ubicacion, 'Ubicación', '200px')}${inp('portada.codigo', po.codigo, 'Código del documento (ej. LWEHS 342.002)', '260px')}${inp('portada.version', po.version, 'Versión', '80px')}${inp('portada.vigente_desde', po.vigente_desde, 'Vigente desde', '120px')}${inp('portada.anio', po.anio, 'Año', '80px')}</div>
+      <div class="field-row" style="gap:8px;flex-wrap:wrap;margin-top:8px">${inp('portada.elaboro', po.elaboro, 'Realizó', '200px')}${inp('portada.reviso', po.reviso, 'Revisó', '200px')}${inp('portada.aprobo', po.aprobo, 'Aprobó', '200px')}</div>
+      <label style="margin-top:8px;display:block;font-size:12px">Leyenda de confidencialidad (opcional, va en la portada)</label>
+      <textarea rows="2" style="width:100%" onchange="manCampo('portada.confidencial',this.value)">${esc(po.confidencial)}</textarea>
+    </div>
+    ${hay ? `
+    ${MAN_TEXTOS.slice(0, 2).map(([k, t]) => `<div class="card"><div class="card-label">${t}</div>${area(k, dt[k], 3)}</div>`).join('')}
+    <div class="card"><div class="card-label">3. Definiciones</div>${manTablaHtml('definiciones')}</div>
+    <div class="card"><div class="card-label">4. Referencias</div>
+      <label style="font-size:12px">4.1 Normativa aplicable</label>${area('normativa_texto', dt.normativa_texto, 2)}<div style="margin-top:6px">${manTablaHtml('normativa')}</div>
+      <label style="font-size:12px;margin-top:10px;display:block">4.2 Diseño – Datos de entrada</label>${area('diseno_texto', dt.diseno_texto, 2)}<div style="margin-top:6px">${manTablaHtml('diseno')}</div></div>
+    <div class="card"><div class="card-label">5. Responsabilidades</div>${area('responsabilidades', dt.responsabilidades, 3)}</div>
+    <div class="card"><div class="card-label">6.1. Inicio del sistema</div>${area('inicio', dt.inicio, 3)}</div>
+    <div class="card"><div class="card-label">6.2. Descripción y operación de unidades — resumen por equipo</div>${manTablaHtml('resumen_operacion')}</div>
+    ${dt.unidades.map((u, i) => `<div class="card">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><span class="hint" style="margin:0">${i + 1}.</span><input value="${esc(u.nombre)}" style="font-weight:600;flex:1" onchange="manUnidadCampo('${u.id}','nombre',this.value)" /><input value="${esc(u.grupo)}" placeholder="Grupo (ej. Tratamiento primario)" style="max-width:240px" onchange="manUnidadCampo('${u.id}','grupo',this.value)" />
+        <button class="btn btn-secondary btn-sm" onclick="manUnidadMover('${u.id}',-1)" ${i ? '' : 'disabled'}>↑</button><button class="btn btn-secondary btn-sm" onclick="manUnidadMover('${u.id}',1)" ${i < dt.unidades.length - 1 ? '' : 'disabled'}>↓</button><button class="remove-btn" onclick="manUnidadDel('${u.id}')">&#x2715;</button></div>
+      <label style="font-size:12px">Descripción y funcionamiento</label>
+      <textarea rows="${dfsFilas(u.descripcion, 5)}" style="width:100%;resize:vertical" onchange="manUnidadCampo('${u.id}','descripcion',this.value)">${esc(u.descripcion)}</textarea>
+      <label style="font-size:12px;margin-top:8px;display:block">Operación y controles del operador (una tarea por línea, con "- ")</label>
+      <textarea rows="${dfsFilas(u.operacion, 3)}" style="width:100%;resize:vertical" onchange="manUnidadCampo('${u.id}','operacion',this.value)">${esc(u.operacion)}</textarea>
+      <div class="card-label" style="margin-top:10px">Alarmas</div>
+      ${u.alarmas.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px">${u.alarmas.map((a, j) => `<tr><td style="${PROCESOS_EQ_TD}"><input value="${esc(a.nombre)}" onchange="manAlarmaCampo('${u.id}',${j},'nombre',this.value)" /></td><td style="${PROCESOS_EQ_TD};width:140px"><select onchange="manAlarmaCampo('${u.id}',${j},'clasificacion',this.value)">${DFS_CLASIF.map(c => `<option ${a.clasificacion === c ? 'selected' : ''}>${c}</option>`).join('')}</select></td><td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="manAlarmaDel('${u.id}',${j})">&#x2715;</button></td></tr>`).join('')}</table>` : '<p class="hint">Sin alarmas.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="manAlarmaAdd('${u.id}')">+ Alarma</button>
+    </div>`).join('')}
+    <div style="margin-bottom:12px"><button class="btn btn-secondary btn-sm" onclick="manUnidadAdd()">+ Unidad</button></div>
+    ${MAN_TEXTOS.slice(4).map(([k, t]) => `<div class="card"><div class="card-label">${t}</div>${area(k, dt[k], 3)}</div>`).join('')}
+    <div class="card"><div class="card-label">7. Anexos</div>
+      <label style="font-size:12px">7.1 Listado de equipos <span class="hint" style="display:inline;margin:0">(con TAG; si no hay TAGs, dejalo vacío y no sale)</span></label>${manTablaHtml('equipos')}
+      <label style="font-size:12px;margin-top:10px;display:block">7.2 Listado de sensores</label>${manTablaHtml('sensores')}
+      <label style="font-size:12px;margin-top:10px;display:block">7.3 Alarmas — texto introductorio (el detalle sale de las alarmas de cada unidad)</label>${area('alarmas_texto', dt.alarmas_texto, 2)}
+      <label style="font-size:12px;margin-top:10px;display:block"><input type="checkbox" style="width:auto" ${dt.incluir_hmi ? 'checked' : ''} onchange="manCampo('incluir_hmi',this.checked);manRender()" /> 7.4 Incluir guía de pantallas del HMI</label>
+      ${dt.incluir_hmi ? area('hmi', dt.hmi, 6) : ''}
+      ${dt.anexos.map(a => `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px"><div style="display:flex;gap:8px;margin-bottom:6px"><input value="${esc(a.titulo)}" style="font-weight:600;flex:1" onchange="manAnexoCampo('${a.id}','titulo',this.value)" /><button class="remove-btn" onclick="manAnexoDel('${a.id}')">&#x2715;</button></div><textarea rows="${dfsFilas(a.texto, 4)}" style="width:100%;resize:vertical" onchange="manAnexoCampo('${a.id}','texto',this.value)">${esc(a.texto)}</textarea></div>`).join('')}
+      <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="manAnexoAdd()">+ Anexo</button>
+    </div>
+    <div class="card"><div class="card-label">8. Registro de modificaciones</div>${manTablaHtml('modificaciones')}</div>
+    <div class="card">
+      <div class="card-label">Ajustar con el chat</div>
+      <p class="hint" style="margin-bottom:8px">Pedile cambios al manual (ej. "en el DAF agregá que se limpia el filtro de recirculado todos los días", "sumá la definición de MBBR", "agregá un anexo con el procedimiento de jar test", "cambiá el alcance para que termine en la cámara de muestras"). Los cambios se aplican directo; podés deshacer el último.</p>
+      <div id="man-chat-msgs" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;margin-bottom:8px">${chatHtml}</div>
+      <div style="display:flex;gap:8px"><input id="man-chat-input" placeholder="Escribí tu pedido..." style="flex:1" onkeydown="if(event.key==='Enter')manChatSend()" /><button class="btn btn-primary btn-sm" onclick="manChatSend()">Enviar</button></div>
+      ${_manHist.length ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="manChatDeshacer()">↶ Deshacer último cambio</button>' : ''}
+      <div id="man-chat-status" style="margin-top:6px"></div>
+    </div>` : ''}`;
+  const m = document.getElementById('man-chat-msgs'); if (m) m.scrollTop = m.scrollHeight;
+}
+
+// ── Chat con acciones y deshacer ──
+const MAN_CAMPOS_TEXTO = ['objetivo', 'alcance', 'responsabilidades', 'inicio', 'emergencia', 'mantenimiento', 'normativa_texto', 'diseno_texto', 'alarmas_texto', 'hmi'];
+const MAN_TOOL_CAMBIOS = {
+  name: 'aplicar_cambios_manual',
+  description: 'Aplica cambios al manual de operación y responde al usuario.',
+  input_schema: { type: 'object', properties: {
+    reply: { type: 'string', description: 'Respuesta breve en español: qué cambiaste (o la respuesta a la pregunta).' },
+    acciones: { type: 'array', description: 'Cambios sobre el documento. Vacío si el usuario solo preguntó.', items: { type: 'object', properties: {
+      tipo: { type: 'string', enum: ['editar_texto', 'agregar_unidad', 'eliminar_unidad', 'renombrar_unidad', 'agregar_alarma', 'editar_alarma', 'quitar_alarma', 'set_definicion', 'quitar_definicion', 'set_diseno', 'quitar_diseno', 'agregar_anexo', 'editar_anexo', 'eliminar_anexo'] },
+      seccion: { type: 'string', description: 'editar_texto: uno de ' + MAN_CAMPOS_TEXTO.join(', ') + ', o el id EXACTO de una unidad (con "campo").' },
+      campo: { type: 'string', enum: ['descripcion', 'operacion'], description: 'editar_texto sobre una unidad: qué parte.' },
+      texto: { type: 'string', description: 'Texto COMPLETO nuevo de la sección (reescribí la sección entera incorporando el cambio, conservando el resto).' },
+      id: { type: 'string', description: 'id EXACTO de la unidad o del anexo.' },
+      despues_de: { type: 'string', description: 'agregar_unidad: id de la unidad tras la cual insertarla.' },
+      nombre: { type: 'string', description: 'agregar_unidad/renombrar_unidad: nombre. Alarmas: nombre de la alarma (en editar_alarma el ACTUAL).' },
+      grupo: { type: 'string' }, nuevo_nombre: { type: 'string' }, clasificacion: { type: 'string', enum: DFS_CLASIF },
+      termino: { type: 'string' }, definicion: { type: 'string' },
+      parametro: { type: 'string' }, unidad: { type: 'string' }, valor: { type: 'string' },
+      titulo: { type: 'string', description: 'agregar_anexo/editar_anexo: título.' }
+    }, required: ['tipo'] } }
+  }, required: ['reply', 'acciones'] }
+};
+function manAplicarAcciones(dt, acciones) {
+  let n = 0;
+  const unidad = id => dt.unidades.find(u => u.id === id);
+  const alarmaIdx = (u, nom) => { const k = dfsClave(nom); const i = u.alarmas.findIndex(a => dfsClave(a.nombre) === k); return i >= 0 ? i : u.alarmas.findIndex(a => k && dfsClave(a.nombre).startsWith(k)); };
+  (acciones || []).forEach(a => {
+    if (a.tipo === 'editar_texto' && a.texto != null) {
+      if (MAN_CAMPOS_TEXTO.includes(a.seccion)) { dt[a.seccion] = a.texto; n++; }
+      else { const u = unidad(a.seccion); if (u && (a.campo === 'descripcion' || a.campo === 'operacion')) { u[a.campo] = a.texto; n++; } }
+    } else if (a.tipo === 'agregar_unidad' && a.nombre) {
+      const nueva = { id: dfsId(), nombre: a.nombre, grupo: a.grupo || '', descripcion: a.texto || '', operacion: '', alarmas: [] };
+      const i = a.despues_de ? dt.unidades.findIndex(u => u.id === a.despues_de) : -1;
+      if (i >= 0) { if (!a.grupo) nueva.grupo = dt.unidades[i].grupo; dt.unidades.splice(i + 1, 0, nueva); } else dt.unidades.push(nueva); n++;
+    } else if (a.tipo === 'eliminar_unidad') { const antes = dt.unidades.length; dt.unidades = dt.unidades.filter(u => u.id !== a.id); if (dt.unidades.length < antes) n++; }
+    else if (a.tipo === 'renombrar_unidad') { const u = unidad(a.id); if (u && a.nombre) { u.nombre = a.nombre; if (a.grupo) u.grupo = a.grupo; n++; } }
+    else if (a.tipo === 'agregar_alarma') { const u = unidad(a.id); if (u && a.nombre) { u.alarmas.push({ nombre: a.nombre, clasificacion: DFS_CLASIF.includes(a.clasificacion) ? a.clasificacion : 'Media' }); n++; } }
+    else if (a.tipo === 'editar_alarma') { const u = unidad(a.id); const j = u ? alarmaIdx(u, a.nombre) : -1; if (j >= 0) { if (a.nuevo_nombre) u.alarmas[j].nombre = a.nuevo_nombre; if (DFS_CLASIF.includes(a.clasificacion)) u.alarmas[j].clasificacion = a.clasificacion; n++; } }
+    else if (a.tipo === 'quitar_alarma') { const u = unidad(a.id); const j = u ? alarmaIdx(u, a.nombre) : -1; if (j >= 0) { u.alarmas.splice(j, 1); n++; } }
+    else if (a.tipo === 'set_definicion' && a.termino) {
+      let f = dt.definiciones.find(x => dfsClave(x.termino) === dfsClave(a.termino));
+      if (!f) { f = { termino: a.termino, definicion: '' }; dt.definiciones.push(f); }
+      if (a.definicion != null) f.definicion = a.definicion; n++;
+    } else if (a.tipo === 'quitar_definicion' && a.termino) { const antes = dt.definiciones.length; dt.definiciones = dt.definiciones.filter(x => dfsClave(x.termino) !== dfsClave(a.termino)); if (dt.definiciones.length < antes) n++; }
+    else if (a.tipo === 'set_diseno' && a.parametro) {
+      let f = dt.diseno.find(x => dfsClave(x.parametro) === dfsClave(a.parametro));
+      if (!f) { f = { parametro: a.parametro, unidad: '', valor: '' }; dt.diseno.push(f); }
+      ['unidad', 'valor'].forEach(k => { if (a[k] != null) f[k] = a[k]; }); n++;
+    } else if (a.tipo === 'quitar_diseno' && a.parametro) { const antes = dt.diseno.length; dt.diseno = dt.diseno.filter(x => dfsClave(x.parametro) !== dfsClave(a.parametro)); if (dt.diseno.length < antes) n++; }
+    else if (a.tipo === 'agregar_anexo' && a.titulo) { dt.anexos.push({ id: dfsId(), titulo: a.titulo, texto: a.texto || '' }); n++; }
+    else if (a.tipo === 'editar_anexo') { const x = dt.anexos.find(y => y.id === a.id); if (x) { if (a.titulo) x.titulo = a.titulo; if (a.texto != null) x.texto = a.texto; n++; } }
+    else if (a.tipo === 'eliminar_anexo') { const antes = dt.anexos.length; dt.anexos = dt.anexos.filter(x => x.id !== a.id); if (dt.anexos.length < antes) n++; }
+  });
+  return n;
+}
+async function manChatSend() {
+  const input = document.getElementById('man-chat-input');
+  const msg = (input?.value || '').trim();
+  if (!msg || _manBusy || !_manDoc) return;
+  const d = _manDoc, st = 'man-chat-status';
+  _manBusy = true;
+  d.chat_historial.push({ role: 'user', content: msg });
+  manRender(); showMsg(st, 'loading', 'Pensando...');
+  try {
+    const dt = d.datos;
+    const docTxt = MAN_CAMPOS_TEXTO.map(k => `[${k}]\n${dt[k]}`).join('\n\n') + '\n\nDEFINICIONES: ' + dt.definiciones.map(x => x.termino).join(', ')
+      + '\n\nDATOS DE DISEÑO (parámetro | unidad | valor):\n' + dt.diseno.map(x => `${x.parametro} | ${x.unidad} | ${x.valor}`).join('\n')
+      + '\n\n' + dt.unidades.map(u => `UNIDAD id=${u.id} — ${u.nombre} (${u.grupo})\n[descripcion]\n${u.descripcion}\n[operacion]\n${u.operacion}\nAlarmas: ${u.alarmas.map(a => `${a.nombre} [${a.clasificacion}]`).join('; ') || '(ninguna)'}`).join('\n\n')
+      + '\n\nANEXOS: ' + (dt.anexos.map(a => `id=${a.id} "${a.titulo}"`).join('; ') || '(ninguno)');
+    const hist = d.chat_historial.slice(0, -1).slice(-8).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+    const prompt = `Estás ayudando a ajustar el Manual de Operación "${d.nombre}" de una planta de tratamiento de efluentes.\n\n${MAN_ESTILO}\n\nDocumento actual:\n${docTxt}\n\n${hist ? 'Conversación reciente:\n' + hist + '\n\n' : ''}Pedido del usuario: ${msg}\n\nAplicá el pedido con "acciones". Para modificar el texto de una sección, devolvé el texto COMPLETO de esa sección con el cambio incorporado (no solo la parte nueva). No inventes datos que el usuario no dio: si falta uno, preguntalo en "reply" sin aplicar nada. En "reply" contá brevemente qué cambiaste.`;
+    const out = await dfsLlamar(prompt, MAN_TOOL_CAMBIOS, 8000);
+    const snap = JSON.parse(JSON.stringify(dt));
+    const n = manAplicarAcciones(dt, out.acciones);
+    if (n) _manHist.push(snap);
+    d.chat_historial.push({ role: 'assistant', content: (out.reply || '(sin respuesta)') + ((out.acciones || []).length && !n ? '\n\n(No pude aplicar los cambios: no encontré las secciones indicadas.)' : '') });
+  } catch (e) { d.chat_historial.push({ role: 'assistant', content: '✕ ' + e.message }); }
+  finally { _manBusy = false; await manGuardar(); manRender(); }
+}
+function manChatDeshacer() {
+  if (!_manHist.length || _manBusy) return;
+  _manDoc.datos = _manHist.pop();
+  _manDoc.chat_historial.push({ role: 'assistant', content: '↶ Deshice el último cambio.' });
+  manGuardar(); manRender();
+}
+
+// ── Exportar a Word ──
+// Texto con párrafos separados por línea en blanco; las líneas que empiezan con "- " o "• " pasan a viñetas.
+function manBloquesTexto(texto) {
+  const B = []; let lista = [];
+  const cerrar = () => { if (lista.length) { B.push({ t: 'bullets', items: lista }); lista = []; } };
+  String(texto || '').split('\n').forEach(l => {
+    const t = l.trim();
+    if (!t) { cerrar(); return; }
+    const m = t.match(/^[-•]\s+(.*)$/);
+    if (m) lista.push(m[1]); else { cerrar(); B.push({ t: 'p', text: t }); }
+  });
+  cerrar(); return B;
+}
+function manBloques(d) {
+  const dt = d.datos, po = dt.portada, B = [];
+  const seccion = (titulo, texto) => { B.push({ t: 'h1', text: titulo }); B.push(...manBloquesTexto(texto)); };
+  B.push({ t: 'cover', lines: [{ text: po.titulo, size: 40, bold: true, color: '1F4E78', before: 1800, after: 300 }, ...(po.cliente ? [{ text: po.cliente, size: 30, bold: true, after: 120 }] : []), { text: po.proyecto, size: 28, after: 120 }, ...(po.ubicacion ? [{ text: po.ubicacion, size: 24, after: 120 }] : []), ...(po.codigo ? [{ text: po.codigo, size: 24, after: 120 }] : []), { text: `Versión Nº ${po.version}   ·   Vigente desde: ${po.vigente_desde}`, size: 22, after: 600 }] });
+  if (po.confidencial) B.push({ t: 'p', text: po.confidencial, italic: true, align: 'center' });
+  B.push({ t: 'table', head: ['Realizó', 'Revisó', 'Aprobó'], rows: [[po.elaboro, po.reviso, po.aprobo]], widths: [3212, 3213, 3213] });
+  B.push({ t: 'pagebreak' });
+  seccion('1. Objetivo', dt.objetivo); seccion('2. Alcance', dt.alcance);
+  if (dt.definiciones.length) { B.push({ t: 'h1', text: '3. Definiciones' }); B.push({ t: 'table', head: ['Término', 'Definición'], rows: dt.definiciones.map(x => [x.termino, x.definicion]), widths: [2600, 7038] }); }
+  B.push({ t: 'h1', text: '4. Referencias' });
+  if (dt.normativa_texto || dt.normativa.length) { B.push({ t: 'h2', text: '4.1. Normativas de tratamiento de efluentes aplicables' }); B.push(...manBloquesTexto(dt.normativa_texto)); if (dt.normativa.length) B.push({ t: 'table', head: ['Parámetro', 'Unidad', 'Límite'], rows: dt.normativa.map(x => [x.parametro, x.unidad, x.limite]), widths: [5238, 2000, 2400] }); }
+  if (dt.diseno_texto || dt.diseno.length) { B.push({ t: 'h2', text: '4.2. Diseño – Datos de entrada' }); B.push(...manBloquesTexto(dt.diseno_texto)); if (dt.diseno.length) B.push({ t: 'table', head: ['Parámetro', 'Unidad', 'Valor'], rows: dt.diseno.map(x => [x.parametro, x.unidad, x.valor]), widths: [5238, 2000, 2400] }); }
+  seccion('5. Responsabilidades', dt.responsabilidades);
+  B.push({ t: 'h1', text: '6. Procedimiento' });
+  B.push({ t: 'h2', text: '6.1. Inicio del sistema' }); B.push(...manBloquesTexto(dt.inicio));
+  B.push({ t: 'h2', text: '6.2. Descripción y operación de unidades del sistema' });
+  B.push({ t: 'p', text: 'Todos los equipos y sensores instalados poseen su propio manual de operación y tabla de mantenimiento. Se recomienda su visualización para la correcta operación de la planta.' });
+  const grupos = []; dt.unidades.forEach(u => { const g = u.grupo || 'General'; if (!grupos.includes(g)) grupos.push(g); });
+  let n = 0; const numerales = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX', 'XXI', 'XXII', 'XXIII', 'XXIV', 'XXV', 'XXVI', 'XXVII', 'XXVIII', 'XXIX', 'XXX'];
+  const rom = i => numerales[i] || String(i + 1);
+  B.push({ t: 'p', text: 'La planta comprende las siguientes unidades:' });
+  grupos.forEach(g => { B.push({ t: 'p', text: g, bold: true }); const lst = []; dt.unidades.filter(u => (u.grupo || 'General') === g).forEach(u => { lst.push(`${rom(n)}. ${u.nombre}`); n++; }); B.push({ t: 'bullets', items: lst }); });
+  if (dt.resumen_operacion.length) { B.push({ t: 'p', text: 'Resumen de los tipos de equipos que componen la planta y si requieren operación activa durante la operación normal. El total del equipamiento debe controlarse diariamente in situ y desde tablero, para verificar que se encuentre en operación correcta, sin fallas ni daños.' }); B.push({ t: 'table', head: ['Equipo', 'Operación necesaria sobre equipo durante operación normal'], rows: dt.resumen_operacion.map(x => [x.equipo, x.operacion]), widths: [3400, 6238] }); }
+  let k = 0, grupoActual = null;
+  dt.unidades.forEach(u => {
+    const g = u.grupo || 'General';
+    if (g !== grupoActual) { grupoActual = g; B.push({ t: 'h3', text: g }); }
+    B.push({ t: 'p', text: `${rom(k)}. ${u.nombre}`, bold: true }); k++;
+    B.push(...manBloquesTexto(u.descripcion));
+    if (u.operacion && u.operacion.trim()) { B.push({ t: 'p', text: 'Operación y controles:', bold: true }); B.push(...manBloquesTexto(u.operacion)); }
+  });
+  B.push({ t: 'h2', text: '6.3. Paro de emergencia' }); B.push(...manBloquesTexto(dt.emergencia));
+  B.push({ t: 'h2', text: '6.4. Mantenimiento preventivo' }); B.push(...manBloquesTexto(dt.mantenimiento));
+  B.push({ t: 'h1', text: '7. Anexos' });
+  let a = 1;
+  if (dt.equipos.length) { B.push({ t: 'h2', text: `7.${a++}. Listado de equipos` }); B.push({ t: 'table', head: ['TAG', 'Equipo', 'Ubicación'], rows: dt.equipos.map(x => [x.tag, x.equipo, x.ubicacion]), widths: [1700, 4300, 3638] }); }
+  if (dt.sensores.length) { B.push({ t: 'h2', text: `7.${a++}. Listado de sensores` }); B.push({ t: 'table', head: ['TAG', 'Equipo', 'Ubicación'], rows: dt.sensores.map(x => [x.tag, x.equipo, x.ubicacion]), widths: [1700, 4300, 3638] }); }
+  if (dt.unidades.some(u => u.alarmas.length)) {
+    B.push({ t: 'h2', text: `7.${a++}. Alarmas` }); B.push(...manBloquesTexto(dt.alarmas_texto));
+    B.push({ t: 'table', head: ['Alarma', 'Unidad', 'Clasificación'], rows: [].concat(...dt.unidades.map(u => u.alarmas.map(x => [x.nombre, u.nombre, x.clasificacion]))), widths: [4200, 3238, 2200] });
+  }
+  if (dt.incluir_hmi && dt.hmi) { B.push({ t: 'h2', text: `7.${a++}. Guía de pantallas del HMI` }); B.push(...manBloquesTexto(dt.hmi)); }
+  dt.anexos.forEach(x => { B.push({ t: 'h2', text: `7.${a++}. ${x.titulo}` }); B.push(...manBloquesTexto(x.texto)); });
+  B.push({ t: 'h1', text: '8. Registro de modificaciones' });
+  B.push({ t: 'table', head: ['Fecha de revisión', 'Versión', 'Ítem', 'Cambio', 'Responsable'], rows: dt.modificaciones.map(x => [x.fecha, x.version, x.item, x.cambio, x.responsable]), widths: [1600, 1000, 900, 4338, 1800] });
+  B.push({ t: 'p', text: '- Fin del Documento -', align: 'center' });
+  return B;
+}
+async function manExportarWord() {
+  if (!_manDoc) return;
+  const st = 'man-status';
+  try {
+    showMsg(st, 'loading', 'Generando Word...');
+    const d = _manDoc;
+    const pend = JSON.stringify(d.datos).split('[completar]').length - 1;
+    const blob = await docxGenerar(manBloques(d), { pie: (d.datos.portada.proyecto || d.nombre) + ' — Manual de operación' });
+    docxDescargar(blob, 'Manual de operación ' + (d.datos.portada.proyecto || d.nombre));
+    showMsg(st, 'success', '✓ Word generado.' + (pend ? ` Ojo: quedan ${pend} lugar${pend === 1 ? '' : 'es'} con "[completar]".` : ''));
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
@@ -24839,6 +25322,7 @@ const NAV_SECTIONS = [
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
   { id:'mantenimiento', label:'Mantenimiento', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>' },
   { id:'dfs', label:'DFS', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></svg>' },
+  { id:'manual-operacion', label:'Manual de operación', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>' },
   { id:'flowsheets', label:'Flowsheets',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M17.5 10v4"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
@@ -24902,7 +25386,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-comercial','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -24910,7 +25394,7 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','cfg-procesos','cfg-documentacion'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','manual-operacion','cfg-procesos','cfg-documentacion'],
   'RRHH':              ['rend','viajes','hallazgos'],
   'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -25119,6 +25603,7 @@ const PANEL_TITLES = {
   'flowsheets': 'Flowsheets',
   'mantenimiento': 'Mantenimiento',
   'dfs': 'DFS — Descripción funcional',
+  'manual-operacion': 'Manual de operación',
   'cfg-documentacion': 'Configuración — Documentación',
   'clientes': 'Clientes',
   'stock': 'Stock',
