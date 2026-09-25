@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.115</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.116</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.115</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.116</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -691,6 +691,35 @@
           </div>
           <div id="procesos-chat-status"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Mantenimiento (área Documentación) ═══ -->
+    <div class="panel" id="panel-mantenimiento">
+      <div id="mant-list-view">
+        <div class="card">
+          <div class="card-label">Mantenimiento</div>
+          <p class="hint" style="margin-top:-6px">Armá el plan de mantenimiento preventivo de una instalación a partir de sus equipos (traídos de un proyecto de Procesos IA, de un Flowsheet, o cargados a mano) usando la planilla madre de Cfg Documentación. Después lo ajustás con el chat y lo exportás a Excel.</p>
+          <button class="btn btn-primary" onclick="mantPlanNuevo()" style="margin-bottom:12px">+ Nuevo plan</button>
+          <div id="mant-list" class="empty">Cargando...</div>
+        </div>
+      </div>
+      <div id="mant-plan-view" style="display:none"></div>
+    </div>
+
+    <!-- ═══ PANEL: Cfg Documentación ═══ -->
+    <div class="panel" id="panel-cfg-documentacion">
+      <div class="card">
+        <div class="card-label">Planilla madre de mantenimiento</div>
+        <p class="hint" style="margin-bottom:10px">Un registro por tipo de equipo, con sus tareas, frecuencias y el calendario anual. Los planes de la solapa Mantenimiento se arman cruzando los equipos de cada instalación con esta planilla. Podés importar tu Excel (formato "Plan anual": una fila combinada por equipo y una "x" por mes), cargar equipos a mano, o pedirle a la IA que complete los que falten (quedan marcados "a validar").</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <input type="file" id="mant-cfg-file" accept=".xlsx,.xls" style="display:none" onchange="mantCfgImportar(this)" />
+          <button class="btn btn-primary btn-sm" onclick="document.getElementById('mant-cfg-file').click()">⬆ Importar desde Excel</button>
+          <button class="btn btn-secondary btn-sm" onclick="mantCfgEquipoAdd()">+ Agregar equipo</button>
+          <button class="btn btn-secondary btn-sm" onclick="mantCfgCompletarIA()" title="Compara los tipos de equipo de Cfg Procesos IA con esta planilla y arma con IA un plan sugerido para los que falten">✨ Completar con IA los equipos que faltan</button>
+        </div>
+        <div id="mant-cfg-status" style="margin-bottom:10px"></div>
+        <div id="mant-cfg-list" class="empty">Cargando...</div>
       </div>
     </div>
 
@@ -2190,6 +2219,8 @@ function switchPanel(name) {
   if (name === 'clientes') clientesRender();
   if (name === 'microorganismos') microoRender();
   if (name === 'cfg-microorganismos') { microoConocimientoRender(); microoAprendizajeRender(); }
+  if (name === 'mantenimiento') mantPlanesRender();
+  if (name === 'cfg-documentacion') mantCfgRender();
 }
 
 // ── Utils ──────────────────────────────────────────────
@@ -23167,10 +23198,651 @@ async function cotizCotizacionEliminar(id) {
   cotizCotizacionesRender();
 }
 
+// ══════════════════════════════════════════════════════════════
+// Mantenimiento (área Documentación): planilla madre por tipo de equipo
+// (Cfg Documentación) + planes armados por proyecto (solapa Mantenimiento).
+// Una tarea guarda "meses" (1-12) = el calendario del plan anual; la
+// frecuencia es solo la etiqueta que se usa para rearmar esos meses.
+// ══════════════════════════════════════════════════════════════
+const MANT_MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+const MANT_FREC = ['diaria','semanal','mensual','bimestral','trimestral','semestral','anual'];
+let _mantCat = null;
+let _mantCfgAbierto = null;
+let _mantPlan = null;
+let _mantProyectos = { procesos: null, flowsheet: null };
+let _mantHist = [];
+let _mantBusy = false;
+
+function mantH() { const s = JSON.parse(localStorage.getItem('daia_session')||'null'); return { Authorization: 'Bearer ' + s.token }; }
+function mantNorm(s) { return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function mantId() { return 'm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+async function mantFetchAll(path) {
+  const out = []; const sep = path.includes('?') ? '&' : '?';
+  for (let off = 0; ; off += 1000) {
+    const r = await supaFetch(`${path}${sep}limit=1000&offset=${off}`, { headers: mantH() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const rows = await r.json(); out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+function mantMesesPorFrecuencia(f, alt) {
+  switch (f) {
+    case 'diaria': case 'semanal': case 'mensual': return [1,2,3,4,5,6,7,8,9,10,11,12];
+    case 'bimestral': return alt ? [1,3,5,7,9,11] : [2,4,6,8,10,12];
+    case 'trimestral': return alt ? [1,4,7,10] : [3,6,9,12];
+    case 'semestral': return [6, 12];
+    default: return [12];
+  }
+}
+function mantFrecuenciaDeMeses(m) { const n = (m || []).length; return n >= 12 ? 'mensual' : n >= 6 ? 'bimestral' : n >= 4 ? 'trimestral' : n >= 2 ? 'semestral' : 'anual'; }
+// Al exportar, la frecuencia va entre paréntesis al final del texto (como en la
+// planilla original), salvo que la tarea ya termine con un paréntesis propio
+// (ej. "(anual o 6.000 h)").
+function mantTareaTexto(t) {
+  const txt = String(t.tarea || '').trim();
+  return (t.frecuencia && !/\)\s*$/.test(txt) && !mantNorm(txt).split(' ').includes(t.frecuencia)) ? `${txt} (${t.frecuencia})` : txt;
+}
+function mantMesChip(on, onclick, label) {
+  return `<span onclick="${onclick}" title="${esc(label)}" style="cursor:pointer;display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:4px;font-size:10px;margin:0 1px;border:1px solid var(--border);${on ? 'background:#c6e0b4;color:#1b4d1b;font-weight:700' : 'background:var(--surface2);color:var(--text2)'}">${esc(label.charAt(0))}</span>`;
+}
+
+// ── IA (tool call forzada, igual que el chat de Paso 2) ──
+async function mantLlamarIA(prompt, tool, maxTokens) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
+  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: maxTokens || 4000, tools: [tool], tool_choice: { type: 'tool', name: tool.name }, messages: [{ role: 'user', content: prompt }] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const tu = data.content?.find(c => c.type === 'tool_use');
+  if (!tu) throw new Error('La IA no devolvió una respuesta con la forma esperada.');
+  return tu.input || {};
+}
+const MANT_TOOL_EMPAREJAR = {
+  name: 'emparejar_equipos',
+  description: 'Indica, para cada equipo de la lista, con qué equipo de la planilla madre de mantenimiento se corresponde (o ninguno).',
+  input_schema: { type: 'object', properties: { resultados: { type: 'array', items: { type: 'object', properties: {
+    indice: { type: 'integer', description: 'Número del equipo en la lista recibida.' },
+    catalogo_id: { type: ['string', 'null'], description: 'id EXACTO del equipo de la planilla madre, o null si ninguno es equivalente.' },
+    confianza: { type: 'string', enum: ['alta', 'media', 'baja'] },
+    motivo: { type: 'string', description: 'Motivo breve (máx. 12 palabras).' }
+  }, required: ['indice', 'catalogo_id', 'confianza'] } } }, required: ['resultados'] }
+};
+async function mantEmparejarIA(items) {
+  const cat = await mantCatCargar();
+  if (!cat.length) throw new Error('La planilla madre está vacía — cargala primero en Cfg Documentación.');
+  const catTxt = cat.map(e => `${e.id} | ${e.nombre}${e.sinonimos ? ' | sinónimos: ' + e.sinonimos : ''}`).join('\n');
+  const itTxt = items.map((it, i) => `${i} | ${it}`).join('\n');
+  const prompt = `Tenés que emparejar equipos de una instalación de tratamiento de efluentes con los tipos de equipo de la planilla madre de mantenimiento.\n\nPlanilla madre (id | nombre):\n${catTxt}\n\nEquipos a emparejar (n | descripción, puede traer tipo, modelo y especificación):\n${itTxt}\n\nReglas: emparejá solo si el equipo ES de ese tipo (ej. "Bomba dosificadora de coagulante" → BOMBAS DOSIFICADORAS; "Soplante" o "Blower" → SOPLANTES; los nombres pueden estar en singular/plural, con sinónimos, en otro idioma o con el modelo/marca). Si ninguno es realmente equivalente, devolvé catalogo_id null — NO fuerces un emparejamiento por parecido superficial (ej. un tanque no es una bomba). Usá "confianza" media/baja si dudás. Devolvé un resultado por cada equipo.`;
+  const out = await mantLlamarIA(prompt, MANT_TOOL_EMPAREJAR, 4000);
+  const res = items.map(() => ({ catalogo_id: null, confianza: null, motivo: '' }));
+  (out.resultados || []).forEach(r => { if (res[r.indice] && (!r.catalogo_id || cat.some(e => e.id === r.catalogo_id))) res[r.indice] = { catalogo_id: r.catalogo_id || null, confianza: r.confianza || null, motivo: r.motivo || '' }; });
+  return res;
+}
+const MANT_TOOL_GENERAR = {
+  name: 'plan_mantenimiento',
+  description: 'Plan de mantenimiento preventivo sugerido para un tipo de equipo.',
+  input_schema: { type: 'object', properties: { tareas: { type: 'array', items: { type: 'object', properties: {
+    tarea: { type: 'string', description: 'Tarea en infinitivo, concreta y verificable. Sin la frecuencia en el texto, salvo que dependa de horas de operación (ej. "cada 5.000 h").' },
+    frecuencia: { type: 'string', enum: ['mensual', 'bimestral', 'trimestral', 'semestral', 'anual'] },
+    criterio: { type: 'string', description: 'De dónde sale la frecuencia (ej. "Sugerencia preventiva genérica; validar con el manual del fabricante").' }
+  }, required: ['tarea', 'frecuencia', 'criterio'] } } }, required: ['tareas'] }
+};
+async function mantGenerarEquipoIA(nombre, detalle) {
+  const cat = await mantCatCargar();
+  const ejemplos = cat.filter(e => e.estado === 'validado' && e.tareas.length).slice(0, 2).map(e => `${e.nombre}:\n` + e.tareas.map(t => `- ${mantTareaTexto(t)}`).join('\n')).join('\n\n');
+  const prompt = `Armá un plan de mantenimiento preventivo para este tipo de equipo de una planta de tratamiento de efluentes: "${nombre}".${detalle ? `\nDatos del equipo: ${detalle}` : ''}\n\nEjemplos del estilo y nivel de detalle que se usa en la empresa (tareas de otros equipos):\n${ejemplos || '(sin ejemplos)'}\n\nReglas:\n- Entre 5 y 8 tareas para un equipo mecánico/eléctrico (2 a 4 si es un equipo pasivo como un tanque, contenedor o canasto: inspección, limpieza, estado estructural).\n- Cubrí: inspección general (ruidos, vibración, fugas, temperatura), controles eléctricos si aplica, lubricación, limpieza, desgaste de partes móviles, y un servicio mayor anual.\n- Frecuencias realistas para servicio continuo en efluentes. No inventes datos específicos de fabricante (aceites, horas, torques) que no conozcas — si dependen del manual, decilo en la tarea ("según manual del fabricante").\n- En "criterio" aclará que es una sugerencia preventiva genérica sin manual del fabricante.`;
+  const out = await mantLlamarIA(prompt, MANT_TOOL_GENERAR, 3000);
+  const alt = {};
+  return (out.tareas || []).filter(t => t.tarea && MANT_FREC.includes(t.frecuencia)).map(t => {
+    alt[t.frecuencia] = (alt[t.frecuencia] || 0) + 1;
+    return { tarea: t.tarea.trim(), frecuencia: t.frecuencia, meses: mantMesesPorFrecuencia(t.frecuencia, alt[t.frecuencia] % 2 === 0), criterio: t.criterio || 'Sugerencia preventiva genérica (sin manual del fabricante); validar.' };
+  });
+}
+
+// ══ Planilla madre (Cfg Documentación) ══════════════════════
+async function mantCatCargar(force) {
+  if (_mantCat && !force) return _mantCat;
+  let eqs, tas;
+  try {
+    eqs = await mantFetchAll(`/rest/v1/mant_equipos?select=*&empresa=eq.${currentEmpresa}&order=nombre`);
+    tas = await mantFetchAll('/rest/v1/mant_tareas?select=*&order=equipo_id,orden,id');
+  } catch (e) { throw new Error('No se pudo leer la planilla madre — ¿corriste el SQL de Mantenimiento?'); }
+  const por = {}; tas.forEach(t => (por[t.equipo_id] = por[t.equipo_id] || []).push(t));
+  _mantCat = eqs.map(e => Object.assign({}, e, { tareas: (por[e.id] || []).sort((a, b) => a.orden - b.orden) }));
+  return _mantCat;
+}
+async function mantCfgRender() {
+  const el = document.getElementById('mant-cfg-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  let cat;
+  try { cat = await mantCatCargar(true); } catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  if (!cat.length) { el.innerHTML = '<p class="hint">Todavía no hay equipos. Importá tu planilla de Excel o agregá uno a mano.</p>'; return; }
+  el.innerHTML = cat.map(e => {
+    const abierto = _mantCfgAbierto === e.id;
+    const badge = e.estado === 'sugerido' ? '<span class="badge" style="background:#fff3cd;color:#8a6d00">a validar</span>' : '<span class="badge" style="background:var(--green-bg,#e3f4e3);color:var(--green,#1b7f1b)">validado</span>';
+    if (!abierto) return `<div class="field-row" style="cursor:pointer" onclick="mantCfgAbrir('${e.id}')"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span><strong>${esc(e.nombre)}</strong> — ${e.tareas.length} tarea${e.tareas.length === 1 ? '' : 's'} ${badge}</span><button class="remove-btn" onclick="event.stopPropagation();mantCfgEquipoDel('${e.id}')">&#x2715;</button></div></div>`;
+    return `<div class="card" style="margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:2fr 2fr 1fr;gap:8px;margin-bottom:8px">
+        <div><label style="font-size:12px">Nombre del tipo de equipo</label><input value="${esc(e.nombre)}" onchange="mantCfgEquipoUpd('${e.id}','nombre',this.value)" /></div>
+        <div><label style="font-size:12px">Sinónimos (ayudan a emparejar)</label><input value="${esc(e.sinonimos || '')}" placeholder="blower, compresor de lóbulos..." onchange="mantCfgEquipoUpd('${e.id}','sinonimos',this.value)" /></div>
+        <div><label style="font-size:12px">Estado</label><select onchange="mantCfgEquipoUpd('${e.id}','estado',this.value)"><option value="validado" ${e.estado === 'validado' ? 'selected' : ''}>Validado</option><option value="sugerido" ${e.estado === 'sugerido' ? 'selected' : ''}>A validar</option></select></div>
+      </div>
+      <label style="font-size:12px">Fuente</label>
+      <input value="${esc(e.fuente || '')}" style="margin-bottom:8px" onchange="mantCfgEquipoUpd('${e.id}','fuente',this.value)" />
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr><th style="${PROCESOS_EQ_TH}">Tarea</th><th style="${PROCESOS_EQ_TH}">Frecuencia</th><th style="${PROCESOS_EQ_TH}">Meses</th><th style="${PROCESOS_EQ_TH}">Criterio / fuente</th><th></th></tr>
+        ${e.tareas.map(t => `<tr>
+          <td style="${PROCESOS_EQ_TD};min-width:280px"><input value="${esc(t.tarea)}" onchange="mantCfgTareaUpd('${t.id}','tarea',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD}"><select onchange="mantCfgTareaUpd('${t.id}','frecuencia',this.value)"><option value=""></option>${MANT_FREC.map(f => `<option value="${f}" ${t.frecuencia === f ? 'selected' : ''}>${f}</option>`).join('')}</select></td>
+          <td style="${PROCESOS_EQ_TD};white-space:nowrap">${MANT_MESES.map((m, i) => mantMesChip((t.meses || []).includes(i + 1), `mantCfgTareaMes('${t.id}',${i + 1})`, m)).join('')}</td>
+          <td style="${PROCESOS_EQ_TD};min-width:200px"><input value="${esc(t.criterio || '')}" onchange="mantCfgTareaUpd('${t.id}','criterio',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="mantCfgTareaDel('${t.id}')">&#x2715;</button></td></tr>`).join('')}
+      </table></div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn btn-secondary btn-sm" onclick="mantCfgTareaAdd('${e.id}')">+ Tarea</button><button class="btn btn-secondary btn-sm" onclick="mantCfgAbrir(null)">Cerrar</button></div>
+    </div>`;
+  }).join('');
+}
+function mantCfgAbrir(id) { _mantCfgAbierto = id; mantCfgRender(); }
+async function mantCfgEquipoUpd(id, campo, val) {
+  const e = _mantCat.find(x => x.id === id); if (!e) return;
+  e[campo] = val;
+  await supaFetch(`/rest/v1/mant_equipos?id=eq.${id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ [campo]: val, updated_at: new Date().toISOString() }) });
+  if (campo === 'nombre' || campo === 'estado') mantCfgRender();
+}
+async function mantCfgEquipoAdd() {
+  const nombre = prompt('Nombre del tipo de equipo (ej. BOMBAS CENTRÍFUGAS):');
+  if (!nombre || !nombre.trim()) return;
+  const r = await supaFetch('/rest/v1/mant_equipos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.trim().toUpperCase(), estado: 'validado', fuente: 'Cargado a mano' }) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows?.length) { alert('No se pudo crear — ¿corriste el SQL de Mantenimiento?'); return; }
+  _mantCfgAbierto = rows[0].id; mantCfgRender();
+}
+async function mantCfgEquipoDel(id) {
+  const e = _mantCat.find(x => x.id === id);
+  if (!confirm(`¿Eliminar "${e ? e.nombre : 'este equipo'}" y sus tareas de la planilla madre?`)) return;
+  await supaFetch(`/rest/v1/mant_equipos?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
+  if (_mantCfgAbierto === id) _mantCfgAbierto = null;
+  mantCfgRender();
+}
+function mantCfgTareaBuscar(id) { for (const e of _mantCat) { const t = e.tareas.find(x => x.id === id); if (t) return { e, t }; } return {}; }
+async function mantCfgTareaUpd(id, campo, val) {
+  const { e, t } = mantCfgTareaBuscar(id); if (!t) return;
+  const patch = { [campo]: val };
+  t[campo] = val;
+  if (campo === 'frecuencia' && val) { const alt = e.tareas.filter(x => x.frecuencia === val).indexOf(t) % 2 === 1; t.meses = mantMesesPorFrecuencia(val, alt); patch.meses = t.meses; }
+  await supaFetch(`/rest/v1/mant_tareas?id=eq.${id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify(patch) });
+  if (campo === 'frecuencia') mantCfgRender();
+}
+async function mantCfgTareaMes(id, mes) {
+  const { t } = mantCfgTareaBuscar(id); if (!t) return;
+  t.meses = (t.meses || []).includes(mes) ? t.meses.filter(m => m !== mes) : (t.meses || []).concat([mes]).sort((a, b) => a - b);
+  await supaFetch(`/rest/v1/mant_tareas?id=eq.${id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ meses: t.meses }) });
+  mantCfgRender();
+}
+async function mantCfgTareaAdd(equipoId) {
+  const e = _mantCat.find(x => x.id === equipoId); if (!e) return;
+  const r = await supaFetch('/rest/v1/mant_tareas', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ equipo_id: equipoId, orden: e.tareas.length, tarea: 'Nueva tarea', frecuencia: 'mensual', meses: mantMesesPorFrecuencia('mensual') }) });
+  if (!r.ok) { alert('No se pudo agregar la tarea.'); return; }
+  mantCfgRender();
+}
+async function mantCfgTareaDel(id) {
+  await supaFetch(`/rest/v1/mant_tareas?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
+  mantCfgRender();
+}
+
+// Importa una planilla con el formato "Plan anual" (grupos por equipo con
+// fila combinada, tareas con "x" por mes) + opcional hoja "Criterios y
+// fuentes" ("EQUIPO | tarea" → criterio / nota).
+function mantParseTarea(raw, meses) {
+  let tarea = String(raw).trim(), frec = null;
+  const m = tarea.match(/\s*\(([^()]+)\)\s*$/);
+  if (m && MANT_FREC.includes(mantNorm(m[1]))) { frec = mantNorm(m[1]); tarea = tarea.slice(0, m.index).trim(); }
+  return { tarea, frecuencia: frec || mantFrecuenciaDeMeses(meses) };
+}
+function mantParseXlsx(wb, nombreArchivo) {
+  const wsPlan = wb.Sheets['Plan anual'] || wb.Sheets[wb.SheetNames[0]];
+  const wsCrit = wb.Sheets['Criterios y fuentes'] || (wb.SheetNames[1] ? wb.Sheets[wb.SheetNames[1]] : null);
+  const crit = {};
+  // La columna "Nota" suele traer una nota GENERAL del archivo en la primera
+  // fila de datos (no es de esa tarea puntual): se ignora para no pegársela
+  // a la primera tarea de un equipo.
+  if (wsCrit) XLSX.utils.sheet_to_json(wsCrit, { header: 1, defval: null }).slice(1).forEach((r, idx) => {
+    if (!r[0]) return;
+    const i = String(r[0]).indexOf(' | '); if (i < 0) return;
+    crit[mantNorm(String(r[0]).slice(0, i)) + '|' + mantNorm(String(r[0]).slice(i + 3))] = { criterio: r[1] || '', nota: idx === 0 ? '' : (r[3] || '') };
+  });
+  const rows = XLSX.utils.sheet_to_json(wsPlan, { header: 1, defval: null });
+  const grupos = []; let actual = null;
+  rows.slice(1).forEach(r => {
+    if (!r[0] || !String(r[0]).trim()) return;
+    const marcas = r.slice(1, 13).map(c => String(c == null ? '' : c).trim().toLowerCase() === 'x');
+    if (!marcas.some(Boolean) && r.slice(1, 13).every(c => c == null || String(c).trim() === '')) {
+      const bruto = String(r[0]).trim();
+      actual = { bruto, nombre: bruto.replace(/\s*-\s*PLAN PREVENTIVO SUGERIDO.*$/i, '').trim(), sugerido: /SUGERIDO|SIN MANUAL/i.test(bruto), tareas: [] };
+      grupos.push(actual); return;
+    }
+    if (!actual) return;
+    const meses = marcas.map((x, i) => x ? i + 1 : null).filter(Boolean);
+    const p = mantParseTarea(r[0], meses);
+    const c = crit[mantNorm(actual.bruto) + '|' + mantNorm(r[0])] || {};
+    actual.tareas.push({ tarea: p.tarea, frecuencia: p.frecuencia, meses, criterio: c.criterio || '', nota: c.nota || '' });
+  });
+  return grupos.filter(g => g.tareas.length).map(g => Object.assign(g, { fuente: g.sugerido ? 'Plan preventivo sugerido (sin manual) — importado de ' + nombreArchivo : 'Importado de ' + nombreArchivo }));
+}
+async function mantCfgImportar(input) {
+  const file = input.files[0]; input.value = '';
+  if (!file) return;
+  const st = 'mant-cfg-status';
+  try {
+    showMsg(st, 'loading', 'Leyendo el Excel...');
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const grupos = mantParseXlsx(wb, file.name);
+    if (!grupos.length) throw new Error('No encontré equipos con tareas en ese archivo (se espera el formato "Plan anual": una fila combinada por equipo y una "x" por mes).');
+    const cat = await mantCatCargar(true);
+    const existentes = grupos.filter(g => cat.some(e => mantNorm(e.nombre) === mantNorm(g.nombre)));
+    let reemplazar = false;
+    if (existentes.length) reemplazar = confirm(`Ya existen en la planilla madre: ${existentes.map(g => g.nombre).join(', ')}.\n\nAceptar = reemplazar sus tareas con las del Excel.\nCancelar = omitirlos y cargar solo los nuevos.`);
+    let cargados = 0, omitidos = 0;
+    for (const g of grupos) {
+      const ex = cat.find(e => mantNorm(e.nombre) === mantNorm(g.nombre));
+      if (ex && !reemplazar) { omitidos++; continue; }
+      if (ex) await supaFetch(`/rest/v1/mant_equipos?id=eq.${ex.id}`, { method: 'DELETE', headers: mantH() });
+      const r = await supaFetch('/rest/v1/mant_equipos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre: g.nombre, estado: g.sugerido ? 'sugerido' : 'validado', fuente: g.fuente }) });
+      const eq = await r.json().catch(() => null);
+      if (!r.ok || !eq?.length) throw new Error('No se pudo crear "' + g.nombre + '" — ¿corriste el SQL de Mantenimiento?');
+      const rt = await supaFetch('/rest/v1/mant_tareas', { method: 'POST', headers: mantH(), body: JSON.stringify(g.tareas.map((t, i) => Object.assign({ equipo_id: eq[0].id, orden: i }, t))) });
+      if (!rt.ok) throw new Error('No se pudieron guardar las tareas de "' + g.nombre + '".');
+      cargados++;
+    }
+    showMsg(st, 'success', `✓ ${cargados} equipo${cargados === 1 ? '' : 's'} importado${cargados === 1 ? '' : 's'}${omitidos ? `, ${omitidos} omitido${omitidos === 1 ? '' : 's'} (ya existían)` : ''}.`);
+    mantCfgRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+async function mantGuardarEquipoIA(nombre, detalle, sinonimos) {
+  const tareas = await mantGenerarEquipoIA(nombre, detalle);
+  if (!tareas.length) throw new Error('La IA no devolvió tareas para "' + nombre + '".');
+  const r = await supaFetch('/rest/v1/mant_equipos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.toUpperCase(), sinonimos: sinonimos || null, estado: 'sugerido', fuente: 'Sugerido por IA (sin manual) — validar' }) });
+  const eq = await r.json().catch(() => null);
+  if (!r.ok || !eq?.length) throw new Error('No se pudo crear "' + nombre + '".');
+  const rt = await supaFetch('/rest/v1/mant_tareas', { method: 'POST', headers: mantH(), body: JSON.stringify(tareas.map((t, i) => Object.assign({ equipo_id: eq[0].id, orden: i }, t))) });
+  if (!rt.ok) throw new Error('No se pudieron guardar las tareas de "' + nombre + '".');
+  await mantCatCargar(true);
+  return eq[0].id;
+}
+// Recorre los tipos de equipo de Cfg Procesos IA ("todos los equipos posibles"),
+// ve cuáles no tienen equivalente en la planilla madre y les arma un plan
+// sugerido (estado "a validar").
+async function mantCfgCompletarIA() {
+  if (_mantBusy) return;
+  const st = 'mant-cfg-status';
+  try {
+    _mantBusy = true;
+    showMsg(st, 'loading', 'Buscando equipos que faltan...');
+    const cat = await mantCatCargar(true);
+    if (!cat.length) throw new Error('Importá primero tu planilla para tener ejemplos del estilo.');
+    const filas = await mantFetchAll(`/rest/v1/procesos_equipos_plantilla?select=tipo_equipo&empresa=eq.${currentEmpresa}`);
+    const vistos = {}; const nombres = [];
+    filas.forEach(f => { const n = String(f.tipo_equipo || '').trim(); if (n && !vistos[mantNorm(n)]) { vistos[mantNorm(n)] = 1; nombres.push(n); } });
+    if (!nombres.length) throw new Error('No hay tipos de equipo cargados en Cfg Procesos IA.');
+    const res = await mantEmparejarIA(nombres);
+    const faltan = nombres.filter((n, i) => !res[i].catalogo_id);
+    if (!faltan.length) { showMsg(st, 'success', '✓ Todos los tipos de equipo de Procesos IA ya tienen plan en la planilla madre.'); return; }
+    if (!confirm(`Faltan ${faltan.length} tipos de equipo en la planilla madre:\n\n${faltan.join('\n')}\n\n¿Armo un plan sugerido con IA para cada uno? Quedan marcados "a validar" (tarda ~10 segundos por equipo).`)) { showMsg(st, 'success', 'Cancelado.'); return; }
+    let ok = 0;
+    for (const n of faltan) {
+      showMsg(st, 'loading', `Generando ${ok + 1}/${faltan.length}: ${n}...`);
+      try { await mantGuardarEquipoIA(n, '', ''); ok++; } catch (e) { console.warn(e.message); }
+    }
+    showMsg(st, 'success', `✓ Se sumaron ${ok} de ${faltan.length} equipos como "a validar". Revisalos abajo.`);
+    mantCfgRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _mantBusy = false; }
+}
+
+// ══ Planes por proyecto (solapa Mantenimiento) ══════════════
+async function mantPlanesRender() {
+  mantPlanVolver(true);
+  const el = document.getElementById('mant-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const rows = await mantFetchAll(`/rest/v1/mant_planes?select=id,nombre,origen,origen_nombre,creado_por_nombre,updated_at&empresa=eq.${currentEmpresa}&order=updated_at.desc`);
+    if (!rows.length) { el.innerHTML = '<div class="empty">No hay planes todavía.</div>'; return; }
+    el.innerHTML = rows.map(p => `<div class="file-item" style="cursor:pointer" onclick="mantPlanAbrir('${p.id}')"><div class="file-icon">🛠</div><div class="file-info"><div class="file-name">${esc(p.nombre)}</div><div class="file-size">${esc(p.origen_nombre || (p.origen === 'manual' ? 'Equipos cargados a mano' : p.origen))} · ${esc(p.creado_por_nombre || '')} · ${new Date(p.updated_at).toLocaleDateString('es-AR')}</div></div><button class="np-item-remove" onclick="event.stopPropagation();mantPlanEliminar('${p.id}')">&#x2715;</button></div>`).join('');
+  } catch (e) { el.innerHTML = '<div class="empty">No se pudo cargar — ¿corriste el SQL de Mantenimiento?</div>'; }
+}
+async function mantPlanNuevo() {
+  const nombre = prompt('Nombre del plan (ej. Planta Cliente X):');
+  if (!nombre || !nombre.trim()) return;
+  const r = await supaFetch('/rest/v1/mant_planes', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.trim(), creado_por_nombre: currentUser?.nombre || currentUser?.email || null }) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows?.length) { alert('No se pudo crear el plan — ¿corriste el SQL de Mantenimiento?'); return; }
+  mantPlanAbrir(rows[0].id);
+}
+async function mantPlanEliminar(id) {
+  if (!confirm('¿Eliminar este plan de mantenimiento?')) return;
+  await supaFetch(`/rest/v1/mant_planes?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
+  mantPlanesRender();
+}
+async function mantPlanAbrir(id) {
+  const r = await supaFetch(`/rest/v1/mant_planes?id=eq.${id}&select=*`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  if (!r.ok || !rows.length) { alert('No se pudo abrir el plan.'); return; }
+  _mantPlan = rows[0]; _mantHist = [];
+  if (!Array.isArray(_mantPlan.equipos)) _mantPlan.equipos = [];
+  if (!Array.isArray(_mantPlan.filas)) _mantPlan.filas = [];
+  if (!Array.isArray(_mantPlan.chat_historial)) _mantPlan.chat_historial = [];
+  document.getElementById('mant-list-view').style.display = 'none';
+  document.getElementById('mant-plan-view').style.display = '';
+  try { await mantCatCargar(); } catch (e) { /* se muestra en el plan */ }
+  mantCargarProyectos();
+  mantPlanRender();
+}
+function mantPlanVolver(silencioso) {
+  _mantPlan = null;
+  const a = document.getElementById('mant-list-view'), b = document.getElementById('mant-plan-view');
+  if (a) a.style.display = ''; if (b) b.style.display = 'none';
+  if (!silencioso) mantPlanesRender();
+}
+let _mantGuardarTimer = null;
+function mantPlanGuardar() {
+  if (!_mantPlan) return Promise.resolve();
+  const p = _mantPlan;
+  return supaFetch(`/rest/v1/mant_planes?id=eq.${p.id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ nombre: p.nombre, origen: p.origen, origen_id: p.origen_id || null, origen_nombre: p.origen_nombre || null, equipos: p.equipos, filas: p.filas, chat_historial: p.chat_historial, updated_at: new Date().toISOString() }) }).catch(() => {});
+}
+async function mantCargarProyectos() {
+  try {
+    if (!_mantProyectos.procesos) _mantProyectos.procesos = await mantFetchAll(`/rest/v1/procesos_proyectos?select=id,nombre,cliente&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+    if (!_mantProyectos.flowsheet) _mantProyectos.flowsheet = await mantFetchAll(`/rest/v1/flowsheet_proyectos?select=id,nombre&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+  } catch (e) { _mantProyectos.procesos = _mantProyectos.procesos || []; _mantProyectos.flowsheet = _mantProyectos.flowsheet || []; }
+  if (_mantPlan) mantPlanRender();
+}
+function mantSetNombre(v) { if (_mantPlan && v.trim()) { _mantPlan.nombre = v.trim(); mantPlanGuardar(); } }
+function mantSetOrigen(tipo) { _mantPlan.origen = tipo; _mantPlan.origen_id = null; _mantPlan.origen_nombre = null; mantPlanGuardar(); mantPlanRender(); }
+function mantSetOrigenProyecto(id) {
+  const lista = _mantProyectos[_mantPlan.origen] || [];
+  const p = lista.find(x => x.id === id);
+  _mantPlan.origen_id = id || null; _mantPlan.origen_nombre = p ? (_mantPlan.origen === 'procesos' ? 'Procesos IA: ' : 'Flowsheet: ') + p.nombre : null;
+  mantPlanGuardar(); mantPlanRender();
+}
+async function mantTraerEquipos() {
+  if (!_mantPlan.origen_id) { alert('Elegí primero el proyecto.'); return; }
+  const tabla = _mantPlan.origen === 'procesos' ? 'procesos_proyectos' : 'flowsheet_proyectos';
+  const r = await supaFetch(`/rest/v1/${tabla}?id=eq.${_mantPlan.origen_id}&select=equipos_data`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  const etapas = rows[0]?.equipos_data?.etapas || {};
+  const nuevos = [];
+  Object.keys(etapas).forEach(et => (etapas[et].equipos || []).forEach(eq => {
+    const detalle = [eq.modelo, eq.especificacion].filter(Boolean).join(' — ').slice(0, 140);
+    nuevos.push({ id: mantId(), tipo: eq.tipo || '(sin tipo)', detalle, cantidad: eq.cantidad || 1, etapa: et, catalogo_id: null, confianza: null, incluir: true });
+  }));
+  if (!nuevos.length) { alert('Ese proyecto no tiene equipos definidos todavía.'); return; }
+  if (_mantPlan.equipos.length && !confirm('Reemplazar la lista actual de equipos por la del proyecto?')) return;
+  _mantPlan.equipos = nuevos; _mantPlan.filas = []; _mantHist = [];
+  await mantPlanGuardar(); mantPlanRender();
+}
+function mantEquipoAdd() { _mantPlan.equipos.push({ id: mantId(), tipo: '', detalle: '', cantidad: 1, etapa: '', catalogo_id: null, confianza: null, incluir: true }); mantPlanGuardar(); mantPlanRender(); }
+function mantEquipoUpd(id, campo, val) {
+  const e = _mantPlan.equipos.find(x => x.id === id); if (!e) return;
+  e[campo] = campo === 'cantidad' ? (Number(val) || 1) : (campo === 'incluir' ? !!val : val);
+  if (campo === 'catalogo_id') { e.catalogo_id = val || null; e.confianza = val ? 'manual' : null; }
+  mantPlanGuardar(); if (campo === 'catalogo_id' || campo === 'incluir') mantPlanRender();
+}
+function mantEquipoDel(id) { _mantPlan.equipos = _mantPlan.equipos.filter(x => x.id !== id); mantPlanGuardar(); mantPlanRender(); }
+async function mantEmparejarClick() {
+  if (_mantBusy) return;
+  const pend = _mantPlan.equipos.filter(e => e.incluir !== false && e.tipo);
+  if (!pend.length) { alert('Cargá equipos primero.'); return; }
+  const st = 'mant-plan-status';
+  try {
+    _mantBusy = true; showMsg(st, 'loading', 'Emparejando con la planilla madre...');
+    const res = await mantEmparejarIA(pend.map(e => [e.tipo, e.detalle].filter(Boolean).join(' — ')));
+    pend.forEach((e, i) => { e.catalogo_id = res[i].catalogo_id; e.confianza = res[i].catalogo_id ? res[i].confianza : null; });
+    await mantPlanGuardar(); mantPlanRender();
+    showMsg('mant-plan-status', 'success', `✓ ${res.filter(r => r.catalogo_id).length} de ${pend.length} emparejados. Revisá los de confianza media/baja y los que quedaron sin equivalente.`);
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _mantBusy = false; }
+}
+async function mantGenerarFaltantes() {
+  if (_mantBusy) return;
+  const st = 'mant-plan-status';
+  const faltan = _mantPlan.equipos.filter(e => e.incluir !== false && e.tipo && !e.catalogo_id);
+  const tipos = []; faltan.forEach(e => { if (!tipos.some(t => mantNorm(t.tipo) === mantNorm(e.tipo))) tipos.push(e); });
+  if (!tipos.length) return;
+  if (!confirm(`Voy a armar con IA un plan sugerido (sin manual, "a validar") para: ${tipos.map(t => t.tipo).join(', ')}.\n\nQuedan guardados en la planilla madre para reusarlos. ¿Seguir?`)) return;
+  try {
+    _mantBusy = true;
+    for (let i = 0; i < tipos.length; i++) {
+      showMsg(st, 'loading', `Generando ${i + 1}/${tipos.length}: ${tipos[i].tipo}...`);
+      const id = await mantGuardarEquipoIA(tipos[i].tipo, tipos[i].detalle, '');
+      _mantPlan.equipos.forEach(e => { if (!e.catalogo_id && mantNorm(e.tipo) === mantNorm(tipos[i].tipo)) { e.catalogo_id = id; e.confianza = 'generado'; } });
+    }
+    await mantPlanGuardar(); mantPlanRender();
+    showMsg('mant-plan-status', 'success', '✓ Listo. Los equipos nuevos quedaron "a validar" en la planilla madre — armá el plan de nuevo para incluirlos.');
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _mantBusy = false; }
+}
+async function mantArmarPlan() {
+  if (_mantPlan.filas.length && !confirm('Ya hay un plan armado. Si lo rearmás se pierden los cambios hechos a mano o por chat. ¿Seguir?')) return;
+  const cat = await mantCatCargar().catch(() => []);
+  const grupos = new Map();
+  _mantPlan.equipos.filter(e => e.incluir !== false && e.catalogo_id).forEach(e => {
+    const g = grupos.get(e.catalogo_id) || { cant: 0, etapas: [] };
+    g.cant += Number(e.cantidad) || 1;
+    if (e.etapa && !g.etapas.includes(e.etapa)) g.etapas.push(e.etapa);
+    grupos.set(e.catalogo_id, g);
+  });
+  const filas = [];
+  grupos.forEach((g, cid) => {
+    const ce = cat.find(x => x.id === cid); if (!ce) return;
+    const label = ce.nombre + (g.cant > 1 ? ` (x${g.cant})` : '') + (g.etapas.length ? ` — ${g.etapas.join(', ')}` : '');
+    ce.tareas.forEach(t => filas.push({ id: mantId(), grupo: label, catalogo_id: cid, tarea: t.tarea, frecuencia: t.frecuencia || '', meses: (t.meses || []).slice(), criterio: t.criterio || '', nota: t.nota || '', aValidar: ce.estado === 'sugerido' }));
+  });
+  if (!filas.length) { alert('No hay equipos emparejados con la planilla madre — usá "Emparejar con IA" o elegí el equipo a mano en cada fila.'); return; }
+  _mantHist = []; _mantPlan.filas = filas;
+  await mantPlanGuardar(); mantPlanRender();
+}
+// Edición manual del plan
+function mantFilaBuscar(id) { return _mantPlan.filas.find(f => f.id === id); }
+function mantFilaUpd(id, campo, val) {
+  const f = mantFilaBuscar(id); if (!f) return;
+  f[campo] = val;
+  if (campo === 'frecuencia' && val) f.meses = mantMesesPorFrecuencia(val, false);
+  mantPlanGuardar(); if (campo === 'frecuencia') mantPlanRender();
+}
+function mantFilaMes(id, mes) {
+  const f = mantFilaBuscar(id); if (!f) return;
+  f.meses = f.meses.includes(mes) ? f.meses.filter(m => m !== mes) : f.meses.concat([mes]).sort((a, b) => a - b);
+  mantPlanGuardar(); mantPlanRender();
+}
+function mantFilaDel(id) { _mantPlan.filas = _mantPlan.filas.filter(f => f.id !== id); mantPlanGuardar(); mantPlanRender(); }
+function mantFilaAdd(gi) {
+  const grupos = mantGruposDelPlan(); const g = grupos[gi]; if (!g) return;
+  const idx = _mantPlan.filas.map(f => f.grupo).lastIndexOf(g.nombre);
+  _mantPlan.filas.splice(idx + 1, 0, { id: mantId(), grupo: g.nombre, catalogo_id: g.filas[0]?.catalogo_id || null, tarea: 'Nueva tarea', frecuencia: 'mensual', meses: mantMesesPorFrecuencia('mensual'), criterio: '', nota: '', aValidar: false });
+  mantPlanGuardar(); mantPlanRender();
+}
+function mantGruposDelPlan() {
+  const out = [];
+  _mantPlan.filas.forEach(f => { let g = out.find(x => x.nombre === f.grupo); if (!g) { g = { nombre: f.grupo, filas: [] }; out.push(g); } g.filas.push(f); });
+  return out;
+}
+// Render
+function mantPlanRender() {
+  const el = document.getElementById('mant-plan-view');
+  if (!el || !_mantPlan) return;
+  const p = _mantPlan; const cat = _mantCat || [];
+  const lista = _mantProyectos[p.origen] || [];
+  const sinMatch = p.equipos.filter(e => e.incluir !== false && e.tipo && !e.catalogo_id).length;
+  const badgeConf = c => !c ? '' : `<span class="badge" style="font-size:10px;${c === 'alta' || c === 'manual' ? 'background:#e3f4e3;color:#1b7f1b' : c === 'generado' ? 'background:#fff3cd;color:#8a6d00' : 'background:#ffe8cc;color:#a85a00'}">${esc(c)}</span>`;
+  const grupos = mantGruposDelPlan();
+  el.innerHTML = `
+    <button class="btn btn-secondary btn-sm" onclick="mantPlanVolver()" style="margin-bottom:12px">← Volver a Mantenimiento</button>
+    <div class="card">
+      <div class="card-label">Plan de mantenimiento</div>
+      <input value="${esc(p.nombre)}" style="font-weight:600;margin-bottom:12px" onchange="mantSetNombre(this.value)" />
+      <div class="card-label" style="margin-top:6px">1. Equipos de la instalación</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <select onchange="mantSetOrigen(this.value)" style="max-width:230px"><option value="manual" ${p.origen === 'manual' ? 'selected' : ''}>Cargar equipos a mano</option><option value="procesos" ${p.origen === 'procesos' ? 'selected' : ''}>Desde un proyecto de Procesos IA</option><option value="flowsheet" ${p.origen === 'flowsheet' ? 'selected' : ''}>Desde un Flowsheet</option></select>
+        ${p.origen !== 'manual' ? `<select onchange="mantSetOrigenProyecto(this.value)" style="flex:1;min-width:200px"><option value="">-- Elegir --</option>${lista.map(x => `<option value="${x.id}" ${p.origen_id === x.id ? 'selected' : ''}>${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="mantTraerEquipos()">Traer equipos</button>` : ''}
+        <button class="btn btn-secondary btn-sm" onclick="mantEquipoAdd()">+ Equipo</button>
+      </div>
+      ${p.equipos.length ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr><th style="${PROCESOS_EQ_TH}"></th><th style="${PROCESOS_EQ_TH}">Equipo</th><th style="${PROCESOS_EQ_TH}">Detalle / modelo</th><th style="${PROCESOS_EQ_TH}">Cant.</th><th style="${PROCESOS_EQ_TH}">Etapa / ubicación</th><th style="${PROCESOS_EQ_TH}">Equipo de la planilla madre</th><th></th></tr>
+        ${p.equipos.map(e => `<tr>
+          <td style="${PROCESOS_EQ_TD}"><input type="checkbox" ${e.incluir !== false ? 'checked' : ''} style="width:auto" onchange="mantEquipoUpd('${e.id}','incluir',this.checked)" /></td>
+          <td style="${PROCESOS_EQ_TD};min-width:150px"><input value="${esc(e.tipo)}" onchange="mantEquipoUpd('${e.id}','tipo',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD};min-width:150px"><input value="${esc(e.detalle || '')}" onchange="mantEquipoUpd('${e.id}','detalle',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD};width:60px"><input type="number" min="1" value="${e.cantidad || 1}" onchange="mantEquipoUpd('${e.id}','cantidad',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD};min-width:120px"><input value="${esc(e.etapa || '')}" onchange="mantEquipoUpd('${e.id}','etapa',this.value)" /></td>
+          <td style="${PROCESOS_EQ_TD};min-width:190px"><select onchange="mantEquipoUpd('${e.id}','catalogo_id',this.value)"><option value="">— Sin equivalente —</option>${cat.map(c => `<option value="${c.id}" ${e.catalogo_id === c.id ? 'selected' : ''}>${esc(c.nombre)}${c.estado === 'sugerido' ? ' (a validar)' : ''}</option>`).join('')}</select> ${badgeConf(e.confianza)}</td>
+          <td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="mantEquipoDel('${e.id}')">&#x2715;</button></td></tr>`).join('')}
+      </table></div>` : '<p class="hint">Todavía no hay equipos. Traelos de un proyecto o agregalos a mano.</p>'}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn btn-secondary btn-sm" onclick="mantEmparejarClick()" ${p.equipos.length ? '' : 'disabled'}>🔗 Emparejar con IA</button>
+        ${sinMatch ? `<button class="btn btn-secondary btn-sm" onclick="mantGenerarFaltantes()">✨ Generar plan para los ${sinMatch} sin equivalente</button>` : ''}
+        <button class="btn btn-primary btn-sm" onclick="mantArmarPlan()" ${p.equipos.length ? '' : 'disabled'}>Armar plan</button>
+      </div>
+      <div id="mant-plan-status" style="margin-top:8px"></div>
+    </div>
+    ${grupos.length ? `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <div class="card-label" style="margin:0">2. Plan anual — ${p.filas.length} tareas</div>
+        <button class="btn btn-primary btn-sm" onclick="mantExportarExcel()">⬇ Exportar Excel</button>
+      </div>
+      <div style="overflow-x:auto">${grupos.map((g, gi) => `
+        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px">
+          <tr><td colspan="4" style="background:#1f4e78;color:#fff;font-weight:700;padding:6px 8px">${esc(g.nombre)} ${g.filas.some(f => f.aValidar) ? '<span class="badge" style="background:#fff3cd;color:#8a6d00;font-size:10px">a validar</span>' : ''}</td></tr>
+          ${g.filas.map(f => `<tr>
+            <td style="${PROCESOS_EQ_TD};min-width:300px"><input value="${esc(f.tarea)}" onchange="mantFilaUpd('${f.id}','tarea',this.value)" /></td>
+            <td style="${PROCESOS_EQ_TD}"><select onchange="mantFilaUpd('${f.id}','frecuencia',this.value)"><option value=""></option>${MANT_FREC.map(x => `<option value="${x}" ${f.frecuencia === x ? 'selected' : ''}>${x}</option>`).join('')}</select></td>
+            <td style="${PROCESOS_EQ_TD};white-space:nowrap">${MANT_MESES.map((m, i) => mantMesChip(f.meses.includes(i + 1), `mantFilaMes('${f.id}',${i + 1})`, m)).join('')}</td>
+            <td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="mantFilaDel('${f.id}')">&#x2715;</button></td></tr>`).join('')}
+          <tr><td colspan="4" style="padding:4px 0"><button class="btn btn-secondary btn-sm" onclick="mantFilaAdd(${gi})">+ Tarea</button></td></tr>
+        </table>`).join('')}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">3. Ajustar con el chat</div>
+      <p class="hint" style="margin-bottom:8px">Pedile cambios al plan (ej. "pasá la revisión de correas de las soplantes a mensual", "agregá una tarea de calibración a las bombas dosificadoras", "sacá el agitador"). Los cambios se aplican directo; podés deshacer el último.</p>
+      <div id="mant-chat-msgs" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;margin-bottom:8px">${(p.chat_historial || []).map(m => `<div style="align-self:${m.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%;background:${m.role === 'user' ? 'var(--blue-bg)' : 'var(--surface2)'};padding:8px 12px;border-radius:10px;font-size:13px;white-space:pre-wrap${m.error ? ';color:var(--red)' : ''}">${esc(m.content)}${m.cambio ? '<div style="font-size:11px;margin-top:4px;color:var(--green)">✓ plan actualizado</div>' : ''}</div>`).join('')}</div>
+      <div style="display:flex;gap:8px"><input id="mant-chat-input" placeholder="Escribí tu pedido..." style="flex:1" onkeydown="if(event.key==='Enter')mantChatSend()" /><button class="btn btn-primary btn-sm" onclick="mantChatSend()">Enviar</button></div>
+      ${_mantHist.length ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="mantChatDeshacer()">↶ Deshacer último cambio del chat</button>' : ''}
+      <div id="mant-chat-status" style="margin-top:6px"></div>
+    </div>` : ''}`;
+  const m = document.getElementById('mant-chat-msgs'); if (m) m.scrollTop = m.scrollHeight;
+}
+// Chat del plan (tool call forzada con acciones sobre filas, con deshacer)
+const MANT_TOOL_CAMBIOS = {
+  name: 'aplicar_cambios_plan',
+  description: 'Aplica cambios al plan de mantenimiento y responde al usuario.',
+  input_schema: { type: 'object', properties: {
+    reply: { type: 'string', description: 'Respuesta breve en español: qué cambiaste (o la respuesta a la pregunta).' },
+    acciones: { type: 'array', description: 'Cambios sobre el plan. Vacío si el usuario solo preguntó.', items: { type: 'object', properties: {
+      tipo: { type: 'string', enum: ['editar_fila', 'eliminar_fila', 'agregar_fila', 'eliminar_grupo'] },
+      id: { type: 'string', description: 'editar_fila / eliminar_fila: id EXACTO de la fila.' },
+      grupo: { type: 'string', description: 'agregar_fila / eliminar_grupo: nombre EXACTO del grupo, tal como figura en el plan.' },
+      tarea: { type: 'string' },
+      frecuencia: { type: 'string', enum: ['mensual', 'bimestral', 'trimestral', 'semestral', 'anual'] },
+      meses: { type: 'array', items: { type: 'integer' }, description: 'Meses 1-12 (1=enero). Si cambia la frecuencia y no los das, se recalculan solos.' },
+      criterio: { type: 'string' }, nota: { type: 'string' }
+    }, required: ['tipo'] } }
+  }, required: ['reply', 'acciones'] }
+};
+async function mantChatSend() {
+  const input = document.getElementById('mant-chat-input');
+  const msg = (input?.value || '').trim();
+  if (!msg || _mantBusy || !_mantPlan) return;
+  const p = _mantPlan; const st = 'mant-chat-status';
+  _mantBusy = true;
+  p.chat_historial.push({ role: 'user', content: msg });
+  mantPlanRender(); showMsg(st, 'loading', 'Pensando...');
+  try {
+    const filasTxt = p.filas.map(f => `${f.id} | ${f.grupo} | ${f.tarea} | ${f.frecuencia || '-'} | meses ${f.meses.join(',')}`).join('\n');
+    const hist = p.chat_historial.slice(0, -1).slice(-8).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+    const prompt = `Estás ayudando a ajustar un plan de mantenimiento preventivo anual ("${p.nombre}") de una planta de tratamiento de efluentes. Cada fila es una tarea de un grupo (equipo) con su frecuencia y los meses del año (1=enero) en que se hace.\n\nPlan actual (id | grupo | tarea | frecuencia | meses):\n${filasTxt}\n\n${hist ? 'Conversación previa:\n' + hist + '\n\n' : ''}Pedido del usuario: "${msg}"\n\nUsá la herramienta "aplicar_cambios_plan". Es la ÚNICA forma de que algo cambie en el plan: si solo lo mencionás en "reply" no pasa nada. Para modificar o borrar una tarea usá el id EXACTO de la lista; para agregar una tarea usá el nombre EXACTO de un grupo existente (no podés crear equipos nuevos desde acá: si te lo piden, explicá que se agregan en la tabla de equipos de arriba y se rearma el plan). Al cambiar la frecuencia de una tarea, si no das "meses" se recalculan solos. Si el usuario solo pregunta, dejá "acciones" vacío. Si te piden un formato de exportación distinto (Word, PDF, otras columnas), explicá que por ahora se exporta a Excel con el formato estándar.`;
+    const out = await mantLlamarIA(prompt, MANT_TOOL_CAMBIOS, 4000);
+    const snap = JSON.parse(JSON.stringify(p.filas));
+    let n = 0;
+    (out.acciones || []).forEach(a => {
+      if (a.tipo === 'editar_fila') {
+        const f = mantFilaBuscar(a.id); if (!f) return;
+        ['tarea', 'criterio', 'nota'].forEach(k => { if (a[k] != null) f[k] = a[k]; });
+        if (a.frecuencia) { f.frecuencia = a.frecuencia; if (!a.meses) f.meses = mantMesesPorFrecuencia(a.frecuencia, false); }
+        if (Array.isArray(a.meses)) f.meses = a.meses.filter(m => m >= 1 && m <= 12).sort((x, y) => x - y);
+        n++;
+      } else if (a.tipo === 'eliminar_fila') { const antes = p.filas.length; p.filas = p.filas.filter(f => f.id !== a.id); if (p.filas.length < antes) n++; }
+      else if (a.tipo === 'eliminar_grupo') { const antes = p.filas.length; p.filas = p.filas.filter(f => f.grupo !== a.grupo); if (p.filas.length < antes) n++; }
+      else if (a.tipo === 'agregar_fila' && a.tarea) {
+        const ref = p.filas.find(f => f.grupo === a.grupo); if (!ref) return;
+        const idx = p.filas.map(f => f.grupo).lastIndexOf(a.grupo);
+        const frec = a.frecuencia || 'mensual';
+        p.filas.splice(idx + 1, 0, { id: mantId(), grupo: a.grupo, catalogo_id: ref.catalogo_id || null, tarea: a.tarea, frecuencia: frec, meses: Array.isArray(a.meses) && a.meses.length ? a.meses.filter(m => m >= 1 && m <= 12) : mantMesesPorFrecuencia(frec, false), criterio: a.criterio || 'Agregada por chat', nota: a.nota || '', aValidar: false });
+        n++;
+      }
+    });
+    if (n) _mantHist.push(snap);
+    const replyTxt = (out.reply || '(sin respuesta)') + ((out.acciones || []).length && !n ? '\n\n(No pude aplicar los cambios: no encontré las filas/grupos indicados.)' : '');
+    p.chat_historial.push({ role: 'assistant', content: replyTxt, cambio: n > 0 });
+  } catch (e) { p.chat_historial.push({ role: 'assistant', content: '✕ ' + e.message, error: true }); }
+  finally { _mantBusy = false; await mantPlanGuardar(); mantPlanRender(); }
+}
+function mantChatDeshacer() {
+  if (!_mantHist.length || _mantBusy) return;
+  _mantPlan.filas = _mantHist.pop();
+  _mantPlan.chat_historial.push({ role: 'assistant', content: '↶ Deshice el último cambio del chat.' });
+  mantPlanGuardar(); mantPlanRender();
+}
+// Exportación a Excel con el mismo formato de la planilla original
+async function mantCargarExcelJS() {
+  if (window.ExcelJS) return;
+  await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js'; s.onload = res; s.onerror = () => rej(new Error('No se pudo cargar la librería de Excel (¿sin conexión?).')); document.head.appendChild(s); });
+}
+async function mantExportarExcel() {
+  try {
+    showMsg('mant-plan-status', 'loading', 'Generando Excel...');
+    await mantCargarExcelJS();
+    const wb = new ExcelJS.Workbook();
+    const borde = { style: 'thin', color: { argb: 'FFBFBFBF' } };
+    const bordes = { top: borde, left: borde, bottom: borde, right: borde };
+    const ws = wb.addWorksheet('Plan anual', { views: [{ state: 'frozen', ySplit: 1 }] });
+    ws.columns = [{ width: 78 }].concat(MANT_MESES.map(() => ({ width: 11 })));
+    const h = ws.addRow(['Equipo / tarea'].concat(['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']));
+    h.eachCell(c => { c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F6B78' } }; c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; c.border = bordes; });
+    const grupos = mantGruposDelPlan();
+    grupos.forEach(g => {
+      const r = ws.addRow([g.nombre + (g.filas.some(f => f.aValidar) ? ' — PLAN SUGERIDO (a validar)' : '')]);
+      ws.mergeCells(r.number, 1, r.number, 13);
+      const c = r.getCell(1); c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } }; c.border = bordes;
+      g.filas.forEach(f => {
+        const fr = ws.addRow([mantTareaTexto(f)].concat(MANT_MESES.map((_, i) => f.meses.includes(i + 1) ? 'x' : null)));
+        fr.getCell(1).alignment = { wrapText: true, vertical: 'middle' }; fr.getCell(1).border = bordes;
+        for (let i = 2; i <= 13; i++) { const c2 = fr.getCell(i); c2.border = bordes; c2.alignment = { horizontal: 'center', vertical: 'middle' }; if (c2.value) c2.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC6E0B4' } }; }
+      });
+    });
+    const ws2 = wb.addWorksheet('Criterios y fuentes', { views: [{ state: 'frozen', ySplit: 1 }] });
+    ws2.columns = [{ width: 90 }, { width: 60 }, { width: 3 }, { width: 50 }];
+    const h2 = ws2.addRow(['Equipo / tarea', 'Criterio de frecuencia / fuente', null, 'Nota']);
+    h2.eachCell(c => { c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F6B78' } }; c.alignment = { wrapText: true, vertical: 'middle' }; });
+    grupos.forEach(g => g.filas.forEach(f => { const r = ws2.addRow([`${g.nombre} | ${mantTareaTexto(f)}`, f.criterio || '', null, f.nota || '']); r.eachCell(c => { c.alignment = { wrapText: true, vertical: 'top' }; }); }));
+    const buf = await wb.xlsx.writeBuffer();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    a.download = 'Plan_mantenimiento_' + (_mantPlan.nombre || 'plan').replace(/[^\w\-]+/g, '_') + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    showMsg('mant-plan-status', 'success', '✓ Excel generado.');
+  } catch (e) { showMsg('mant-plan-status', 'error', '✕ ' + e.message); }
+}
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
-const NAV_AREA_ORDER = ['General', 'Compras y Comex', 'Comercial', 'Laboratorio', 'Procesos'];
+const NAV_AREA_ORDER = ['General', 'Compras y Comex', 'Comercial', 'Laboratorio', 'Procesos', 'Documentación'];
 const NAV_GEAR_ICON = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>';
 const NAV_SECTIONS = [
   { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
@@ -23184,6 +23856,7 @@ const NAV_SECTIONS = [
   { id:'cotizaciones', label:'Cotizaciones',   area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>' },
   { id:'microorganismos', label:'Microorganismos', area:'Laboratorio', icon:'<svg viewBox="0 0 24 24"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 100-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 114 0c0 .5-.34 3-4 6"/><path d="M12 6V3a1 1 0 011-1"/></svg>' },
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
+  { id:'mantenimiento', label:'Mantenimiento', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>' },
   { id:'flowsheets', label:'Flowsheets',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M17.5 10v4"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
@@ -23195,6 +23868,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-comercial', label:'Cfg Comercial',        area:'Comercial',     icon:NAV_GEAR_ICON },
   { id:'cfg-microorganismos', label:'Cfg Microorganismos', area:'Laboratorio', icon:NAV_GEAR_ICON },
   { id:'cfg-procesos',  label:'Cfg Procesos IA',      area:'Procesos',      icon:NAV_GEAR_ICON },
+  { id:'cfg-documentacion', label:'Cfg Documentación', area:'Documentación', icon:NAV_GEAR_ICON },
 ];
 
 function navAreaSlug(area) { return area.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
@@ -23246,7 +23920,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-comercial','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -23254,11 +23928,11 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','cfg-procesos'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','cfg-procesos','cfg-documentacion'],
   'RRHH':              ['rend','viajes','hallazgos'],
-  'Servicios':         ['rend','viajes','hallazgos','microorganismos'],
+  'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
-  'Técnicos':          ['rend','viajes','hallazgos','microorganismos'],
+  'Técnicos':          ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
 };
 
 // supaFetch defined at top of script
@@ -23461,6 +24135,8 @@ const PANEL_TITLES = {
   'procesos': 'Procesos IA',
   'cfg-procesos': 'Configuración — Procesos IA',
   'flowsheets': 'Flowsheets',
+  'mantenimiento': 'Mantenimiento',
+  'cfg-documentacion': 'Configuración — Documentación',
   'clientes': 'Clientes',
   'stock': 'Stock',
   'cotiz-precios': 'Lista de precios',
