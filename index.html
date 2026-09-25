@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -22705,10 +22705,61 @@ function cotizArmadoIniciales(nombreCompleto) {
   if (partes.length === 1) return partes[0].slice(0,2).toUpperCase();
   return (partes[0][0] + partes[partes.length-1][0]).toUpperCase();
 }
+// Copia el formato (número/fecha, alineación, relleno, fuente y bordes) de una
+// fila del Excel de Q a otra, columnas A:E, vía Graph. Primero lee de la fila
+// entera de una vez; si en alguna propiedad las columnas difieren entre sí
+// (Graph devuelve null), esa propiedad se copia columna por columna.
+async function cotizExcelCopiarFormatoFila(token, excelBase, filaOrigen, filaDestino) {
+  const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+  const llamar = async (metodo, ruta, body) => {
+    const r = await fetch(excelBase + ruta, { method: metodo, headers: H, body: body ? JSON.stringify(body) : undefined });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + r.status); }
+    return metodo === 'GET' ? r.json() : null;
+  };
+  const COLS = ['A', 'B', 'C', 'D', 'E'];
+  const dir = (fila, col) => `range(address='${col ? col + fila : 'A' + fila + ':E' + fila}')`;
+  const soloCampos = (obj, campos) => { const o = {}; campos.forEach(c => { if (obj[c] !== undefined && obj[c] !== null) o[c] = obj[c]; }); return o; };
+  const hayNulos = (obj, campos) => campos.some(c => obj[c] === null || obj[c] === undefined);
+  const PROPS = [
+    ['format', ['horizontalAlignment', 'verticalAlignment', 'wrapText', 'indentLevel', 'rowHeight']],
+    ['format/fill', ['color']],
+    ['format/font', ['name', 'size', 'color', 'bold', 'italic', 'underline']],
+  ];
+  const LADOS = ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight', 'InsideVertical'];
+  const CAMPOS_BORDE = ['style', 'color', 'weight'];
+  // 1) lecturas (en paralelo): formato numérico + cada propiedad + bordes, de la fila completa
+  const [nf, ...lecturas] = await Promise.all([
+    llamar('GET', `${dir(filaOrigen)}?$select=numberFormat`),
+    ...PROPS.map(([sub]) => llamar('GET', `${dir(filaOrigen)}/${sub}`)),
+    ...LADOS.map(l => llamar('GET', `${dir(filaOrigen)}/format/borders/${l}`)),
+  ]);
+  const props = lecturas.slice(0, PROPS.length), bordes = lecturas.slice(PROPS.length);
+  // 2) escrituras (en orden, no en paralelo: Excel Online serializa los cambios al mismo libro)
+  if (nf.numberFormat?.[0]) await llamar('PATCH', dir(filaDestino), { numberFormat: [nf.numberFormat[0]] });
+  for (let i = 0; i < PROPS.length; i++) {
+    const [sub, campos] = PROPS[i];
+    if (!hayNulos(props[i], campos.filter(c => c !== 'rowHeight'))) { await llamar('PATCH', `${dir(filaDestino)}/${sub}`, soloCampos(props[i], campos)); continue; }
+    const porCol = await Promise.all(COLS.map(c => llamar('GET', `${dir(filaOrigen, c)}/${sub}`)));
+    for (let j = 0; j < COLS.length; j++) {
+      const b = soloCampos(porCol[j], campos);
+      if (Object.keys(b).length) await llamar('PATCH', `${dir(filaDestino, COLS[j])}/${sub}`, b);
+    }
+  }
+  if (bordes.every(b => !hayNulos(b, CAMPOS_BORDE))) {
+    for (let i = 0; i < LADOS.length; i++) await llamar('PATCH', `${dir(filaDestino)}/format/borders/${LADOS[i]}`, soloCampos(bordes[i], CAMPOS_BORDE));
+  } else {
+    const combos = [];
+    COLS.forEach(c => ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight'].forEach(l => combos.push([c, l])));
+    const leidos = await Promise.all(combos.map(([c, l]) => llamar('GET', `${dir(filaOrigen, c)}/format/borders/${l}`)));
+    for (let j = 0; j < combos.length; j++) await llamar('PATCH', `${dir(filaDestino, combos[j][0])}/format/borders/${combos[j][1]}`, soloCampos(leidos[j], CAMPOS_BORDE));
+  }
+}
 // Agrega una fila al final de la hoja "Q-" del Excel de Q (Cfg Imputación):
-// A=fecha, B=iniciales del usuario, C=cliente, D=referencia, E=Nº de Q.
-// No es fatal si falla (la cotización ya se generó y guardó igual) — el
-// error se le muestra al usuario para que lo cargue a mano si hace falta.
+// A=fecha, B=iniciales del usuario, C=cliente, D=referencia, E=Nº de Q — y le
+// copia el formato de la fila de arriba. Devuelve un aviso (texto) si la fila
+// se registró pero no se pudo copiar el formato; tira error si no se pudo
+// registrar. No es fatal si falla (la cotización ya se generó y guardó igual)
+// — el error se le muestra al usuario para que lo cargue a mano si hace falta.
 async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   const raw = await supaConfigGet('rend_q_excel');
   if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
@@ -22722,6 +22773,12 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
     body: JSON.stringify({ values: [[cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre||currentUser?.email||''), st.cliente||'', st.referencia||'', qNumeroCompleto]] })
   });
   if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+  // La fila de arriba tiene que ser una fila de datos (la 1 es el encabezado).
+  if (nextRow > 2) {
+    try { await cotizExcelCopiarFormatoFila(token, excelBase, nextRow - 1, nextRow); }
+    catch(eF) { return ` (la fila se registró en el Excel de Q, pero no se pudo copiarle el formato de la fila de arriba — ${eF.message})`; }
+  }
+  return '';
 }
 // Al EDITAR una cotización ya registrada: busca su fila existente en la
 // hoja "Q-" (por Nº de Q, columna E) y actualiza Cliente/Referencia (C/D) —
@@ -22874,7 +22931,7 @@ async function cotizArmadoGenerar() {
       if (!editando) {
         showMsg(statusId, 'loading', 'Registrando en el Excel de Q...');
         try {
-          await cotizArmadoRegistrarEnExcelQ(st, qCompleto);
+          avisoQ = await cotizArmadoRegistrarEnExcelQ(st, qCompleto);
         } catch(eQ) {
           avisoQ = ' (ojo: no se pudo registrar en el Excel de Q — ' + eQ.message + ', cargalo a mano ahí)';
         }
