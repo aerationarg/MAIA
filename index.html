@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16583,16 +16583,28 @@ async function spEnsureFolder(token, siteId, parentId, name) {
   });
   if (createResp.ok) { const item = await createResp.json(); return item.id; }
   if (createResp.status === 409) {
-    const listResp = await fetch(base + '/children?$select=id,name,folder', { headers: { Authorization: 'Bearer '+token } });
-    if (listResp.ok) {
+    // 1) Búsqueda directa por nombre (no depende de cuántos elementos tenga la
+    //    carpeta). El listado de abajo solo trae la primera página (200) — con
+    //    muchas carpetas de clientes, la que se busca podía quedar en otra página.
+    try {
+      const directa = await fetch(`${base}:/${encodeURIComponent(name)}?$select=id,name,folder`, { headers: { Authorization: 'Bearer '+token } });
+      if (directa.ok) { const it = await directa.json(); if (it.folder && it.id) return it.id; }
+    } catch(e) { /* se sigue con el listado */ }
+    // 2) Listado recorriendo todas las páginas (@odata.nextLink).
+    const nameNorm = name.trim().toLowerCase();
+    let url = base + '/children?$select=id,name,folder&$top=200';
+    while (url) {
+      const listResp = await fetch(url, { headers: { Authorization: 'Bearer '+token } });
+      if (!listResp.ok) {
+        const listErr = await listResp.json().catch(()=>({}));
+        throw new Error(`No se pudo listar el contenido de la carpeta para buscar "${name}": ${listErr.error?.message || 'HTTP '+listResp.status}`);
+      }
       const listData = await listResp.json();
-      const nameNorm = name.trim().toLowerCase();
       const existing = (listData.value||[]).find(it => it.folder && it.name.trim().toLowerCase() === nameNorm);
       if (existing) return existing.id;
-      throw new Error(`La carpeta "${name}" ya existe según SharePoint (409) pero no aparece en el listado de la carpeta — puede ser un problema de permisos de lectura, o el nombre no coincide exactamente.`);
+      url = listData['@odata.nextLink'] || null;
     }
-    const listErr = await listResp.json().catch(()=>({}));
-    throw new Error(`No se pudo listar el contenido de la carpeta para buscar "${name}": ${listErr.error?.message || 'HTTP '+listResp.status}`);
+    throw new Error(`La carpeta "${name}" ya existe según SharePoint (409) pero no aparece en el listado de la carpeta — puede ser un problema de permisos de lectura, o el nombre no coincide exactamente.`);
   }
   const createErr = await createResp.json().catch(()=>({}));
   throw new Error(`No se pudo crear la carpeta "${name}": ${createErr.error?.message || 'HTTP '+createResp.status} — revisá que la cuenta tenga permiso de escritura en esa carpeta de SharePoint.`);
