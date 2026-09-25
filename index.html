@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.118</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.118</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -836,11 +836,7 @@
       <div class="card">
         <div class="card-label">Catálogo de productos</div>
         <p class="hint" style="margin-bottom:10px">Marca/modelo/código/descripción estándar de lo que vende la empresa, y las cantidades en cada estado — se usa como referencia al cargar una venta o armar una cotización. Los precios (costo, precio de venta y sus variantes) se manejan en "Lista de precios".</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-          <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="width:auto">+ Agregar producto</button>
-          <button class="btn btn-secondary" onclick="cotizLimAbrir()" style="width:auto" title="Saca de la descripción la marca y el modelo que ya están en sus propios campos (con vista previa)">🧹 Limpiar marca/modelo repetidos en descripciones</button>
-        </div>
-        <div id="cotiz-limpiar-desc"></div>
+        <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
         <input id="cotiz-catalogo-buscar" placeholder="Buscar por marca, modelo, código o descripción..." style="margin-bottom:6px" oninput="cotizCatalogoBuscarDebounced()" />
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
           <input id="cotiz-catalogo-filtro-marca" list="cotiz-marcas-datalist" placeholder="Filtrar por marca" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
@@ -21362,139 +21358,6 @@ async function cotizCatalogoRender() {
     `;
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
 }
-// ── Limpieza de descripciones: sacar marca/modelo que ya están en sus campos ──
-// Herramienta con vista previa (antes → después) para no repetir la marca y el
-// modelo dentro de la descripción del catálogo. Nada se guarda hasta aplicar,
-// y antes de aplicar se descarga un respaldo con las descripciones originales.
-const COTIZ_LIM_LETRA = 'A-Za-z0-9\\u00C0-\\u00FF';
-function cotizLimRegex(valor) {
-  const v = String(valor || '').trim();
-  if (v.length < 2 || /^\d$/.test(v)) return null;
-  // los espacios del valor son opcionales en la descripción ("CR 5-4" ≈ "CR5-4")
-  const patron = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
-  return new RegExp(`(?<![${COTIZ_LIM_LETRA}])${patron}(?![${COTIZ_LIM_LETRA}])`, 'gi');
-}
-function cotizLimQuitar(texto, valor) {
-  const re = cotizLimRegex(valor);
-  return re ? texto.replace(re, ' ') : texto;
-}
-function cotizLimLimpiarSeparadores(s) {
-  let t = s.replace(/\s+/g, ' ');
-  // etiquetas sueltas que quedaron sin valor ("Marca:", "Modelo:"), y recién
-  // después los paréntesis que quedaron vacíos
-  t = t.replace(/\b(marca|modelo|mod|mca)\b\.?\s*[:\-]?\s*(?=$|[,;\-–—/|)\]]|\b(marca|modelo|mod|mca)\b)/gi, '');
-  t = t.replace(/\(\s*[,;:\-–—/]*\s*\)/g, '').replace(/\[\s*[,;:\-–—/]*\s*\]/g, '');
-  t = t.replace(/\s+([,;:.)])/g, '$1');
-  t = t.replace(/([,;:\-–—/|])\s*(?:[,;:\-–—/|]\s*)+/g, '$1 ');
-  t = t.replace(/^[\s,;:\-–—/|.]+|[\s,;:\-–—/|]+$/g, '');
-  return t.replace(/\s+/g, ' ').trim();
-}
-// null = no hay nada para limpiar en este producto
-function cotizLimProponer(r) {
-  const orig = String(r.descripcion || '');
-  if (!orig.trim()) return null;
-  // Se prueban los dos órdenes y se queda el que más saca: a veces la marca
-  // parte al modelo en dos ("AIREADOR AireO2 50HP" con modelo "AIREADOR 50HP":
-  // hay que sacar la marca primero), y a veces el modelo contiene la marca
-  // ("Tsurumi B Series": hay que sacar el modelo primero).
-  const sinMarca = cotizLimQuitar(orig, r.marca);
-  const ordenA = cotizLimQuitar(sinMarca, r.modelo);
-  const sinModelo = cotizLimQuitar(orig, r.modelo);
-  const ordenB = cotizLimQuitar(sinModelo, r.marca);
-  const norm = s => s.replace(/\s+/g, '');
-  const sinAmbos = norm(ordenA).length <= norm(ordenB).length ? ordenA : ordenB;
-  if (sinAmbos === orig) return null;
-  const sacoModelo = sinModelo !== orig || ordenA !== sinMarca;
-  let nueva = cotizLimLimpiarSeparadores(sinAmbos);
-  // si todo lo que quedó está entre paréntesis (ej. "(Nº parte fabricante: 5101660)"), se sacan
-  const envuelta = nueva.match(/^\(([^()]*)\)$/);
-  if (envuelta) nueva = envuelta[1].trim();
-  // si la descripción arrancaba con mayúscula (ej. con la marca) y ahora
-  // empieza con otra palabra, se mantiene la mayúscula inicial
-  if (/^[A-ZÁÉÍÓÚÑ]/.test(orig.trim()) && /^[a-záéíóúñ]/.test(nueva)) nueva = nueva.charAt(0).toUpperCase() + nueva.slice(1);
-  if (nueva === orig.trim()) return null;
-  const modeloNum = /^[\d.,\s]+$/.test(String(r.modelo || '').trim()) && String(r.modelo || '').trim() !== '';
-  // la descripción era básicamente la marca + el modelo: quedaría vacía
-  const igualModelo = nueva.length < 4 && sacoModelo;
-  return { id: r.id, marca: r.marca || '', modelo: r.modelo || '', antes: orig, nueva, vacia: nueva.length < 4, igualModelo, revisar: sacoModelo && modeloNum };
-}
-function cotizLimResaltar(orig, marca, modelo) {
-  const rangos = [];
-  [modelo, marca].forEach(v => { const re = cotizLimRegex(v); if (!re) return; let m; while ((m = re.exec(orig))) { rangos.push([m.index, m.index + m[0].length]); if (m[0].length === 0) re.lastIndex++; } });
-  rangos.sort((a, b) => a[0] - b[0]);
-  const fus = [];
-  rangos.forEach(r => { const u = fus[fus.length - 1]; if (u && r[0] <= u[1]) u[1] = Math.max(u[1], r[1]); else fus.push(r.slice()); });
-  let out = '', pos = 0;
-  fus.forEach(([a, b]) => { out += esc(orig.slice(pos, a)) + '<mark style="background:#ffd6d6;text-decoration:line-through">' + esc(orig.slice(a, b)) + '</mark>'; pos = b; });
-  return out + esc(orig.slice(pos));
-}
-let _cotizLim = { props: [], sel: {} };
-async function cotizLimAbrir() {
-  const box = document.getElementById('cotiz-limpiar-desc');
-  if (!box) return;
-  box.innerHTML = '<div class="card" style="margin-bottom:12px">Analizando el catálogo...</div>';
-  try {
-    const rows = await mantFetchAll(`/rest/v1/cotizaciones_catalogo?select=id,marca,modelo,descripcion&empresa=eq.${currentEmpresa}&order=marca,modelo,id`);
-    const props = rows.map(cotizLimProponer).filter(Boolean);
-    _cotizLim = { props, sel: {} };
-    props.forEach(p => { _cotizLim.sel[p.id] = !p.vacia && !p.revisar; });
-    cotizLimRender(rows.length);
-  } catch (e) { box.innerHTML = '<div class="card" style="margin-bottom:12px">No se pudo leer el catálogo.</div>'; }
-}
-function cotizLimRender(total) {
-  const box = document.getElementById('cotiz-limpiar-desc');
-  if (!box) return;
-  const { props, sel } = _cotizLim;
-  if (!props.length) { box.innerHTML = `<div class="card" style="margin-bottom:12px"><p class="hint" style="margin:0">Revisé ${total} productos y no encontré ninguno con la marca o el modelo repetidos en la descripción. ✓</p><button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="cotizLimCerrar()">Cerrar</button></div>`; return; }
-  const nSel = props.filter(p => sel[p.id]).length;
-  box.innerHTML = `<div class="card" style="margin-bottom:12px;border-color:var(--blue)">
-    <div class="card-label">Limpiar descripciones — ${props.length} producto${props.length === 1 ? '' : 's'} para revisar (de ${total})</div>
-    <p class="hint" style="margin-bottom:8px">Lo tachado es lo que se saca de la descripción. Vienen tildados los que quedan bien; quedan <b>sin tildar</b> los de modelo numérico (podría ser una medida, ej. "150 litros") y los que quedarían vacíos o casi vacíos (cuando la descripción era igual a la marca + el modelo) — revisalos a mano, o tildalos con el botón de abajo si querés dejar esas descripciones vacías. Antes de aplicar se descarga un respaldo con las descripciones originales.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-      <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcar(true)">Tildar todos</button>
-      <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcar(false)">Destildar todos</button>
-      <button class="btn btn-secondary btn-sm" onclick="cotizLimMarcarVacios()" title="Tilda también los que quedarían con la descripción vacía porque era igual a la marca + el modelo">Tildar también los que quedan vacíos (${props.filter(p => p.vacia).length})</button>
-      <button class="btn btn-primary btn-sm" onclick="cotizLimAplicar()">Aplicar a los ${nSel} tildados</button>
-      <button class="btn btn-secondary btn-sm" onclick="cotizLimCerrar()">Cerrar</button>
-      <span id="cotiz-lim-status"></span>
-    </div>
-    <div style="max-height:440px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-      <tr><th></th><th style="${PROCESOS_EQ_TH}">Marca</th><th style="${PROCESOS_EQ_TH}">Modelo</th><th style="${PROCESOS_EQ_TH}">Descripción actual</th><th style="${PROCESOS_EQ_TH}">Quedaría</th></tr>
-      ${props.map(p => `<tr style="${p.vacia || p.revisar ? 'background:#fff8e1' : ''}">
-        <td style="${PROCESOS_EQ_TD}"><input type="checkbox" style="width:auto" ${sel[p.id] ? 'checked' : ''} onchange="cotizLimToggle('${p.id}',this.checked)" /></td>
-        <td style="${PROCESOS_EQ_TD}">${esc(p.marca)}</td><td style="${PROCESOS_EQ_TD}">${esc(p.modelo)}</td>
-        <td style="${PROCESOS_EQ_TD}">${cotizLimResaltar(p.antes, p.marca, p.modelo)}</td>
-        <td style="${PROCESOS_EQ_TD}"><b>${esc(p.nueva) || '<i>(vacía)</i>'}</b>${p.vacia ? ` <span class="badge" style="background:#ffe8cc;color:#a85a00">${p.igualModelo ? 'la descripción es igual al modelo: quedaría vacía' : 'quedaría casi vacía'}</span>` : ''}${p.revisar ? ' <span class="badge" style="background:#ffe8cc;color:#a85a00">modelo numérico</span>' : ''}</td></tr>`).join('')}
-    </table></div></div>`;
-}
-function cotizLimToggle(id, v) { _cotizLim.sel[id] = v; const b = document.querySelector('#cotiz-limpiar-desc .btn-primary'); if (b) b.textContent = `Aplicar a los ${_cotizLim.props.filter(p => _cotizLim.sel[p.id]).length} tildados`; }
-function cotizLimMarcar(v) { _cotizLim.props.forEach(p => { _cotizLim.sel[p.id] = v; }); cotizLimRender(_cotizLim.props.length); }
-function cotizLimMarcarVacios() { _cotizLim.props.forEach(p => { if (p.vacia) _cotizLim.sel[p.id] = true; }); cotizLimRender(_cotizLim.props.length); }
-function cotizLimCerrar() { const box = document.getElementById('cotiz-limpiar-desc'); if (box) box.innerHTML = ''; _cotizLim = { props: [], sel: {} }; }
-async function cotizLimAplicar() {
-  const aplicar = _cotizLim.props.filter(p => _cotizLim.sel[p.id]);
-  if (!aplicar.length) { alert('No hay productos tildados.'); return; }
-  if (!confirm(`Voy a actualizar la descripción de ${aplicar.length} producto${aplicar.length === 1 ? '' : 's'}.\n\nPrimero se descarga un archivo de respaldo con las descripciones originales. ¿Seguir?`)) return;
-  const st = 'cotiz-lim-status';
-  try {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(aplicar.map(p => ({ id: p.id, descripcion_original: p.antes })), null, 1)], { type: 'application/json' }));
-    a.download = 'respaldo_descripciones_catalogo_' + new Date().toISOString().slice(0, 10) + '.json';
-    document.body.appendChild(a); a.click(); a.remove();
-    let ok = 0, fallos = 0;
-    for (let i = 0; i < aplicar.length; i += 10) {
-      showMsg(st, 'loading', `Actualizando ${Math.min(i + 10, aplicar.length)}/${aplicar.length}...`);
-      const res = await Promise.all(aplicar.slice(i, i + 10).map(p => supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${p.id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ descripcion: p.nueva }) }).then(r => r.ok).catch(() => false)));
-      res.forEach(r => r ? ok++ : fallos++);
-    }
-    showMsg(st, fallos ? 'error' : 'success', fallos ? `✕ ${ok} actualizados, ${fallos} con error.` : `✓ ${ok} descripciones actualizadas.`);
-    cotizCatalogoRender();
-    const hechos = new Set(aplicar.map(p => p.id));
-    _cotizLim.props = _cotizLim.props.filter(p => !hechos.has(p.id) || fallos);
-    if (!fallos) setTimeout(cotizLimCerrar, 2500);
-  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
-}
-
 async function cotizCatalogoAdd() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
@@ -22823,15 +22686,16 @@ async function cotizGuardarPdfEnSharePoint(guardadoSp, nombreBase) {
     if (copiaId) await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiaId}`, { method:'DELETE', headers:{Authorization:'Bearer '+token} }).catch(()=>null);
   }
 }
-// Nombre pedido: "Q-XXXX - Referencia - Cliente" (sin extensión) — se le
+// Nombre pedido: "QXXXX Cliente Referencia" (sin extensión; vale para el Excel
+// y para el PDF) — se le
 // agrega " REVn" solo si esta cotización realmente quedó en esa revisión
 // (no cuando se elige mantener la versión actual, ahí el nombre sale
 // idéntico al de antes a propósito, para que la subida a SharePoint
 // sobrescriba el mismo archivo en vez de crear uno nuevo).
 function cotizNombreArchivoBase(st) {
-  const qParte = st.q_numero ? (/^q-/i.test(st.q_numero) ? st.q_numero : 'Q-'+st.q_numero) : 'Sin número';
-  const partes = [qParte, st.referencia, st.cliente].filter(Boolean);
-  return cotizSanitizeNombre(partes.join(' - '));
+  const qParte = st.q_numero ? 'Q' + String(st.q_numero).trim().replace(/^q-?\s*/i, '') : 'Sin número';
+  const partes = [qParte, st.cliente, st.referencia].filter(Boolean);
+  return cotizSanitizeNombre(partes.join(' '));
 }
 
 // Iniciales para la fila del Excel de Q (ej. "Federico Cherny" → "FC").
