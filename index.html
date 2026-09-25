@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -697,7 +697,6 @@
     <!-- ═══ PANEL: Mantenimiento (área Documentación) ═══ -->
     <div class="panel" id="panel-mantenimiento">
       <div id="mant-list-view">
-        <div id="mant-ia-lista" style="margin-bottom:12px"></div>
         <div class="card">
           <div class="card-label">Mantenimiento</div>
           <p class="hint" style="margin-top:-6px">Armá el plan de mantenimiento preventivo de una instalación a partir de sus equipos (traídos de un proyecto de Procesos IA, de un Flowsheet, o cargados a mano) usando la planilla madre de Cfg Documentación. Después lo ajustás con el chat y lo exportás a Excel.</p>
@@ -22873,9 +22872,6 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
     try { await cotizExcelCopiarFormatoFila(token, excelBase, filaModelo, nextRow); }
     catch (eF) {
       console.warn('[Excel de Q] no se pudo copiar el formato', { filaModelo, nextRow, viaTabla }, eF.message);
-      const aviso = ` (la fila ${nextRow} se registró en el Excel de Q${viaTabla ? ' (dentro de la tabla)' : ''}, pero el formato de la fila ${filaModelo} no se copió bien — ${eF.message})`;
-      alert('⚠ La cotización se registró en el Excel de Q, pero no se pudo copiar el formato de la fila de arriba.\n\nDetalle técnico (pasámelo si sigue pasando):\n' + eF.message + '\n\n(fila nueva: ' + nextRow + ', fila modelo: ' + filaModelo + (viaTabla ? ', vía tabla' : '') + ')');
-      return aviso;
     }
   }
   return '';
@@ -23738,6 +23734,11 @@ function mantIaCardHtml(enPlan) {
     <div id="mant-ia-status-${k}" style="margin-top:8px"></div>
   </div>`;
 }
+// Un solo botón "Armar plan": si hay mensaje/documentos arma con IA; si no, arma desde los equipos ya cargados
+function mantArmarClick() {
+  if ((_mantIa.texto || '').trim() || _mantIa.archivos.length) return mantIaArmar(true);
+  return mantArmarPlan();
+}
 function mantIaListaRender() { const el = document.getElementById('mant-ia-lista'); if (el) el.innerHTML = mantIaCardHtml(false); }
 function mantIaRefrescar() { if (_mantPlan) mantPlanRender(); else mantIaListaRender(); }
 function mantIaAdjuntar(input) {
@@ -23951,7 +23952,6 @@ async function mantSugGuardar(id) {
 // ══ Planes por proyecto (solapa Mantenimiento) ══════════════
 async function mantPlanesRender() {
   mantPlanVolver(true);
-  mantIaListaRender();
   const el = document.getElementById('mant-list');
   if (!el) return;
   el.innerHTML = 'Cargando...';
@@ -23962,8 +23962,7 @@ async function mantPlanesRender() {
   } catch (e) { el.innerHTML = '<div class="empty">No se pudo cargar — ¿corriste el SQL de Mantenimiento?</div>'; }
 }
 async function mantPlanNuevo() {
-  const nombre = prompt('Nombre del plan (ej. Planta Cliente X):');
-  if (!nombre || !nombre.trim()) return;
+  const nombre = 'Plan nuevo';
   const r = await supaFetch('/rest/v1/mant_planes', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombre.trim(), creado_por_nombre: currentUser?.nombre || currentUser?.email || null }) });
   const rows = await r.json().catch(() => null);
   if (!r.ok || !rows?.length) { alert('No se pudo crear el plan — ¿corriste el SQL de Mantenimiento?'); return; }
@@ -23979,6 +23978,7 @@ async function mantPlanAbrir(id) {
   const rows = await r.json().catch(() => []);
   if (!r.ok || !rows.length) { alert('No se pudo abrir el plan.'); return; }
   _mantPlan = rows[0]; _mantHist = [];
+  _mantIa = { nombre: '', texto: '', archivos: [], modo: 'agregar', ocupado: false };
   if (!Array.isArray(_mantPlan.equipos)) _mantPlan.equipos = [];
   if (!Array.isArray(_mantPlan.filas)) _mantPlan.filas = [];
   if (!Array.isArray(_mantPlan.chat_historial)) _mantPlan.chat_historial = [];
@@ -24121,17 +24121,20 @@ function mantPlanRender() {
   const grupos = mantGruposDelPlan();
   el.innerHTML = `
     <button class="btn btn-secondary btn-sm" onclick="mantPlanVolver()" style="margin-bottom:12px">← Volver a Mantenimiento</button>
-    ${mantIaCardHtml(true)}
+    <input value="${esc(p.nombre)}" placeholder="Nombre del plan" style="font-weight:700;font-size:18px;margin-bottom:12px" onchange="mantSetNombre(this.value)" />
     ${mantSugHtml()}
-    <div class="card">
-      <div class="card-label">Plan de mantenimiento</div>
-      <input value="${esc(p.nombre)}" style="font-weight:600;margin-bottom:12px" onchange="mantSetNombre(this.value)" />
-      <div class="card-label" style="margin-top:6px">1. Equipos de la instalación</div>
+    <div class="card" style="border-color:var(--blue)">
+      <div class="card-label">✨ Armar el plan</div>
+      <p class="hint" style="margin-bottom:8px">Contale la instalación o pegá su lista de equipos, y/o adjuntá documentos (memoria descriptiva, listado de equipos, manuales: PDF, Word, Excel, CSV, TXT o imagen). También podés traer los equipos de un proyecto de Procesos IA o de un Flowsheet, o cargarlos a mano. La IA los asocia con los tipos de la planilla madre; si adjuntás el manual de un equipo, usa sus tareas y frecuencias. Después lo ajustás con el chat.</p>
+      <textarea rows="4" placeholder="Ej: Planta con pozo de bombeo con 2 bombas sumergibles, reactor biológico con 3 soplantes y difusores de membrana, y deshidratación con un tornillo prensa..." oninput="_mantIa.texto=this.value" style="width:100%;resize:vertical;margin-bottom:8px">${esc(_mantIa.texto)}</textarea>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input type="file" id="mant-ia-file-plan" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.jpg,.jpeg,.png" style="display:none" onchange="mantIaAdjuntar(this)" />
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('mant-ia-file-plan').click()">📎 Adjuntar documentos</button>
         <select onchange="mantSetOrigen(this.value)" style="max-width:230px"><option value="manual" ${p.origen === 'manual' ? 'selected' : ''}>Cargar equipos a mano</option><option value="procesos" ${p.origen === 'procesos' ? 'selected' : ''}>Desde un proyecto de Procesos IA</option><option value="flowsheet" ${p.origen === 'flowsheet' ? 'selected' : ''}>Desde un Flowsheet</option></select>
         ${p.origen !== 'manual' ? `<select onchange="mantSetOrigenProyecto(this.value)" style="flex:1;min-width:200px"><option value="">-- Elegir --</option>${lista.map(x => `<option value="${x.id}" ${p.origen_id === x.id ? 'selected' : ''}>${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="mantTraerEquipos()">Traer equipos</button>` : ''}
         <button class="btn btn-secondary btn-sm" onclick="mantEquipoAdd()">+ Equipo</button>
       </div>
+      ${_mantIa.archivos.length ? `<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px">${_mantIa.archivos.map((a, i) => `<span class="badge" style="background:var(--surface2);border:1px solid var(--border)">📄 ${esc(a.name)} <span style="cursor:pointer" onclick="mantIaQuitar(${i})">✕</span></span>`).join('')}</div>` : ''}
       ${p.equipos.length ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
         <tr><th style="${PROCESOS_EQ_TH}"></th><th style="${PROCESOS_EQ_TH}">Equipo</th><th style="${PROCESOS_EQ_TH}">Detalle / modelo</th><th style="${PROCESOS_EQ_TH}">Cant.</th><th style="${PROCESOS_EQ_TH}">Etapa / ubicación</th><th style="${PROCESOS_EQ_TH}">Equipo de la planilla madre</th><th></th></tr>
         ${p.equipos.map(e => `<tr>
@@ -24143,12 +24146,14 @@ function mantPlanRender() {
           <td style="${PROCESOS_EQ_TD};min-width:190px"><select onchange="mantEquipoUpd('${e.id}','catalogo_id',this.value)"><option value="">— Sin equivalente —</option>${cat.map(c => `<option value="${c.id}" ${e.catalogo_id === c.id ? 'selected' : ''}>${esc(c.nombre)}${c.estado === 'sugerido' ? ' (a validar)' : ''}</option>`).join('')}</select> ${badgeConf(e.confianza)}${e.tareas_propias && e.tareas_propias.length ? ` <span class="badge" style="background:#e3f0ff;color:#1f4e78;font-size:10px">📘 manual: ${e.tareas_propias.length} tareas</span>` : ''}</td>
           <td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="mantEquipoDel('${e.id}')">&#x2715;</button></td></tr>`).join('')}
       </table></div>` : '<p class="hint">Todavía no hay equipos. Traelos de un proyecto o agregalos a mano.</p>'}
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
+        ${p.equipos.length && (_mantIa.texto.trim() || _mantIa.archivos.length) ? `<select onchange="_mantIa.modo=this.value" style="max-width:260px"><option value="agregar" ${_mantIa.modo === 'agregar' ? 'selected' : ''}>Sumar a los equipos actuales</option><option value="reemplazar" ${_mantIa.modo === 'reemplazar' ? 'selected' : ''}>Reemplazar los equipos actuales</option></select>` : ''}
         <button class="btn btn-secondary btn-sm" onclick="mantEmparejarClick()" ${p.equipos.length ? '' : 'disabled'}>🔗 Emparejar con IA</button>
         ${sinTareas ? `<button class="btn btn-secondary btn-sm" onclick="mantGenerarFaltantes()">✨ Generar plan para los ${sinTareas} tipos sin tareas</button>` : ''}
-        <button class="btn btn-primary btn-sm" onclick="mantArmarPlan()" ${p.equipos.length ? '' : 'disabled'}>Armar plan</button>
+        <button class="btn btn-primary btn-sm" onclick="mantArmarClick()" ${_mantIa.ocupado ? 'disabled' : ''}>Armar plan</button>
       </div>
       ${sinMatch ? `<p class="hint" style="margin-top:8px">${sinMatch} equipo${sinMatch === 1 ? '' : 's'} sin tipo asignado: elegí el tipo en el desplegable de cada fila, o agregá un tipo nuevo en Cfg Documentación si no existe.</p>` : ''}
+      <div id="mant-ia-status-plan" style="margin-top:8px"></div>
       <div id="mant-plan-status" style="margin-top:8px"></div>
     </div>
     ${grupos.length ? `<div class="card">
