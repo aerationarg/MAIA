@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.19</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.20</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.19</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.20</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -14678,7 +14678,8 @@ function procesosStep3EtapaPanelHtml(nombreEtapa) {
         <button class="btn btn-secondary btn-sm" onclick="procesosStep3AbrirEtapa('${safe}')">✕ Cerrar</button>
       </div>
       ${valoresResumen.length ? `<p class="hint" style="margin-bottom:8px">${valoresResumen.map(([k, v]) => `${esc(k)}: ${esc(String(v))}`).join(' · ')}</p>` : ''}
-      ${!plantillaMatch ? `<p class="hint" style="margin-bottom:8px">⚠ No hay una etapa configurada en Cfg Procesos IA &gt; Plantilla de equipos por etapa que coincida con "${esc(nombreEtapa)}" — agregala ahí para poder autocompletar y para que "Sugerir equipos con IA" funcione en esta etapa.</p>` : ''}
+      ${!plantillaMatch && h.libre ? `<p class="hint" style="margin-bottom:8px">🆕 Unidad libre (hoja creada por IA): no tiene plantilla de equipos, así que "Sugerir equipos con IA" propone los equipos con criterio propio, sin lista cerrada.</p>` : ''}
+      ${!plantillaMatch && !h.libre ? `<p class="hint" style="margin-bottom:8px">⚠ No hay una etapa configurada en Cfg Procesos IA &gt; Plantilla de equipos por etapa que coincida con "${esc(nombreEtapa)}" — agregala ahí para poder autocompletar y para que "Sugerir equipos con IA" funcione en esta etapa.</p>` : ''}
       <div id="procesos-step3-status"></div>
       <button class="btn btn-primary btn-sm" onclick="procesosStep3SugerirEquipos('${safe}')">✦ Sugerir equipos con IA</button>
       <div class="gap"></div>
@@ -15064,6 +15065,47 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
 // El trabajo real, sin confirm() ni manejo de status propio — lo puede
 // llamar tanto el botón individual como "Sugerir equipos de todas las
 // etapas" (procesosStep3SugerirTodas), etapa por etapa en orden.
+// Unidades libres (sin plantilla de equipos): la IA propone los equipos con criterio propio — sin lista cerrada.
+// Marca/modelo se sigue buscando en los catálogos si hay alguno relevante; si no, quedan en blanco para el chat o la carga a mano.
+const PROCESOS_TOOL_EQUIPOS_LIBRES = {
+  name: 'proponer_equipos_libres',
+  description: 'Lista de equipos genéricos (sin marca) de una unidad de tratamiento libre.',
+  input_schema: { type: 'object', properties: {
+    equipos: { type: 'array', items: { type: 'object', properties: {
+      tipo: { type: 'string', description: 'Nombre habitual y genérico del equipo (ej. "Bomba sumergible", "Mezclador sumergible", "Sensor de nivel radar", "Soplante de lóbulos").' },
+      cantidad: { type: 'number', description: 'Cantidad total instalada, incluyendo la reserva si corresponde.' },
+      especificacion: { type: 'string', description: 'Pares "Dato: valor" separados por "; " con los datos que definen el equipo, calculados a partir de los valores de diseño de la unidad.' },
+      justificacion: { type: 'string', description: 'Por qué se necesita, cómo se obtuvo la cantidad y los valores (base de cálculo, redundancia).' }
+    }, required: ['tipo', 'cantidad', 'especificacion', 'justificacion'] } }
+  }, required: ['equipos'] }
+};
+async function procesosStep3SugerirEquiposLibres(nombreEtapa, h, valoresEtapa, referenciasTxt, leccionesTxt, fichasTxt) {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step3-status';
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('API key no disponible.');
+  const prompt = `Estás definiendo los equipos necesarios para la unidad de tratamiento "${nombreEtapa}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo. Es una UNIDAD LIBRE (no tiene hoja en la planilla de la empresa ni plantilla de equipos: la hoja la creó una IA), así que NO hay una lista cerrada: proponé vos, con tu criterio de ingeniería, los equipos que hacen falta para que la unidad funcione (mezcla, bombeo, aireación, dosificación, instrumentación de nivel/caudal/pH/OD, válvulas principales, etc.), con la cantidad incluyendo reserva cuando corresponda.\n\nValores de diseño calculados para esta unidad:\n${valoresEtapa || '(sin valores)'}\n${h.libre && h.libre.metodologia ? '\nMetodología de la hoja: ' + h.libre.metodologia + '\n' : ''}${h.libre && (h.libre.supuestos || []).length ? '\nSupuestos de la hoja: ' + h.libre.supuestos.join('; ') + '\n' : ''}\nInfo general del proyecto:\n${procesosResumenCampos(p)}\n${h.material || h.geometria ? '\nMaterial y geometría de la unidad: ' + [h.material && (PROCESOS_MATERIALES[h.material] || h.material), h.geometria && (PROCESOS_GEOMETRIAS[h.geometria] || h.geometria)].filter(Boolean).join(', ') + '.\n' : ''}${referenciasTxt}${fichasTxt}${leccionesTxt}${procesosChatGeneralResumenTxt(p)}${PROCESOS_STEP3_REGLAS_ESPECIFICACION}\nNo dupliques equipos que ya pertenezcan a otra unidad del tren; solo los de esta.`;
+  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, tools: [PROCESOS_TOOL_EQUIPOS_LIBRES], tool_choice: { type: 'tool', name: PROCESOS_TOOL_EQUIPOS_LIBRES.name }, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+  });
+  if (!resp.ok) { const errBody = await resp.json().catch(() => ({})); throw new Error(errBody.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const tu = data.content && data.content.find(c => c.type === 'tool_use');
+  if (!tu) throw new Error('La IA no devolvió la lista de equipos con la forma esperada.');
+  let nuevos = ((tu.input || {}).equipos || []).filter(eq => eq && eq.tipo).map(eq => ({ id: procesosNuevoId(), tipo: String(eq.tipo).trim(), cantidad: eq.cantidad != null && Number.isFinite(Number(eq.cantidad)) ? Number(eq.cantidad) : 1, especificacion: eq.especificacion || '', modelo: '', justificacion: eq.justificacion || '' }));
+  if (!nuevos.length) throw new Error('La IA no propuso ningún equipo para "' + nombreEtapa + '".');
+  try {
+    showMsg(statusId, 'loading', 'Buscando equivalentes en catálogo...');
+    nuevos = await procesosStep3MatchCatalogo(nombreEtapa, nuevos, valoresEtapa, []);
+  } catch (eCat) { console.warn('No se pudo buscar en catálogo, se deja la lista genérica:', eCat.message); }
+  const ed = Object.assign({}, p.equipos_data);
+  ed.etapas = Object.assign({}, ed.etapas);
+  const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
+  e.equipos = nuevos; e.confirmada = false;
+  ed.etapas[nombreEtapa] = e;
+  await procesosSaveProyecto({ equipos_data: ed }, p);
+}
 async function procesosStep3SugerirEquiposCore(nombreEtapa) {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step3-status';
@@ -15093,11 +15135,13 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
     // que el usuario la cargue primero.
     await procesosEquiposPlantillaCargar();
     const plantillaMatch = procesosEquiposPlantillaDeEtapa(nombreEtapa);
-    if (!plantillaMatch || !plantillaMatch.equipos.length) {
+    const libreSinPlantilla = !!h.libre && (!plantillaMatch || !plantillaMatch.equipos.length);
+    if ((!plantillaMatch || !plantillaMatch.equipos.length) && !libreSinPlantilla) {
       throw new Error(`No hay equipos configurados para una etapa que coincida con "${nombreEtapa}" en Cfg Procesos IA > Plantilla de equipos por etapa — agregala ahí antes de poder sugerir equipos para esta etapa.${h.libre ? ' (Es una unidad libre creada por IA: no tiene plantilla; mientras tanto podés cargarle los equipos a mano.)' : ''}`);
     }
     const referenciasTxt = referencias ? '\nProyectos anteriores de la empresa tomados como referencia:\n' + referencias + '\n' : '';
     const leccionesTxt = lecciones ? '\nLecciones aprendidas de proyectos anteriores (reglas informales de la empresa):\n' + lecciones + '\n' : '';
+    if (libreSinPlantilla) { await procesosStep3SugerirEquiposLibres(nombreEtapa, h, valoresEtapa, referenciasTxt, leccionesTxt, fichasTxt); return; }
     const plantillaTxt = `\nEquipos disponibles para la etapa "${plantillaMatch.etapa.nombre}" — LISTA CERRADA de la empresa, SOLO podés elegir de acá, copiando el campo "tipo" EXACTAMENTE como figura (mismo texto, sin modificarlo ni traducirlo) y sin inventar ningún equipo que no esté en esta lista:\n${plantillaMatch.equipos.map(eq => `  - ${eq.tipo_equipo}${eq.cantidad_sugerida ? ' (cantidad sugerida: '+eq.cantidad_sugerida+')' : ''}${eq.caracteristicas ? ' — descripción: '+eq.caracteristicas : ''}${procesosEquipoInfoTipoTxt(eq)}`).join('\n')}\n\nElegí SOLO los que apliquen a este proyecto puntual (no hace falta usar todos) — usá el "cuándo se usa" de cada equipo (cuando figure) para decidir si aplica. Si varios son alternativas entre sí para la misma función (ej. distintas tecnologías de deshidratación, o distintos tipos de bomba para el mismo uso), elegí SOLO UNA de esas alternativas, la más adecuada según los valores de diseño — nunca propongas dos alternativas para la misma función.\n\n${PROCESOS_STEP3_REGLAS_ESPECIFICACION}`;
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     const DEFAULT_TEMPLATE_STEP3_SUGERIR = `Estás definiendo los equipos necesarios para la etapa/unidad de tratamiento "{{nombreEtapa}}" de un proyecto de tratamiento de efluentes — TODAVÍA SIN marca/modelo, eso se resuelve en un paso aparte.\n\nValores de diseño calculados para esta etapa:\n{{valoresEtapa}}\n\nInfo general del cliente/proyecto:\n{{resumenCampos}}\n{{referenciasTxt}}{{leccionesTxt}}{{plantillaTxt}}{{chatGeneralTxt}}\nSugerí la lista de equipos necesarios para esta etapa, basándote en los valores de diseño (caudal, dimensiones, carga, etc.) y en cómo se resolvieron etapas similares en los proyectos de referencia, si aplica — pero SIEMPRE eligiendo exclusivamente de la lista cerrada de arriba, nunca de tu conocimiento general. Para cada equipo indicá cantidad (seguí la cantidad sugerida de la lista si la hay, ej. redundancia N+1 — no la ignores), tipo (copiado EXACTO de la lista), una especificación técnica breve (capacidad, potencia, material, etc. — usá la descripción de la lista como guía de qué datos completar) y una justificación breve.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"equipos":[{"tipo":"Bomba centrífuga sumergible","cantidad":2,"especificacion":"Caudal 15 m3/h, HP 3, una de reserva","justificacion":"Una en operación y una de reserva por criterio de redundancia"}]}`;
