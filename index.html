@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.11</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.12</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.11</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.12</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -705,6 +705,19 @@
         </div>
       </div>
       <div id="mant-plan-view" style="display:none"></div>
+    </div>
+
+    <!-- ═══ PANEL: DFS (área Documentación) ═══ -->
+    <div class="panel" id="panel-dfs">
+      <div id="dfs-list-view">
+        <div class="card">
+          <div class="card-label">DFS — Descripción funcional</div>
+          <p class="hint" style="margin-top:-6px">Armá la descripción funcional (memoria de funcionamiento) de una planta a partir de un proyecto de Procesos IA, de un Flowsheet, de un mensaje y/o de documentos. Después la ajustás con el chat y la exportás a Word.</p>
+          <button class="btn btn-primary" onclick="dfsNuevo()" style="margin-bottom:12px">+ Nuevo DFS</button>
+          <div id="dfs-list" class="empty">Cargando...</div>
+        </div>
+      </div>
+      <div id="dfs-doc-view" style="display:none"></div>
     </div>
 
     <!-- ═══ PANEL: Cfg Documentación ═══ -->
@@ -2220,6 +2233,7 @@ function switchPanel(name) {
   if (name === 'microorganismos') microoRender();
   if (name === 'cfg-microorganismos') { microoConocimientoRender(); microoAprendizajeRender(); }
   if (name === 'mantenimiento') mantPlanesRender();
+  if (name === 'dfs') dfsListaRender();
   if (name === 'cfg-documentacion') mantCfgRender();
 }
 
@@ -23767,9 +23781,9 @@ function mantIaAdjuntar(input) {
   mantIaRefrescar();
 }
 function mantIaQuitar(i) { _mantIa.archivos.splice(i, 1); mantIaRefrescar(); }
-async function mantIaBloques() {
+async function mantIaBloques(archivos) {
   const bloques = [];
-  for (const f of _mantIa.archivos) {
+  for (const f of (archivos || _mantIa.archivos)) {
     const buf = await f.arrayBuffer();
     if (procesosArchivoLocalEsPdf(f.name) || procesosArchivoLocalEsImagen(f.name)) {
       bloques.push({ type: 'text', text: `── Documento adjunto: "${f.name}" ──` });
@@ -24299,6 +24313,513 @@ async function mantExportarExcel() {
   } catch (e) { showMsg('mant-plan-status', 'error', '✕ ' + e.message); }
 }
 
+// ══ Generador de Word (.docx) desde bloques — lo usan el DFS y (después) el Manual de operación ══
+// Arma el paquete OOXML a mano con JSZip (sin librerías extra). Bloques:
+//  {t:'h1'|'h2'|'h3', text}  {t:'p', text, bold?, italic?, align?}  {t:'bullets', items:[..]}
+//  {t:'table', head:[..], rows:[[..]], widths:[dxa..]}  {t:'pagebreak'}  {t:'spacer'}
+//  {t:'cover', lines:[{text,size,bold,color}], }   (párrafos centrados de portada)
+// Un salto de línea simple dentro de un texto se respeta (<w:br/>); los párrafos se separan por bloque.
+function docxEsc(s) { return String(s == null ? '' : s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function docxRuns(text, o) {
+  o = o || {};
+  const rpr = (o.bold ? '<w:b/>' : '') + (o.italic ? '<w:i/>' : '') + (o.color ? `<w:color w:val="${o.color}"/>` : '') + (o.size ? `<w:sz w:val="${o.size}"/><w:szCs w:val="${o.size}"/>` : '');
+  return String(text == null ? '' : text).split('\n').map((ln, i) =>
+    `<w:r>${rpr ? `<w:rPr>${rpr}</w:rPr>` : ''}${i ? '<w:br/>' : ''}<w:t xml:space="preserve">${docxEsc(ln)}</w:t></w:r>`).join('');
+}
+function docxParrafo(text, o) {
+  o = o || {};
+  const ppr = (o.style ? `<w:pStyle w:val="${o.style}"/>` : '') + (o.num ? `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>` : '') + (o.keepNext ? '<w:keepNext/>' : '')
+    + (o.spacing ? `<w:spacing ${o.spacing}/>` : '') + (o.align ? `<w:jc w:val="${o.align}"/>` : '');
+  return `<w:p>${ppr ? `<w:pPr>${ppr}</w:pPr>` : ''}${docxRuns(text, o)}</w:p>`;
+}
+function docxTabla(head, rows, widths) {
+  const n = head.length;
+  const total = 9638;
+  const w = (widths && widths.length === n) ? widths : Array(n).fill(Math.floor(total / n));
+  const celda = (txt, i, esHead) => `<w:tc><w:tcPr><w:tcW w:w="${w[i]}" w:type="dxa"/>${esHead ? '<w:shd w:val="clear" w:color="auto" w:fill="1F4E78"/>' : ''}</w:tcPr>${docxParrafo(txt, { bold: esHead, color: esHead ? 'FFFFFF' : null, size: 20, spacing: 'w:before="40" w:after="40"' })}</w:tc>`;
+  const fila = (cells, esHead) => `<w:tr>${esHead ? '<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>' : '<w:trPr><w:cantSplit/></w:trPr>'}${cells.map((c, i) => celda(c, i, esHead)).join('')}</w:tr>`;
+  const bord = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(b => `<w:${b} w:val="single" w:sz="4" w:space="0" w:color="8C8C8C"/>`).join('');
+  return `<w:tbl><w:tblPr><w:tblW w:w="${w.reduce((a, b) => a + b, 0)}" w:type="dxa"/><w:tblBorders>${bord}</w:tblBorders><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr>`
+    + `<w:tblGrid>${w.map(x => `<w:gridCol w:w="${x}"/>`).join('')}</w:tblGrid>${fila(head, true)}${rows.map(r => fila(head.map((_, i) => r[i] == null ? '' : r[i]), false)).join('')}</w:tbl>`;
+}
+function docxBloquesXml(bloques) {
+  return bloques.map(b => {
+    if (b.t === 'h1') return docxParrafo(b.text, { style: 'Heading1' });
+    if (b.t === 'h2') return docxParrafo(b.text, { style: 'Heading2' });
+    if (b.t === 'h3') return docxParrafo(b.text, { style: 'Heading3' });
+    if (b.t === 'p') return docxParrafo(b.text, { bold: b.bold, italic: b.italic, align: b.align });
+    if (b.t === 'bullets') return (b.items || []).map(it => docxParrafo(it, { style: 'ListParagraph', num: true })).join('');
+    if (b.t === 'table') return docxTabla(b.head, b.rows, b.widths) + docxParrafo('', {});
+    if (b.t === 'pagebreak') return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+    if (b.t === 'spacer') return docxParrafo('', {});
+    if (b.t === 'cover') return (b.lines || []).map(l => docxParrafo(l.text, { align: 'center', bold: l.bold, size: l.size, color: l.color, spacing: `w:before="${l.before || 0}" w:after="${l.after || 120}"` })).join('');
+    return '';
+  }).join('');
+}
+async function docxGenerar(bloques, opts) {
+  opts = opts || {};
+  const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>`);
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`);
+  zip.file('word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`);
+  const est = (id, nombre, rpr, ppr, extra) => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${nombre}"/>${extra || ''}<w:qFormat/><w:pPr>${ppr || ''}</w:pPr><w:rPr>${rpr || ''}</w:rPr></w:style>`;
+  zip.file('word/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles ${NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri" w:eastAsia="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="es-AR"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="264" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>`
+    + `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="both"/></w:pPr></w:style>`
+    + est('Heading1', 'heading 1', '<w:b/><w:color w:val="1F4E78"/><w:sz w:val="32"/><w:szCs w:val="32"/>', '<w:keepNext/><w:spacing w:before="360" w:after="160"/><w:jc w:val="left"/><w:outlineLvl w:val="0"/>', '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>')
+    + est('Heading2', 'heading 2', '<w:b/><w:color w:val="1F4E78"/><w:sz w:val="28"/><w:szCs w:val="28"/>', '<w:keepNext/><w:spacing w:before="280" w:after="120"/><w:jc w:val="left"/><w:outlineLvl w:val="1"/>', '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>')
+    + est('Heading3', 'heading 3', '<w:b/><w:color w:val="1F4E78"/><w:sz w:val="24"/><w:szCs w:val="24"/>', '<w:keepNext/><w:spacing w:before="240" w:after="100"/><w:jc w:val="left"/><w:outlineLvl w:val="2"/>', '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>')
+    + est('ListParagraph', 'List Paragraph', '', '<w:spacing w:after="60"/><w:ind w:left="720"/><w:jc w:val="left"/>', '<w:basedOn w:val="Normal"/>')
+    + `</w:styles>`);
+  zip.file('word/numbering.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering ${NS}><w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`);
+  zip.file('word/footer1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr ${NS}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>${opts.pie ? `<w:r><w:rPr><w:sz w:val="16"/><w:color w:val="666666"/></w:rPr><w:t xml:space="preserve">${docxEsc(opts.pie)}  ·  Página </w:t></w:r>` : '<w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t xml:space="preserve">Página </w:t></w:r>'}<w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>1</w:t></w:r><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>`);
+  zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${docxBloquesXml(bloques)}<w:sectPr><w:footerReference w:type="default" r:id="rId3"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+}
+function docxDescargar(blob, nombre) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = nombre.replace(/[\\/:*?"<>|]+/g, ' ').trim() + '.docx';
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// ══ DFS — Descripción Funcional / Memoria de funcionamiento (área Documentación) ══
+// Documento por proyecto: portada + objetivo + generales + una sección por etapa
+// (narrativa + alarmas) + tabla de alarmas + tablas de rangos y parámetros.
+// Se arma con IA desde un proyecto de Procesos IA / Flowsheet y/o mensaje y documentos,
+// se ajusta a mano o por chat (con deshacer) y se exporta a Word.
+// Persistencia: tabla doc_documentos (tipo 'dfs').
+const DFS_CLASIF = ['Prioritaria', 'Media', 'Baja'];
+const DFS_GENERALES_ESTANDAR = `Todas las mediciones de caudal de planta, así como las de presión transmembrana y oxígeno disuelto (si corresponden), deberán ser graficadas. Las alarmas deberán indicarse en una tabla separada de las alarmas activas. Además, todas las mediciones de caudal deberán tener la indicación de valor instantáneo y acumulado diario, con la posibilidad de reset y guardado del histórico para control.
+Todos los equipos, sensores y válvulas actuadas deberán contar con tiempo de retardo para accionamiento y para señal de falla. Además, deberán visualizar en pantalla su estado con un código de colores para fácil lectura del operador (activo, apagado y en falla).
+Las alarmas prioritarias, que son las que afectan directamente al funcionamiento del proceso de forma crítica, deberán figurar en todas las pantallas de manera bien visible.`;
+const DFS_ESTILO = `ESTILO DE LA DESCRIPCIÓN FUNCIONAL (DFS) DE AERATION — seguilo:
+- Es un documento para quien PROGRAMA el PLC y el HMI: describe con precisión qué hace el sistema y por qué, no es un texto comercial.
+- Una sección por unidad de proceso, en el orden hidráulico del tren. Prosa técnica en presente y tercera persona ("El efluente ingresa…", "La marcha de las bombas dependerá de…"), párrafos cortos, sin viñetas dentro de la narrativa.
+- Recorré el flujo: cómo entra el líquido a la unidad, qué equipos la componen (con su TAG entre paréntesis SOLO si figura en las fuentes; si no, nombrá el equipo por su función, p. ej. "la bomba de alimentación"), qué sensores la comandan y cómo, y a dónde sale.
+- Para cada equipo/lazo indicá: condición de arranque y de parada, enclavamientos ("está enclavada con el sensor de caudal", "si no hay nivel mínimo en el tanque la bomba no arranca"), instalación 1+1 con rotación por tiempo seteable desde tablero y pasaje automático al equipo de reserva ante falla, variadores de frecuencia y su frecuencia mínima, lazos de control (set point de OD, PID de pH con banda muerta, etc.), secuencias temporizadas (tiempo de funcionamiento/pausa, lavados, purgas), y qué pasa ante una falla (si solo da alarma en el HMI o si detiene el proceso).
+- Los valores ajustables se remiten a las tablas: "(ver tabla de parámetros)". Nunca inventes valores de diseño: si el dato no está en las fuentes, el valor va como "A definir" en la tabla de parámetros.
+- Cerrá cada unidad con la lista de alarmas de esa unidad, con clasificación: PRIORITARIA = afecta de forma crítica al proceso o a la seguridad (falla de un sensor o equipo sin respaldo del que depende todo lo demás, alto nivel con riesgo de rebalse, falla general de un equipo principal); MEDIA = hay equipo de respaldo, o no detiene el proceso, o es un aviso previo (bajo nivel de químico, cambio a local, sin producto dosificado); BAJA = informativa. Nombre de alarma corto y en forma "Falla X", "Nivel bajo en X", "X en local".
+- Tablas finales: RANGO (mínimo–máximo permitido para configurar) y VALOR (el de puesta en marcha) de cada parámetro seteable: set points, tiempos de retardo/rotación/funcionamiento/limpieza, niveles de operación y bloqueo, frecuencias mínimas, dosis, concentraciones. Unidades explícitas. Los rangos deben ser razonables para el tipo de parámetro; el valor solo si hay dato en las fuentes, si no "A definir".
+EJEMPLO de párrafo (reactor de aireación): "El control de la cantidad de aire suministrado viene comandado por la lectura de un sensor de oxígeno disuelto instalado dentro del reactor (OD 171.100.101). El programa de operación de planta posee parametrizado un valor de set point (ver tabla de parámetros) y va ajustando la frecuencia de los sopladores para mantener el oxígeno cercano a dicho set point. Por protección de los sopladores, la frecuencia mínima es de 25 Hz. Al arrancar, se comienza con un equipo hasta alcanzar un porcentaje de su capacidad; si aun así no se alcanza el set point, se enciende la otra unidad."
+EJEMPLO de alarmas: "Falla BD 1101, BD 1102 – Media (porque hay back up)"; "Falla FIT 100 – Prioritaria (porque todo se enclava a esto)"; "Nivel bajo en TK 1100 – Media".`;
+
+let _dfsDoc = null, _dfsHist = [], _dfsBusy = false;
+let _dfsIa = { texto: '', archivos: [], ocupado: false };
+let _dfsProyectos = {};
+function dfsId() { return 'd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function dfsDatosVacios() {
+  return { portada: { titulo: 'MEMORIA DE FUNCIONAMIENTO (DFS)', proyecto: '', ubicacion: '', anio: String(new Date().getFullYear()), revisiones: [{ fecha: new Date().toLocaleDateString('es-AR').replace(/\//g, '-'), archivo: '', comentario: '' }], elaboro: '', reviso: '', aprobo: '', nota: '' },
+    objetivo: '', generales: DFS_GENERALES_ESTANDAR, etapas: [], parametros: [] };
+}
+function dfsNormalizar(d) {
+  const v = dfsDatosVacios(); d = d && typeof d === 'object' ? d : {};
+  const out = { portada: Object.assign(v.portada, d.portada || {}), objetivo: d.objetivo || '', generales: d.generales != null ? d.generales : v.generales, etapas: Array.isArray(d.etapas) ? d.etapas : [], parametros: Array.isArray(d.parametros) ? d.parametros : [] };
+  if (!Array.isArray(out.portada.revisiones) || !out.portada.revisiones.length) out.portada.revisiones = v.portada.revisiones;
+  out.etapas.forEach(e => { if (!e.id) e.id = dfsId(); if (!Array.isArray(e.alarmas)) e.alarmas = []; e.texto = e.texto || ''; e.nombre = e.nombre || ''; });
+  return out;
+}
+
+// ── Lista ──
+async function dfsListaRender() {
+  dfsVolver(true);
+  const el = document.getElementById('dfs-list');
+  if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const rows = await mantFetchAll(`/rest/v1/doc_documentos?select=id,nombre,origen_nombre,creado_por_nombre,updated_at&empresa=eq.${currentEmpresa}&tipo=eq.dfs&order=updated_at.desc`);
+    if (!rows.length) { el.innerHTML = '<div class="empty">No hay DFS todavía.</div>'; return; }
+    el.innerHTML = rows.map(p => `<div class="file-item" style="cursor:pointer" onclick="dfsAbrir('${p.id}')"><div class="file-icon">📋</div><div class="file-info"><div class="file-name">${esc(p.nombre)}</div><div class="file-size">${esc(p.origen_nombre || 'Sin proyecto asociado')} · ${esc(p.creado_por_nombre || '')} · ${new Date(p.updated_at).toLocaleDateString('es-AR')}</div></div><button class="remove-btn" onclick="event.stopPropagation();dfsEliminar('${p.id}')">&#x2715;</button></div>`).join('');
+  } catch (e) { el.innerHTML = '<div class="empty">No se pudo cargar — ¿corriste el SQL de DFS (tabla doc_documentos)?</div>'; }
+}
+async function dfsNuevo() {
+  const r = await supaFetch('/rest/v1/doc_documentos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, tipo: 'dfs', nombre: 'DFS nuevo', origen: 'ninguno', datos: dfsDatosVacios(), creado_por_nombre: currentUser?.nombre || currentUser?.email || null }) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows?.length) { alert('No se pudo crear el DFS — ¿corriste el SQL de DFS (tabla doc_documentos)?'); return; }
+  dfsAbrir(rows[0].id);
+}
+async function dfsEliminar(id) {
+  if (!confirm('¿Eliminar este DFS?')) return;
+  await supaFetch(`/rest/v1/doc_documentos?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
+  dfsListaRender();
+}
+async function dfsAbrir(id) {
+  const r = await supaFetch(`/rest/v1/doc_documentos?id=eq.${id}&select=*`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  if (!r.ok || !rows.length) { alert('No se pudo abrir el DFS.'); return; }
+  _dfsDoc = rows[0]; _dfsHist = [];
+  _dfsDoc.datos = dfsNormalizar(_dfsDoc.datos);
+  if (!Array.isArray(_dfsDoc.chat_historial)) _dfsDoc.chat_historial = [];
+  _dfsIa = { texto: '', archivos: [], ocupado: false };
+  document.getElementById('dfs-list-view').style.display = 'none';
+  document.getElementById('dfs-doc-view').style.display = '';
+  dfsCargarProyectos();
+  dfsRender();
+}
+function dfsVolver(silencioso) {
+  _dfsDoc = null;
+  const a = document.getElementById('dfs-list-view'), b = document.getElementById('dfs-doc-view');
+  if (a) a.style.display = ''; if (b) b.style.display = 'none';
+  if (!silencioso) dfsListaRender();
+}
+let _dfsGuardarTimer = null;
+function dfsGuardar() {
+  if (!_dfsDoc) return Promise.resolve();
+  const p = _dfsDoc;
+  return supaFetch(`/rest/v1/doc_documentos?id=eq.${p.id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ nombre: p.nombre, origen: p.origen || 'ninguno', origen_id: p.origen_id || null, origen_nombre: p.origen_nombre || null, datos: p.datos, chat_historial: p.chat_historial, updated_at: new Date().toISOString() }) }).catch(() => {});
+}
+async function dfsCargarProyectos() {
+  try {
+    if (!_dfsProyectos.procesos) _dfsProyectos.procesos = await mantFetchAll(`/rest/v1/procesos_proyectos?select=id,nombre,cliente&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+    if (!_dfsProyectos.flowsheet) _dfsProyectos.flowsheet = await mantFetchAll(`/rest/v1/flowsheet_proyectos?select=id,nombre&empresa=eq.${currentEmpresa}&order=created_at.desc`);
+  } catch (e) { _dfsProyectos.procesos = _dfsProyectos.procesos || []; _dfsProyectos.flowsheet = _dfsProyectos.flowsheet || []; }
+  if (_dfsDoc) dfsRender();
+}
+function dfsSetNombre(v) { if (_dfsDoc && v.trim()) { _dfsDoc.nombre = v.trim(); dfsGuardar(); } }
+function dfsSetOrigen(tipo) { _dfsDoc.origen = tipo; _dfsDoc.origen_id = null; _dfsDoc.origen_nombre = null; dfsGuardar(); dfsRender(); }
+function dfsSetOrigenProyecto(id) {
+  const p = (_dfsProyectos[_dfsDoc.origen] || []).find(x => x.id === id);
+  _dfsDoc.origen_id = id || null; _dfsDoc.origen_nombre = p ? (_dfsDoc.origen === 'procesos' ? 'Procesos IA: ' : 'Flowsheet: ') + p.nombre : null;
+  dfsGuardar(); dfsRender();
+}
+function dfsAdjuntar(input) {
+  const nuevos = [...input.files]; input.value = ''; const errores = [];
+  nuevos.forEach(f => {
+    if (!MANT_IA_EXT.test(f.name)) errores.push(`"${f.name}": tipo no soportado (usá PDF, Word .docx, Excel, CSV, TXT o imagen)`);
+    else if (f.size > 20 * 1024 * 1024) errores.push(`"${f.name}": pesa más de 20 MB`);
+    else _dfsIa.archivos.push(f);
+  });
+  if (errores.length) alert('No se pudieron adjuntar:\n\n' + errores.join('\n'));
+  dfsRender();
+}
+function dfsQuitarArchivo(i) { _dfsIa.archivos.splice(i, 1); dfsRender(); }
+
+// ── Contexto del proyecto elegido ──
+async function dfsContextoProyecto() {
+  const d = _dfsDoc;
+  if (!d.origen_id || (d.origen !== 'procesos' && d.origen !== 'flowsheet')) return '';
+  if (d.origen === 'procesos') {
+    const r = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${d.origen_id}&select=*`, { headers: mantH() });
+    const rows = await r.json().catch(() => []);
+    const p = rows[0]; if (!p) throw new Error('No se pudo leer el proyecto de Procesos IA.');
+    let ctx = `Proyecto de Procesos IA: ${p.nombre}${p.cliente ? ' — Cliente: ' + p.cliente : ''}\n\n`;
+    try { ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`; } catch (e) { /* sin info */ }
+    try { const dis = procesosResumenDiseno(p); if (dis) ctx += `Diseño definido (valores por unidad/etapa):\n${dis}\n\n`; } catch (e) { /* sin diseño */ }
+    try { const eq = procesosResumenEquipos(p, true); if (eq) ctx += `Equipos definidos por etapa:\n${eq}\n\n`; } catch (e) { /* sin equipos */ }
+    try { const ch = procesosChatGeneralResumenTxt(p); if (ch) ctx += ch; } catch (e) { /* sin chat */ }
+    return ctx;
+  }
+  const r = await supaFetch(`/rest/v1/flowsheet_proyectos?id=eq.${d.origen_id}&select=nombre,equipos_data`, { headers: mantH() });
+  const rows = await r.json().catch(() => []);
+  const fp = rows[0]; if (!fp) throw new Error('No se pudo leer el Flowsheet.');
+  const etapas = fp.equipos_data?.etapas || {};
+  const txt = Object.keys(etapas).map(et => `Etapa "${et}":\n` + (etapas[et].equipos || []).map(e => `  - ${e.cantidad || 1}x ${e.tipo || '(sin tipo)'}${e.especificacion ? ' — ' + e.especificacion : ''}${e.modelo ? ' — Modelo: ' + e.modelo : ''}`).join('\n')).join('\n');
+  return `Flowsheet: ${fp.nombre}\n\nEquipos por etapa:\n${txt}\n\n`;
+}
+
+// ── Generación con IA (por pasos: estructura → una llamada por etapa) ──
+const DFS_TOOL_ESTRUCTURA = {
+  name: 'estructura_dfs',
+  description: 'Estructura del DFS: datos de portada, objetivo, generales y las etapas de proceso en orden hidráulico, con una ficha técnica de cada una.',
+  input_schema: { type: 'object', properties: {
+    proyecto: { type: 'string', description: 'Nombre del proyecto/planta (ej. "422 - VACALÍN" o "Planta de tratamiento de efluentes de X").' },
+    ubicacion: { type: 'string', description: 'Ciudad/localidad, si figura.' },
+    objetivo: { type: 'string', description: 'Párrafo introductorio: qué planta es, dónde, y que este documento describe su funcionamiento para facilitar la programación del PLC/HMI. Incluí el límite de suministro/alcance si figura y, si hay instalación existente, cómo se integra (mediciones existentes que se leen, etc.).' },
+    generales: { type: 'string', description: 'Requerimientos generales de visualización y alarmas. Partí del texto estándar recibido y ajustalo al proyecto (mediciones a graficar según los sensores que existan, etc.). Párrafos separados por línea en blanco.' },
+    etapas: { type: 'array', description: 'Unidades de proceso a describir, en orden hidráulico, incluyendo las secundarias (lodos, deshidratación, químicos/CIP, drenajes, preparación de polímero) como unidad propia o dentro de la que corresponda.', items: { type: 'object', properties: {
+      nombre: { type: 'string', description: 'Nombre corto de la unidad (ej. "Reactor de aireación").' },
+      ficha: { type: 'string', description: 'FICHA TÉCNICA de esta unidad (200–400 palabras): TODOS los equipos, sensores y válvulas con su TAG y modelo si figuran; instalación (1+1, variadores); cómo se comanda cada uno; enclavamientos; set points, tiempos y niveles con su valor si figuran; secuencias; qué ocurre ante fallas; de dónde recibe y adónde envía. Solo hechos de las fuentes — marcá "(no definido en las fuentes)" en lo que falte.' }
+    }, required: ['nombre', 'ficha'] } }
+  }, required: ['objetivo', 'generales', 'etapas'] }
+};
+const DFS_TOOL_ETAPA = {
+  name: 'etapa_dfs',
+  description: 'Sección del DFS para una unidad de proceso: narrativa de funcionamiento, alarmas y parámetros ajustables.',
+  input_schema: { type: 'object', properties: {
+    texto: { type: 'string', description: 'Narrativa de funcionamiento de la unidad (varios párrafos separados por una línea en blanco), siguiendo el estilo indicado. Sin títulos ni listas de alarmas (van aparte).' },
+    alarmas: { type: 'array', items: { type: 'object', properties: {
+      nombre: { type: 'string', description: 'Nombre corto (ej. "Falla BD 1101, BD 1102", "Nivel bajo en TK 200").' },
+      clasificacion: { type: 'string', enum: DFS_CLASIF },
+      motivo: { type: 'string', description: 'Breve aclaración opcional (ej. "porque hay back up").' }
+    }, required: ['nombre', 'clasificacion'] } },
+    parametros: { type: 'array', description: 'Parámetros seteables desde el HMI de esta unidad.', items: { type: 'object', properties: {
+      parametro: { type: 'string', description: 'Descripción del parámetro (ej. "Set point de OD", "Tiempo de rotación entre bombas de drenaje").' },
+      unidad: { type: 'string' },
+      rango: { type: 'string', description: 'Rango de configuración permitido, formato "0 a 10".' },
+      valor: { type: 'string', description: 'Valor de puesta en marcha si figura en las fuentes; si no, "A definir".' }
+    }, required: ['parametro', 'unidad', 'rango', 'valor'] } }
+  }, required: ['texto', 'alarmas', 'parametros'] }
+};
+async function dfsLlamar(contenido, tool, maxTokens) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
+  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: maxTokens, tools: [tool], tool_choice: { type: 'tool', name: tool.name }, messages: [{ role: 'user', content: contenido }] })
+  });
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const tu = data.content?.find(c => c.type === 'tool_use');
+  if (!tu) throw new Error('La IA no devolvió una respuesta con la forma esperada.');
+  return tu.input || {};
+}
+function dfsClave(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+async function dfsGenerar() {
+  if (_dfsIa.ocupado || !_dfsDoc) return;
+  const st = 'dfs-status', d = _dfsDoc;
+  const texto = (_dfsIa.texto || '').trim();
+  if (!texto && !_dfsIa.archivos.length && !d.origen_id) { showMsg(st, 'error', '✕ Elegí un proyecto, escribí un mensaje o adjuntá documentos.'); return; }
+  if (d.datos.etapas.length && !confirm('Ya hay un DFS armado. ¿Reemplazarlo por uno nuevo? (Podés deshacerlo con el botón de deshacer del chat.)')) return;
+  try {
+    _dfsIa.ocupado = true; dfsRender();
+    showMsg(st, 'loading', 'Leyendo el proyecto y los documentos...');
+    const ctx = await dfsContextoProyecto();
+    const bloques = await mantIaBloques(_dfsIa.archivos);
+    const fuentes = (ctx ? `DATOS DEL PROYECTO (MAIA):\n${ctx}\n` : '') + (texto ? `MENSAJE DEL USUARIO:\n${texto}\n\n` : '');
+    const p1 = `Vas a redactar la Descripción Funcional (DFS) de una planta de tratamiento de efluentes. Primero definí la estructura: portada, objetivo, generales y las unidades de proceso en orden hidráulico, con la ficha técnica de cada una (los datos duros que después se usan para redactar). Usá SOLO lo que figura en las fuentes; no inventes equipos, TAGs ni valores.\n\n${DFS_ESTILO}\n\nTEXTO ESTÁNDAR DE "GENERALES" (ajustalo al proyecto):\n${DFS_GENERALES_ESTANDAR}\n\n${fuentes}Si hay documentos adjuntos, están a continuación (pueden ser un DFS de otro proyecto de ejemplo, un manual, una memoria descriptiva o el listado de equipos: usá su contenido según corresponda a ESTE proyecto).`;
+    const est = await dfsLlamar([{ type: 'text', text: p1 }, ...bloques], DFS_TOOL_ESTRUCTURA, 8000);
+    const etapasIn = (est.etapas || []).filter(e => e && e.nombre);
+    if (!etapasIn.length) throw new Error('La IA no identificó etapas de proceso. Sumá más información (equipos, descripción del tratamiento).');
+    const nueva = dfsDatosVacios();
+    nueva.portada = Object.assign(nueva.portada, d.datos.portada, { proyecto: est.proyecto || d.datos.portada.proyecto || d.origen_nombre || d.nombre, ubicacion: est.ubicacion || d.datos.portada.ubicacion });
+    nueva.objetivo = est.objetivo || ''; nueva.generales = est.generales || DFS_GENERALES_ESTANDAR;
+    const listado = etapasIn.map((e, i) => `${i + 1}. ${e.nombre}`).join('\n');
+    const params = new Map();
+    for (let i = 0; i < etapasIn.length; i++) {
+      const e = etapasIn[i];
+      showMsg(st, 'loading', `Redactando unidad ${i + 1} de ${etapasIn.length}: ${e.nombre}...`);
+      const p2 = `Redactá la sección del DFS de UNA unidad de la planta.\n\nPlanta: ${nueva.portada.proyecto}\nUnidades de la planta, en orden (para que sepas de dónde viene y adónde va el flujo):\n${listado}\n\nUNIDAD A REDACTAR: ${e.nombre}\nFicha técnica (fuente de verdad):\n${e.ficha || '(sin datos)'}\n\n${DFS_ESTILO}${texto ? `\n\nInstrucciones del usuario a respetar:\n${texto}` : ''}`;
+      const out = await dfsLlamar([{ type: 'text', text: p2 }], DFS_TOOL_ETAPA, 6000);
+      nueva.etapas.push({ id: dfsId(), nombre: e.nombre, texto: out.texto || '', alarmas: (out.alarmas || []).filter(a => a && a.nombre).map(a => ({ nombre: a.nombre + (a.motivo ? ` (${a.motivo})` : ''), clasificacion: DFS_CLASIF.includes(a.clasificacion) ? a.clasificacion : 'Media' })) });
+      (out.parametros || []).forEach(x => { const k = dfsClave(x.parametro); if (k && !params.has(k)) params.set(k, { parametro: x.parametro, unidad: x.unidad || '', rango: x.rango || '', valor: x.valor || 'A definir' }); });
+    }
+    nueva.parametros = [...params.values()];
+    _dfsHist.push(JSON.parse(JSON.stringify(d.datos)));
+    d.datos = nueva;
+    if (!d.nombre || d.nombre === 'DFS nuevo') d.nombre = 'DFS ' + (nueva.portada.proyecto || '').slice(0, 60);
+    _dfsIa = { texto: '', archivos: [], ocupado: false };
+    await dfsGuardar(); dfsRender();
+    showMsg(st, 'success', `✓ DFS armado con ${nueva.etapas.length} unidades, ${nueva.etapas.reduce((n, e) => n + e.alarmas.length, 0)} alarmas y ${nueva.parametros.length} parámetros. Revisalo y ajustalo con el chat; los valores "A definir" hay que completarlos.`);
+  } catch (e) { _dfsIa.ocupado = false; dfsRender(); showMsg(st, 'error', '✕ ' + e.message); }
+}
+
+// ── Edición manual ──
+function dfsCampo(ruta, valor) {
+  const d = _dfsDoc.datos, partes = ruta.split('.');
+  let o = d; for (let i = 0; i < partes.length - 1; i++) o = o[partes[i]];
+  o[partes[partes.length - 1]] = valor; dfsGuardar();
+}
+function dfsEtapa(id) { return _dfsDoc.datos.etapas.find(e => e.id === id); }
+function dfsEtapaCampo(id, campo, v) { const e = dfsEtapa(id); if (e) { e[campo] = v; dfsGuardar(); } }
+function dfsEtapaAdd() { _dfsDoc.datos.etapas.push({ id: dfsId(), nombre: 'Nueva unidad', texto: '', alarmas: [] }); dfsGuardar(); dfsRender(); }
+function dfsEtapaDel(id) { if (!confirm('¿Quitar esta unidad del DFS?')) return; _dfsDoc.datos.etapas = _dfsDoc.datos.etapas.filter(e => e.id !== id); dfsGuardar(); dfsRender(); }
+function dfsEtapaMover(id, dir) {
+  const a = _dfsDoc.datos.etapas, i = a.findIndex(e => e.id === id), j = i + dir;
+  if (i < 0 || j < 0 || j >= a.length) return;
+  [a[i], a[j]] = [a[j], a[i]]; dfsGuardar(); dfsRender();
+}
+function dfsAlarmaAdd(id) { const e = dfsEtapa(id); if (e) { e.alarmas.push({ nombre: '', clasificacion: 'Media' }); dfsGuardar(); dfsRender(); } }
+function dfsAlarmaCampo(id, i, campo, v) { const e = dfsEtapa(id); if (e && e.alarmas[i]) { e.alarmas[i][campo] = v; dfsGuardar(); } }
+function dfsAlarmaDel(id, i) { const e = dfsEtapa(id); if (e) { e.alarmas.splice(i, 1); dfsGuardar(); dfsRender(); } }
+function dfsParamAdd() { _dfsDoc.datos.parametros.push({ parametro: '', unidad: '', rango: '', valor: 'A definir' }); dfsGuardar(); dfsRender(); }
+function dfsParamCampo(i, campo, v) { const p = _dfsDoc.datos.parametros[i]; if (p) { p[campo] = v; dfsGuardar(); } }
+function dfsParamDel(i) { _dfsDoc.datos.parametros.splice(i, 1); dfsGuardar(); dfsRender(); }
+function dfsRevAdd() { _dfsDoc.datos.portada.revisiones.push({ fecha: new Date().toLocaleDateString('es-AR').replace(/\//g, '-'), archivo: '', comentario: '' }); dfsGuardar(); dfsRender(); }
+function dfsRevCampo(i, campo, v) { const r = _dfsDoc.datos.portada.revisiones[i]; if (r) { r[campo] = v; dfsGuardar(); } }
+function dfsRevDel(i) { const a = _dfsDoc.datos.portada.revisiones; if (a.length > 1) { a.splice(i, 1); dfsGuardar(); dfsRender(); } }
+function dfsFilas(t, min) { return Math.max(min || 3, Math.min(30, String(t || '').split('\n').reduce((n, l) => n + Math.ceil((l.length || 1) / 110), 0))); }
+
+// ── Render ──
+function dfsRender() {
+  const el = document.getElementById('dfs-doc-view');
+  if (!el || !_dfsDoc) return;
+  const d = _dfsDoc, dt = d.datos, po = dt.portada;
+  const lista = _dfsProyectos[d.origen] || [];
+  const inp = (ruta, val, ph, ancho) => `<input value="${esc(val)}" placeholder="${esc(ph)}" onchange="dfsCampo('${ruta}',this.value)" style="${ancho ? 'max-width:' + ancho + ';' : ''}" />`;
+  const chatHtml = (d.chat_historial || []).map(m => `<div style="align-self:${m.role === 'user' ? 'flex-end' : 'flex-start'};max-width:85%;background:${m.role === 'user' ? 'var(--blue-bg)' : 'var(--surface2)'};padding:6px 10px;border-radius:8px;font-size:13px;white-space:pre-wrap">${esc(m.content)}</div>`).join('');
+  el.innerHTML = `
+    <button class="btn btn-secondary btn-sm" onclick="dfsVolver()" style="margin-bottom:12px">← Volver a DFS</button>
+    <input value="${esc(d.nombre)}" placeholder="Nombre del DFS" style="font-weight:700;font-size:18px;margin-bottom:12px" onchange="dfsSetNombre(this.value)" />
+    <div class="card" style="border-color:var(--blue)">
+      <div class="card-label">✨ Armar el DFS con IA</div>
+      <p class="hint" style="margin-bottom:8px">Elegí el proyecto del que sale el tratamiento (Procesos IA o Flowsheet), y/o contá la planta en un mensaje, y/o adjuntá documentos (memoria descriptiva, listado de equipos, manuales, un DFS de otro proyecto como ejemplo: PDF, Word, Excel, CSV, TXT o imagen). La IA redacta una sección por unidad de proceso —con enclavamientos, lógica de arranque/parada, alarmas y parámetros— siguiendo el estilo de los DFS de Aeration. Los TAGs se usan solo si figuran en las fuentes. Después lo ajustás a mano o con el chat.</p>
+      <textarea rows="4" placeholder="Ej: Planta MBR con tamiz, reactor de aireación con 2 soplantes + 1 de reserva y control por OD, tanque de membranas con 2 trenes, deshidratación por tornillo. Las bombas de permeado rotan cada 168 h..." oninput="_dfsIa.texto=this.value" style="width:100%;resize:vertical;margin-bottom:8px">${esc(_dfsIa.texto)}</textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input type="file" id="dfs-file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.jpg,.jpeg,.png" style="display:none" onchange="dfsAdjuntar(this)" />
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('dfs-file').click()">📎 Adjuntar documentos</button>
+        <select onchange="dfsSetOrigen(this.value)" style="max-width:250px"><option value="ninguno" ${!d.origen || d.origen === 'ninguno' ? 'selected' : ''}>Sin proyecto (mensaje/documentos)</option><option value="procesos" ${d.origen === 'procesos' ? 'selected' : ''}>Desde un proyecto de Procesos IA</option><option value="flowsheet" ${d.origen === 'flowsheet' ? 'selected' : ''}>Desde un Flowsheet</option></select>
+        ${d.origen === 'procesos' || d.origen === 'flowsheet' ? `<select onchange="dfsSetOrigenProyecto(this.value)" style="flex:1;min-width:200px"><option value="">-- Elegir --</option>${lista.map(x => `<option value="${x.id}" ${d.origen_id === x.id ? 'selected' : ''}>${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</select>` : ''}
+        <button class="btn btn-primary btn-sm" onclick="dfsGenerar()" ${_dfsIa.ocupado ? 'disabled' : ''}>${dt.etapas.length ? 'Volver a generar el DFS' : 'Generar DFS'}</button>
+      </div>
+      ${_dfsIa.archivos.length ? `<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px">${_dfsIa.archivos.map((a, i) => `<span class="badge" style="background:var(--surface2);border:1px solid var(--border)">📄 ${esc(a.name)} <span style="cursor:pointer" onclick="dfsQuitarArchivo(${i})">✕</span></span>`).join('')}</div>` : ''}
+      <div id="dfs-status"></div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <div class="card-label" style="margin:0">Portada y revisiones</div>
+        <button class="btn btn-primary btn-sm" onclick="dfsExportarWord()" ${dt.etapas.length ? '' : 'disabled'}>⬇ Exportar Word</button>
+      </div>
+      <div class="field-row" style="gap:8px;flex-wrap:wrap">${inp('portada.titulo', po.titulo, 'Título', '340px')}${inp('portada.proyecto', po.proyecto, 'Proyecto (ej. 422 - VACALÍN)', '300px')}${inp('portada.ubicacion', po.ubicacion, 'Ubicación', '220px')}${inp('portada.anio', po.anio, 'Año', '90px')}</div>
+      <label style="margin-top:8px;display:block;font-size:12px">Índice de revisiones</label>
+      <table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th style="${PROCESOS_EQ_TH}">Fecha</th><th style="${PROCESOS_EQ_TH}">Nombre de archivo</th><th style="${PROCESOS_EQ_TH}">Comentario / cambios</th><th></th></tr>
+        ${po.revisiones.map((r, i) => `<tr><td style="${PROCESOS_EQ_TD};width:120px"><input value="${esc(r.fecha)}" onchange="dfsRevCampo(${i},'fecha',this.value)" /></td><td style="${PROCESOS_EQ_TD}"><input value="${esc(r.archivo)}" onchange="dfsRevCampo(${i},'archivo',this.value)" /></td><td style="${PROCESOS_EQ_TD}"><input value="${esc(r.comentario)}" onchange="dfsRevCampo(${i},'comentario',this.value)" /></td><td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="dfsRevDel(${i})">&#x2715;</button></td></tr>`).join('')}</table>
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="dfsRevAdd()">+ Revisión</button>
+      <div class="field-row" style="gap:8px;flex-wrap:wrap;margin-top:8px">${inp('portada.elaboro', po.elaboro, 'Elaborado por', '220px')}${inp('portada.reviso', po.reviso, 'Revisado por', '220px')}${inp('portada.aprobo', po.aprobo, 'Aprobado por', '220px')}</div>
+      <label style="margin-top:8px;display:block;font-size:12px">Nota inicial (opcional, ej. referencia al estándar de pantallas)</label>
+      <textarea rows="2" style="width:100%" onchange="dfsCampo('portada.nota',this.value)">${esc(po.nota)}</textarea>
+    </div>
+    ${dt.etapas.length ? `<div class="card">
+      <div class="card-label">Objetivo y generales</div>
+      <label style="font-size:12px">Objetivo</label>
+      <textarea rows="${dfsFilas(dt.objetivo, 3)}" style="width:100%;resize:vertical" onchange="dfsCampo('objetivo',this.value)">${esc(dt.objetivo)}</textarea>
+      <label style="font-size:12px;margin-top:8px;display:block">Generales</label>
+      <textarea rows="${dfsFilas(dt.generales, 4)}" style="width:100%;resize:vertical" onchange="dfsCampo('generales',this.value)">${esc(dt.generales)}</textarea>
+    </div>` : ''}
+    ${dt.etapas.map((e, i) => `<div class="card">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><span class="hint" style="margin:0">${i + 1}.</span><input value="${esc(e.nombre)}" style="font-weight:600;flex:1" onchange="dfsEtapaCampo('${e.id}','nombre',this.value)" />
+        <button class="btn btn-secondary btn-sm" onclick="dfsEtapaMover('${e.id}',-1)" title="Subir" ${i ? '' : 'disabled'}>↑</button><button class="btn btn-secondary btn-sm" onclick="dfsEtapaMover('${e.id}',1)" title="Bajar" ${i < dt.etapas.length - 1 ? '' : 'disabled'}>↓</button><button class="remove-btn" onclick="dfsEtapaDel('${e.id}')">&#x2715;</button></div>
+      <textarea rows="${dfsFilas(e.texto, 5)}" style="width:100%;resize:vertical" placeholder="Descripción de funcionamiento de la unidad..." onchange="dfsEtapaCampo('${e.id}','texto',this.value)">${esc(e.texto)}</textarea>
+      <div class="card-label" style="margin-top:10px">Alarmas de esta unidad</div>
+      ${e.alarmas.length ? `<table style="width:100%;border-collapse:collapse;font-size:12px">${e.alarmas.map((a, j) => `<tr><td style="${PROCESOS_EQ_TD}"><input value="${esc(a.nombre)}" onchange="dfsAlarmaCampo('${e.id}',${j},'nombre',this.value)" /></td><td style="${PROCESOS_EQ_TD};width:140px"><select onchange="dfsAlarmaCampo('${e.id}',${j},'clasificacion',this.value)">${DFS_CLASIF.map(c => `<option ${a.clasificacion === c ? 'selected' : ''}>${c}</option>`).join('')}</select></td><td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="dfsAlarmaDel('${e.id}',${j})">&#x2715;</button></td></tr>`).join('')}</table>` : '<p class="hint">Sin alarmas.</p>'}
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="dfsAlarmaAdd('${e.id}')">+ Alarma</button>
+    </div>`).join('')}
+    ${dt.etapas.length ? `<div style="margin-bottom:12px"><button class="btn btn-secondary btn-sm" onclick="dfsEtapaAdd()">+ Unidad</button></div>
+    <div class="card">
+      <div class="card-label">Tabla de rangos y parámetros</div>
+      <p class="hint" style="margin-bottom:8px">Parámetros que se configuran desde el HMI: rango permitido y valor de puesta en marcha. Los "A definir" hay que completarlos antes de entregar.</p>
+      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th style="${PROCESOS_EQ_TH}">Parámetro</th><th style="${PROCESOS_EQ_TH}">Unidad</th><th style="${PROCESOS_EQ_TH}">Rango</th><th style="${PROCESOS_EQ_TH}">Valor</th><th></th></tr>
+        ${dt.parametros.map((p, i) => `<tr><td style="${PROCESOS_EQ_TD};min-width:260px"><input value="${esc(p.parametro)}" onchange="dfsParamCampo(${i},'parametro',this.value)" /></td><td style="${PROCESOS_EQ_TD};width:90px"><input value="${esc(p.unidad)}" onchange="dfsParamCampo(${i},'unidad',this.value)" /></td><td style="${PROCESOS_EQ_TD};width:110px"><input value="${esc(p.rango)}" onchange="dfsParamCampo(${i},'rango',this.value)" /></td><td style="${PROCESOS_EQ_TD};width:110px"><input value="${esc(p.valor)}" ${/definir/i.test(p.valor || '') ? 'style="background:#fff3cd"' : ''} onchange="dfsParamCampo(${i},'valor',this.value)" /></td><td style="${PROCESOS_EQ_TD}"><button class="remove-btn" onclick="dfsParamDel(${i})">&#x2715;</button></td></tr>`).join('')}</table></div>
+      <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="dfsParamAdd()">+ Parámetro</button>
+    </div>
+    <div class="card">
+      <div class="card-label">Ajustar con el chat</div>
+      <p class="hint" style="margin-bottom:8px">Pedile cambios al DFS (ej. "en el reactor agregá que si falla el soplante 1 entra el de reserva", "poné la alarma de bajo nivel del TK 200 como prioritaria", "sumá una unidad de desinfección después del sedimentador", "el set point de OD es 2 mg/l"). Los cambios se aplican directo; podés deshacer el último.</p>
+      <div id="dfs-chat-msgs" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto;margin-bottom:8px">${chatHtml}</div>
+      <div style="display:flex;gap:8px"><input id="dfs-chat-input" placeholder="Escribí tu pedido..." style="flex:1" onkeydown="if(event.key==='Enter')dfsChatSend()" /><button class="btn btn-primary btn-sm" onclick="dfsChatSend()">Enviar</button></div>
+      ${_dfsHist.length ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="dfsChatDeshacer()">↶ Deshacer último cambio</button>' : ''}
+      <div id="dfs-chat-status" style="margin-top:6px"></div>
+    </div>` : ''}`;
+  const m = document.getElementById('dfs-chat-msgs'); if (m) m.scrollTop = m.scrollHeight;
+}
+
+// ── Chat con acciones y deshacer ──
+const DFS_TOOL_CAMBIOS = {
+  name: 'aplicar_cambios_dfs',
+  description: 'Aplica cambios al DFS y responde al usuario.',
+  input_schema: { type: 'object', properties: {
+    reply: { type: 'string', description: 'Respuesta breve en español: qué cambiaste (o la respuesta a la pregunta).' },
+    acciones: { type: 'array', description: 'Cambios sobre el documento. Vacío si el usuario solo preguntó.', items: { type: 'object', properties: {
+      tipo: { type: 'string', enum: ['editar_texto', 'agregar_unidad', 'eliminar_unidad', 'renombrar_unidad', 'agregar_alarma', 'editar_alarma', 'quitar_alarma', 'set_parametro', 'quitar_parametro'] },
+      seccion: { type: 'string', description: 'editar_texto: "objetivo", "generales" o el id EXACTO de la unidad.' },
+      texto: { type: 'string', description: 'editar_texto/agregar_unidad: texto COMPLETO nuevo de la sección (reescribí la sección entera incorporando el cambio, conservando el resto).' },
+      id: { type: 'string', description: 'id EXACTO de la unidad (eliminar/renombrar/alarmas).' },
+      despues_de: { type: 'string', description: 'agregar_unidad: id de la unidad tras la cual insertarla (omitir para al final).' },
+      nombre: { type: 'string', description: 'agregar_unidad/renombrar_unidad: nombre. agregar_alarma/editar_alarma/quitar_alarma: nombre de la alarma (en editar_alarma, el ACTUAL).' },
+      nuevo_nombre: { type: 'string', description: 'editar_alarma: nombre nuevo (opcional).' },
+      clasificacion: { type: 'string', enum: DFS_CLASIF },
+      parametro: { type: 'string', description: 'set_parametro/quitar_parametro: descripción del parámetro.' },
+      unidad: { type: 'string' }, rango: { type: 'string' }, valor: { type: 'string' }
+    }, required: ['tipo'] } }
+  }, required: ['reply', 'acciones'] }
+};
+function dfsAplicarAcciones(dt, acciones) {
+  let n = 0;
+  const buscar = id => dt.etapas.find(e => e.id === id);
+  const alarmaIdx = (e, nom) => { const k = dfsClave(nom); const i = e.alarmas.findIndex(a => dfsClave(a.nombre) === k); return i >= 0 ? i : e.alarmas.findIndex(a => k && dfsClave(a.nombre).startsWith(k)); };
+  (acciones || []).forEach(a => {
+    if (a.tipo === 'editar_texto' && a.texto != null) {
+      if (a.seccion === 'objetivo') { dt.objetivo = a.texto; n++; }
+      else if (a.seccion === 'generales') { dt.generales = a.texto; n++; }
+      else { const e = buscar(a.seccion); if (e) { e.texto = a.texto; n++; } }
+    } else if (a.tipo === 'agregar_unidad' && a.nombre) {
+      const nueva = { id: dfsId(), nombre: a.nombre, texto: a.texto || '', alarmas: [] };
+      const i = a.despues_de ? dt.etapas.findIndex(e => e.id === a.despues_de) : -1;
+      if (i >= 0) dt.etapas.splice(i + 1, 0, nueva); else dt.etapas.push(nueva); n++;
+    } else if (a.tipo === 'eliminar_unidad') { const antes = dt.etapas.length; dt.etapas = dt.etapas.filter(e => e.id !== a.id); if (dt.etapas.length < antes) n++; }
+    else if (a.tipo === 'renombrar_unidad') { const e = buscar(a.id); if (e && a.nombre) { e.nombre = a.nombre; n++; } }
+    else if (a.tipo === 'agregar_alarma') { const e = buscar(a.id); if (e && a.nombre) { e.alarmas.push({ nombre: a.nombre, clasificacion: DFS_CLASIF.includes(a.clasificacion) ? a.clasificacion : 'Media' }); n++; } }
+    else if (a.tipo === 'editar_alarma') { const e = buscar(a.id); const j = e ? alarmaIdx(e, a.nombre) : -1; if (j >= 0) { if (a.nuevo_nombre) e.alarmas[j].nombre = a.nuevo_nombre; if (DFS_CLASIF.includes(a.clasificacion)) e.alarmas[j].clasificacion = a.clasificacion; n++; } }
+    else if (a.tipo === 'quitar_alarma') { const e = buscar(a.id); const j = e ? alarmaIdx(e, a.nombre) : -1; if (j >= 0) { e.alarmas.splice(j, 1); n++; } }
+    else if (a.tipo === 'set_parametro' && a.parametro) {
+      let p = dt.parametros.find(x => dfsClave(x.parametro) === dfsClave(a.parametro));
+      if (!p) { p = { parametro: a.parametro, unidad: '', rango: '', valor: 'A definir' }; dt.parametros.push(p); }
+      ['unidad', 'rango', 'valor'].forEach(k => { if (a[k] != null) p[k] = a[k]; }); n++;
+    } else if (a.tipo === 'quitar_parametro' && a.parametro) { const antes = dt.parametros.length; dt.parametros = dt.parametros.filter(x => dfsClave(x.parametro) !== dfsClave(a.parametro)); if (dt.parametros.length < antes) n++; }
+  });
+  return n;
+}
+async function dfsChatSend() {
+  const input = document.getElementById('dfs-chat-input');
+  const msg = (input?.value || '').trim();
+  if (!msg || _dfsBusy || !_dfsDoc) return;
+  const d = _dfsDoc, st = 'dfs-chat-status';
+  _dfsBusy = true;
+  d.chat_historial.push({ role: 'user', content: msg });
+  dfsRender(); showMsg(st, 'loading', 'Pensando...');
+  try {
+    const dt = d.datos;
+    const docTxt = `OBJETIVO:\n${dt.objetivo}\n\nGENERALES:\n${dt.generales}\n\n` + dt.etapas.map(e => `UNIDAD id=${e.id} — ${e.nombre}\n${e.texto}\nAlarmas: ${e.alarmas.map(a => `${a.nombre} [${a.clasificacion}]`).join('; ') || '(ninguna)'}`).join('\n\n')
+      + `\n\nPARÁMETROS (parámetro | unidad | rango | valor):\n` + dt.parametros.map(p => `${p.parametro} | ${p.unidad} | ${p.rango} | ${p.valor}`).join('\n');
+    const hist = d.chat_historial.slice(0, -1).slice(-8).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
+    const prompt = `Estás ayudando a ajustar la Descripción Funcional (DFS) "${d.nombre}" de una planta de tratamiento de efluentes.\n\n${DFS_ESTILO}\n\nDocumento actual:\n${docTxt}\n\n${hist ? 'Conversación reciente:\n' + hist + '\n\n' : ''}Pedido del usuario: ${msg}\n\nAplicá el pedido con "acciones". Para modificar el texto de una unidad, devolvé el texto COMPLETO de esa sección con el cambio incorporado (no solo la parte nueva). Si el usuario aporta un dato de diseño (set point, tiempo, nivel), además de reflejarlo en el texto si corresponde, cargalo con set_parametro. No inventes datos que el usuario no dio: si falta uno, preguntalo en "reply" sin aplicar nada. En "reply" contá brevemente qué cambiaste.`;
+    const out = await dfsLlamar(prompt, DFS_TOOL_CAMBIOS, 8000);
+    const snap = JSON.parse(JSON.stringify(dt));
+    const n = dfsAplicarAcciones(dt, out.acciones);
+    if (n) _dfsHist.push(snap);
+    d.chat_historial.push({ role: 'assistant', content: (out.reply || '(sin respuesta)') + ((out.acciones || []).length && !n ? '\n\n(No pude aplicar los cambios: no encontré las secciones indicadas.)' : '') });
+  } catch (e) { d.chat_historial.push({ role: 'assistant', content: '✕ ' + e.message }); }
+  finally { _dfsBusy = false; await dfsGuardar(); dfsRender(); }
+}
+function dfsChatDeshacer() {
+  if (!_dfsHist.length || _dfsBusy) return;
+  _dfsDoc.datos = _dfsHist.pop();
+  _dfsDoc.chat_historial.push({ role: 'assistant', content: '↶ Deshice el último cambio.' });
+  dfsGuardar(); dfsRender();
+}
+
+// ── Exportar a Word ──
+function dfsBloques(d) {
+  const dt = d.datos, po = dt.portada, B = [];
+  const parrafos = t => String(t || '').split(/\n\s*\n/).map(x => x.trim()).filter(Boolean);
+  const proyecto = po.proyecto || d.nombre;
+  B.push({ t: 'cover', lines: [{ text: po.titulo || 'MEMORIA DE FUNCIONAMIENTO (DFS)', size: 44, bold: true, color: '1F4E78', before: 2400, after: 400 }, { text: proyecto, size: 32, bold: true, after: 120 }, ...(po.ubicacion ? [{ text: po.ubicacion, size: 26, after: 120 }] : []), { text: po.anio || '', size: 26, after: 1200 }] });
+  B.push({ t: 'h3', text: 'ÍNDICE DE REVISIONES' });
+  B.push({ t: 'table', head: ['Fecha', 'Nombre archivo', 'Comentario/cambios'], rows: po.revisiones.map(r => [r.fecha, r.archivo, r.comentario]), widths: [1700, 3600, 4338] });
+  B.push({ t: 'table', head: ['ELABORADO POR', 'REVISADO POR', 'APROBADO POR'], rows: [[po.elaboro, po.reviso, po.aprobo]], widths: [3212, 3213, 3213] });
+  B.push({ t: 'pagebreak' });
+  B.push({ t: 'h1', text: 'MEMORIA DE FUNCIONAMIENTO' });
+  if (po.nota) B.push({ t: 'p', text: po.nota, italic: true });
+  const intro = parrafos(dt.objetivo); intro.forEach(x => B.push({ t: 'p', text: x }));
+  if (dt.generales) { B.push({ t: 'h3', text: 'Generales' }); parrafos(dt.generales).forEach(x => B.push({ t: 'p', text: x })); }
+  if (dt.etapas.length) { B.push({ t: 'p', text: 'La planta de tratamiento de efluentes contiene las siguientes unidades de proceso:' }); B.push({ t: 'bullets', items: dt.etapas.map(e => e.nombre) }); }
+  dt.etapas.forEach((e, i) => {
+    B.push({ t: 'h3', text: `${i + 1}. ${e.nombre}` });
+    parrafos(e.texto).forEach(x => B.push({ t: 'p', text: x }));
+    if (e.alarmas.length) { B.push({ t: 'p', text: 'En esta unidad las alarmas son:' }); B.push({ t: 'bullets', items: e.alarmas.map(a => `${a.nombre} – ${a.clasificacion}`) }); }
+  });
+  const alarmas = []; dt.etapas.forEach(e => e.alarmas.forEach(a => alarmas.push([a.nombre, e.nombre, a.clasificacion])));
+  if (alarmas.length) { B.push({ t: 'h1', text: 'TABLA DE ALARMAS' }); B.push({ t: 'table', head: ['Alarma', 'Sector', 'Clasificación'], rows: alarmas, widths: [4200, 3238, 2200] }); }
+  if (dt.parametros.length) {
+    B.push({ t: 'h1', text: 'TABLA DE RANGOS' });
+    B.push({ t: 'table', head: ['Parámetro', 'Unidad', 'Rango'], rows: dt.parametros.map(p => [p.parametro, p.unidad, p.rango]), widths: [5638, 1800, 2200] });
+    B.push({ t: 'h1', text: 'TABLA DE PARÁMETROS' });
+    B.push({ t: 'table', head: ['Parámetro', 'Unidad', 'Valor'], rows: dt.parametros.map(p => [p.parametro, p.unidad, p.valor]), widths: [5638, 1800, 2200] });
+  }
+  return B;
+}
+async function dfsExportarWord() {
+  if (!_dfsDoc) return;
+  const st = 'dfs-status';
+  try {
+    showMsg(st, 'loading', 'Generando Word...');
+    const d = _dfsDoc;
+    const aDefinir = d.datos.parametros.filter(p => /definir/i.test(p.valor || '')).length;
+    const blob = await docxGenerar(dfsBloques(d), { pie: (d.datos.portada.proyecto || d.nombre) + ' — DFS' });
+    docxDescargar(blob, 'DFS ' + (d.datos.portada.proyecto || d.nombre));
+    showMsg(st, 'success', '✓ Word generado.' + (aDefinir ? ` Ojo: ${aDefinir} parámetro${aDefinir === 1 ? '' : 's'} quedaron "A definir".` : ''));
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
@@ -24317,6 +24838,7 @@ const NAV_SECTIONS = [
   { id:'microorganismos', label:'Microorganismos', area:'Laboratorio', icon:'<svg viewBox="0 0 24 24"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 100-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 114 0c0 .5-.34 3-4 6"/><path d="M12 6V3a1 1 0 011-1"/></svg>' },
   { id:'procesos',  label:'Procesos IA',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.5H7a2.5 2.5 0 0 1 0-5H6a2.5 2.5 0 0 1 0-5h.04A2.5 2.5 0 0 1 7 4.5 2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.5H17a2.5 2.5 0 0 0 0-5h1a2.5 2.5 0 0 0 0-5h-.04A2.5 2.5 0 0 0 17 4.5 2.5 2.5 0 0 0 14.5 2Z"/></svg>' },
   { id:'mantenimiento', label:'Mantenimiento', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>' },
+  { id:'dfs', label:'DFS', area:'Documentación', icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></svg>' },
   { id:'flowsheets', label:'Flowsheets',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M17.5 10v4"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
@@ -24380,7 +24902,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
   'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-comercial','cfg-viajes'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -24388,7 +24910,7 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','cfg-procesos','cfg-documentacion'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','cfg-procesos','cfg-documentacion'],
   'RRHH':              ['rend','viajes','hallazgos'],
   'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -24596,6 +25118,7 @@ const PANEL_TITLES = {
   'cfg-procesos': 'Configuración — Procesos IA',
   'flowsheets': 'Flowsheets',
   'mantenimiento': 'Mantenimiento',
+  'dfs': 'DFS — Descripción funcional',
   'cfg-documentacion': 'Configuración — Documentación',
   'clientes': 'Clientes',
   'stock': 'Stock',
