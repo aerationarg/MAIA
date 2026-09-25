@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.113</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.114</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.113</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.114</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11636,6 +11636,44 @@ function procesosConCache(blocks) {
   return copia;
 }
 
+// Se fuerza esta tool (tool_choice) en vez de pedirle a la IA "respondé con
+// este JSON" como texto libre: con JSON-en-texto, "acciones" es un campo
+// opcional fácil de "olvidar" mientras el modelo narra en "reply" que ya
+// hizo el cambio (el chat quedaba diciendo que completó una celda sin que
+// eso pasara de verdad en la planilla). Con una tool call forzada, la forma
+// de la respuesta la valida la API — no hay forma de responder sin pasar
+// por "acciones", aunque venga vacío.
+const PROCESOS_STEP2_TOOL = {
+  name: 'aplicar_cambios',
+  description: 'Aplica los cambios de diseño a la planilla de esta unidad y devuelve la respuesta conversacional para el usuario.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      reply: { type: 'string', description: 'Respuesta conversacional breve en español, explicando qué hiciste y por qué (o la explicación pedida, si el usuario solo preguntó).' },
+      acciones: {
+        type: 'array',
+        description: 'Cambios a aplicar en la planilla. Array vacío si no corresponde ningún cambio (el usuario solo preguntó o pidió una explicación).',
+        items: {
+          type: 'object',
+          properties: {
+            tipo: { type: 'string', enum: ['set', 'buscar_objetivo'], description: '"set" fija directamente el valor de una celda. "buscar_objetivo" varía un dato de ENTRADA para que una celda calculada llegue a un valor objetivo (el sistema hace la búsqueda numérica exacta).' },
+            celda: { type: 'string', description: 'Solo para "set": la celda a fijar, ej. "C4".' },
+            valor: { type: 'number', description: 'Solo para "set": el valor a fijar en esa celda.' },
+            variar: { type: 'string', description: 'Solo para "buscar_objetivo": la celda de entrada (editable, no forzada a mano) que se va a variar.' },
+            celda_objetivo: { type: 'string', description: 'Solo para "buscar_objetivo": la celda calculada que tiene que llegar al valor objetivo.' },
+            valor_objetivo: { type: 'number', description: 'Solo para "buscar_objetivo": el valor que tiene que dar celda_objetivo.' },
+            min: { type: 'number', description: 'Solo para "buscar_objetivo": límite inferior razonable para el valor de "variar".' },
+            max: { type: 'number', description: 'Solo para "buscar_objetivo": límite superior razonable para el valor de "variar".' },
+          },
+          required: ['tipo'],
+        },
+      },
+      leccion_aprendida: { type: ['string', 'null'], description: 'Una oración con una regla/ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía), o null si no hay nada nuevo para recordar.' },
+    },
+    required: ['reply', 'acciones'],
+  },
+};
+
 const _procesosStep2ChatEnviando = {};
 async function procesosStep2ChatSend(nombre, msgOverride) {
   const input = document.getElementById('procesos-step2-chat-input');
@@ -11733,7 +11771,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const leccionesTxt = lecciones ? 'Lecciones aprendidas de proyectos anteriores de la empresa (reglas informales, no están en el Excel ni en la bibliografía) — tenelas en cuenta si aplican a esta unidad:\n' + lecciones + '\n\n' : '';
     const chatGeneralTxt = procesosChatGeneralResumenTxt(p);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta unidad:\n' + historialPrevio + '\n\n' : '';
-    const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{corrientesEtapaTxt}}{{grupoTxt}}{{criteriosTxt}}{{plantasCompactasTxt}}{{archivosProyectoTxt}}{{leccionesTxt}}{{chatGeneralTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"reply":"...respuesta conversacional breve en español...","acciones":[{"tipo":"set","celda":"C4","valor":12},{"tipo":"buscar_objetivo","variar":"C4","celda_objetivo":"C9","valor_objetivo":200,"min":0,"max":1000}],"leccion_aprendida":null}\n\nUsá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, devolvé "acciones":[]. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply".`;
+    const DEFAULT_TEMPLATE_STEP2_CHAT = `Estás ayudando a diseñar la unidad/etapa "{{nombre}}" de un proyecto, usando esta planilla de cálculo real (celdas con sus fórmulas de Excel). Cada dato trae, si existen, su "rango normal" (valores orientativos/habituales — podés proponer probar fuera de ese rango si el usuario lo pide o el cálculo lo justifica, pero avisalo) y su "rango límite" (no se debe exceder salvo que el usuario lo pida explícitamente a sabiendas). IMPORTANTE: el "valor actual" de cada celda de acá abajo es el estado REAL en este momento — manda por encima de lo que la conversación previa diga que se hizo. Si en un mensaje anterior dijiste que ya habías cargado o corregido una celda, pero acá abajo esa celda sigue en 0, vacía o en un valor que no coincide con lo que dijiste, ese cambio en realidad NO quedó aplicado — volvé a fijarlo ahora con una acción "set", no asumas que ya está resuelto solo porque lo mencionaste antes:\n\n{{estadoActual}}\n\nInfo del cliente/proyecto:\n{{resumenCampos}}\n\n{{corrientesEtapaTxt}}{{grupoTxt}}{{criteriosTxt}}{{plantasCompactasTxt}}{{archivosProyectoTxt}}{{leccionesTxt}}{{chatGeneralTxt}}{{historialTxt}}Mensaje del usuario: "{{msg}}"\n\nRespondé llamando a la herramienta "aplicar_cambios" — es la ÚNICA forma de que tus cambios se apliquen de verdad a la planilla; si solo los describís en "reply" pero no los incluís también en "acciones" de esa llamada, en los hechos NO pasa nada (la celda queda como estaba). Usá "set" para fijar directamente el valor de una celda — normalmente un dato editable, pero también podés usarlo en una celda de resultado (calculada) si el usuario pide explícitamente forzar/corregir ese resultado (ej. tiene un dato de campo real distinto al que da la fórmula). En ese caso avisá en "reply" que esa celda queda con el valor fijado a mano y va a dejar de recalcularse sola si después cambia algún dato de entrada, salvo que la vuelvan a tocar. Usá "buscar_objetivo" cuando el usuario pide llegar a un resultado variando un dato de ENTRADA (variar debe ser una celda editable, no forzada a mano) dentro de un rango [min,max] razonable que vos definas según el rango normal/límite de esa celda y el contexto del proyecto — el sistema hace la búsqueda numérica exacta, vos solo elegís qué variar, qué objetivo alcanzar y el rango. Si el usuario solo pregunta o pide una explicación sin pedir cambios, dejá "acciones" vacío. Si de esta interacción surge una regla o ajuste de diseño que valga la pena recordar para futuros proyectos (algo que no está en el Excel ni en la bibliografía — por ejemplo un criterio que dio el usuario, o algo que hubo que corregir), redactalo en una oración clara y ponelo en "leccion_aprendida" — NO digas en "reply" que ya la guardaste, porque todavía no se guardó: el sistema le va a mostrar la propuesta al usuario para que la confirme o la edite antes de guardarla. Si no hay nada nuevo para recordar, dejalo en null. Si no hay una acción posible con los datos disponibles, explicalo en "reply" y dejá "acciones" vacío.`;
     const templateStep2Chat = await procesosPromptText('step2_chat', DEFAULT_TEMPLATE_STEP2_CHAT);
     // La IA no puede calcular la planilla: las celdas calculadas las recalcula
     // el sistema DESPUÉS de aplicar sus acciones. Si cita números de resultados
@@ -11743,12 +11781,13 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, historialTxt, msg, precisionTxt });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, tools: [PROCESOS_STEP2_TOOL], tool_choice: { type: 'tool', name: PROCESOS_STEP2_TOOL.name }, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
     });
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
-    const text = data.content?.find(c => c.type === 'text')?.text || '{}';
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    const toolUse = data.content?.find(c => c.type === 'tool_use');
+    if (!toolUse) throw new Error('La IA no devolvió una respuesta con la forma esperada.');
+    const parsed = toolUse.input || {};
     if (parsed.leccion_aprendida) procesosStep2PendingLeccion = { hoja: nombre, texto: parsed.leccion_aprendida };
 
     const cellByRef = r => model.cells.find(c => c.ref === r);
