@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.15</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.16</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.15</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.16</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -24610,7 +24610,7 @@ async function dfsGenerar() {
     let refs = [], refIds = [];
     if (_dfsIa.refModo !== 'ninguna') {
       showMsg(st, 'loading', 'Buscando referencias parecidas en la biblioteca...');
-      refs = await refsCargar();
+      refs = await refsCargar(false, d.id);
       refIds = await refsSeleccionar(refs, fuentes, _dfsIa.archivos.map(a => a.name)).catch(() => []);
     }
     const refsTxt = refIds.length ? `\n\n${refsReglas(_dfsIa.refModo)}\n\n${refsUnidadesIndice(refs, refIds)}\n\nPara cada unidad nueva, si alguna unidad de esas referencias equivale, indicá su id en "refs_unidades" (máx. 2 por unidad): de ahí se toma el texto y las alarmas como base.` : '';
@@ -25033,7 +25033,7 @@ async function manGenerar() {
     let refs = [], refIds = [];
     if (_manIa.refModo !== 'ninguna') {
       showMsg(st, 'loading', 'Buscando referencias parecidas en la biblioteca...');
-      refs = await refsCargar();
+      refs = await refsCargar(false, d.id);
       refIds = await refsSeleccionar(refs, fuentes, _manIa.archivos.map(a => a.name)).catch(() => []);
     }
     const refsTxt = refIds.length ? `\n\n${refsReglas(_manIa.refModo)}\n\n${refsUnidadesIndice(refs, refIds)}\n\nPara cada unidad nueva, si alguna unidad de esas referencias equivale, indicá su id en "refs_unidades" (máx. 2 por unidad).\n\nEJEMPLOS DE REDACCIÓN de las secciones generales (objetivo, alcance, responsabilidades, inicio, emergencia, mantenimiento, definiciones y anexos) en manuales de referencia:\n${refsMuestraManual(refs, refIds)}` : '';
@@ -25347,12 +25347,27 @@ async function manExportarWord() {
 // operación) como base. Son punto de partida, no un molde: la IA puede agregar, sacar y mejorar; lo que no se
 // puede es copiar como dato del proyecto marcas, modelos, TAGs, personas ni valores de otra obra.
 const REFS_MODOS = { guia: 'Como guía (la IA puede apartarse y proponer)', cerca: 'Seguir de cerca (estructura, detalle y alarmas)', ninguna: 'No usar referencias' };
-let _refsCache = null;
-async function refsCargar(forzar) {
-  if (_refsCache && !forzar) return _refsCache;
-  try { _refsCache = await mantFetchAll('/rest/v1/doc_referencias?select=id,tipo,nombre,cliente,descripcion,fuente,estado,datos&estado=neq.excluida&order=created_at.asc'); }
-  catch (e) { _refsCache = []; }
-  return _refsCache;
+let _refsLib = null, _refsUltima = [];
+// Biblioteca = referencias externas cargadas (doc_referencias, se cachean) + los DFS y Manuales generados en MAIA
+// (doc_documentos: se leen en vivo, así lo que se edita se refleja y lo que se elimina desaparece solo).
+// excluirId: el documento que se está generando (para que no se use a sí mismo). incluirExcluidos: para el panel de Cfg.
+async function refsCargar(forzar, excluirId, incluirExcluidos) {
+  if (!_refsLib || forzar) {
+    try { _refsLib = await mantFetchAll('/rest/v1/doc_referencias?select=id,tipo,nombre,cliente,descripcion,fuente,estado,datos&estado=neq.excluida&order=created_at.asc'); }
+    catch (e) { _refsLib = []; }
+  }
+  let mia = [];
+  try {
+    let filas;
+    try { filas = await mantFetchAll('/rest/v1/doc_documentos?select=id,tipo,nombre,datos,referencia,updated_at&tipo=in.(dfs,manual)&order=updated_at.desc'); }
+    catch (e) { filas = await mantFetchAll('/rest/v1/doc_documentos?select=id,tipo,nombre,datos,updated_at&tipo=in.(dfs,manual)&order=updated_at.desc'); }
+    mia = filas.filter(f => f.id !== excluirId && (incluirExcluidos || f.referencia !== 'excluida') && ((f.datos && (f.datos.etapas || f.datos.unidades)) || []).length).map(f => {
+      const us = (f.datos.etapas || f.datos.unidades || []).map(u => u.nombre).filter(Boolean);
+      return { id: f.id, tipo: f.tipo, nombre: f.nombre, cliente: (f.datos.portada && (f.datos.portada.cliente || f.datos.portada.proyecto)) || '', descripcion: 'Generado en MAIA. Unidades: ' + us.slice(0, 10).join(', '), fuente: 'MAIA', estado: 'MAIA', origen: 'maia', excluida: f.referencia === 'excluida', datos: f.datos };
+    });
+  } catch (e) { mia = []; }
+  _refsUltima = _refsLib.concat(mia);
+  return _refsUltima;
 }
 // Unidades de una referencia con la misma forma sin importar si es DFS (etapas/texto) o Manual (unidades/descripcion)
 function refUnidades(r) {
@@ -25424,19 +25439,21 @@ async function refsCfgRender() {
   const el = document.getElementById('refs-cfg-body');
   if (!el) return;
   el.innerHTML = 'Cargando...';
-  const refs = await refsCargar(true);
+  const refs = await refsCargar(true, null, true);
   if (!refs.length) { el.innerHTML = '<p class="hint">No hay referencias cargadas todavía (o falta correr el SQL de la biblioteca).</p>'; return; }
   el.innerHTML = refs.map(r => {
-    const us = refUnidades(r), d = r.datos || {};
+    const us = refUnidades(r), d = r.datos || {}, maia = r.origen === 'maia';
     const al = us.reduce((n, u) => n + u.alarmas.length, 0);
-    return `<div class="field-row" style="padding:10px;margin-bottom:8px">
+    return `<div class="field-row" style="padding:10px;margin-bottom:8px;${r.excluida ? 'opacity:.6' : ''}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
-        <div><b>${esc(r.nombre)}</b> <span class="badge" style="font-size:10px;background:var(--surface2);border:1px solid var(--border)">${r.tipo === 'dfs' ? 'DFS' : 'Manual'}</span> <span class="badge" style="font-size:10px;${r.estado === 'validado' ? 'background:#e3f4e3;color:#1b7f1b' : 'background:#fff3cd;color:#8a6d00'}">${r.estado === 'validado' ? 'validada' : 'a validar'}</span>
+        <div><b>${esc(r.nombre)}</b> <span class="badge" style="font-size:10px;background:var(--surface2);border:1px solid var(--border)">${r.tipo === 'dfs' ? 'DFS' : 'Manual'}</span> ${maia ? `<span class="badge" style="font-size:10px;background:#e6eefc;color:#1f4e78">generado en MAIA${r.excluida ? ' · no se usa' : ''}</span>` : `<span class="badge" style="font-size:10px;${r.estado === 'validado' ? 'background:#e3f4e3;color:#1b7f1b' : 'background:#fff3cd;color:#8a6d00'}">${r.estado === 'validado' ? 'validada' : 'a validar'}</span>`}
           <div class="hint" style="margin:2px 0 0">${esc(r.cliente || '')}</div></div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-secondary btn-sm" onclick="refsToggleValidado('${r.id}')">${r.estado === 'validado' ? 'Marcar a validar' : '✓ Marcar validada'}</button><button class="btn btn-secondary btn-sm" onclick="refsVer('${r.id}')">Ver</button><button class="remove-btn" onclick="refsEliminar('${r.id}')">&#x2715;</button></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${maia
+          ? `<button class="btn btn-secondary btn-sm" onclick="refsToggleUsar('${r.id}')">${r.excluida ? 'Volver a usar como referencia' : 'No usar como referencia'}</button>`
+          : `<button class="btn btn-secondary btn-sm" onclick="refsToggleValidado('${r.id}')">${r.estado === 'validado' ? 'Marcar a validar' : '✓ Marcar validada'}</button>`}<button class="btn btn-secondary btn-sm" onclick="refsVer('${r.id}')">Ver</button>${maia ? '' : `<button class="remove-btn" onclick="refsEliminar('${r.id}')">&#x2715;</button>`}</div>
       </div>
       <div style="font-size:12px;margin-top:6px">${esc(r.descripcion || '')}</div>
-      <div class="hint" style="margin:4px 0 0">${us.length} unidades · ${al} alarmas${(d.parametros || []).length ? ' · ' + d.parametros.length + ' parámetros' : ''}${(d.definiciones || []).length ? ' · ' + d.definiciones.length + ' definiciones' : ''} · fuente: ${esc(r.fuente || '')}</div>
+      <div class="hint" style="margin:4px 0 0">${us.length} unidades · ${al} alarmas${(d.parametros || []).length ? ' · ' + d.parametros.length + ' parámetros' : ''}${(d.definiciones || []).length ? ' · ' + d.definiciones.length + ' definiciones' : ''}${maia ? ' · se elimina desde su solapa (DFS / Manual de operación)' : ' · fuente: ' + esc(r.fuente || '')}</div>
       <div id="refs-ver-${r.id}" style="display:none;margin-top:8px"></div>
     </div>`;
   }).join('');
@@ -25444,18 +25461,25 @@ async function refsCfgRender() {
 function refsVer(id) {
   const box = document.getElementById('refs-ver-' + id); if (!box) return;
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
-  const r = (_refsCache || []).find(x => x.id === id); if (!r) return;
+  const r = _refsUltima.find(x => x.id === id); if (!r) return;
   box.innerHTML = refUnidades(r).map(u => `<details style="margin-bottom:4px"><summary style="cursor:pointer;font-size:13px"><b>${esc(u.nombre)}</b> <span class="hint" style="display:inline;margin:0">· ${u.texto.length} caracteres${u.alarmas.length ? ' · ' + u.alarmas.length + ' alarmas' : ''}</span></summary><div style="white-space:pre-wrap;font-size:12px;margin:6px 0;max-height:280px;overflow:auto">${esc(u.texto.slice(0, 6000))}${u.alarmas.length ? '\n\nAlarmas: ' + esc(u.alarmas.map(a => `${a.nombre} [${a.clasificacion}]`).join('; ')) : ''}</div></details>`).join('');
   box.style.display = '';
 }
 async function refsToggleValidado(id) {
-  const r = (_refsCache || []).find(x => x.id === id); if (!r) return;
+  const r = _refsUltima.find(x => x.id === id); if (!r) return;
   const nuevo = r.estado === 'validado' ? 'a validar' : 'validado';
   await supaFetch(`/rest/v1/doc_referencias?id=eq.${id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ estado: nuevo }) });
   refsCfgRender();
 }
+// DFS / Manual generados en MAIA: se pueden dejar de usar como referencia (por ejemplo, un borrador). Requiere la columna doc_documentos.referencia.
+async function refsToggleUsar(id) {
+  const r = _refsUltima.find(x => x.id === id); if (!r) return;
+  const res = await supaFetch(`/rest/v1/doc_documentos?id=eq.${id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ referencia: r.excluida ? 'usar' : 'excluida' }) });
+  if (!res.ok) { alert('No se pudo cambiar — ¿corriste el SQL que agrega la columna "referencia" a doc_documentos?'); return; }
+  refsCfgRender();
+}
 async function refsEliminar(id) {
-  const r = (_refsCache || []).find(x => x.id === id);
+  const r = _refsUltima.find(x => x.id === id);
   if (!confirm(`¿Sacar "${r ? r.nombre : 'esta referencia'}" de la biblioteca?`)) return;
   await supaFetch(`/rest/v1/doc_referencias?id=eq.${id}`, { method: 'DELETE', headers: mantH() });
   refsCfgRender();
