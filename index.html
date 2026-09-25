@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -22718,10 +22718,29 @@ function cotizArmadoIniciales(nombreCompleto) {
   if (partes.length === 1) return partes[0].slice(0,2).toUpperCase();
   return (partes[0][0] + partes[partes.length-1][0]).toUpperCase();
 }
-// Copia el formato (número/fecha, alineación, relleno, fuente y bordes) de una
-// fila del Excel de Q a otra, columnas A:E, vía Graph. Primero lee de la fila
-// entera de una vez; si en alguna propiedad las columnas difieren entre sí
-// (Graph devuelve null), esa propiedad se copia columna por columna.
+// Si el Registro es una Tabla de Excel (encabezado con filtros) que arranca en la
+// columna A y termina justo en la última fila con datos, devuelve {id, columnCount}.
+// Agregar la fila POR la tabla la extiende (y hereda su estilo/formato), en vez de
+// escribir una fila suelta debajo que queda afuera de la tabla y sin formato.
+async function cotizExcelTablaDelRegistro(token, excelBase, ultimaFila) {
+  const H = { Authorization: 'Bearer ' + token };
+  const lista = await fetch(excelBase + 'tables?$select=id,name', { headers: H });
+  if (!lista.ok) return null;
+  const tablas = (await lista.json()).value || [];
+  for (const t of tablas) {
+    const r = await fetch(`${excelBase}tables('${encodeURIComponent(t.id)}')/range?$select=address,rowIndex,rowCount,columnIndex,columnCount`, { headers: H });
+    if (!r.ok) continue;
+    const d = await r.json();
+    if (d.columnIndex === 0 && d.rowIndex + d.rowCount === ultimaFila) return { id: t.id, columnCount: d.columnCount };
+  }
+  return null;
+}
+// Copia el formato (número/fecha, alineación, relleno, fuente, bordes y alto de
+// fila) de una fila del Excel de Q a otra, columnas A:E, vía Graph. Lee de la
+// fila entera de una vez y, si las columnas difieren entre sí (Graph devuelve
+// null), copia esa propiedad columna por columna. Cada propiedad se copia por
+// separado: si una falla, las demás igual se aplican, y al final se avisa cuáles
+// fallaron o si la fila nueva quedó distinta a la de arriba (verificación).
 async function cotizExcelCopiarFormatoFila(token, excelBase, filaOrigen, filaDestino) {
   const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
   const llamar = async (metodo, ruta, body) => {
@@ -22734,45 +22753,74 @@ async function cotizExcelCopiarFormatoFila(token, excelBase, filaOrigen, filaDes
   const soloCampos = (obj, campos) => { const o = {}; campos.forEach(c => { if (obj[c] !== undefined && obj[c] !== null) o[c] = obj[c]; }); return o; };
   const hayNulos = (obj, campos) => campos.some(c => obj[c] === null || obj[c] === undefined);
   const PROPS = [
-    ['format', ['horizontalAlignment', 'verticalAlignment', 'wrapText', 'indentLevel', 'rowHeight']],
-    ['format/fill', ['color']],
-    ['format/font', ['name', 'size', 'color', 'bold', 'italic', 'underline']],
+    ['alineación', 'format', ['horizontalAlignment', 'verticalAlignment', 'wrapText', 'indentLevel', 'rowHeight']],
+    ['relleno', 'format/fill', ['color']],
+    ['fuente', 'format/font', ['name', 'size', 'color', 'bold', 'italic', 'underline']],
   ];
   const LADOS = ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight', 'InsideVertical'];
   const CAMPOS_BORDE = ['style', 'color', 'weight'];
-  // 1) lecturas (en paralelo): formato numérico + cada propiedad + bordes, de la fila completa
-  const [nf, ...lecturas] = await Promise.all([
+  const errores = [];
+  const paso = async (nombre, fn) => { try { await fn(); } catch (e) { errores.push(`${nombre}: ${e.message}`); } };
+  const lect = await Promise.allSettled([
     llamar('GET', `${dir(filaOrigen)}?$select=numberFormat`),
-    ...PROPS.map(([sub]) => llamar('GET', `${dir(filaOrigen)}/${sub}`)),
+    ...PROPS.map(([, sub]) => llamar('GET', `${dir(filaOrigen)}/${sub}`)),
     ...LADOS.map(l => llamar('GET', `${dir(filaOrigen)}/format/borders/${l}`)),
   ]);
-  const props = lecturas.slice(0, PROPS.length), bordes = lecturas.slice(PROPS.length);
-  // 2) escrituras (en orden, no en paralelo: Excel Online serializa los cambios al mismo libro)
-  if (nf.numberFormat?.[0]) await llamar('PATCH', dir(filaDestino), { numberFormat: [nf.numberFormat[0]] });
+  const val = i => (lect[i].status === 'fulfilled' ? lect[i].value : null);
+  const fallo = i => lect[i].reason?.message || 'no se pudo leer';
+  // 1) formato numérico / fecha
+  await paso('formato de número', async () => {
+    if (!val(0)) throw new Error(fallo(0));
+    const nf = val(0).numberFormat?.[0];
+    if (nf) await llamar('PATCH', dir(filaDestino), { numberFormat: [nf] });
+  });
+  // 2) alineación, relleno, fuente
   for (let i = 0; i < PROPS.length; i++) {
-    const [sub, campos] = PROPS[i];
-    if (!hayNulos(props[i], campos.filter(c => c !== 'rowHeight'))) { await llamar('PATCH', `${dir(filaDestino)}/${sub}`, soloCampos(props[i], campos)); continue; }
-    const porCol = await Promise.all(COLS.map(c => llamar('GET', `${dir(filaOrigen, c)}/${sub}`)));
-    for (let j = 0; j < COLS.length; j++) {
-      const b = soloCampos(porCol[j], campos);
-      if (Object.keys(b).length) await llamar('PATCH', `${dir(filaDestino, COLS[j])}/${sub}`, b);
-    }
+    const [nombre, sub, campos] = PROPS[i];
+    await paso(nombre, async () => {
+      const p = val(1 + i);
+      if (!p) throw new Error(fallo(1 + i));
+      if (!hayNulos(p, campos.filter(c => c !== 'rowHeight' && c !== 'indentLevel'))) { await llamar('PATCH', `${dir(filaDestino)}/${sub}`, soloCampos(p, campos)); return; }
+      const porCol = await Promise.all(COLS.map(c => llamar('GET', `${dir(filaOrigen, c)}/${sub}`)));
+      for (let j = 0; j < COLS.length; j++) {
+        const b = soloCampos(porCol[j], campos);
+        if (Object.keys(b).length) await llamar('PATCH', `${dir(filaDestino, COLS[j])}/${sub}`, b);
+      }
+    });
   }
-  if (bordes.every(b => !hayNulos(b, CAMPOS_BORDE))) {
-    for (let i = 0; i < LADOS.length; i++) await llamar('PATCH', `${dir(filaDestino)}/format/borders/${LADOS[i]}`, soloCampos(bordes[i], CAMPOS_BORDE));
-  } else {
+  // 3) bordes
+  await paso('bordes', async () => {
+    const b = LADOS.map((_, i) => val(1 + PROPS.length + i));
+    const iMal = b.findIndex(x => !x);
+    if (iMal >= 0) throw new Error(fallo(1 + PROPS.length + iMal));
+    if (b.every(x => !hayNulos(x, CAMPOS_BORDE))) {
+      for (let i = 0; i < LADOS.length; i++) await llamar('PATCH', `${dir(filaDestino)}/format/borders/${LADOS[i]}`, soloCampos(b[i], CAMPOS_BORDE));
+      return;
+    }
     const combos = [];
     COLS.forEach(c => ['EdgeTop', 'EdgeBottom', 'EdgeLeft', 'EdgeRight'].forEach(l => combos.push([c, l])));
     const leidos = await Promise.all(combos.map(([c, l]) => llamar('GET', `${dir(filaOrigen, c)}/format/borders/${l}`)));
     for (let j = 0; j < combos.length; j++) await llamar('PATCH', `${dir(filaDestino, combos[j][0])}/format/borders/${combos[j][1]}`, soloCampos(leidos[j], CAMPOS_BORDE));
-  }
+  });
+  // 4) verificación: la fila nueva tiene que haber quedado igual a la de arriba en alineación y bordes
+  await paso('verificación', async () => {
+    const [fmtD, ...bordD] = await Promise.all([llamar('GET', `${dir(filaDestino)}/format`), ...['EdgeBottom', 'EdgeLeft'].map(l => llamar('GET', `${dir(filaDestino)}/format/borders/${l}`))]);
+    const dif = [];
+    const fmtO = val(1);
+    if (fmtO && fmtO.horizontalAlignment != null && fmtD.horizontalAlignment !== fmtO.horizontalAlignment) dif.push('alineación');
+    ['EdgeBottom', 'EdgeLeft'].forEach((l, i) => { const o = val(1 + PROPS.length + LADOS.indexOf(l)); if (o && o.style != null && bordD[i].style !== o.style) dif.push('bordes'); });
+    if (dif.length) throw new Error('la fila nueva quedó distinta a la de arriba en: ' + [...new Set(dif)].join(', '));
+  });
+  if (errores.length) throw new Error(errores.join(' | '));
 }
 // Agrega una fila al final de la hoja "Q-" del Excel de Q (Cfg Imputación):
-// A=fecha, B=iniciales del usuario, C=cliente, D=referencia, E=Nº de Q — y le
-// copia el formato de la fila de arriba. Devuelve un aviso (texto) si la fila
-// se registró pero no se pudo copiar el formato; tira error si no se pudo
-// registrar. No es fatal si falla (la cotización ya se generó y guardó igual)
-// — el error se le muestra al usuario para que lo cargue a mano si hace falta.
+// A=fecha, B=iniciales del usuario, C=cliente, D=referencia, E=Nº de Q. Si el
+// Registro es una Tabla de Excel, la agrega POR la tabla (así la extiende y
+// hereda su formato); si no, escribe la fila debajo. En ambos casos le copia el
+// formato de la fila de arriba. Devuelve un aviso (texto) si la fila se registró
+// pero el formato no quedó bien; tira error si no se pudo registrar. No es fatal
+// si falla (la cotización ya se generó y guardó igual) — el error se le muestra
+// al usuario para que lo cargue a mano si hace falta.
 async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   const raw = await supaConfigGet('rend_q_excel');
   if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
@@ -22781,15 +22829,25 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
   const nextRow = (rows?.length || 1) + 1;
   const excelBase = `https://graph.microsoft.com/v1.0/sites/${ref.siteId}/drive/items/${ref.id}/workbook/worksheets('Q-')/`;
-  const resp = await fetch(excelBase + `range(address='A${nextRow}:E${nextRow}')`, {
-    method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-    body: JSON.stringify({ values: [[cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre||currentUser?.email||''), st.cliente||'', st.referencia||'', qNumeroCompleto]] })
-  });
-  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+  const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+  const valores = [cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre || currentUser?.email || ''), st.cliente || '', st.referencia || '', qNumeroCompleto];
+  let viaTabla = false;
+  if (nextRow > 2) {
+    const tabla = await cotizExcelTablaDelRegistro(token, excelBase, nextRow - 1).catch(() => null);
+    if (tabla && tabla.columnCount >= valores.length) {
+      const fila = valores.concat(Array(tabla.columnCount - valores.length).fill(''));
+      const r = await fetch(`${excelBase}tables('${encodeURIComponent(tabla.id)}')/rows/add`, { method: 'POST', headers: H, body: JSON.stringify({ index: null, values: [fila] }) }).catch(() => null);
+      viaTabla = !!(r && r.ok);
+    }
+  }
+  if (!viaTabla) {
+    const resp = await fetch(excelBase + `range(address='A${nextRow}:E${nextRow}')`, { method: 'PATCH', headers: H, body: JSON.stringify({ values: [valores] }) });
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
+  }
   // La fila de arriba tiene que ser una fila de datos (la 1 es el encabezado).
   if (nextRow > 2) {
     try { await cotizExcelCopiarFormatoFila(token, excelBase, nextRow - 1, nextRow); }
-    catch(eF) { return ` (la fila se registró en el Excel de Q, pero no se pudo copiarle el formato de la fila de arriba — ${eF.message})`; }
+    catch (eF) { return ` (la fila se registró en el Excel de Q${viaTabla ? ' (dentro de la tabla)' : ''}, pero el formato de la fila de arriba no se copió bien — ${eF.message})`; }
   }
   return '';
 }
@@ -23624,6 +23682,8 @@ const MANT_TOOL_ARMAR = {
       etapa: { type: 'string', description: 'Etapa o ubicación donde está.' },
       catalogo_id: { type: ['string', 'null'], description: 'id EXACTO del tipo de la planilla madre, o null si ninguno es equivalente.' },
       confianza: { type: 'string', enum: ['alta', 'media', 'baja'] },
+      documento: { type: 'string', description: 'Solo con tareas_manual: nombre del archivo adjunto del que salen las tareas.' },
+      tipo_sugerido: { type: 'string', description: 'Solo con tareas_manual y catalogo_id null: nombre GENÉRICO del tipo de equipo (no el nombre en su etapa), en el estilo de los tipos de la planilla madre (ej. "Bomba peristáltica").' },
       tareas_manual: { type: 'array', description: 'SOLO si un documento adjunto es el manual/plan de mantenimiento de este equipo.', items: { type: 'object', properties: {
         tarea: { type: 'string' },
         frecuencia: { type: 'string', enum: ['diaria', 'semanal', 'mensual', 'bimestral', 'trimestral', 'semestral', 'anual'] },
@@ -23722,7 +23782,7 @@ async function mantIaArmar(enPlan) {
     const bloques = await mantIaBloques();
     showMsg(st, 'loading', 'Armando el plan con IA (puede tardar hasta un minuto)...');
     const catTxt = cat.map(e => `${e.id} | ${e.nombre}${e.sinonimos ? ' | sinónimos: ' + e.sinonimos : ''}${e.tareas.length ? '' : ' | (todavía sin tareas)'}`).join('\n');
-    const prompt = `Sos un ingeniero de mantenimiento de plantas de tratamiento de efluentes. Tenés que armar la lista de EQUIPOS de una instalación a partir de lo que cuenta el usuario y/o de los documentos adjuntos, y asociar cada equipo con un TIPO de la planilla madre de mantenimiento.\n\nPlanilla madre (id | tipo):\n${catTxt}\n\n${texto ? `Mensaje del usuario:\n"${texto}"\n\n` : ''}Reglas:\n- Listá cada equipo que requiere mantenimiento (bombas, soplantes, aireadores, agitadores, difusores, sensores e instrumentos, tamices, deshidratadores, filtros, membranas, DAF, decanters, etc.). No listes obra civil ni cañerías salvo que sean un equipo. Juntá los iguales de una misma etapa sumando "cantidad".\n- "nombre": como figura en el mensaje o documento (nombre del equipo en su etapa); "detalle": marca, modelo y especificación relevante; "etapa": dónde está.\n- catalogo_id: el tipo de la planilla madre que le corresponde, combinando nombre y especificación (un nombre de etapa como "bomba de recirculación" no dice el tipo; la especificación sí). id EXACTO de la lista o null si no hay tipo equivalente — NO fuerces asociaciones por parecido superficial.\n- tareas_manual: SOLO si un documento adjunto es el manual del equipo o su plan de mantenimiento: extraé sus tareas de mantenimiento preventivo con la frecuencia (si depende de horas de operación, elegí la frecuencia más cercana y poné las horas en el texto de la tarea) y en "criterio" citá el manual (documento y sección/página si la ves). Si no hay manual de ese equipo, omití el campo: se usan las tareas de la planilla madre.\n- No inventes equipos que no estén en el mensaje o los documentos. Si el material no menciona equipos, devolvé "equipos" vacío y explicalo en el resumen.\n- "resumen": 2-4 frases con lo que armaste y los supuestos o dudas que quedan.`;
+    const prompt = `Sos un ingeniero de mantenimiento de plantas de tratamiento de efluentes. Tenés que armar la lista de EQUIPOS de una instalación a partir de lo que cuenta el usuario y/o de los documentos adjuntos, y asociar cada equipo con un TIPO de la planilla madre de mantenimiento.\n\nPlanilla madre (id | tipo):\n${catTxt}\n\n${texto ? `Mensaje del usuario:\n"${texto}"\n\n` : ''}Reglas:\n- Listá cada equipo que requiere mantenimiento (bombas, soplantes, aireadores, agitadores, difusores, sensores e instrumentos, tamices, deshidratadores, filtros, membranas, DAF, decanters, etc.). No listes obra civil ni cañerías salvo que sean un equipo. Juntá los iguales de una misma etapa sumando "cantidad".\n- "nombre": como figura en el mensaje o documento (nombre del equipo en su etapa); "detalle": marca, modelo y especificación relevante; "etapa": dónde está.\n- catalogo_id: el tipo de la planilla madre que le corresponde, combinando nombre y especificación (un nombre de etapa como "bomba de recirculación" no dice el tipo; la especificación sí). id EXACTO de la lista o null si no hay tipo equivalente — NO fuerces asociaciones por parecido superficial.\n- tareas_manual: SOLO si un documento adjunto es el manual del equipo o su plan de mantenimiento: extraé sus tareas de mantenimiento preventivo con la frecuencia (si depende de horas de operación, elegí la frecuencia más cercana y poné las horas en el texto de la tarea) y en "criterio" citá el manual (documento y sección/página si la ves). Si no hay manual de ese equipo, omití el campo: se usan las tareas de la planilla madre. Con tareas_manual completá también "documento" (nombre del archivo) y, si el equipo no tiene tipo equivalente en la planilla madre, "tipo_sugerido" con un nombre GENÉRICO del tipo de equipo (ej. "Bomba peristáltica", no "Bomba de dosificación de coagulante"), con el mismo estilo que los tipos existentes.\n- No inventes equipos que no estén en el mensaje o los documentos. Si el material no menciona equipos, devolvé "equipos" vacío y explicalo en el resumen.\n- "resumen": 2-4 frases con lo que armaste y los supuestos o dudas que quedan.`;
     const out = await mantLlamarIA([...bloques, { type: 'text', text: prompt }], MANT_TOOL_ARMAR, 8000);
     const nuevos = (out.equipos || []).filter(e => e && e.nombre).map(e => {
       const ce = cat.find(c => c.id === e.catalogo_id);
@@ -23732,7 +23792,12 @@ async function mantIaArmar(enPlan) {
         return { tarea: t.tarea.trim(), frecuencia: t.frecuencia, meses: mantMesesPorFrecuencia(t.frecuencia, alt[t.frecuencia] % 2 === 0), criterio: t.criterio || 'Manual adjunto' };
       });
       const eq = { id: mantId(), tipo: e.nombre, detalle: String(e.detalle || '').slice(0, 300), cantidad: Number(e.cantidad) || 1, etapa: e.etapa || '', catalogo_id: ce ? ce.id : null, confianza: ce ? (e.confianza || 'media') : null, incluir: true };
-      if (propias.length) eq.tareas_propias = propias;
+      if (propias.length) {
+        eq.tareas_propias = propias;
+        eq.documento = String(e.documento || '').slice(0, 200);
+        eq.manual_sug = 'pendiente';
+        if (!ce) eq.sug_nombre = String(e.tipo_sugerido || e.nombre).trim();
+      }
       return eq;
     });
     if (!nuevos.length) throw new Error(out.resumen || 'No encontré equipos en el mensaje ni en los documentos.');
@@ -23759,12 +23824,99 @@ async function mantIaArmar(enPlan) {
     _mantIa = { nombre: '', texto: '', archivos: [], modo: 'agregar', ocupado: false };
     await mantPlanGuardar(); mantPlanRender();
     const avisos = [];
-    if (conManual) avisos.push(`${conManual} equipo${conManual === 1 ? '' : 's'} con tareas sacadas del manual adjunto`);
+    if (conManual) avisos.push(`${conManual} equipo${conManual === 1 ? '' : 's'} con tareas sacadas del manual adjunto (podés guardarlas en la planilla madre desde la tarjeta "Manuales adjuntos")`);
     if (sinTipo) avisos.push(`${sinTipo} sin tipo asignado (elegilo en el desplegable o agregá el tipo en Cfg Documentación)`);
     if (sinTar.length) avisos.push(`tipos sin tareas todavía: ${sinTar.join(', ')} (usá "Generar plan para los tipos sin tareas")`);
     showMsg('mant-plan-status', avisos.length ? 'error' : 'success', `${avisos.length ? '⚠' : '✓'} ${nuevos.length} equipo${nuevos.length === 1 ? '' : 's'} identificado${nuevos.length === 1 ? '' : 's'}, ${filas.length} tareas.${avisos.length ? ' Ojo: ' + avisos.join('; ') + '.' : ''}`);
   } catch (e) { _mantIa.ocupado = false; showMsg(st, 'error', '✕ ' + e.message); return; }
   _mantIa.ocupado = false;
+}
+
+// ── Manuales adjuntos: ¿guardar sus tareas en la planilla madre? ──
+// Las tareas que la IA saca de un manual adjunto se usan en ese plan. Además se
+// le propone al usuario guardarlas en la planilla madre:
+//  • si el tipo de equipo existe pero NO tiene el mantenimiento definido o
+//    validado (sin tareas o "a validar") → reemplaza sus tareas;
+//  • si el equipo no tiene tipo → crea un tipo nuevo (nombre genérico editable);
+//  • si el tipo ya tiene un plan validado → no se propone nada (queda el validado).
+// El usuario puede aceptar o "No guardar" (queda solo en ese plan).
+function mantSugClave(e, cat) {
+  const ce = (cat || []).find(c => c.id === e.catalogo_id);
+  return ce ? 'c:' + ce.id : 'n:' + mantNorm(e.sug_nombre || e.tipo);
+}
+function mantSugItems() {
+  if (!_mantPlan) return [];
+  const cat = _mantCat || [], vistos = new Set(), items = [];
+  _mantPlan.equipos.filter(e => e.tareas_propias && e.tareas_propias.length && e.manual_sug === 'pendiente').forEach(e => {
+    const ce = cat.find(c => c.id === e.catalogo_id);
+    if (ce && ce.estado === 'validado' && ce.tareas.length) return;
+    const clave = mantSugClave(e, cat);
+    if (vistos.has(clave)) return;
+    vistos.add(clave);
+    items.push({ e, ce, modo: ce ? 'reemplazar' : 'crear' });
+  });
+  return items;
+}
+function mantSugHtml() {
+  const items = mantSugItems();
+  if (!items.length) return '';
+  return `<div class="card" style="border-color:#1f4e78">
+    <div class="card-label">📘 Manuales adjuntos — ¿guardarlos en la planilla madre?</div>
+    <p class="hint" style="margin-bottom:8px">Estas tareas salieron de un manual que adjuntaste y ya se usan en este plan. Podés guardarlas en la planilla madre para reusarlas en otros planes, o no guardar nada y dejarlas solo para este caso.</p>
+    ${items.map(({ e, ce, modo }) => `<div class="field-row" style="padding:10px">
+      <div><b>${esc(e.tipo)}</b> <span class="hint" style="display:inline;margin:0">· ${e.tareas_propias.length} tareas${e.documento ? ' · ' + esc(e.documento) : ''}</span></div>
+      <div style="margin:6px 0">${modo === 'reemplazar'
+        ? `Reemplazaría el plan del tipo <b>${esc(ce.nombre)}</b> (${ce.tareas.length ? `tiene ${ce.tareas.length} tareas "a validar"` : 'todavía sin tareas'}).`
+        : `No hay un tipo equivalente. Se crearía el tipo: <input value="${esc(e.sug_nombre || e.tipo)}" style="max-width:280px;display:inline-block" onchange="mantSugNombre('${e.id}',this.value)" />`}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="mantSugGuardar('${e.id}')">Guardar en la planilla madre</button><button class="btn btn-secondary btn-sm" onclick="mantSugDescartar('${e.id}')">No guardar (solo para este plan)</button></div>
+    </div>`).join('')}
+    <div id="mant-sug-status" style="margin-top:6px"></div>
+  </div>`;
+}
+function mantSugNombre(id, v) { const e = _mantPlan.equipos.find(x => x.id === id); if (e) { e.sug_nombre = v.trim(); mantPlanGuardar(); } }
+function mantSugDescartar(id) {
+  const e = _mantPlan.equipos.find(x => x.id === id); if (!e) return;
+  const clave = mantSugClave(e, _mantCat);
+  _mantPlan.equipos.forEach(x => { if (x.manual_sug === 'pendiente' && x.tareas_propias && mantSugClave(x, _mantCat) === clave) x.manual_sug = 'descartado'; });
+  mantPlanGuardar(); mantPlanRender();
+}
+async function mantSugGuardar(id) {
+  if (_mantBusy) return;
+  const it = mantSugItems().find(x => x.e.id === id); if (!it) return;
+  const e = it.e, st = 'mant-sug-status';
+  try {
+    _mantBusy = true;
+    showMsg(st, 'loading', 'Guardando en la planilla madre...');
+    const cat = await mantCatCargar(true);
+    const clave = mantSugClave(e, cat);
+    const fuente = `Manual adjunto${e.documento ? ': ' + e.documento : ''} (tareas extraídas por IA) — validar`;
+    let destino = it.ce ? cat.find(c => c.id === it.ce.id) : null, crear = !destino;
+    if (crear) {
+      const nombre = (e.sug_nombre || e.tipo || '').trim();
+      if (!nombre) throw new Error('Poné un nombre para el tipo de equipo.');
+      const igual = cat.find(c => mantNorm(c.nombre) === mantNorm(nombre));
+      if (igual) {
+        if (igual.estado === 'validado' && igual.tareas.length) throw new Error(`Ya existe el tipo "${igual.nombre}" con un plan validado — no se pisa. Elegí otro nombre o tocá "No guardar".`);
+        destino = igual; crear = false;
+      } else {
+        const r = await supaFetch('/rest/v1/mant_equipos', { method: 'POST', headers: Object.assign({ Prefer: 'return=representation' }, mantH()), body: JSON.stringify({ empresa: currentEmpresa, nombre, sinonimos: mantNorm(e.tipo) !== mantNorm(nombre) ? e.tipo : null, estado: 'sugerido', fuente }) });
+        const rows = await r.json().catch(() => null);
+        if (!r.ok || !rows?.length) throw new Error('No se pudo crear el tipo "' + nombre + '".');
+        destino = { id: rows[0].id, nombre };
+      }
+    }
+    if (!crear && destino.tareas) {
+      await supaFetch(`/rest/v1/mant_tareas?equipo_id=eq.${destino.id}`, { method: 'DELETE', headers: mantH() });
+      await supaFetch(`/rest/v1/mant_equipos?id=eq.${destino.id}`, { method: 'PATCH', headers: mantH(), body: JSON.stringify({ estado: 'sugerido', fuente, updated_at: new Date().toISOString() }) });
+    }
+    const rt = await supaFetch('/rest/v1/mant_tareas', { method: 'POST', headers: mantH(), body: JSON.stringify(e.tareas_propias.map((t, i) => ({ equipo_id: destino.id, orden: i, tarea: t.tarea, frecuencia: t.frecuencia, meses: t.meses, criterio: t.criterio || '' }))) });
+    if (!rt.ok) throw new Error('No se pudieron guardar las tareas.');
+    _mantPlan.equipos.forEach(x => { if (x.manual_sug === 'pendiente' && x.tareas_propias && mantSugClave(x, cat) === clave) { x.manual_sug = 'guardado'; x.catalogo_id = destino.id; } });
+    await mantCatCargar(true);
+    await mantPlanGuardar(); mantPlanRender();
+    showMsg('mant-plan-status', 'success', `✓ Guardado en la planilla madre como "${destino.nombre}" (queda "a validar" hasta que lo revises en Cfg Documentación).`);
+  } catch (err) { showMsg(st, 'error', '✕ ' + err.message); }
+  finally { _mantBusy = false; }
 }
 
 // ══ Planes por proyecto (solapa Mantenimiento) ══════════════
@@ -23941,6 +24093,7 @@ function mantPlanRender() {
   el.innerHTML = `
     <button class="btn btn-secondary btn-sm" onclick="mantPlanVolver()" style="margin-bottom:12px">← Volver a Mantenimiento</button>
     ${mantIaCardHtml(true)}
+    ${mantSugHtml()}
     <div class="card">
       <div class="card-label">Plan de mantenimiento</div>
       <input value="${esc(p.nombre)}" style="font-weight:600;margin-bottom:12px" onchange="mantSetNombre(this.value)" />
