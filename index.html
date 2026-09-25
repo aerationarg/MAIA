@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.112</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.113</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.112</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.113</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11170,6 +11170,23 @@ async function procesosStep2DefinirTodas() {
   alert(`Listo: se revisaron ${orden.length} unidad(es) en orden.`);
 }
 
+// Si una celda todavía está vacía, en error, o (si es calculada) en 0 —
+// compartido entre la detección inicial de "qué falta" y la verificación
+// posterior de si de verdad se completó.
+function procesosStep2CeldaFalta(hf, c) {
+  const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+  if (v == null || v === '') return true;
+  if (procesosStep2EsError(v) || (typeof v === 'string' && v.startsWith('#'))) return true; // #DIV/0!, #REF!, #NUM!, etc. (HyperFormula los devuelve como objeto)
+  if (typeof v === 'number' && !isFinite(v)) return true;
+  // Una celda editable en 0 no es sospechosa (puede ser un dato real). Una
+  // celda CALCULADA en 0 sí puede serlo — a veces es solo una referencia a
+  // otra hoja de parámetros base que quedó sin cargar (ej. ='Bases de
+  // diseño'!B5) en vez de un cálculo real; se la marca para que la IA
+  // revise si corresponde reemplazarla por el dato real del Paso 1.
+  if (c.isFormula && v === 0) return true;
+  return false;
+}
+
 // Ídem, pero invocable las veces que haga falta (botón "Revisar y completar"),
 // no solo la primera vez que se abre la hoja.
 async function procesosStep2RevisarYCompletar(nombre, esAuto) {
@@ -11186,19 +11203,7 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
   }
   const mapeosHoja = (p.diseno_data?.mapeos?.[nombre]) || [];
   const celdasConMapeo = new Set(mapeosHoja.map(m => m.celda));
-  const faltantes = model.cells.filter(c => !celdasConMapeo.has(c.ref)).filter(c => {
-    const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
-    if (v == null || v === '') return true;
-    if (procesosStep2EsError(v) || (typeof v === 'string' && v.startsWith('#'))) return true; // #DIV/0!, #REF!, #NUM!, etc. (HyperFormula los devuelve como objeto)
-    if (typeof v === 'number' && !isFinite(v)) return true;
-    // Una celda editable en 0 no es sospechosa (puede ser un dato real). Una
-    // celda CALCULADA en 0 sí puede serlo — a veces es solo una referencia a
-    // otra hoja de parámetros base que quedó sin cargar (ej. ='Bases de
-    // diseño'!B5) en vez de un cálculo real; se la marca para que la IA
-    // revise si corresponde reemplazarla por el dato real del Paso 1.
-    if (c.isFormula && v === 0) return true;
-    return false;
-  });
+  const faltantes = model.cells.filter(c => !celdasConMapeo.has(c.ref)).filter(c => procesosStep2CeldaFalta(hf, c));
   const problemasIniciales = procesosStep2DetectarProblemas(nombre);
   if (!faltantes.length && !problemasIniciales.length) { if (!esAuto) alert('No se encontraron datos vacíos, en 0, con error ni resultados fuera de rango para revisar.'); return; }
 
@@ -11210,6 +11215,20 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
   if (faltantes.length) {
     const ok = await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. IMPORTANTE: si el primer valor que adoptás para un dato de dimensionamiento (por ejemplo el volumen de un reactor, una superficie, una cantidad de unidades) hace que otros parámetros calculados queden fuera de su rango normal o límite, NO lo dejes así — adoptá un valor mayor o menor (aunque sea bastante distinto del que calculaste al principio) hasta que el conjunto cumpla; usá "buscar_objetivo" o probá varios valores en tus acciones. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real. Contame brevemente qué adoptaste y por qué.');
     if (!ok) return;
+    // El chat a veces "dice" en el texto que completó una celda pero no
+    // emite la acción "set" correspondiente — como una celda editable
+    // vacía en 0 no viola ningún rango, el barrido de abajo (que solo
+    // mira errores/fuera de rango) no se entera de que en realidad no
+    // quedó nada aplicado. Se verifica acá con las MISMAS celdas
+    // detectadas como faltantes al principio, y si siguen igual, se le
+    // pide de nuevo puntualmente (una sola vez).
+    const hfPost = procesosStep2GetHF(nombre);
+    const siguenFaltando = hfPost ? faltantes.filter(c => procesosStep2CeldaFalta(hfPost, c)) : [];
+    if (siguenFaltando.length) {
+      const lista = siguenFaltando.map(c => `- ${c.ref} ${c.label}`).join('\n');
+      const ok2 = await procesosStep2ChatSend(nombre, `Revisé la planilla después de tu respuesta anterior y estas celdas siguen vacías, en 0 o con error, aunque tu mensaje decía que las habías completado — el cambio no quedó aplicado de verdad:\n${lista}\n\nVolvé a fijarlas ahora mismo con una acción "set" en tu respuesta (no alcanza con mencionarlo en el texto).`);
+      if (!ok2) return;
+    }
   }
   await procesosStep2BarridoVerificacion(nombre);
 }
@@ -11271,7 +11290,7 @@ function procesosStep2DetectarProblemas(nombre) {
 // vuelve a revisar. Hasta 2 vueltas extra; corta antes si ya no hay problemas
 // o si una vuelta no cambió nada (mismos problemas que la anterior).
 async function procesosStep2BarridoVerificacion(nombre) {
-  const MAX_VUELTAS = 2;
+  const MAX_VUELTAS = 1;
   let firmaAnterior = null;
   for (let vuelta = 1; vuelta <= MAX_VUELTAS; vuelta++) {
     const problemas = procesosStep2DetectarProblemas(nombre);
