@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.20</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.21</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.20</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.21</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9385,6 +9385,7 @@ function procesosStep2Html(p) {
 
   return `
     <div class="card-label">Paso 2 — Diseñar el proyecto</div>
+    ${procesosEscenariosBarraHtml(p)}
     <div id="procesos-step2-status"></div>
     ${st.sugerenciaError ? `
     <div class="card" style="margin:6px 0;border-color:var(--red)">
@@ -11077,7 +11078,7 @@ function procesosStep2TrenCancelar() {
   st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false; st.trenEdicionManual = false;
   renderProcesosStepContent();
 }
-async function procesosStep2TrenAplicar() {
+async function procesosStep2TrenAplicar(opts) {
   const p = procesosCurrentProyecto;
   const st = procesosStep2State;
   const grupos = st.trenPropuesto?.grupos || [];
@@ -11125,7 +11126,7 @@ async function procesosStep2TrenAplicar() {
   dd.orden = orden;
   st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false; st.trenEdicionManual = false; st.trenAlternativa = null;
   await procesosSaveProyecto({ diseno_data: dd }, p);
-  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); procesosStep2LibresGenerarPendientes().catch(e => console.warn('Unidades libres:', e.message)); }
+  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); if (!(opts && opts.sinLibres)) procesosStep2LibresGenerarPendientes().catch(e => console.warn('Unidades libres:', e.message)); }
 }
 
 // Id del slot del DOM para el panel de una hoja — a partir del NOMBRE, no de
@@ -12374,6 +12375,7 @@ function procesosStep3Html(p) {
   };
   return `
     <div class="card-label">Paso 3 — Definir etapas y equipos</div>
+    ${procesosEscenariosBarraHtml(p)}
     <p class="hint" style="margin:6px 0 10px">Para cada unidad/etapa definida en el Paso 2, definí los equipos necesarios (bombas, sopladores, tableros, etc.) — pedile a la IA que sugiera en base al diseño y a proyectos de referencia, o armalos a mano.</p>
     <button class="btn btn-secondary btn-sm" onclick="procesosStep3SugerirTodas()" style="margin-bottom:8px">✦ Sugerir equipos de todas las etapas</button>
     <div id="procesos-step3-status-batch"></div>
@@ -15477,6 +15479,7 @@ async function procesosBuildContexto(hastaStep, incluirChatGeneral, incluirEquip
   if (fichasCtx) ctx += fichasCtx + '\n';
   if (hastaStep > 2) { const diseno = procesosResumenDiseno(p); if (diseno) ctx += `Diseño del proyecto definido (valores por unidad/etapa):\n${diseno}\n\n`; }
   if (hastaStep > 3) { const equipos = procesosResumenEquipos(p, incluirEquiposNoConfirmados); if (equipos) ctx += `Equipos definidos por etapa:\n${equipos}\n\n`; }
+  { const escTxt = procesosEscenariosContextoTxt(p, hastaStep); if (escTxt) ctx += escTxt; }
   // Listado liviano (sin el contenido completo) de archivos propios del
   // proyecto — para que la IA sepa que existen aunque acá no se les inyecte
   // el texto entero (eso lo hace cada chat/paso por separado, filtrado por
@@ -15703,7 +15706,7 @@ function procesosPropuestaFilaComercial(item) {
 }
 function procesosPropuestaReemplazarTablaComercial(doc, items) {
   const tbl = procesosPropuestaBuscarTabla(doc, 1, 'PROPUESTA COMERCIAL');
-  const xml = items.map((it,i) => procesosPropuestaFilaComercial(Object.assign({item:i+1}, it))).join('');
+  const xml = items.some(it => it.alternativa) ? procesosPropuestaFilasComercialAlternativas(items) : items.map((it,i) => procesosPropuestaFilaComercial(Object.assign({item:i+1}, it))).join('');
   procesosPropuestaReemplazarFilas(doc, tbl, 1, xml || procesosPropuestaFilaComercial({item:'',cantidad:'',descripcion:'(sin ítems cargados)',precio_unitario:0}));
 }
 // Condiciones Comerciales: tabla de filas fijas (etiqueta | valor) — solo se
@@ -15917,16 +15920,25 @@ const PROCESOS_PROPUESTA_SECCIONES = [
 // definidos y confirmados en el Paso 3 (uno por equipo, con la etapa como
 // referencia) — el precio unitario queda en null, se completa a mano acá.
 function procesosPropuestaItemsDesdeEquipos(p) {
-  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
-  const etapas = procesosStep3EtapasConfirmadas(p).filter(n => ed[n]?.confirmada);
-  const items = [];
-  etapas.forEach(nombre => {
-    (ed[nombre].equipos || []).forEach(eq => {
-      const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
-      items.push({ id: procesosNuevoId(), etapa: nombre, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null });
+  const de = (pp, alt, etiqueta) => {
+    const ed = (pp.equipos_data && pp.equipos_data.etapas) || {};
+    const etapas = procesosStep3EtapasConfirmadas(pp).filter(n => ed[n]?.confirmada);
+    const items = [];
+    etapas.forEach(nombre => {
+      (ed[nombre].equipos || []).forEach(eq => {
+        const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
+        const it = { id: procesosNuevoId(), etapa: alt ? etiqueta + ' · ' + nombre : nombre, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null };
+        if (alt) { it.alternativa = alt; it.alternativaEtiqueta = etiqueta; }
+        items.push(it);
+      });
     });
-  });
-  return items;
+    return items;
+  };
+  // Con dos alternativas, los ítems de cada una van separados (cada una con su propio total)
+  const info = procesosEscenariosInfo(p);
+  if (!info) return de(p, null, null);
+  const etA = procesosEscenarioEtiqueta(info, info.activo), etB = procesosEscenarioEtiqueta(info, info.otro.id);
+  return [...de(p, info.activo, etA), ...de(procesosEscenarioPseudoProyecto(p), info.otro.id, etB)].sort((x, y) => (x.alternativa < y.alternativa ? -1 : (x.alternativa > y.alternativa ? 1 : 0)));
 }
 function procesosPropuestaSeedIfNeeded(p) {
   if (p.propuesta_data && p.propuesta_data.secciones) return p.propuesta_data;
@@ -15995,6 +16007,7 @@ function procesosStep4Html(p) {
 
   return `
     <div class="card-label">Paso 4 — Generar la propuesta</div>
+    ${procesosEscenariosInfo(p) ? `<p class="hint" style="margin:6px 0 10px;color:var(--blue)">🔀 La propuesta presenta las dos alternativas (${esc(procesosEscenarioEtiqueta(procesosEscenariosInfo(p), 'A'))} y ${esc(procesosEscenarioEtiqueta(procesosEscenariosInfo(p), 'B'))}): las secciones comparan ambas y cada una tiene su propio total. Para ajustar el diseño o los equipos de una, volvé a los pasos 2 y 3 y cambiá de alternativa.</p>` : ''}
     <p class="hint" style="margin:6px 0 10px">Se usa la plantilla vinculada como "Propuesta base" en Cfg Procesos IA — se completa con lo definido en los pasos anteriores, se puede editar cada sección a mano o pedirle ajustes a la IA por chat, y se genera el Word manteniendo el formato y la letra chica original.</p>
     <div id="procesos-step4-status"></div>
     <button class="btn btn-primary" onclick="procesosStep4GenerarConIA()">✦ Generar contenido con IA</button>
@@ -16014,19 +16027,7 @@ function procesosStep4Html(p) {
     <div class="gap"></div>
     <label>Propuesta comercial — ítems y precios</label>
     <p class="hint" style="margin-bottom:6px">Se cargan solos desde los equipos definidos en el Paso 3 — completá el precio unitario de cada uno (MAIA no tiene datos de costos).</p>
-    ${items.length ? `
-      <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2)">
-        <span style="flex:2">Descripción</span><span style="width:60px">Cant.</span><span style="width:120px">Precio unit. (USD)</span><span style="width:110px">Total</span>
-      </div>
-      ${items.map(it => `
-      <div class="field-row" style="padding:4px 0;display:flex;gap:6px;align-items:center">
-        <span style="flex:2;font-size:13px">${esc(it.descripcion)}${it.etapa?` <span style="color:var(--text2);font-size:11px">(${esc(it.etapa)})</span>`:''}</span>
-        <input value="${esc(String(it.cantidad))}" style="width:60px" onchange="procesosStep4SetItemCampo('${it.id}','cantidad',this.value)" />
-        <input value="${it.precio_unitario!=null?esc(String(it.precio_unitario)):''}" placeholder="0.00" style="width:120px" onchange="procesosStep4SetItemCampo('${it.id}','precio_unitario',this.value)" />
-        <span style="width:110px;font-size:13px">${it.precio_unitario ? procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0)) : '—'}</span>
-      </div>`).join('')}
-      <div style="text-align:right;margin-top:6px;font-weight:600">Total: USD ${procesosFormatearNumero(totalGeneral)}</div>
-    ` : '<p class="hint">Todavía no hay equipos definidos en el Paso 3.</p>'}
+    ${procesosStep4ItemsHtml(items)}
     <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep4RecargarItemsDesdeEquipos()">↻ Volver a traer ítems desde el Paso 3</button>
 
     <div class="gap"></div>
@@ -25850,6 +25851,7 @@ function procesosLibreRegistrar(nombre) {
   if (!h || !h.libre || !(h.libre.filas || []).length || !st.workbook) return false;
   const { ws, legibles } = procesosLibreConstruirWs(h.libre);
   st.workbook.Sheets[nombre] = ws;
+  st.libreNombres = st.libreNombres || []; if (!st.libreNombres.includes(nombre)) st.libreNombres.push(nombre);
   if (!st.workbook.SheetNames.includes(nombre)) st.workbook.SheetNames.push(nombre);
   const model = procesosStep2BuildModel(ws);
   model.cells.forEach(c => { const l = legibles[c.ref]; if (l) { c.claveLibre = l.clave; c.formulaLegible = l.formula; c.notaLibre = l.nota; } });
@@ -26052,8 +26054,162 @@ function procesosStep2TrenAlternativaHtml(st) {
     <span class="badge" style="background:var(--blue-bg);color:var(--blue)">🔀 Alternativa: ${esc(a.titulo || 'sin título')}</span>
     ${a.comparacion ? `<p class="hint" style="margin:8px 0;white-space:pre-wrap">${esc(a.comparacion)}</p>` : ''}
     ${procesosStep2TrenDiagramaHtml(a.grupos)}
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="procesosStep2TrenUsarAlternativa()">Cambiar a esta alternativa</button><button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenDescartarAlternativa()">Descartar alternativa</button></div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="procesosStep2TrenUsarAlternativa()">Cambiar a esta alternativa</button>${procesosEscenariosInfo(procesosCurrentProyecto) ? '' : '<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenSumarAlternativa()" title="Aplica el tren actual como Alternativa A y crea la B con este tren: cada una con su diseño, equipos y precio, y la propuesta las presenta juntas">➕ Sumar como alternativa (la propuesta las presenta juntas)</button>'}<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenDescartarAlternativa()">Descartar alternativa</button></div>
   </div>`;
+}
+
+// ══ Alternativas como ESCENARIOS del mismo proyecto (máximo 2: A y B) ══
+// Un proyecto puede tener dos alternativas de tratamiento que se presentan juntas en la propuesta. Cada una es un
+// "escenario" con su propio tren, valores de diseño (Paso 2) y equipos (Paso 3); el Paso 1 (cliente, corrientes,
+// tecnología), el chat general y la propuesta son comunes. Se guarda sin columnas nuevas: el escenario que se está
+// viendo vive en diseno_data / equipos_data como siempre, y el otro queda guardado en diseno_data.escenarios.otro.
+// Al cambiar de escenario se intercambian; así todo el código de los pasos sigue leyendo diseno_data / equipos_data.
+function procesosEscenariosInfo(p) {
+  const e = p && p.diseno_data && p.diseno_data.escenarios;
+  return e && e.otro && e.otro.diseno ? e : null;
+}
+function procesosEscenarioEtiqueta(info, id) {
+  const n = ((info.nombres || {})[id] || '').trim();
+  return 'Alternativa ' + id + (n && !/^alternativa\s+[ab]$/i.test(n) ? ' — ' + n : '');
+}
+// "Proyecto" con los datos del escenario que NO se está viendo — sirve para reusar las funciones que reciben un proyecto
+function procesosEscenarioPseudoProyecto(p) {
+  const e = procesosEscenariosInfo(p);
+  if (!e) return null;
+  return { id: p.id, nombre: p.nombre, cliente: p.cliente, info_cliente: p.info_cliente, tecnologia_confirmada: p.tecnologia_confirmada, diseno_data: e.otro.diseno, equipos_data: e.otro.equipos || { etapas: {} } };
+}
+// Al cambiar de escenario lo calculado en la sesión (modelos, HyperFormula, hojas libres del libro) ya no corresponde
+function procesosEscenarioResetCaches(p) {
+  const st = procesosStep2State;
+  if (st.workbook) {
+    (st.libreNombres || []).forEach(n => { delete st.workbook.Sheets[n]; const i = st.workbook.SheetNames.indexOf(n); if (i >= 0) st.workbook.SheetNames.splice(i, 1); });
+  }
+  st.libreNombres = [];
+  st.hojaModels = {}; st.hfInstances = {}; st.hfShared = null; st.sheetIndex = {};
+  st.hojaAbierta = null; st.trenPropuesto = null; st.trenAlternativa = null; st.trenChat = []; st.trenHistorial = [];
+  st.balance = null; st.balanceTrenVisible = false; st.balanceAbierto = {};
+  procesosStep2PendingLeccion = null;
+  procesosStep3State = { proyectoId: null, etapaAbierta: null };
+  if (st.workbook) procesosLibreRegistrarTodas(p);
+}
+async function procesosEscenarioCambiar() {
+  const p = procesosCurrentProyecto, e = procesosEscenariosInfo(p);
+  if (!e) return;
+  const actual = JSON.parse(JSON.stringify(Object.assign({}, p.diseno_data, { escenarios: undefined })));
+  const otroId = e.otro.id;
+  const nuevoDD = Object.assign({}, e.otro.diseno, { escenarios: { activo: otroId, nombres: e.nombres || {}, comparacion: e.comparacion || '', otro: { id: e.activo, diseno: actual, equipos: p.equipos_data || { etapas: {} } } } });
+  const nuevoEq = e.otro.equipos || { etapas: {} };
+  await procesosSaveProyecto({ diseno_data: nuevoDD, equipos_data: nuevoEq }, p);
+  procesosEscenarioResetCaches(p);
+  renderProcesosStepContent();
+  procesosStep2LibresGenerarPendientes().catch(() => {});
+}
+async function procesosEscenarioRenombrar(id) {
+  const p = procesosCurrentProyecto, e = procesosEscenariosInfo(p);
+  if (!e) return;
+  const nuevo = prompt('Nombre de la Alternativa ' + id + ' (ej. "MBR con membranas" o "Lodos activos"):', (e.nombres || {})[id] || '');
+  if (nuevo == null) return;
+  const dd = Object.assign({}, p.diseno_data); dd.escenarios = Object.assign({}, e, { nombres: Object.assign({}, e.nombres, { [id]: nuevo.trim() }) });
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  renderProcesosStepContent();
+}
+async function procesosEscenarioQuitar() {
+  const p = procesosCurrentProyecto, e = procesosEscenariosInfo(p);
+  if (!e) return;
+  if (!confirm('¿Quedarte solo con la ' + procesosEscenarioEtiqueta(e, e.activo) + '? Se descarta la ' + procesosEscenarioEtiqueta(e, e.otro.id) + ' (su tren, sus valores y sus equipos) y la propuesta vuelve a tener una sola opción.')) return;
+  const dd = Object.assign({}, p.diseno_data); delete dd.escenarios;
+  // los ítems de la otra alternativa salen de la propuesta comercial
+  const pd = p.propuesta_data ? Object.assign({}, p.propuesta_data) : null;
+  const campos = { diseno_data: dd };
+  if (pd && pd.comercial_items) { pd.comercial_items = pd.comercial_items.filter(it => !it.alternativa || it.alternativa === e.activo).map(it => { const c = Object.assign({}, it); delete c.alternativa; delete c.alternativaEtiqueta; c.etapa = String(c.etapa || '').replace(/^Alternativa [AB][^·]*·\s*/, ''); return c; }); campos.propuesta_data = pd; }
+  await procesosSaveProyecto(campos, p);
+  renderProcesosStepContent();
+}
+// Sumar la alternativa propuesta como Alternativa B: el tren actual se aplica como A y B se crea aparte, con el tren alternativo
+async function procesosStep2TrenSumarAlternativa() {
+  const st = procesosStep2State, p = procesosCurrentProyecto;
+  if (!st.trenAlternativa || !st.trenPropuesto) return;
+  if (procesosEscenariosInfo(p)) { alert('Este proyecto ya tiene dos alternativas (el máximo por ahora).'); return; }
+  if (!confirm('Se va a aplicar el tren actual como Alternativa A y crear la Alternativa B con el tren alternativo. Cada una tiene su propio diseño, equipos y precio, y la propuesta las presenta juntas. Podés alternar entre ellas con el selector de arriba. ¿Seguimos?')) return;
+  const alt = st.trenAlternativa;
+  await procesosStep2TrenAplicar({ sinLibres: true });
+  const ddA = JSON.parse(JSON.stringify(p.diseno_data || {}));
+  const eqA = p.equipos_data || { etapas: {} };
+  const ddB = { hojas: {}, orden: [], escenarios: { activo: 'B', nombres: { A: '', B: alt.titulo || '' }, comparacion: alt.comparacion || '', otro: { id: 'A', diseno: ddA, equipos: eqA } } };
+  await procesosSaveProyecto({ diseno_data: ddB, equipos_data: { etapas: {} } }, p);
+  procesosEscenarioResetCaches(p);
+  st.trenPropuesto = { grupos: alt.grupos };
+  await procesosStep2TrenAplicar({ sinLibres: true });
+  showMsg('procesos-step2-status', 'loading', '🔀 Creando la Alternativa B...');
+  await procesosStep2LibresGenerarPendientes();
+  await procesosEscenarioCambiar(); // se vuelve a la A, que es donde se venía trabajando (la B queda lista para abrirla con el selector)
+  showMsg('procesos-step2-status', 'success', '✓ Ahora el proyecto tiene dos alternativas. Estás en la A; cambiá a la B con el selector de arriba para definir sus valores.');
+}
+function procesosEscenariosBarraHtml(p) {
+  const e = procesosEscenariosInfo(p);
+  if (!e) return '';
+  const btn = id => {
+    const activo = e.activo === id;
+    return `<button class="btn btn-sm ${activo ? 'btn-primary' : 'btn-secondary'}" style="width:auto" ${activo ? '' : 'onclick="procesosEscenarioCambiar()"'}>${esc(procesosEscenarioEtiqueta(e, id))}</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" onclick="procesosEscenarioRenombrar('${id}')" title="Ponerle nombre a esta alternativa">✎</button>`;
+  };
+  return `<div class="card" style="margin:6px 0 10px;border-color:var(--blue)">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="badge" style="background:var(--blue-bg);color:var(--blue)">🔀 Este proyecto tiene 2 alternativas</span>${btn('A')}${btn('B')}<button class="btn btn-secondary btn-sm" style="margin-left:auto;width:auto" onclick="procesosEscenarioQuitar()" title="Descartar la otra alternativa y quedarte con la que estás viendo">✕ Quedarme solo con esta</button></div>
+    <p class="hint" style="margin:6px 0 0">Estás viendo la <b>${esc(procesosEscenarioEtiqueta(e, e.activo))}</b>: lo que definas en los pasos 2 y 3 se guarda en ella. La propuesta (Paso 4) presenta ambas, cada una con su total.${e.comparacion ? '<br><span style="white-space:pre-wrap">' + esc(e.comparacion) + '</span>' : ''}</p>
+  </div>`;
+}
+// Bloque para los prompts: la otra alternativa (tren, diseño y equipos) y cómo presentar ambas en la propuesta
+function procesosEscenariosContextoTxt(p, hastaStep) {
+  const e = procesosEscenariosInfo(p);
+  if (!e) return '';
+  const otro = procesosEscenarioPseudoProyecto(p);
+  const nA = procesosEscenarioEtiqueta(e, e.activo), nB = procesosEscenarioEtiqueta(e, e.otro.id);
+  let t = `ALTERNATIVAS: este proyecto tiene DOS alternativas de tratamiento que se presentan juntas al cliente. Lo de arriba (diseño y equipos) corresponde a la ${nA}; la otra es la ${nB}.${e.comparacion ? '\nComparación entre ambas: ' + e.comparacion : ''}\n\n`;
+  try {
+    const tren = procesosStep2GruposDesdeActual(otro).map((g, i) => `${i + 1}. ${g.instancias.map(x => x.nombre).join(' + ')}${g.libre ? ' (unidad libre)' : ''}${g.linea === 'lodos' ? ' [lodos]' : ''}${g.instancias[0] && (g.instancias[0].material || g.instancias[0].geometria) ? ' (' + [g.instancias[0].material, g.instancias[0].geometria].filter(Boolean).join(', ') + ')' : ''}`).join('\n');
+    if (tren) t += `── ${nB}: tren de tratamiento ──\n${tren}\n\n`;
+    if (hastaStep > 2) { const dis = procesosResumenDiseno(otro); if (dis) t += `── ${nB}: diseño definido ──\n${dis}\n\n`; }
+    if (hastaStep > 3) { const eq = procesosResumenEquipos(otro, true); if (eq) t += `── ${nB}: equipos por etapa ──\n${eq}\n\n`; }
+  } catch (err) { /* se sigue con lo que haya */ }
+  if (hastaStep >= 4) t += `CÓMO PRESENTAR LAS ALTERNATIVAS EN LA PROPUESTA: la propuesta presenta AMBAS alternativas, no una sola. Los parámetros de diseño y la calidad de vuelco son comunes. En "Selección de tecnología" explicá las dos opciones y compará sus ventajas y desventajas (costo, espacio, operación, mantenimiento) de forma equilibrada. En "Etapas de proceso" describí las etapas de la ${nA} y a continuación las de la ${nB}, con subtítulos "${nA}" y "${nB}", sin mezclar equipos de una en la otra. Cuando hables de una unidad o equipo, aclará a qué alternativa pertenece.\n\n`;
+  return t;
+}
+// Ítems y totales de la propuesta comercial, por alternativa cuando hay dos
+function procesosStep4ItemsHtml(items) {
+  if (!items.length) return '<p class="hint">Todavía no hay equipos definidos en el Paso 3.</p>';
+  const tot = arr => arr.reduce((acc, it) => acc + (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0), 0);
+  const fila = it => `
+      <div class="field-row" style="padding:4px 0;display:flex;gap:6px;align-items:center">
+        <span style="flex:2;font-size:13px">${esc(it.descripcion)}${it.etapa ? ` <span style="color:var(--text2);font-size:11px">(${esc(it.etapa)})</span>` : ''}</span>
+        <input value="${esc(String(it.cantidad))}" style="width:60px" onchange="procesosStep4SetItemCampo('${it.id}','cantidad',this.value)" />
+        <input value="${it.precio_unitario != null ? esc(String(it.precio_unitario)) : ''}" placeholder="0.00" style="width:120px" onchange="procesosStep4SetItemCampo('${it.id}','precio_unitario',this.value)" />
+        <span style="width:110px;font-size:13px">${it.precio_unitario ? procesosFormatearNumero((Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0)) : '—'}</span>
+      </div>`;
+  const cab = `
+      <div class="field-row" style="padding:2px 0 4px;display:flex;gap:6px;font-size:11px;color:var(--text2)">
+        <span style="flex:2">Descripción</span><span style="width:60px">Cant.</span><span style="width:120px">Precio unit. (USD)</span><span style="width:110px">Total</span>
+      </div>`;
+  if (!items.some(it => it.alternativa)) return cab + items.map(fila).join('') + `<div style="text-align:right;margin-top:6px;font-weight:600">Total: USD ${procesosFormatearNumero(tot(items))}</div>`;
+  const ids = [...new Set(items.map(it => it.alternativa || ''))];
+  return ids.map(id => {
+    const grupo = items.filter(it => (it.alternativa || '') === id);
+    const etiqueta = (grupo[0] && grupo[0].alternativaEtiqueta) || (id ? 'Alternativa ' + id : 'Sin alternativa');
+    return `<div class="card" style="margin:8px 0"><div class="card-label">${esc(etiqueta)}</div>${cab}${grupo.map(fila).join('')}<div style="text-align:right;margin-top:6px;font-weight:600">Total ${esc(etiqueta)}: USD ${procesosFormatearNumero(tot(grupo))}</div></div>`;
+  }).join('');
+}
+// Filas de la tabla comercial del Word: por alternativa, su título, sus ítems y su total
+function procesosPropuestaFilasComercialAlternativas(items) {
+  const fmt = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const ids = [...new Set(items.map(it => it.alternativa || ''))];
+  let n = 0, xml = '';
+  ids.forEach(id => {
+    const grupo = items.filter(it => (it.alternativa || '') === id);
+    const etiqueta = ((grupo[0] && grupo[0].alternativaEtiqueta) || 'Alternativa ' + id).toUpperCase();
+    xml += '<w:tr>' + procesosPropuestaCeldaComercial('', 755) + procesosPropuestaCeldaComercial('', 1202) + procesosPropuestaCeldaComercial(etiqueta, 2861) + procesosPropuestaCeldaComercial('', 2128) + procesosPropuestaCeldaComercial('', 2268) + '</w:tr>';
+    let total = 0;
+    grupo.forEach(it => { n++; total += (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0); xml += procesosPropuestaFilaComercial(Object.assign({ item: n }, it)); });
+    xml += '<w:tr>' + procesosPropuestaCeldaComercial('', 755) + procesosPropuestaCeldaComercial('', 1202) + procesosPropuestaCeldaComercial('TOTAL ' + etiqueta + ' (USD, más IVA)', 2861) + procesosPropuestaCeldaComercial('', 2128) + procesosPropuestaCeldaComercial(total ? fmt(total) : '', 2268) + '</w:tr>';
+  });
+  return xml;
 }
 
 // ── Sidebar: secciones agrupadas por área ───────────────
