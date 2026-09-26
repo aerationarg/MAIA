@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.21</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.22</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.21</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.22</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10046,8 +10046,10 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
           // EXACTO real de la planilla en vez de descartar la unidad entera.
           const gruposValidos = procesosStep2NormalizarUnidades(parsed.unidades, workbook);
           if (gruposValidos.length) {
+            st.loadingMsg = 'Verificando las unidades libres contra la planilla...'; renderProcesosStepContent();
+            const notasLibres = await procesosStep2VerificarLibres(gruposValidos);
             st.trenPropuesto = { grupos: gruposValidos };
-            st.trenChat = []; st.trenHistorial = []; st.trenEdicionManual = false;
+            st.trenChat = notasLibres.length ? [{ role: 'assistant', content: notasLibres.join('\n'), cambio: false }] : []; st.trenHistorial = []; st.trenEdicionManual = false;
           } else {
             console.warn('Tren propuesto: la IA no devolvió ninguna unidad usable. Respuesta cruda:', text);
             st.sugerenciaError = 'La IA no propuso ninguna unidad válida — probá reintentar. Si se repite, mirá la consola del navegador (F12) — ahí queda la respuesta cruda para revisar qué pasó.';
@@ -10858,6 +10860,8 @@ Respondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"respue
     if (parsed.alternativa && Array.isArray(parsed.alternativa.unidades)) {
       const gAlt = procesosStep2NormalizarUnidades(parsed.alternativa.unidades, st.workbook);
       if (gAlt.length) {
+        const notasAlt = await procesosStep2VerificarLibres(gAlt);
+        if (notasAlt.length) reply += '\n\n' + notasAlt.join('\n');
         st.trenAlternativa = { titulo: String(parsed.alternativa.titulo || 'Alternativa'), comparacion: String(parsed.alternativa.comparacion || ''), grupos: gAlt };
         reply += '\n\n🔀 Armé una alternativa: mirala arriba, comparada con el tren actual.';
       } else {
@@ -10867,6 +10871,8 @@ Respondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"respue
     if (Array.isArray(parsed.unidades)) {
       const grupos = procesosStep2NormalizarUnidades(parsed.unidades, st.workbook);
       if (grupos.length) {
+        const notasLibres = await procesosStep2VerificarLibres(grupos);
+        if (notasLibres.length) reply += '\n\n' + notasLibres.join('\n');
         st.trenHistorial = (st.trenHistorial || []).concat([JSON.parse(JSON.stringify(st.trenPropuesto.grupos))]);
         st.trenPropuesto = { grupos };
         cambio = true;
@@ -10994,6 +11000,7 @@ function procesosStep2TrenPropuestoHtml() {
       <div class="card-label">Diagrama del tren</div>
       ${procesosStep2TrenDiagramaHtml(st.trenPropuesto.grupos)}
     </div>
+    ${procesosStep2TrenVerificacionHtml(st)}
     ${procesosStep2TrenAlternativaHtml(st)}
     ${st.trenEdicionManual ? st.trenPropuesto.grupos.map(grupoHtml).join('') : ''}
     <div class="card" style="margin:12px 0">
@@ -26210,6 +26217,101 @@ function procesosPropuestaFilasComercialAlternativas(items) {
     xml += '<w:tr>' + procesosPropuestaCeldaComercial('', 755) + procesosPropuestaCeldaComercial('', 1202) + procesosPropuestaCeldaComercial('TOTAL ' + etiqueta + ' (USD, más IVA)', 2861) + procesosPropuestaCeldaComercial('', 2128) + procesosPropuestaCeldaComercial(total ? fmt(total) : '', 2268) + '</w:tr>';
   });
   return xml;
+}
+
+// ══ Verificación de unidades libres: ¿la planilla ya tiene esa etapa con otro nombre? ══
+// La IA propone una unidad como "libre" porque no la encuentra en la lista de hojas; pero la planilla puede tenerla con
+// otro nombre ("Sed 2°" = sedimentador secundario, siglas, inglés, etc.). Después de cada propuesta o cambio del tren,
+// una segunda consulta a la IA compara SEMÁNTICAMENTE cada unidad libre con todas las hojas (nombre + todas sus
+// etiquetas): si es claramente la misma etapa se usa la hoja; si hay duda, se le muestra al usuario para que decida.
+const PROCESOS_TOOL_VERIFICAR_LIBRES = {
+  name: 'verificar_unidades_libres',
+  description: 'Indica, para cada unidad libre propuesta, si en realidad la planilla ya tiene una hoja que calcula esa misma etapa.',
+  input_schema: { type: 'object', properties: { resultados: { type: 'array', items: { type: 'object', properties: {
+    nombre: { type: 'string', description: 'Nombre EXACTO de la unidad libre, tal como se recibió.' },
+    hoja: { type: ['string', 'null'], description: 'Nombre EXACTO de la hoja de la planilla que calcula esa misma etapa, o null si ninguna.' },
+    confianza: { type: 'string', enum: ['alta', 'media', 'baja'], description: '"alta" = es claramente la misma etapa (mismo proceso con otro nombre, sigla, abreviatura u otro idioma); "media" = podría serlo pero hay dudas; "baja" = solo se parece.' },
+    motivo: { type: 'string', description: 'Motivo breve (máx. 15 palabras).' }
+  }, required: ['nombre', 'hoja', 'confianza'] } } }, required: ['resultados'] }
+};
+function procesosStep2ConvertirLibreEnHoja(g, hoja, grupos, motivoExtra) {
+  const orig = g.hojaBase;
+  const usados = new Set((grupos || []).filter(x => x !== g).flatMap(x => x.instancias.map(i => i.nombre)));
+  let nombre = hoja, n = 2; while (usados.has(nombre)) nombre = hoja + ' — ' + (n++);
+  g.libre = false; g.descripcionLibre = ''; g.hojaBase = hoja; delete g.sugerenciaHoja;
+  g.instancias.forEach(i => { i.nombre = nombre; });
+  g.motivo = ((g.motivo || '') + ' (Propuesta como unidad libre «' + orig + '»; la planilla ya la tiene como «' + hoja + '».' + (motivoExtra ? ' ' + motivoExtra : '') + ')').trim();
+}
+// Devuelve notas para mostrar en el chat del tren; modifica los grupos en el lugar
+async function procesosStep2VerificarLibres(grupos) {
+  const st = procesosStep2State, wb = st.workbook;
+  const libres = (grupos || []).filter(g => g.libre);
+  if (!libres.length || !wb) return [];
+  const apiKey = getApiKey();
+  if (!apiKey) return [];
+  st.libreVerif = st.libreVerif || {};
+  const clave = g => procesosNormTxt(g.hojaBase + '|' + (g.descripcionLibre || ''));
+  const propias = st.libreNombres || [];
+  const pendientes = libres.filter(g => !(clave(g) in st.libreVerif));
+  if (pendientes.length) {
+    try {
+      const hojasTxt = wb.SheetNames.filter(n => !propias.includes(n)).map(n => {
+        const m = st.hojaModels[n] || (st.hojaModels[n] = procesosStep2BuildModel(wb.Sheets[n]));
+        return `- ${n}: ${m.cells.map(c => c.label).filter(Boolean).slice(0, 40).join(', ') || '(sin etiquetas detectadas)'}`;
+      }).join('\n');
+      const usadas = [...new Set(grupos.filter(g => !g.libre).map(g => g.hojaBase))];
+      const prompt = `Se armó un tren de tratamiento de efluentes con algunas unidades marcadas como LIBRES: la IA que lo armó no encontró en la lista de hojas de la planilla una hoja para esa etapa. Tu tarea es VERIFICAR si en realidad la planilla ya tiene una hoja que calcula esa misma etapa con otro nombre (abreviaturas como "Sed 2°" = sedimentador secundario, siglas como "EQ" = ecualizador o "LA" = lodos activos, otro idioma, denominaciones alternativas). Guiate por el nombre Y por las etiquetas de cada hoja (lo que calcula).\n\nHojas de la planilla (nombre: etiquetas de sus celdas):\n${hojasTxt}\n\nUnidades libres a verificar:\n${pendientes.map(g => `- "${g.hojaBase}"${g.descripcionLibre ? ': ' + g.descripcionLibre : ''}`).join('\n')}\n\nHojas que el tren ya usa como unidad propia: ${usadas.join(', ') || '(ninguna)'}.\n\nReglas: marcá una hoja solo si esa hoja dimensiona el MISMO proceso/equipo que la unidad libre (no basta con que sea una etapa relacionada: un "digestor" no es un "espesador" ni un "reactor biológico"). "alta" solo si estás seguro; ante la duda usá "media"; si solo se parece, "baja" o null. Si la hoja ya la usa el tren para otra unidad, solo elegila si la libre es claramente una segunda unidad de esa misma etapa.`;
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, tools: [PROCESOS_TOOL_VERIFICAR_LIBRES], tool_choice: { type: 'tool', name: PROCESOS_TOOL_VERIFICAR_LIBRES.name }, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      const tu = data.content && data.content.find(c => c.type === 'tool_use');
+      const res = (tu && tu.input && tu.input.resultados) || [];
+      pendientes.forEach(g => {
+        const r = res.find(x => procesosNormTxt(x.nombre) === procesosNormTxt(g.hojaBase));
+        const hoja = r && r.hoja && wb.SheetNames.find(n => procesosNormTxt(n) === procesosNormTxt(r.hoja) && !propias.includes(n));
+        st.libreVerif[clave(g)] = hoja ? { hoja, confianza: r.confianza, motivo: r.motivo || '' } : null;
+      });
+    } catch (e) { console.warn('No se pudo verificar las unidades libres:', e.message); return []; }
+  }
+  const notas = [];
+  libres.forEach(g => {
+    const r = st.libreVerif[clave(g)];
+    if (!r) return;
+    const orig = g.hojaBase;
+    if (r.confianza === 'alta') {
+      procesosStep2ConvertirLibreEnHoja(g, r.hoja, grupos, r.motivo);
+      notas.push(`🔎 «${orig}» iba a ser una unidad libre, pero la planilla ya tiene la hoja «${r.hoja}»${r.motivo ? ' (' + r.motivo + ')' : ''}: usé esa.`);
+    } else if (r.confianza === 'media') {
+      g.sugerenciaHoja = { hoja: r.hoja, motivo: r.motivo };
+      notas.push(`🔎 «${orig}» (unidad libre) podría ser la hoja «${r.hoja}»${r.motivo ? ' (' + r.motivo + ')' : ''}. Decidí en la tarjeta de arriba.`);
+    }
+  });
+  return notas;
+}
+function procesosStep2TrenUsarHojaLibre(gi) {
+  const st = procesosStep2State, g = st.trenPropuesto && st.trenPropuesto.grupos[gi];
+  if (!g || !g.sugerenciaHoja) return;
+  st.trenHistorial = (st.trenHistorial || []).concat([JSON.parse(JSON.stringify(st.trenPropuesto.grupos))]);
+  const orig = g.hojaBase, hoja = g.sugerenciaHoja.hoja;
+  procesosStep2ConvertirLibreEnHoja(g, hoja, st.trenPropuesto.grupos, '');
+  st.trenChat = (st.trenChat || []).concat([{ role: 'assistant', content: `✓ «${orig}» ahora usa la hoja «${hoja}» de la planilla.`, cambio: true }]);
+  renderProcesosStepContent();
+}
+function procesosStep2TrenMantenerLibre(gi) {
+  const g = procesosStep2State.trenPropuesto && procesosStep2State.trenPropuesto.grupos[gi];
+  if (g) delete g.sugerenciaHoja;
+  renderProcesosStepContent();
+}
+function procesosStep2TrenVerificacionHtml(st) {
+  const sug = (st.trenPropuesto ? st.trenPropuesto.grupos : []).map((g, gi) => ({ g, gi })).filter(x => x.g.libre && x.g.sugerenciaHoja);
+  if (!sug.length) return '';
+  return sug.map(({ g, gi }) => `<div class="card" style="margin-bottom:10px;border-color:#e0a800">
+    <p style="margin:0 0 8px;font-size:13px">🔎 <b>«${esc(g.hojaBase)}»</b> está como unidad libre, pero podría ser la hoja <b>«${esc(g.sugerenciaHoja.hoja)}»</b> de la planilla${g.sugerenciaHoja.motivo ? ' — ' + esc(g.sugerenciaHoja.motivo) : ''}.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="procesosStep2TrenUsarHojaLibre(${gi})">Usar la hoja «${esc(g.sugerenciaHoja.hoja)}»</button><button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenMantenerLibre(${gi})">Mantener como unidad libre</button></div>
+  </div>`).join('');
 }
 
 // ── Sidebar: secciones agrupadas por área ───────────────
