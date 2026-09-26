@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.24</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.25</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.24</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.25</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -21025,10 +21025,20 @@ function microoImagenUrl(row) {
 // Busca, entre los organismos con imagen cargada, cuáles menciona el texto de
 // una respuesta del asistente (match por nombre completo, no por género solo,
 // para no mostrar una foto de otra especie del mismo género).
-function microoOrganismosMencionados(texto, conocimiento) {
-  if (!texto || !conocimiento?.length) return [];
-  const t = texto.toLowerCase();
-  return conocimiento.filter(c => c.imagen_url && c.nombre && t.includes(c.nombre.toLowerCase()));
+function microoNormTxt(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+// Tolerante: sin tildes, con nombre o sinónimos, y singular/plural ("Diatomea" ~ "Diatomeas").
+// También mira las etiquetas de los marcadores ("Ciliado reptante") además del texto.
+function microoOrganismosMencionados(texto, conocimiento, etiquetas) {
+  if (!conocimiento?.length) return [];
+  const t = microoNormTxt(texto + ' ' + (etiquetas || []).join(' '));
+  if (!t.trim()) return [];
+  const raiz = w => w.replace(/(es|s)$/, '');
+  const tRaiz = t.split(/[^a-z0-9]+/).filter(Boolean).map(raiz).join(' ');
+  return conocimiento.filter(c => {
+    if (!c.imagen_url || !c.nombre) return false;
+    const nombres = [c.nombre].concat(String(c.sinonimos || '').split(/[,;/]/)).map(microoNormTxt).map(x => x.trim()).filter(x => x.length >= 4);
+    return nombres.some(n => t.includes(n) || (' ' + tRaiz + ' ').includes(' ' + n.split(/[^a-z0-9]+/).filter(Boolean).map(raiz).join(' ') + ' '));
+  });
 }
 function microoSystemPrompt(conocimiento, pedirUbicacion) {
   const fecha = new Date().toLocaleDateString('es-AR', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
@@ -21187,7 +21197,7 @@ function microoRenderChat() {
   if (!el) return;
   if (!_microoMensajes.length) { el.innerHTML = '<p class="hint">Sacá una foto y contame qué estás viendo para arrancar.</p>'; return; }
   el.innerHTML = _microoMensajes.map((m, i) => {
-    const matches = m.rol === 'assistant' ? microoOrganismosMencionados(m.texto, _microoConocimientoCache || []) : [];
+    const matches = m.rol === 'assistant' ? microoOrganismosMencionados(m.texto, _microoConocimientoCache || [], microoMarcadoresDe(m).map(mk => mk.etiqueta).filter(Boolean)) : [];
     // Los marcadores de posición se dibujan sobre la FOTO QUE MANDÓ EL
     // USUARIO (el mensaje anterior, que es el que disparó esta respuesta),
     // no sobre la respuesta en sí. Puede haber más de uno (uno por cada
@@ -21274,18 +21284,24 @@ async function microoEnviarMensaje() {
     // El marcador de ubicación solo tiene sentido con una foto fija (no con
     // los varios frames de un video, donde el organismo puede desplazarse).
     const pedirUbicacion = !videoInfo && imagenes.length > 0;
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5', max_tokens: 1500,
-        system: microoSystemPrompt(conocimiento, pedirUbicacion),
-        messages: [...historial, { role:'user', content: contenidoActual }]
-      })
-    });
-    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
-    const data = await resp.json();
-    let textoRespuesta = data.content?.find(c=>c.type==='text')?.text || '(sin respuesta)';
+    // Las respuestas largas pueden agotar max_tokens: si se corta, se pide seguir (hasta 3 veces)
+    // retomando desde el texto ya escrito, para no perder el final ni las líneas de ubicación.
+    let textoRespuesta = '';
+    for (let tanda = 0; tanda < 4; tanda++) {
+      const msgs = [...historial, { role:'user', content: contenidoActual }];
+      if (textoRespuesta) msgs.push({ role:'assistant', content: [{ type:'text', text: textoRespuesta.replace(/s+$/, '') }] });
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4096, system: microoSystemPrompt(conocimiento, pedirUbicacion), messages: msgs })
+      });
+      if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || 'HTTP '+resp.status); }
+      const data = await resp.json();
+      const parte = data.content?.find(c=>c.type==='text')?.text || '';
+      textoRespuesta = textoRespuesta ? textoRespuesta.replace(/s+$/, '') + parte : parte;
+      if (data.stop_reason !== 'max_tokens') break;
+    }
+    if (!textoRespuesta) textoRespuesta = '(sin respuesta)';
     // Parsea y saca del texto visible los marcadores
     // "[UBICACION etiqueta="..." x=NN% y=NN% tamano=NN%]" que el prompt le
     // pide agregar al final, uno por cada elemento que puede ubicar dentro
