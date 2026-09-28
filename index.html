@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.25</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.26</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.25</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.26</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -647,6 +647,41 @@
         <div class="card-label">Todos los hallazgos (SGI)</div>
         <p class="hint" style="margin-top:-6px;margin-bottom:10px">Cualquier integrante de SGI puede ver y editar todos los hallazgos, sean o no propios.</p>
         <div id="hallazgos-todos-list" class="empty">Cargando...</div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Conciliación bancaria ═══ -->
+    <div class="panel" id="panel-concil">
+      <div class="card">
+        <div class="card-label">Nueva conciliación</div>
+        <p class="hint" style="margin-bottom:10px">Subí el extracto del banco (PDF) y el Excel de movimientos que exporta el sistema contable — la IA detecta qué está en uno y no en el otro, y arma las 4 tablas de diferencias. Tené en cuenta que los impuestos/comisiones que el banco discrimina en varias líneas se comparan contra el asiento único de "gastos bancarios" de la contabilidad, no línea por línea.</p>
+        <label>Banco</label>
+        <select id="concil-banco-select" style="margin-bottom:10px" onchange="concilBancoSeleccionado()"><option value="">Cargando bancos...</option></select>
+        <label>Fecha de cierre</label>
+        <input type="date" id="concil-fecha" style="margin-bottom:10px" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div>
+            <label>Extracto del banco (PDF)</label>
+            <input type="file" accept="application/pdf" id="concil-pdf-input" onchange="concilArchivoSeleccionado('pdf', this.files[0])" />
+            <div id="concil-pdf-label" class="hint"></div>
+          </div>
+          <div>
+            <label>Movimientos contables (Excel)</label>
+            <input type="file" accept=".xlsx,.xls" id="concil-excel-input" onchange="concilArchivoSeleccionado('excel', this.files[0])" />
+            <div id="concil-excel-label" class="hint"></div>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="concil-analizar-btn" onclick="concilAnalizar()">Analizar diferencias</button>
+        <div id="concil-analizar-status" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card" id="concil-resultado-card" style="display:none">
+        <div class="card-label">Resultado de la conciliación</div>
+        <div id="concil-resumen" style="margin-bottom:14px"></div>
+        <div id="concil-bloques"></div>
+        <div id="concil-gastos-bancarios" style="margin:14px 0"></div>
+        <button class="btn btn-primary" onclick="concilConfirmar()">✓ Confirmar y guardar en SharePoint</button>
+        <div id="concil-confirmar-status" style="margin-top:8px"></div>
       </div>
     </div>
 
@@ -1230,6 +1265,16 @@
           <span id="cfg-hallazgos-excel-label">Sin seleccionar</span>
           <button class="sp-browse-btn" onclick="fbOpen('file','hallazgos-excel')">Seleccionar</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Config Conciliación bancaria ═══ -->
+    <div class="panel" id="panel-cfg-concil">
+      <div class="card">
+        <div class="card-label">Bancos</div>
+        <p class="hint" style="margin-bottom:10px">Un banco por cuenta a conciliar. La carpeta es donde se va a guardar cada mes el extracto y el Excel — dentro de ella se crea automáticamente una subcarpeta por período (ej. "2025-11").</p>
+        <div id="concil-bancos-list"></div>
+        <button class="btn btn-secondary" onclick="concilBancoAdd()" style="margin-top:4px">+ Agregar banco</button>
       </div>
     </div>
 
@@ -2243,6 +2288,8 @@ function switchPanel(name) {
   if (name === 'cfg-viajes') renderCfgViajes();
   if (name === 'hallazgos') renderHallazgos();
   if (name === 'cfg-hallazgos') renderCfgHallazgos();
+  if (name === 'concil') concilRender();
+  if (name === 'cfg-concil') concilBancosCfgRender();
   if (name === 'procesos') renderProcesosList();
   if (name === 'flowsheets') renderFlowsheetsList();
   if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
@@ -17442,6 +17489,10 @@ function fbSelectCurrent() {
     supaConfigSet('rend_base_folder', JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label }))
       .catch(e => alert('No se pudo guardar la carpeta base: ' + e.message));
     return;
+  } else if (fbTarget === 'concil-banco-folder') {
+    fbClose();
+    concilBancoGuardarCarpeta(_concilBancoEditId, { folder_path: path, folder_id: itemId, site_id: fbCurrentSiteId, folder_label: label });
+    return;
   }
   saveSpDefaults(spDefaults);
   fbClose();
@@ -26360,6 +26411,506 @@ function procesosStep2TrenVerificacionHtml(st) {
   </div>`).join('');
 }
 
+// ── Conciliación bancaria (Administración): comparar el extracto del banco (PDF) ──
+// contra los movimientos que exporta el sistema contable (Excel), detectar diferencias
+// en 4 tablas clásicas de conciliación bancaria, y guardar el resultado como una hoja
+// nueva en el mismo Excel + el PDF, en la carpeta de SharePoint configurada por banco.
+//
+// Los impuestos/comisiones que el banco discrimina en muchas líneas (IVA, ley 25413,
+// SIRCREB, IIBB, etc.) NO se comparan una por una: se suman aparte y se comparan contra
+// el asiento único de "gastos bancarios" que la contabilidad carga una vez por mes (se
+// detecta por concepto, ej. "ajuste ext bna 9-2025") — ver concilConciliar().
+
+function concilNormTxt(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+
+function concilEsGastoBancarioExcel(concepto) {
+  const t = concilNormTxt(concepto);
+  return /ajuste\s*ext|gasto[s]?\s*banc|comisio?n(es)?\s*banc/.test(t);
+}
+
+function concilMontosIguales(a, b, tol) { return Math.abs(a - b) <= (tol == null ? 1 : tol); }
+function concilDiasEntre(f1, f2) { return Math.abs((new Date(f1) - new Date(f2)) / 86400000); }
+
+function concilMatchLado(excelRows, pdfRows, ventanaDias) {
+  const pdfDisponibles = pdfRows.map(r => ({ ...r, _used: false }));
+  const matches = [];
+  const excelSinMatch = [];
+  excelRows.forEach(er => {
+    let mejor = null, mejorDiff = Infinity;
+    pdfDisponibles.forEach(pr => {
+      if (pr._used) return;
+      if (!concilMontosIguales(er.monto, pr.monto)) return;
+      const diff = concilDiasEntre(er.fecha, pr.fecha);
+      if (diff <= ventanaDias && diff < mejorDiff) { mejor = pr; mejorDiff = diff; }
+    });
+    if (mejor) { mejor._used = true; matches.push({ excel: er, pdf: mejor }); }
+    else excelSinMatch.push(er);
+  });
+  const pdfSinMatch = pdfDisponibles.filter(r => !r._used);
+  return { matches, excelSinMatch, pdfSinMatch };
+}
+
+function concilConciliar(movsExcel, movsPdf, ventanaDias) {
+  ventanaDias = ventanaDias == null ? 10 : ventanaDias;
+  const excelGastoRows = movsExcel.filter(m => (m.haber || 0) > 0 && concilEsGastoBancarioExcel(m.concepto));
+  const pdfGastoRows = movsPdf.filter(m => m.esGastoBancario);
+  const gastosBancariosExcel = excelGastoRows.reduce((s, r) => s + r.haber, 0);
+  const gastosBancariosPdf = pdfGastoRows.reduce((s, r) => s + (r.debito || 0) - (r.credito || 0), 0);
+
+  const excelCred = movsExcel.filter(m => (m.debe || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debe }));
+  const excelDeb = movsExcel.filter(m => (m.haber || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.haber }));
+  const pdfCred = movsPdf.filter(m => (m.credito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.credito }));
+  const pdfDeb = movsPdf.filter(m => (m.debito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debito }));
+
+  const dCred = concilMatchLado(excelCred, pdfCred, ventanaDias);
+  const dDeb = concilMatchLado(excelDeb, pdfDeb, ventanaDias);
+
+  const r2 = n => Math.round(n * 100) / 100;
+  return {
+    b1: dCred.excelSinMatch, b2: dCred.pdfSinMatch, b3: dDeb.pdfSinMatch, b4: dDeb.excelSinMatch,
+    gastosBancariosPdf: r2(gastosBancariosPdf), gastosBancariosExcel: r2(gastosBancariosExcel),
+    gastosBancariosSinContabilizar: r2(gastosBancariosPdf - gastosBancariosExcel),
+    coincidenciasAuto: dCred.matches.length + dDeb.matches.length,
+  };
+}
+
+// ── Parseo del Excel de movimientos contables ──
+function concilExcelFechaISO(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === 'number') {
+    const ms = Math.round((v - 25569) * 86400 * 1000);
+    return new Date(ms).toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/.exec(s);
+  if (m) { let [, d, mo, y] = m; if (y.length === 2) y = '20' + y; return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`; }
+  return null;
+}
+function concilNum(v) {
+  if (v == null || v === '') return 0;
+  if (typeof v === 'number') return v;
+  const n = parseFloat(String(v).replace(/\./g, '').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+function concilParseExcelMovs(rows) {
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  let headerIdx = -1, colFecha = -1, colConcepto = -1, colDebe = -1, colHaber = -1, colSaldo = -1;
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const row = (rows[i] || []).map(norm);
+    const iFecha = row.findIndex(c => c === 'fecha');
+    const iConcepto = row.findIndex(c => c === 'concepto');
+    const iDebe = row.findIndex(c => c === 'debe' || c === 'debito' || c === 'débito');
+    const iHaber = row.findIndex(c => c === 'haber' || c === 'credito' || c === 'crédito');
+    const iSaldo = row.findIndex(c => c === 'saldo');
+    if (iFecha >= 0 && iConcepto >= 0 && (iDebe >= 0 || iHaber >= 0)) {
+      headerIdx = i; colFecha = iFecha; colConcepto = iConcepto; colDebe = iDebe; colHaber = iHaber; colSaldo = iSaldo;
+      break;
+    }
+  }
+  if (headerIdx === -1) throw new Error('No encontré las columnas Fecha/Concepto/Debe/Haber en el Excel — ¿es el archivo de movimientos correcto?');
+  const out = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const fecha = concilExcelFechaISO(row[colFecha]);
+    const concepto = row[colConcepto];
+    const debe = colDebe >= 0 ? concilNum(row[colDebe]) : 0;
+    const haber = colHaber >= 0 ? concilNum(row[colHaber]) : 0;
+    const saldo = colSaldo >= 0 && row[colSaldo] !== '' && row[colSaldo] != null ? concilNum(row[colSaldo]) : null;
+    if (!fecha && !debe && !haber) continue;
+    if (!fecha) continue;
+    out.push({ fecha, concepto: String(concepto || '').trim(), debe, haber, saldo });
+  }
+  return out;
+}
+
+// ── Armado de la hoja de diferencias (plan de escritura vía Graph) ──
+function concilFechaDMY(iso) {
+  if (!iso) return '';
+  const [y, m, d] = String(iso).split('-');
+  return `${d}/${m}/${y}`;
+}
+const CONCIL_LABELS = {
+  b1: 'DEPOSITOS CONTABILIZADOS NO ACREDITADOS EN EL BANCO',
+  b2: 'DEPOSITOS ACREDITADOS EN BANCO NO REGISTRADOS EN LA CONTABILIDAD',
+  b3: 'CHEQUES / DEBITOS EN EL BANCO NO REGISTRADOS EN LA CONTABILIDAD',
+  b4: 'CHEQUES/TRANSFERENCIAS PENDIENTES DE DEBITAR EN EL BANCO',
+};
+function concilBuildSheetPlan(input) {
+  const ops = [];
+  const sheetName = `Conciliación ${input.bancoNombre} al ${concilFechaDMY(input.fechaCierreISO).replace(/\//g, '-')}`.slice(0, 31);
+  ops.push({ type: 'values', range: 'C3', values: [[`CONCILIACION BANCARIA ${input.bancoNombre} ${input.empresa} — AL ${concilFechaDMY(input.fechaCierreISO)}`]], bold: true });
+  ops.push({ type: 'values', range: 'C5:D5', values: [['SALDO SEGÚN CONTABILIDAD', input.saldoContabilidad]], bold: true });
+  const filaSum = {};
+  let row = 16;
+  const blockPlans = {};
+  ['b1', 'b2', 'b3', 'b4'].forEach(key => {
+    const rows = input[key] || [];
+    const n = Math.max(rows.length, 1);
+    const titleRow = row, dataStart = row + 1, dataEnd = dataStart + n - 1, sumRow = dataEnd + 1;
+    blockPlans[key] = { titleRow, dataStart, dataEnd, sumRow, rows };
+    filaSum[key] = sumRow;
+    row = sumRow + 2;
+  });
+  ops.push({ type: 'values', range: 'C6', values: [[CONCIL_LABELS.b1]] });
+  ops.push({ type: 'formula', range: 'D6', formula: `=D${filaSum.b1}` });
+  ops.push({ type: 'values', range: 'C7', values: [[CONCIL_LABELS.b2]] });
+  ops.push({ type: 'formula', range: 'D7', formula: `=D${filaSum.b2}` });
+  ops.push({ type: 'values', range: 'C8', values: [[CONCIL_LABELS.b3]] });
+  ops.push({ type: 'formula', range: 'D8', formula: `=D${filaSum.b3}` });
+  ops.push({ type: 'values', range: 'C9', values: [[CONCIL_LABELS.b4]] });
+  ops.push({ type: 'formula', range: 'D9', formula: `=D${filaSum.b4}` });
+  ops.push({ type: 'values', range: 'C10:D10', values: [['GASTOS BANCARIOS SIN CONTABILIZAR', input.gastosBancariosSinContabilizar]] });
+  ops.push({ type: 'values', range: 'C11:D11', values: [['SALDO SEGÚN EXTRACTO BANCARIO', input.saldoExtracto]], bold: true });
+  ops.push({ type: 'values', range: 'C12', values: [['DIFERENCIA']] });
+  ops.push({ type: 'formula', range: 'D12', formula: '=D5-D6+D7-D8+D9-D10-D11', highlight: true });
+  ops.push({ type: 'values', range: 'C14', values: [['DETALLE']], bold: true });
+  ['b1', 'b2', 'b3', 'b4'].forEach(key => {
+    const { titleRow, dataStart, dataEnd, sumRow, rows } = blockPlans[key];
+    ops.push({ type: 'values', range: `C${titleRow}`, values: [[CONCIL_LABELS[key]]], bold: true });
+    const dataValues = [];
+    for (let i = 0; i < (dataEnd - dataStart + 1); i++) {
+      const r = rows[i];
+      dataValues.push(r ? [concilFechaDMY(r.fecha), r.concepto, r.monto] : ['', '', '']);
+    }
+    ops.push({ type: 'values', range: `B${dataStart}:D${dataEnd}`, values: dataValues });
+    ops.push({ type: 'formula', range: `D${sumRow}`, formula: `=SUM(D${dataStart}:D${dataEnd})`, bold: true });
+  });
+  return { sheetName, ops };
+}
+
+// ── Estado y flujo de la app ──
+const CONCIL_TOOL_EXTRAER_PDF = {
+  name: 'extraer_movimientos_banco',
+  description: 'Extrae todos los movimientos de un extracto bancario en PDF, distinguiendo movimientos reales de cargos bancarios (impuestos, comisiones, gravámenes).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      saldo_inicial: { type: 'number', description: 'Saldo anterior/inicial del período, tal como figura en el extracto.' },
+      saldo_final: { type: 'number', description: 'Saldo final del período (el último saldo del extracto).' },
+      movimientos: {
+        type: 'array', items: {
+          type: 'object', properties: {
+            fecha: { type: 'string', description: 'Fecha del movimiento en formato YYYY-MM-DD.' },
+            concepto: { type: 'string' },
+            debito: { type: 'number', description: 'Monto debitado (egreso). 0 si esta línea es un crédito.' },
+            credito: { type: 'number', description: 'Monto acreditado (ingreso). 0 si esta línea es un débito.' },
+            es_gasto_bancario: { type: 'boolean', description: 'true si es un impuesto, comisión, IVA sobre comisión, gravamen (ley 25413, IIBB, SIRCREB, IBTC), percepción, retención o sello bancario — cualquier cargo que el banco discrimina en líneas separadas pero que la empresa asienta como un solo gasto bancario mensual. false para transferencias, pagos, depósitos, cheques, plazos fijos, traspasos entre cuentas, etc.' },
+          }, required: ['fecha', 'concepto', 'debito', 'credito', 'es_gasto_bancario']
+        }
+      }
+    },
+    required: ['movimientos', 'saldo_final']
+  }
+};
+
+let _concilBancos = null;
+let _concilBancoEditId = null;
+let _concilPdfFile = null;
+let _concilExcelFile = null;
+let _concilState = null;
+
+async function concilBancosLoad(force) {
+  if (_concilBancos && !force) return _concilBancos;
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  try {
+    const res = await supaFetch('/rest/v1/conciliacion_bancos?select=*&order=empresa,nombre', { headers: { Authorization: 'Bearer ' + session.token } });
+    _concilBancos = res.ok ? await res.json() : [];
+  } catch (e) { _concilBancos = []; }
+  return _concilBancos;
+}
+
+async function concilRender() {
+  _concilPdfFile = null; _concilExcelFile = null; _concilState = null;
+  document.getElementById('concil-resultado-card').style.display = 'none';
+  document.getElementById('concil-pdf-label').textContent = '';
+  document.getElementById('concil-excel-label').textContent = '';
+  document.getElementById('concil-pdf-input').value = '';
+  document.getElementById('concil-excel-input').value = '';
+  const fechaEl = document.getElementById('concil-fecha');
+  if (!fechaEl.value) {
+    const hoy = new Date(); const finMesAnterior = new Date(hoy.getFullYear(), hoy.getMonth(), 0);
+    fechaEl.value = finMesAnterior.toISOString().slice(0, 10);
+  }
+  const bancos = await concilBancosLoad(true);
+  const sel = document.getElementById('concil-banco-select');
+  const delaEmpresa = bancos.filter(b => b.empresa === currentEmpresa);
+  if (!delaEmpresa.length) { sel.innerHTML = '<option value="">No hay bancos configurados para esta empresa — cargalos en Cfg Conciliación bancaria</option>'; return; }
+  sel.innerHTML = delaEmpresa.map(b => `<option value="${b.id}">${esc(b.nombre)}</option>`).join('');
+}
+
+function concilArchivoSeleccionado(tipo, file) {
+  if (!file) return;
+  if (tipo === 'pdf') { _concilPdfFile = file; document.getElementById('concil-pdf-label').textContent = file.name; }
+  else { _concilExcelFile = file; document.getElementById('concil-excel-label').textContent = file.name; }
+}
+
+async function concilAnalizar() {
+  const statusId = 'concil-analizar-status';
+  const bancoId = document.getElementById('concil-banco-select').value;
+  const fechaISO = document.getElementById('concil-fecha').value;
+  if (!bancoId) { alert('Elegí un banco.'); return; }
+  if (!fechaISO) { alert('Elegí la fecha de cierre.'); return; }
+  if (!_concilPdfFile || !_concilExcelFile) { alert('Subí el PDF del banco y el Excel de movimientos.'); return; }
+  const banco = (_concilBancos || []).find(b => b.id === bancoId);
+  const btn = document.getElementById('concil-analizar-btn');
+  btn.disabled = true;
+  showMsg(statusId, 'loading', 'Leyendo el Excel...');
+  try {
+    const ab = await _concilExcelFile.arrayBuffer();
+    const wb = XLSX.read(ab, { type: 'array', cellDates: true });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+    const movsExcel = concilParseExcelMovs(rows);
+
+    showMsg(statusId, 'loading', 'Leyendo el extracto con IA (puede tardar)...');
+    const apiKey = getApiKey();
+    if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
+    const b64 = await fileToBase64(_concilPdfFile);
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5', max_tokens: 8000,
+        tools: [CONCIL_TOOL_EXTRAER_PDF], tool_choice: { type: 'tool', name: CONCIL_TOOL_EXTRAER_PDF.name },
+        messages: [{
+          role: 'user', content: [
+            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+            { type: 'text', text: 'Extraé todos los movimientos de este extracto bancario, en orden, sin omitir ninguno. Prestá especial atención a distinguir los movimientos reales (transferencias, pagos, depósitos, cheques, plazos fijos, traspasos) de los cargos bancarios (comisiones, IVA sobre comisiones, impuesto ley 25413, SIRCREB, IBTC, percepciones/retenciones de IIBB, sellos, etc.) — estos últimos van con es_gasto_bancario=true.' }
+          ]
+        }]
+      })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
+    const data = await resp.json();
+    const tu = data.content?.find(c => c.type === 'tool_use');
+    if (!tu) throw new Error('La IA no devolvió los movimientos — probá de nuevo.');
+    const ext = tu.input;
+    const movsPdf = (ext.movimientos || []).map(m => ({ fecha: m.fecha, concepto: m.concepto || '', debito: m.debito || 0, credito: m.credito || 0, esGastoBancario: !!m.es_gasto_bancario }));
+
+    showMsg(statusId, 'loading', 'Comparando...');
+    const r = concilConciliar(movsExcel, movsPdf);
+    const saldoContabilidad = movsExcel.length ? (movsExcel[movsExcel.length - 1].saldo ?? null) : null;
+    const saldoExtracto = ext.saldo_final != null ? ext.saldo_final : null;
+
+    _concilState = {
+      bancoId, banco, empresa: currentEmpresa, fechaISO,
+      movsExcel, movsPdf, saldoContabilidad, saldoExtracto,
+      b1: r.b1, b2: r.b2, b3: r.b3, b4: r.b4,
+      gastosBancariosPdf: r.gastosBancariosPdf, gastosBancariosExcel: r.gastosBancariosExcel,
+      gastosBancariosSinContabilizar: r.gastosBancariosSinContabilizar,
+    };
+    concilRenderResultado();
+    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente. Revisá las tablas antes de confirmar.`);
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function concilNumFmt(n) { return (n == null ? 0 : n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+function concilRecalcular() {
+  const s = _concilState;
+  const sumB = k => s[k].reduce((a, r) => a + r.monto, 0);
+  const diferencia = (s.saldoContabilidad || 0) - sumB('b1') + sumB('b2') - sumB('b3') + sumB('b4') - (s.gastosBancariosSinContabilizar || 0) - (s.saldoExtracto || 0);
+  return { sumB1: sumB('b1'), sumB2: sumB('b2'), sumB3: sumB('b3'), sumB4: sumB('b4'), diferencia: Math.round(diferencia * 100) / 100 };
+}
+
+function concilRenderResultado() {
+  const s = _concilState;
+  document.getElementById('concil-resultado-card').style.display = '';
+  const calc = concilRecalcular();
+  document.getElementById('concil-resumen').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">
+      <div><label>Saldo según contabilidad</label><input type="number" step="0.01" value="${s.saldoContabilidad ?? ''}" onchange="concilEditarSaldo('saldoContabilidad',this.value)" /></div>
+      <div><label>Saldo según extracto bancario</label><input type="number" step="0.01" value="${s.saldoExtracto ?? ''}" onchange="concilEditarSaldo('saldoExtracto',this.value)" /></div>
+    </div>
+    <div style="margin-top:10px;font-size:15px;font-weight:600;color:${Math.abs(calc.diferencia) < 1 ? 'var(--green)' : 'var(--red)'}">
+      Diferencia: $ ${concilNumFmt(calc.diferencia)} ${Math.abs(calc.diferencia) < 1 ? '✓ concilia' : ''}
+    </div>`;
+
+  const sums = { b1: calc.sumB1, b2: calc.sumB2, b3: calc.sumB3, b4: calc.sumB4 };
+  const bloqueHtml = (key, label) => `
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-label">${esc(label)} <span style="font-weight:400;color:var(--text2)">— $ ${concilNumFmt(sums[key])}</span></div>
+      ${s[key].length ? s[key].map((r, i) => `
+        <div style="display:grid;grid-template-columns:130px 1fr 130px 30px;gap:6px;margin-bottom:4px;align-items:center">
+          <input type="date" value="${r.fecha || ''}" onchange="concilEditarFila('${key}',${i},'fecha',this.value)" style="font-size:12px" />
+          <input value="${esc(r.concepto || '')}" onchange="concilEditarFila('${key}',${i},'concepto',this.value)" style="font-size:12px" />
+          <input type="number" step="0.01" value="${r.monto}" onchange="concilEditarFila('${key}',${i},'monto',this.value)" style="font-size:12px" />
+          <button class="btn btn-secondary btn-sm" onclick="concilQuitarFila('${key}',${i})" title="Quitar">✕</button>
+        </div>`).join('') : '<p class="hint">Sin diferencias.</p>'}
+      <button class="btn btn-secondary btn-sm" onclick="concilAgregarFila('${key}')" style="margin-top:4px">+ Agregar fila</button>
+    </div>`;
+  document.getElementById('concil-bloques').innerHTML =
+    bloqueHtml('b1', CONCIL_LABELS.b1) + bloqueHtml('b2', CONCIL_LABELS.b2) + bloqueHtml('b3', CONCIL_LABELS.b3) + bloqueHtml('b4', CONCIL_LABELS.b4);
+
+  document.getElementById('concil-gastos-bancarios').innerHTML = `
+    <div class="card">
+      <div class="card-label">Gastos bancarios sin contabilizar</div>
+      <p class="hint" style="margin-bottom:8px">Impuestos/comisiones del extracto ($ ${concilNumFmt(s.gastosBancariosPdf)}) menos lo que ya cubre el asiento de gastos bancarios de la contabilidad ($ ${concilNumFmt(s.gastosBancariosExcel)}).</p>
+      <input type="number" step="0.01" value="${s.gastosBancariosSinContabilizar}" onchange="concilEditarSaldo('gastosBancariosSinContabilizar',this.value)" />
+    </div>`;
+}
+
+function concilEditarSaldo(campo, val) { _concilState[campo] = parseFloat(val) || 0; concilRenderResultado(); }
+function concilEditarFila(bloque, idx, campo, val) {
+  const r = _concilState[bloque][idx];
+  r[campo] = campo === 'monto' ? (parseFloat(val) || 0) : val;
+  concilRenderResultado();
+}
+function concilQuitarFila(bloque, idx) { _concilState[bloque].splice(idx, 1); concilRenderResultado(); }
+function concilAgregarFila(bloque) { _concilState[bloque].push({ fecha: _concilState.fechaISO, concepto: '', monto: 0 }); concilRenderResultado(); }
+
+async function concilEjecutarPlan(token, siteId, itemId, plan) {
+  const wbBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/workbook/`;
+  const existResp = await fetch(wbBase + 'worksheets?$select=name', { headers: { Authorization: 'Bearer ' + token } });
+  const existData = existResp.ok ? await existResp.json() : { value: [] };
+  const nombresExistentes = new Set((existData.value || []).map(w => w.name));
+  let nombre = plan.sheetName, n = 2;
+  while (nombresExistentes.has(nombre)) nombre = (plan.sheetName.slice(0, 28) + ' (' + (n++) + ')').slice(0, 31);
+  const addResp = await fetch(wbBase + 'worksheets/add', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nombre })
+  });
+  if (!addResp.ok) { const e = await addResp.json().catch(() => ({})); throw new Error('No se pudo crear la hoja en el Excel: ' + (e.error?.message || 'HTTP ' + addResp.status)); }
+
+  const shBase = wbBase + `worksheets('${encodeURIComponent(nombre)}')/`;
+  for (const op of plan.ops) {
+    if (op.type === 'values') {
+      await fetch(shBase + `range(address='${op.range}')`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: op.values })
+      });
+    } else if (op.type === 'formula') {
+      await fetch(shBase + `range(address='${op.range}')`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ formulas: [[op.formula]] })
+      });
+    }
+    if (op.bold) {
+      await fetch(shBase + `range(address='${op.range}')/format/font`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ bold: true })
+      }).catch(() => {});
+    }
+    if (op.highlight) {
+      await fetch(shBase + `range(address='${op.range}')/format/fill`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ color: '#FFFF00' })
+      }).catch(() => {});
+    }
+  }
+  return nombre;
+}
+
+async function concilConfirmar() {
+  const s = _concilState;
+  if (!s) return;
+  const statusId = 'concil-confirmar-status';
+  showMsg(statusId, 'loading', 'Conectando con SharePoint...');
+  try {
+    if (!s.banco.folder_id || !s.banco.site_id) throw new Error('Este banco no tiene carpeta configurada — cargala en Cfg Conciliación bancaria.');
+    const token = await getMsToken();
+    const periodo = s.fechaISO.slice(0, 7);
+    showMsg(statusId, 'loading', 'Creando la carpeta del período...');
+    const folderId = await spEnsureFolder(token, s.banco.site_id, s.banco.folder_id, periodo);
+
+    showMsg(statusId, 'loading', 'Subiendo el extracto (PDF)...');
+    const pdfB64 = await fileToBase64(_concilPdfFile);
+    await fetch(`https://graph.microsoft.com/v1.0/sites/${s.banco.site_id}/drive/items/${folderId}:/${encodeURIComponent(_concilPdfFile.name)}:/content`, {
+      method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: Uint8Array.from(atob(pdfB64), c => c.charCodeAt(0))
+    });
+
+    showMsg(statusId, 'loading', 'Subiendo el Excel...');
+    const excelB64 = await fileToBase64(_concilExcelFile);
+    const upResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${s.banco.site_id}/drive/items/${folderId}:/${encodeURIComponent(_concilExcelFile.name)}:/content`, {
+      method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: Uint8Array.from(atob(excelB64), c => c.charCodeAt(0))
+    });
+    if (!upResp.ok) throw new Error('No se pudo subir el Excel a SharePoint.');
+    const excelItem = await upResp.json();
+
+    showMsg(statusId, 'loading', 'Armando la hoja de diferencias...');
+    const plan = concilBuildSheetPlan({
+      bancoNombre: s.banco.nombre, empresa: s.empresa, fechaCierreISO: s.fechaISO,
+      saldoContabilidad: s.saldoContabilidad || 0, saldoExtracto: s.saldoExtracto || 0,
+      b1: s.b1, b2: s.b2, b3: s.b3, b4: s.b4, gastosBancariosSinContabilizar: s.gastosBancariosSinContabilizar || 0,
+    });
+    const sheetName = await concilEjecutarPlan(token, s.banco.site_id, excelItem.id, plan);
+
+    showMsg(statusId, 'loading', 'Guardando registro...');
+    const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+    await supaFetch('/rest/v1/conciliacion_historial', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + session.token },
+      body: JSON.stringify({ banco_id: s.bancoId, empresa: s.empresa, periodo, diferencia_final: concilRecalcular().diferencia, confirmado_por_nombre: currentUser?.nombre || currentUser?.email || null })
+    }).catch(() => {});
+
+    showMsg(statusId, 'success', `✓ Guardado en la carpeta "${periodo}" — hoja "${sheetName}" agregada al Excel.`);
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  }
+}
+
+// ── Cfg Conciliación bancaria: lista de bancos ──
+async function concilBancosCfgRender() {
+  const el = document.getElementById('concil-bancos-list');
+  el.innerHTML = 'Cargando...';
+  const bancos = await concilBancosLoad(true);
+  if (!bancos.length) { el.innerHTML = '<p class="hint">Todavía no hay bancos cargados — ¿corriste el SQL de Conciliación bancaria?</p>'; return; }
+  el.innerHTML = bancos.map(b => `
+    <div class="card" style="margin-bottom:8px">
+      <div style="display:grid;grid-template-columns:110px 1fr;gap:8px;margin-bottom:8px">
+        <div><label style="font-size:12px">Empresa</label>
+          <select onchange="concilBancoUpdate('${b.id}','empresa',this.value)">
+            <option value="AA" ${b.empresa === 'AA' ? 'selected' : ''}>AA</option>
+            <option value="AS" ${b.empresa === 'AS' ? 'selected' : ''}>AS</option>
+          </select>
+        </div>
+        <div><label style="font-size:12px">Nombre</label><input value="${esc(b.nombre || '')}" onchange="concilBancoUpdate('${b.id}','nombre',this.value)" /></div>
+      </div>
+      <label style="font-size:12px">Carpeta destino</label>
+      <div class="sp-selected" style="margin-bottom:8px">
+        <span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.folder_label || 'Sin seleccionar')}</span>
+        <button class="sp-browse-btn" onclick="concilBancoElegirCarpeta('${b.id}')">Seleccionar</button>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="concilBancoEliminar('${b.id}')" style="color:var(--red)">Eliminar</button>
+    </div>`).join('');
+}
+async function concilBancoAdd() {
+  const nombre = prompt('Nombre del banco (ej. "Banco Galicia"):');
+  if (!nombre || !nombre.trim()) return;
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  const res = await supaFetch('/rest/v1/conciliacion_bancos', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + session.token },
+    body: JSON.stringify({ nombre: nombre.trim(), empresa: currentEmpresa })
+  });
+  if (!res.ok) { alert('No se pudo crear — ¿corriste el SQL de Conciliación bancaria?'); return; }
+  concilBancosCfgRender();
+}
+async function concilBancoUpdate(id, campo, val) {
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  await supaFetch('/rest/v1/conciliacion_bancos?id=eq.' + id, {
+    method: 'PATCH', headers: { Authorization: 'Bearer ' + session.token },
+    body: JSON.stringify({ [campo]: val })
+  });
+  _concilBancos = null;
+}
+function concilBancoElegirCarpeta(id) { _concilBancoEditId = id; fbOpen('folder', 'concil-banco-folder'); }
+async function concilBancoGuardarCarpeta(id, campos) {
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  await supaFetch('/rest/v1/conciliacion_bancos?id=eq.' + id, {
+    method: 'PATCH', headers: { Authorization: 'Bearer ' + session.token },
+    body: JSON.stringify(campos)
+  });
+  _concilBancos = null;
+  concilBancosCfgRender();
+}
+async function concilBancoEliminar(id) {
+  if (!confirm('¿Eliminar este banco?')) return;
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  await supaFetch('/rest/v1/conciliacion_bancos?id=eq.' + id, { method: 'DELETE', headers: { Authorization: 'Bearer ' + session.token } });
+  _concilBancos = null;
+  concilBancosCfgRender();
+}
+
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
@@ -26369,6 +26920,7 @@ const NAV_SECTIONS = [
   { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
   { id:'viajes',    label:'Viajes',           area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>' },
   { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
+  { id:'concil',    label:'Conciliación bancaria', area:'General',   icon:'<svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/></svg>' },
   { id:'np-loc',    label:'NP Local',         area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
   { id:'np-int',    label:'NP Internacional', area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>' },
   { id:'clientes',  label:'Clientes',         area:'Comercial',      icon:'<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
@@ -26386,6 +26938,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-rend',      label:'Cfg Rendiciones',      area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-viajes',    label:'Cfg Viajes',           area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-concil',    label:'Cfg Conciliación bancaria', area:'General',  icon:NAV_GEAR_ICON },
   { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras y Comex', icon:NAV_GEAR_ICON },
   { id:'cfg-np-int',    label:'Cfg NP Internacional', area:'Compras y Comex', icon:NAV_GEAR_ICON },
   { id:'cfg-comercial', label:'Cfg Comercial',        area:'Comercial',     icon:NAV_GEAR_ICON },
@@ -26443,8 +26996,8 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
-  'Administración':    ['rend','viajes','hallazgos','cfg-rend','cfg-comercial','cfg-viajes'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
+  'Administración':    ['rend','viajes','hallazgos','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
   'Compras y Comex':   ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
@@ -26653,6 +27206,8 @@ const PANEL_TITLES = {
   'cfg-rend': 'Configuración — Rendiciones',
   'cfg-viajes': 'Configuración — Viajes',
   'cfg-hallazgos': 'Configuración — Hallazgos',
+  'concil': 'Conciliación bancaria',
+  'cfg-concil': 'Configuración — Conciliación bancaria',
   'cfg-np-loc': 'Configuración — NP Local',
   'cfg-np-int': 'Configuración — NP Internacional',
   'procesos': 'Procesos IA',
