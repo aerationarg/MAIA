@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.32</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.31</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.32</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -439,6 +439,11 @@
     </div>
 
     <div class="sidebar-scroll">
+      <div class="sidebar-section" id="nav-dashboard-section">
+        <button class="nav-btn" id="nav-dashboard" data-label="Dashboard" onclick="navSelect('dashboard')"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>Dashboard</span></button>
+      </div>
+      <div class="sidebar-divider"></div>
+
       <div class="sidebar-section" id="nav-sections-section">
         <div class="sidebar-section-label">Secciones</div>
         <div id="nav-sections-group"></div>
@@ -503,6 +508,11 @@
     </div>
 
     <div class="content">
+
+    <!-- ═══ PANEL: Dashboard ═══ -->
+    <div class="panel" id="panel-dashboard">
+      <div id="dashboard-content"><p class="hint">Cargando...</p></div>
+    </div>
 
     <!-- ═══ PANEL: Rendiciones ═══ -->
     <div class="panel active" id="panel-rend">
@@ -2265,6 +2275,7 @@ function switchPanel(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   const panel = document.getElementById('panel-' + name);
   if (panel) panel.classList.add('active');
+  if (name === 'dashboard') dashboardRender();
   if (name === 'admin') renderAdmin();
   if (name === 'cfg-rend') {
     renderRendFields(); rendLoadFields().then(renderRendFields);
@@ -27116,6 +27127,160 @@ async function concilBancoEliminar(id) {
 }
 
 
+// ── Dashboard ───────────────────────────────────────────────────────────
+// Reutiliza SECTOR_TABS: cada tarjeta se muestra si el sector ya tiene acceso
+// al módulo correspondiente por el menú — así no hay que mantener una lista
+// aparte de "qué ve cada sector". Admin y Dirección ven todas las tarjetas
+// (resumen ejecutivo), tengan o no esos módulos en su propio menú — es de
+// solo lectura, así que no hay riesgo de exponer una acción que no deberían
+// poder hacer, solo números.
+const DASHBOARD_SECTORES_EJECUTIVO = ['Admin', 'Dirección'];
+
+function dashTile(valor, label, sub, color) {
+  return `<div style="background:var(--bg2,#f7f7f7);border-radius:10px;padding:14px 10px;text-align:center">
+    <div style="font-size:26px;font-weight:700;line-height:1.1${color ? ';color:' + color : ''}">${valor}</div>
+    <div style="font-size:12px;color:var(--text2);margin-top:4px">${esc(label)}</div>
+    ${sub ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">${esc(sub)}</div>` : ''}
+  </div>`;
+}
+function dashGrupo(titulo, tilesHtml) {
+  if (!tilesHtml) return '';
+  return `<div class="card" style="margin-bottom:12px">
+    <div class="card-label">${esc(titulo)}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-top:8px">${tilesHtml}</div>
+  </div>`;
+}
+// "Este mes" sobre una columna created_at (timestamptz real) — se compara en
+// horario local, no hace falta que el server entienda funciones de fecha.
+function dashEsteMes(fechaISO) {
+  if (!fechaISO) return false;
+  const d = new Date(fechaISO), hoy = new Date();
+  return d.getFullYear() === hoy.getFullYear() && d.getMonth() === hoy.getMonth();
+}
+// Nunca tira: si la tabla/columna no existe o la consulta falla, devuelve []
+// para que a esa tarjeta puntual le falten datos en vez de romper todo el
+// dashboard. Reintenta una vez sin filtro de empresa por si esa columna no
+// existiera de verdad en esa tabla.
+async function dashFetchSeguro(tabla, query, queryFallback) {
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  const auth = { Authorization: 'Bearer ' + session.token };
+  try {
+    let res = await supaFetch(`/rest/v1/${tabla}?${query}`, { headers: auth });
+    if (!res.ok && queryFallback) res = await supaFetch(`/rest/v1/${tabla}?${queryFallback}`, { headers: auth });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) { console.warn('Dashboard — error consultando ' + tabla + ':', e.message); return []; }
+}
+
+async function dashCotizaciones() {
+  const rows = await dashFetchSeguro('cotizaciones',
+    `select=estado,items,created_at&empresa=eq.${currentEmpresa}&order=created_at.desc&limit=300`,
+    `select=estado,items,created_at&order=created_at.desc&limit=300`);
+  if (!rows.length) return '';
+  const totalDe = r => (r.items || []).reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0), 0);
+  const pendientes = rows.filter(r => (r.estado || 'pendiente') === 'pendiente');
+  const esteMes = rows.filter(r => dashEsteMes(r.created_at));
+  const vendidasMes = esteMes.filter(r => r.estado === 'vendida');
+  const perdidasMes = esteMes.filter(r => r.estado === 'perdida');
+  const montoPendiente = pendientes.reduce((a, r) => a + totalDe(r), 0);
+  const montoVendidoMes = vendidasMes.reduce((a, r) => a + totalDe(r), 0);
+  return dashGrupo('Cotizaciones', [
+    dashTile(pendientes.length, 'Pendientes', montoPendiente ? '≈ $' + procesosFormatearNumero(montoPendiente) : ''),
+    dashTile(vendidasMes.length, 'Vendidas este mes', montoVendidoMes ? '≈ $' + procesosFormatearNumero(montoVendidoMes) : '', 'var(--green)'),
+    dashTile(perdidasMes.length, 'Perdidas este mes', '', perdidasMes.length ? 'var(--red)' : null),
+  ].join(''));
+}
+
+async function dashHallazgos() {
+  const rows = await dashFetchSeguro('hallazgos', `select=estado&limit=500`);
+  if (!rows.length) return '';
+  const pendientes = rows.filter(r => r.estado === 'pendiente').length;
+  return dashGrupo('Hallazgos (SGI)', [
+    dashTile(pendientes, 'Pendientes', '', pendientes ? 'var(--red)' : 'var(--green)'),
+    dashTile(rows.length, 'Total cargados'),
+  ].join(''));
+}
+
+async function dashNP() {
+  const rows = await dashFetchSeguro('np_aprobaciones', `select=pfx&estado=eq.pendiente&limit=300`);
+  const loc = rows.filter(r => r.pfx === 'np-loc').length;
+  const int = rows.filter(r => r.pfx === 'np-int').length;
+  if (!rows.length) return dashGrupo('Notas de pedido', dashTile(0, 'Pendientes de aprobación', '', 'var(--green)'));
+  return dashGrupo('Notas de pedido — pendientes de aprobación', [
+    dashTile(loc, 'Local', '', loc ? 'var(--red)' : 'var(--green)'),
+    dashTile(int, 'Internacional', '', int ? 'var(--red)' : 'var(--green)'),
+  ].join(''));
+}
+
+async function dashMantenimiento() {
+  const planes = await dashFetchSeguro('mant_planes', `select=id&empresa=eq.${currentEmpresa}&limit=500`, `select=id&limit=500`);
+  const equipos = await dashFetchSeguro('mant_equipos', `select=estado&empresa=eq.${currentEmpresa}&limit=500`, `select=estado&limit=500`);
+  if (!planes.length && !equipos.length) return '';
+  const aValidar = equipos.filter(e => e.estado === 'sugerido').length;
+  return dashGrupo('Mantenimiento', [
+    dashTile(planes.length, 'Planes armados'),
+    dashTile(aValidar, 'Equipos a validar', '', aValidar ? '#b8860b' : 'var(--green)'),
+  ].join(''));
+}
+
+async function dashProcesos() {
+  const rows = await dashFetchSeguro('procesos_proyectos', `select=paso_actual&limit=300`);
+  if (!rows.length) return '';
+  const enPaso4 = rows.filter(r => Number(r.paso_actual) === 4).length;
+  return dashGrupo('Procesos IA', [
+    dashTile(rows.length, 'Proyectos en curso'),
+    dashTile(enPaso4, 'En Paso 4 (propuesta)', '', enPaso4 ? 'var(--green)' : null),
+  ].join(''));
+}
+
+async function dashConciliacion() {
+  const bancos = await dashFetchSeguro('conciliacion_bancos', `select=id,nombre&empresa=eq.${currentEmpresa}`);
+  if (!bancos.length) return '';
+  const tiles = await Promise.all(bancos.map(async b => {
+    const hist = await dashFetchSeguro('conciliacion_historial', `select=periodo,diferencia_final&banco_id=eq.${b.id}&order=periodo.desc&limit=1`);
+    if (!hist.length) return dashTile('—', b.nombre, 'sin conciliar todavía');
+    const h = hist[0];
+    const ok = Math.abs(h.diferencia_final || 0) < 1;
+    return dashTile(ok ? '✓' : ('$' + procesosFormatearNumero(h.diferencia_final)), b.nombre, h.periodo, ok ? 'var(--green)' : 'var(--red)');
+  }));
+  return dashGrupo('Conciliación bancaria — última diferencia por banco', tiles.join(''));
+}
+
+async function dashClientes() {
+  const rows = await dashFetchSeguro('clientes', `select=id&limit=1000`);
+  if (!rows.length) return '';
+  return dashGrupo('Clientes', dashTile(rows.length, 'Cargados en MAIA'));
+}
+
+const DASHBOARD_CARDS = [
+  { modulos: ['cotizaciones'], render: dashCotizaciones },
+  { modulos: ['hallazgos'], render: dashHallazgos },
+  { modulos: ['np-loc', 'np-int'], render: dashNP },
+  { modulos: ['mantenimiento'], render: dashMantenimiento },
+  { modulos: ['procesos'], render: dashProcesos },
+  { modulos: ['concil'], render: dashConciliacion },
+  { modulos: ['clientes'], render: dashClientes },
+];
+
+async function dashboardRender() {
+  const el = document.getElementById('dashboard-content');
+  if (!el) return;
+  el.innerHTML = '<p class="hint">Cargando...</p>';
+  const esEjecutivo = DASHBOARD_SECTORES_EJECUTIVO.includes(currentSector);
+  const allowed = SECTOR_TABS[currentSector] || [];
+  const cards = esEjecutivo ? DASHBOARD_CARDS : DASHBOARD_CARDS.filter(c => c.modulos.some(m => allowed.includes(m)));
+  if (!cards.length) { el.innerHTML = '<p class="hint">Todavía no hay tarjetas de dashboard para tu sector.</p>'; return; }
+  const intro = esEjecutivo ? '<p class="hint" style="margin-bottom:10px">Resumen ejecutivo — todos los módulos.</p>' : '';
+  try {
+    const partes = await Promise.all(cards.map(c => c.render().catch(e => { console.warn('Dashboard — error en una tarjeta:', e.message); return ''; })));
+    const html = partes.filter(Boolean).join('');
+    el.innerHTML = intro + (html || '<p class="hint">Todavía no hay datos para mostrar acá.</p>');
+  } catch (e) {
+    el.innerHTML = `<p class="hint">No se pudo cargar el dashboard: ${esc(e.message)}</p>`;
+  }
+}
+
 // ── Sidebar: secciones agrupadas por área ───────────────
 // Para agregar una sección nueva: sumarla acá con su área. Si el área es
 // nueva, agregarla también a NAV_AREA_ORDER para fijar en qué orden aparece.
@@ -27403,6 +27568,7 @@ function continueLoginAfterEmpresa() {
 
 // ── Sidebar navigation ────────────────────────────────
 const PANEL_TITLES = {
+  'dashboard': 'Dashboard',
   'rend': 'Rendiciones',
   'viajes': 'Viajes',
   'hallazgos': 'Hallazgos',
