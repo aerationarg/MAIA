@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.28</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.27</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.28</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26646,6 +26646,21 @@ function concilArchivoSeleccionado(tipo, file) {
   if (tipo === 'pdf') { _concilPdfFile = file; document.getElementById('concil-pdf-label').textContent = file.name; }
   else { _concilExcelFile = file; document.getElementById('concil-excel-label').textContent = file.name; }
 }
+function concilBancoSeleccionado() {} // reservado por si hace falta reaccionar al cambio de banco más adelante
+
+// Extrae un mensaje legible de cualquier cosa que se haya lanzado/rechazado —
+// no siempre es un Error de verdad: un fetch rechazado, un FileReader.onerror
+// o una respuesta HTTP no-JSON pueden llegar acá sin .message, y mostrar
+// "undefined" no le sirve a nadie para diagnosticar. Además se loguea el
+// objeto completo a consola para poder revisarlo.
+function concilErrMsg(e) {
+  console.error('Conciliación bancaria — error:', e);
+  if (e == null) return 'Error desconocido — mirá la consola del navegador para más detalle.';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  if (e.error?.message) return e.error.message;
+  try { const s = JSON.stringify(e); return s && s !== '{}' ? s : String(e); } catch (_) { return String(e); }
+}
 
 async function concilAnalizar() {
   const statusId = 'concil-analizar-status';
@@ -26703,7 +26718,7 @@ async function concilAnalizar() {
     concilRenderResultado();
     showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente. Revisá las tablas antes de confirmar.`);
   } catch (e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    showMsg(statusId, 'error', '✕ ' + concilErrMsg(e));
   } finally {
     btn.disabled = false;
   }
@@ -26779,13 +26794,15 @@ async function concilEjecutarPlan(token, siteId, itemId, plan) {
   const shBase = wbBase + `worksheets('${encodeURIComponent(nombre)}')/`;
   for (const op of plan.ops) {
     if (op.type === 'values') {
-      await fetch(shBase + `range(address='${op.range}')`, {
+      const r = await fetch(shBase + `range(address='${op.range}')`, {
         method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: op.values })
       });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(`No se pudo escribir "${op.range}" en la hoja: ` + (e.error?.message || 'HTTP ' + r.status)); }
     } else if (op.type === 'formula') {
-      await fetch(shBase + `range(address='${op.range}')`, {
+      const r = await fetch(shBase + `range(address='${op.range}')`, {
         method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ formulas: [[op.formula]] })
       });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(`No se pudo escribir la fórmula en "${op.range}": ` + (e.error?.message || 'HTTP ' + r.status)); }
     }
     if (op.bold) {
       await fetch(shBase + `range(address='${op.range}')/format/font`, {
@@ -26815,9 +26832,10 @@ async function concilConfirmar() {
 
     showMsg(statusId, 'loading', 'Subiendo el extracto (PDF)...');
     const pdfB64 = await fileToBase64(_concilPdfFile);
-    await fetch(`https://graph.microsoft.com/v1.0/sites/${s.banco.site_id}/drive/items/${folderId}:/${encodeURIComponent(_concilPdfFile.name)}:/content`, {
+    const pdfUpResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${s.banco.site_id}/drive/items/${folderId}:/${encodeURIComponent(_concilPdfFile.name)}:/content`, {
       method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: Uint8Array.from(atob(pdfB64), c => c.charCodeAt(0))
     });
+    if (!pdfUpResp.ok) { const e = await pdfUpResp.json().catch(() => ({})); throw new Error('No se pudo subir el PDF a SharePoint: ' + (e.error?.message || 'HTTP ' + pdfUpResp.status)); }
 
     showMsg(statusId, 'loading', 'Subiendo el Excel...');
     const excelB64 = await fileToBase64(_concilExcelFile);
@@ -26844,7 +26862,7 @@ async function concilConfirmar() {
 
     showMsg(statusId, 'success', `✓ Guardado en la carpeta "${periodo}" — hoja "${sheetName}" agregada al Excel.`);
   } catch (e) {
-    showMsg(statusId, 'error', '✕ ' + e.message);
+    showMsg(statusId, 'error', '✕ ' + concilErrMsg(e));
   }
 }
 
