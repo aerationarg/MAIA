@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.28</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.29</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.28</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.29</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26450,8 +26450,49 @@ function concilMatchLado(excelRows, pdfRows, ventanaDias) {
   return { matches, excelSinMatch, pdfSinMatch };
 }
 
-function concilConciliar(movsExcel, movsPdf, ventanaDias) {
+// Segunda pasada, sobre lo que quedó sin matchear 1 a 1: agrupa por cercanía de
+// fecha y ve si la SUMA de varias líneas de un lado da exactamente el monto de
+// una línea sola del otro lado — el caso típico es un lote (sueldos, un cúmulo
+// de gastos bancarios que no se detectó por concepto, etc.) que la contabilidad
+// asienta junto pero el banco lista transferencia por transferencia. Solo agrupa
+// TODAS las líneas disponibles en la ventana (no busca subconjuntos) para no
+// inventar coincidencias: si además hay algo ajeno en esos días, no matchea, y
+// esas líneas simplemente quedan en la tabla de diferencias como antes.
+function concilLoteMatch(excelSinMatch, pdfSinMatch, ventanaDias) {
+  const excelUsados = new Set(), pdfUsados = new Set();
+  const notas = [];
+  excelSinMatch.forEach((er, ei) => {
+    if (excelUsados.has(ei)) return;
+    const candidatos = pdfSinMatch.map((pr, pi) => ({ pr, pi })).filter(({ pr, pi }) => !pdfUsados.has(pi) && concilDiasEntre(er.fecha, pr.fecha) <= ventanaDias);
+    if (candidatos.length < 2) return;
+    const suma = candidatos.reduce((s, c) => s + c.pr.monto, 0);
+    if (concilMontosIguales(suma, er.monto, 2)) {
+      excelUsados.add(ei);
+      candidatos.forEach(c => pdfUsados.add(c.pi));
+      notas.push({ excel: er, pdfItems: candidatos.map(c => c.pr) });
+    }
+  });
+  pdfSinMatch.forEach((pr, pi) => {
+    if (pdfUsados.has(pi)) return;
+    const candidatos = excelSinMatch.map((er, ei) => ({ er, ei })).filter(({ er, ei }) => !excelUsados.has(ei) && concilDiasEntre(er.fecha, pr.fecha) <= ventanaDias);
+    if (candidatos.length < 2) return;
+    const suma = candidatos.reduce((s, c) => s + c.er.monto, 0);
+    if (concilMontosIguales(suma, pr.monto, 2)) {
+      pdfUsados.add(pi);
+      candidatos.forEach(c => excelUsados.add(c.ei));
+      notas.push({ pdf: pr, excelItems: candidatos.map(c => c.er) });
+    }
+  });
+  return {
+    excelRestante: excelSinMatch.filter((_, i) => !excelUsados.has(i)),
+    pdfRestante: pdfSinMatch.filter((_, i) => !pdfUsados.has(i)),
+    notas,
+  };
+}
+
+function concilConciliar(movsExcel, movsPdf, ventanaDias, ventanaLoteDias) {
   ventanaDias = ventanaDias == null ? 10 : ventanaDias;
+  ventanaLoteDias = ventanaLoteDias == null ? 3 : ventanaLoteDias;
   const excelGastoRows = movsExcel.filter(m => (m.haber || 0) > 0 && concilEsGastoBancarioExcel(m.concepto));
   const pdfGastoRows = movsPdf.filter(m => m.esGastoBancario);
   const gastosBancariosExcel = excelGastoRows.reduce((s, r) => s + r.haber, 0);
@@ -26464,13 +26505,16 @@ function concilConciliar(movsExcel, movsPdf, ventanaDias) {
 
   const dCred = concilMatchLado(excelCred, pdfCred, ventanaDias);
   const dDeb = concilMatchLado(excelDeb, pdfDeb, ventanaDias);
+  const loteCred = concilLoteMatch(dCred.excelSinMatch, dCred.pdfSinMatch, ventanaLoteDias);
+  const loteDeb = concilLoteMatch(dDeb.excelSinMatch, dDeb.pdfSinMatch, ventanaLoteDias);
 
   const r2 = n => Math.round(n * 100) / 100;
   return {
-    b1: dCred.excelSinMatch, b2: dCred.pdfSinMatch, b3: dDeb.pdfSinMatch, b4: dDeb.excelSinMatch,
+    b1: loteCred.excelRestante, b2: loteCred.pdfRestante, b3: loteDeb.pdfRestante, b4: loteDeb.excelRestante,
     gastosBancariosPdf: r2(gastosBancariosPdf), gastosBancariosExcel: r2(gastosBancariosExcel),
     gastosBancariosSinContabilizar: r2(gastosBancariosPdf - gastosBancariosExcel),
     coincidenciasAuto: dCred.matches.length + dDeb.matches.length,
+    lotesAuto: loteCred.notas.length + loteDeb.notas.length,
   };
 }
 
@@ -26538,9 +26582,22 @@ const CONCIL_LABELS = {
   b3: 'CHEQUES / DEBITOS EN EL BANCO NO REGISTRADOS EN LA CONTABILIDAD',
   b4: 'CHEQUES/TRANSFERENCIAS PENDIENTES DE DEBITAR EN EL BANCO',
 };
+// Excel corta los nombres de hoja a 31 caracteres, y prohíbe : \ / ? * [ ].
+// Si el nombre del banco es largo, se acorta ÉL (nunca la fecha, que es lo que
+// hace falta para distinguir un mes de otro) — antes se cortaba el string entero
+// a lo bruto y quedaba algo como "...al 3" en vez de "...al 30-11-2025".
+function concilSheetNameSafe(bancoNombre, fechaCierreISO) {
+  const limpiar = s => String(s || '').replace(/[:\\/?*\[\]]/g, '-');
+  const sufijo = ` al ${concilFechaDMY(fechaCierreISO).replace(/\//g, '-')}`;
+  const prefijoBase = limpiar(`Conciliación ${bancoNombre}`);
+  const maxPrefijo = 31 - sufijo.length;
+  const prefijo = prefijoBase.length > maxPrefijo ? prefijoBase.slice(0, Math.max(maxPrefijo, 1)) : prefijoBase;
+  return (prefijo + sufijo).slice(0, 31);
+}
+
 function concilBuildSheetPlan(input) {
   const ops = [];
-  const sheetName = `Conciliación ${input.bancoNombre} al ${concilFechaDMY(input.fechaCierreISO).replace(/\//g, '-')}`.slice(0, 31);
+  const sheetName = concilSheetNameSafe(input.bancoNombre, input.fechaCierreISO);
   ops.push({ type: 'values', range: 'C3', values: [[`CONCILIACION BANCARIA ${input.bancoNombre} ${input.empresa} — AL ${concilFechaDMY(input.fechaCierreISO)}`]], bold: true });
   ops.push({ type: 'values', range: 'C5:D5', values: [['SALDO SEGÚN CONTABILIDAD', input.saldoContabilidad]], bold: true });
   const filaSum = {};
@@ -26716,7 +26773,7 @@ async function concilAnalizar() {
       gastosBancariosSinContabilizar: r.gastosBancariosSinContabilizar,
     };
     concilRenderResultado();
-    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente. Revisá las tablas antes de confirmar.`);
+    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente${r.lotesAuto ? ` y ${r.lotesAuto} lote(s) (ej. sueldos, gastos bancarios) se agruparon contra un asiento único` : ''}. Revisá las tablas antes de confirmar.`);
   } catch (e) {
     showMsg(statusId, 'error', '✕ ' + concilErrMsg(e));
   } finally {
