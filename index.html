@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.35</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.36</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.35</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.36</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11853,6 +11853,7 @@ async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre) {
     celdasAplicadas.push(c.ref);
   });
   if (!celdasAplicadas.length) { alert('No se pudo hacer coincidir ninguna dimensión de "'+modeloNombre+'" con celdas editables de esta hoja — revisá los nombres de celda en Cfg Procesos IA.'); return; }
+  if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
   h.valores = nuevosValores;
   h.confirmada = false;
   h.plantaCompacta = { modelo: modeloNombre, celdas: celdasAplicadas };
@@ -11908,6 +11909,16 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   if (!cell) return;
   const numVal = val === '' ? '' : (isNaN(Number(val)) ? val : Number(val));
   hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[numVal]]);
+  // Fuerza un recálculo completo del grafo de dependencias — HyperFormula
+  // recalcula solo con cada setCellContents, pero en esta app una misma
+  // instancia compartida recibe MUCHOS addSheet/setSheetContent manuales (una
+  // hoja libre se rearma entera cada vez que se registra) y en algún caso
+  // puntual esa mezcla dejaba una celda dependiente sin recalcularse sola
+  // (reportado: cambiar "Número de batches" no movía "Volumen por batch," a
+  // pesar de que la fórmula seguía intacta). rebuildAndRecalculate() es la
+  // manera documentada de HyperFormula de resincronizar todo — es barato para
+  // hojas de este tamaño.
+  if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
 
   const p = procesosCurrentProyecto;
   const dd = Object.assign({}, p.diseno_data);
@@ -12194,6 +12205,9 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
         }
       } catch (_e) { /* acción individual inválida, seguir con las demás */ }
     });
+    // Ver comentario en procesosStep2SetValor: resincroniza HyperFormula
+    // después de aplicar los cambios de este mensaje.
+    if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
 
     // Qué cambió de verdad en la planilla respecto de lo que la IA veía al
     // pensar su respuesta: datos que cambió ella + resultados que se
@@ -12278,6 +12292,7 @@ function procesosStep2RestaurarFormula(nombre, ref) {
   const hf = procesosStep2GetHF(nombre);
   if (c && hf && model.grid[c.row] && model.grid[c.row][c.col] != null) {
     hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[model.grid[c.row][c.col]]]);
+    if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
   }
   procesosSaveProyecto({ diseno_data: dd }, p).then(() => { if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel(); });
 }
