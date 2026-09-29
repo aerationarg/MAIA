@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.30</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.31</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.30</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.31</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4651,10 +4651,69 @@ async function renderHallazgos() {
 }
 
 // ── Asistente MAIA (chat flotante, con búsqueda en SharePoint) ──
-const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, y también explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿dónde está la plantilla de rendición?", "¿qué dice la lista de Hallazgos sobre tal proyecto?" o "¿cómo cargo un hallazgo?".';
+const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, buscar en los datos guardados dentro de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos, etc.), y explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿qué le cotizamos a tal cliente?", "¿qué hallazgos siguen abiertos?" o "¿cómo cargo un hallazgo?".';
 let _maiaChatMessages = [];
 let _maiaChatLoading = false;
 let _maiaChatSourceCache = null;
+
+// ── Consulta de datos propios de MAIA (Supabase) — de SOLO LECTURA ──
+// Todos los usuarios ven todos los módulos acá (a diferencia del menú, que sí
+// filtra por sector): esto solo permite CONSULTAR, nunca crear/editar/borrar,
+// así que no hace falta replicar los mismos permisos de acceso que tiene cada
+// sección. "select" es opcional (default '*'); "orderBy" también es opcional y
+// si la columna no existiera de verdad, maiaChatConsultarDatos reintenta sin
+// order en vez de romper la consulta entera.
+const MAIA_DATOS_MODULOS = {
+  hallazgos: { tabla: 'hallazgos', label: 'Hallazgos (SGI)', orderBy: 'created_at.desc' },
+  clientes: { tabla: 'clientes', label: 'Clientes (con contactos, sucursales y lugares de entrega)', select: '*,clientes_contactos(*),clientes_sucursales(*),clientes_lugares_entrega(*)' },
+  cotizaciones: { tabla: 'cotizaciones', label: 'Cotizaciones en armado/curso' },
+  cotizaciones_historial_ventas: { tabla: 'cotizaciones_historial_ventas', label: 'Historial de cotizaciones/ventas cerradas (ganadas y perdidas)' },
+  cotizaciones_catalogo: { tabla: 'cotizaciones_catalogo', label: 'Catálogo de productos, precios y stock' },
+  np_historial: { tabla: 'np_historial', label: 'Notas de pedido (historial)' },
+  np_aprobaciones: { tabla: 'np_aprobaciones', label: 'Notas de pedido pendientes/en aprobación' },
+  mant_planes: { tabla: 'mant_planes', label: 'Planes de mantenimiento', orderBy: 'updated_at.desc' },
+  mant_equipos: { tabla: 'mant_equipos', label: 'Equipos dados de alta en Mantenimiento' },
+  mant_tareas: { tabla: 'mant_tareas', label: 'Tareas de los planes de mantenimiento' },
+  procesos_catalogo: { tabla: 'procesos_catalogo', label: 'Procesos IA — catálogo/fichas de proyectos anteriores' },
+  procesos_proyectos: { tabla: 'procesos_proyectos', label: 'Procesos IA — proyectos en curso', orderBy: 'created_at.desc' },
+  flowsheet_proyectos: { tabla: 'flowsheet_proyectos', label: 'Flowsheets generados', orderBy: 'created_at.desc' },
+  microorganismos_conocimiento: { tabla: 'microorganismos_conocimiento', label: 'Microorganismos — base de conocimiento propia' },
+  doc_documentos: { tabla: 'doc_documentos', label: 'Documentos de referencia (DFS / Manual de operación)', orderBy: 'updated_at.desc' },
+  conciliacion_bancos: { tabla: 'conciliacion_bancos', label: 'Conciliación bancaria — bancos configurados' },
+  conciliacion_historial: { tabla: 'conciliacion_historial', label: 'Conciliación bancaria — historial de conciliaciones confirmadas', orderBy: 'created_at.desc' },
+  viajes_solicitudes: { tabla: 'viajes_solicitudes', label: 'Viajes — solicitudes' },
+};
+const MAIA_DATOS_TOPE_FETCH = 500; // por consulta, antes de filtrar — evita traer una tabla entera si es gigante
+async function maiaChatConsultarDatos(modulo, filtro, limite) {
+  const cfg = MAIA_DATOS_MODULOS[modulo];
+  if (!cfg) return `Módulo "${modulo}" no reconocido. Los módulos disponibles son: ${Object.keys(MAIA_DATOS_MODULOS).join(', ')}.`;
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  const auth = { Authorization: 'Bearer ' + session.token };
+  const selectParam = cfg.select || '*';
+  let res = await supaFetch(`/rest/v1/${cfg.tabla}?select=${encodeURIComponent(selectParam)}&limit=${MAIA_DATOS_TOPE_FETCH}${cfg.orderBy ? '&order=' + cfg.orderBy : ''}`, { headers: auth });
+  if (!res.ok) {
+    // reintento simple, sin select especial ni order, por si alguno de los dos no existiera de verdad
+    res = await supaFetch(`/rest/v1/${cfg.tabla}?select=*&limit=${MAIA_DATOS_TOPE_FETCH}`, { headers: auth });
+  }
+  if (!res.ok) { const e = await res.json().catch(() => ({})); return `No se pudo consultar "${cfg.label}": ${e.message || 'HTTP ' + res.status}`; }
+  let rows = await res.json();
+  const totalTraido = rows.length;
+  if (filtro && filtro.trim()) {
+    const q = filtro.trim().toLowerCase();
+    rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+  }
+  const limiteFinal = Math.min(Math.max(Number(limite) || 20, 1), 60);
+  const hayMas = rows.length > limiteFinal;
+  rows = rows.slice(0, limiteFinal);
+  return JSON.stringify({
+    modulo: cfg.label,
+    filas_devueltas: rows.length,
+    aviso: hayMas
+      ? 'Hay más resultados de los que se muestran acá — si el usuario necesita más, pedile que afine la búsqueda con un texto más específico.'
+      : (totalTraido >= MAIA_DATOS_TOPE_FETCH ? `Esta tabla tiene ${MAIA_DATOS_TOPE_FETCH} o más filas y solo se trajeron las primeras ${MAIA_DATOS_TOPE_FETCH} antes de filtrar — si no encontrás lo que buscás, podría estar fuera de ese lote; avisale al usuario de esta limitación si no encontrás algo que debería existir.` : undefined),
+    datos: rows,
+  });
+}
 
 const MAIA_CHAT_TOOLS = [
   {
@@ -4729,6 +4788,15 @@ const MAIA_CHAT_TOOLS = [
       pagina_titulo: { type:'string', description:'Título de la página (opcional)' },
       notas: { type:'string', description:'Cualquier aclaración útil para la próxima vez — ej. qué campo interno corresponde a qué dato ("el nombre de la persona está en el campo Title, no en uno de tipo Persona")' }
     }, required:['tipo','alias','site_id'] }
+  },
+  {
+    name: 'consultar_datos_maia',
+    description: 'Consulta datos GUARDADOS ADENTRO de MAIA (no de SharePoint): clientes, cotizaciones, hallazgos, notas de pedido, planes de mantenimiento, proyectos de Procesos IA, flowsheets, catálogo de productos/precios, documentos de referencia, conciliación bancaria, viajes. Es de SOLO LECTURA — nunca crea, edita ni borra nada. Usala para cualquier pregunta sobre datos reales de la empresa que vivan en MAIA, por ejemplo "¿qué le cotizamos a tal cliente?", "¿qué hallazgos siguen abiertos?", "¿hay algún proyecto anterior parecido a X?", "notas de pedido pendientes de aprobación". Si no sabés en qué módulo puede estar algo, probá con el que más se parezca — podés llamarla varias veces con distintos módulos en la misma pregunta.',
+    input_schema: { type:'object', properties: {
+      modulo: { type:'string', enum: Object.keys(MAIA_DATOS_MODULOS), description: 'Qué conjunto de datos consultar:\n' + Object.entries(MAIA_DATOS_MODULOS).map(([k,v]) => `- "${k}": ${v.label}`).join('\n') },
+      filtro: { type:'string', description:'Texto libre para quedarte solo con las filas que lo contengan en cualquier campo (nombre de cliente, número de cotización, estado, etc.). Dejalo vacío para traer las últimas filas sin filtrar.' },
+      limite: { type:'number', description:'Cuántas filas devolver como máximo (default 20, máximo 60) — pedí pocas si solo necesitás un dato puntual.' },
+    }, required:['modulo'] }
   }
 ];
 
@@ -5250,7 +5318,7 @@ async function maiaChatCallClaude(messages) {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
-      system: maiaChatFechaHoyTxt() + 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer. Si te preguntan por datos que viven en una LISTA de SharePoint (un registro, un listado, una tabla de seguimiento — no un archivo) o por un botón/link/"vínculo rápido" en una PÁGINA de un sitio (por ejemplo un Microsoft Form u otro sistema externo que no es archivo ni Lista): PRIMERO llamá a buscar_conocimiento_sharepoint con el tema — si te devuelve un site_id (y list_id o pagina_id según corresponda) con una coincidencia razonable, usalos DIRECTAMENTE en leer_lista_sharepoint o leer_pagina_sharepoint, sin volver a buscar el sitio/lista/página de cero. Si no encuentra nada útil, encadená la búsqueda normal: para una Lista, 1) buscar_sitios_sharepoint para el sitio (te da un "id" de sitio); 2) buscar_listas_sharepoint con ese id (te da un "id" de lista); 3) leer_lista_sharepoint con ambos ids — pasale "filtro" con lo que el usuario esté buscando para no traer la lista entera de una. Para una página, 1) buscar_sitios_sharepoint para el sitio; 2) buscar_paginas_sharepoint con ese site_id (si no sabés el nombre exacto de la página, dejá el filtro vacío para ver todas y elegí la de Inicio u otra que corresponda); 3) leer_pagina_sharepoint con site_id y pagina_id para traer los links — identificá cuál es el que el usuario busca y pasáselo en su propia línea, copiado EXACTO tal cual vino, igual que hacés con los links de buscar_sharepoint (si hay varios candidatos ambiguos, mostráselos todos y preguntale cuál quiere). Copiá todos los ids EXACTOS tal cual vinieron en el resultado anterior, nunca los inventes ni los abrevies — aunque el usuario te haya dado el nombre exacto del sitio/lista/página, igual tenés que resolver los ids con estas herramientas, nunca los asumas. Cada vez que resolvés con ÉXITO (por la vía que sea) una Lista o página que le sirvió al usuario para responder, llamá a guardar_conocimiento_sharepoint con lo que encontraste (alias con palabras clave del tema, los ids, y en "notas" cualquier aclaración útil como qué campo interno corresponde a qué dato) — así la próxima consulta sobre ese tema, de cualquier usuario, es más rápida y no depende de la búsqueda por nombre. No hace falta pedirle permiso al usuario para guardar esto, es información interna del asistente. Si alguna herramienta de sitios, listas o páginas tira error, no encuentra nada, o el resultado no tiene la info que te piden, decíselo al usuario con claridad — nunca inventes ítems, nombres, fechas ni ningún otro dato que no haya venido literalmente en el resultado de la herramienta.',
+      system: maiaChatFechaHoyTxt() + 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan por datos reales de la empresa que vivan ADENTRO de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos de Procesos IA, flowsheets, catálogo de productos/precios, conciliación bancaria, viajes — no archivos ni Listas de SharePoint), usá consultar_datos_maia con el módulo que corresponda; si no estás segurx de en qué módulo puede estar algo, probá con el más parecido, y si hace falta llamala varias veces con módulos distintos para la misma pregunta antes de decir que no encontraste nada. Es de solo lectura: nunca la uses para intentar cambiar, borrar o crear algo — si te piden eso, explicá que para modificar datos hay que hacerlo desde la sección correspondiente de MAIA, vos solo podés consultar. Cuando muestres los resultados, resumilos en una respuesta clara (tabla o lista corta si son varios) en vez de pegar el JSON crudo, y si el resultado trae un "aviso" sobre que puede haber más datos de los que se muestran, contáselo al usuario. Nunca inventes ni completes con supuestos ningún dato (nombre, monto, fecha, estado) que no haya venido literalmente en el resultado de la herramienta — si algo no está, decilo así de claro. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer. Si te preguntan por datos que viven en una LISTA de SharePoint (un registro, un listado, una tabla de seguimiento — no un archivo) o por un botón/link/"vínculo rápido" en una PÁGINA de un sitio (por ejemplo un Microsoft Form u otro sistema externo que no es archivo ni Lista): PRIMERO llamá a buscar_conocimiento_sharepoint con el tema — si te devuelve un site_id (y list_id o pagina_id según corresponda) con una coincidencia razonable, usalos DIRECTAMENTE en leer_lista_sharepoint o leer_pagina_sharepoint, sin volver a buscar el sitio/lista/página de cero. Si no encuentra nada útil, encadená la búsqueda normal: para una Lista, 1) buscar_sitios_sharepoint para el sitio (te da un "id" de sitio); 2) buscar_listas_sharepoint con ese id (te da un "id" de lista); 3) leer_lista_sharepoint con ambos ids — pasale "filtro" con lo que el usuario esté buscando para no traer la lista entera de una. Para una página, 1) buscar_sitios_sharepoint para el sitio; 2) buscar_paginas_sharepoint con ese site_id (si no sabés el nombre exacto de la página, dejá el filtro vacío para ver todas y elegí la de Inicio u otra que corresponda); 3) leer_pagina_sharepoint con site_id y pagina_id para traer los links — identificá cuál es el que el usuario busca y pasáselo en su propia línea, copiado EXACTO tal cual vino, igual que hacés con los links de buscar_sharepoint (si hay varios candidatos ambiguos, mostráselos todos y preguntale cuál quiere). Copiá todos los ids EXACTOS tal cual vinieron en el resultado anterior, nunca los inventes ni los abrevies — aunque el usuario te haya dado el nombre exacto del sitio/lista/página, igual tenés que resolver los ids con estas herramientas, nunca los asumas. Cada vez que resolvés con ÉXITO (por la vía que sea) una Lista o página que le sirvió al usuario para responder, llamá a guardar_conocimiento_sharepoint con lo que encontraste (alias con palabras clave del tema, los ids, y en "notas" cualquier aclaración útil como qué campo interno corresponde a qué dato) — así la próxima consulta sobre ese tema, de cualquier usuario, es más rápida y no depende de la búsqueda por nombre. No hace falta pedirle permiso al usuario para guardar esto, es información interna del asistente. Si alguna herramienta de sitios, listas o páginas tira error, no encuentra nada, o el resultado no tiene la info que te piden, decíselo al usuario con claridad — nunca inventes ítems, nombres, fechas ni ningún otro dato que no haya venido literalmente en el resultado de la herramienta.',
       tools: MAIA_CHAT_TOOLS,
       messages: maiaChatTrimForApi(messages, 8)
     })
@@ -5287,8 +5355,9 @@ async function maiaChatSend() {
         const usaArchivo = toolUses.some(t => t.name === 'leer_archivo_sharepoint');
         const usaCodigo = toolUses.some(t => t.name === 'leer_codigo_maia');
         const usaSp = toolUses.some(t => t.name === 'buscar_sharepoint');
+        const usaDatos = toolUses.some(t => t.name === 'consultar_datos_maia');
         const usaListas = toolUses.some(t => ['buscar_conocimiento_sharepoint','buscar_sitios_sharepoint','buscar_listas_sharepoint','leer_lista_sharepoint','buscar_paginas_sharepoint','leer_pagina_sharepoint','guardar_conocimiento_sharepoint'].includes(t.name));
-        const label = usaArchivo ? '📄 Leyendo el archivo...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : usaListas ? '📋 Buscando en listas/páginas de SharePoint...' : '🔎 Buscando en SharePoint...';
+        const label = usaArchivo ? '📄 Leyendo el archivo...' : usaDatos ? '📊 Consultando datos de MAIA...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : usaListas ? '📋 Buscando en listas/páginas de SharePoint...' : '🔎 Buscando en SharePoint...';
         hintEl = maiaChatRenderMsg('system-hint', label);
       }
       const toolResults = [];
@@ -5315,6 +5384,8 @@ async function maiaChatSend() {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarPaginas(tu.input?.site_id || '', tu.input?.query || '') });
           } else if (tu.name === 'leer_pagina_sharepoint') {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatLeerPagina(tu.input?.site_id || '', tu.input?.pagina_id || '') });
+          } else if (tu.name === 'consultar_datos_maia') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatConsultarDatos(tu.input?.modulo || '', tu.input?.filtro || '', tu.input?.limite) });
           } else {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarSharePoint(tu.input?.query || '') });
           }
