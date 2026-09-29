@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.29</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.30</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.29</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.30</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26490,31 +26490,61 @@ function concilLoteMatch(excelSinMatch, pdfSinMatch, ventanaDias) {
   };
 }
 
-function concilConciliar(movsExcel, movsPdf, ventanaDias, ventanaLoteDias) {
+// Ventana amplia para chequear si algo YA IDENTIFICADO como pendiente en un mes
+// anterior se resolvió este mes: acá no hay riesgo de "coincidencia trucha" como
+// con datos nuevos (son pocos ítems, ya señalados a mano), así que no tiene
+// sentido acotarlo a unos días — un cheque puede tardar meses en cobrarse.
+const CONCIL_VENTANA_ARRASTRE = 3650;
+
+// arrastre: cuatro arrays de {fecha,concepto,monto} — el detalle YA CONFIRMADO
+// del mes anterior (b1..b4), tal cual se guardó al confirmar esa conciliación.
+// Antes de mirar los movimientos nuevos de este mes, se fija si algo de lo
+// arrastrado ya se resolvió (ahora aparece del otro lado) — si no, se sigue
+// arrastrando. Lo que sigue pendiente + lo nuevo de este mes es el resultado.
+function concilConciliar(movsExcel, movsPdf, arrastre, ventanaDias, ventanaLoteDias) {
   ventanaDias = ventanaDias == null ? 10 : ventanaDias;
   ventanaLoteDias = ventanaLoteDias == null ? 3 : ventanaLoteDias;
+  arrastre = arrastre || {};
+  const arB1 = arrastre.b1 || [], arB2 = arrastre.b2 || [], arB3 = arrastre.b3 || [], arB4 = arrastre.b4 || [];
+
   const excelGastoRows = movsExcel.filter(m => (m.haber || 0) > 0 && concilEsGastoBancarioExcel(m.concepto));
   const pdfGastoRows = movsPdf.filter(m => m.esGastoBancario);
   const gastosBancariosExcel = excelGastoRows.reduce((s, r) => s + r.haber, 0);
   const gastosBancariosPdf = pdfGastoRows.reduce((s, r) => s + (r.debito || 0) - (r.credito || 0), 0);
 
-  const excelCred = movsExcel.filter(m => (m.debe || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debe }));
-  const excelDeb = movsExcel.filter(m => (m.haber || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.haber }));
-  const pdfCred = movsPdf.filter(m => (m.credito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.credito }));
-  const pdfDeb = movsPdf.filter(m => (m.debito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debito }));
+  const excelCredNuevo = movsExcel.filter(m => (m.debe || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debe }));
+  const excelDebNuevo = movsExcel.filter(m => (m.haber || 0) > 0 && !excelGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.haber }));
+  const pdfCredNuevo = movsPdf.filter(m => (m.credito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.credito }));
+  const pdfDebNuevo = movsPdf.filter(m => (m.debito || 0) > 0 && !pdfGastoRows.includes(m)).map(m => ({ fecha: m.fecha, concepto: m.concepto, monto: m.debito }));
 
-  const dCred = concilMatchLado(excelCred, pdfCred, ventanaDias);
-  const dDeb = concilMatchLado(excelDeb, pdfDeb, ventanaDias);
+  // Paso 1: ¿lo arrastrado (b1: excel esperando al banco) ya lo acreditó el banco este mes?
+  const rB1 = concilMatchLado(arB1, pdfCredNuevo, CONCIL_VENTANA_ARRASTRE);
+  // Paso 2: ¿lo arrastrado (b2: banco esperando a la contabilidad) ya se registró este mes?
+  const rB2 = concilMatchLado(excelCredNuevo, arB2, CONCIL_VENTANA_ARRASTRE);
+  // Paso 3: con lo que sobra de cada lado (nuevo, sin usar para resolver arrastre), el
+  // matching normal de este mes — 1 a 1 con ventana corta, y después por lote.
+  const dCred = concilMatchLado(rB2.excelSinMatch, rB1.pdfSinMatch, ventanaDias);
   const loteCred = concilLoteMatch(dCred.excelSinMatch, dCred.pdfSinMatch, ventanaLoteDias);
+
+  const rB4 = concilMatchLado(arB4, pdfDebNuevo, CONCIL_VENTANA_ARRASTRE);
+  const rB3 = concilMatchLado(excelDebNuevo, arB3, CONCIL_VENTANA_ARRASTRE);
+  const dDeb = concilMatchLado(rB3.excelSinMatch, rB4.pdfSinMatch, ventanaDias);
   const loteDeb = concilLoteMatch(dDeb.excelSinMatch, dDeb.pdfSinMatch, ventanaLoteDias);
 
+  const marcar = (rows, origen) => rows.map(r => origen ? { ...r, arrastrado: true } : r);
   const r2 = n => Math.round(n * 100) / 100;
   return {
-    b1: loteCred.excelRestante, b2: loteCred.pdfRestante, b3: loteDeb.pdfRestante, b4: loteDeb.excelRestante,
-    gastosBancariosPdf: r2(gastosBancariosPdf), gastosBancariosExcel: r2(gastosBancariosExcel),
+    b1: [...marcar(rB1.excelSinMatch, true), ...loteCred.excelRestante], // DEPOSITOS CONTABILIZADOS NO ACREDITADOS EN EL BANCO
+    b2: [...marcar(rB2.pdfSinMatch, true), ...loteCred.pdfRestante],     // DEPOSITOS ACREDITADOS EN BANCO NO REGISTRADOS EN LA CONTABILIDAD
+    b3: [...marcar(rB3.pdfSinMatch, true), ...loteDeb.pdfRestante],      // CHEQUES / DEBITOS EN EL BANCO NO REGISTRADOS EN LA CONTABILIDAD
+    b4: [...marcar(rB4.excelSinMatch, true), ...loteDeb.excelRestante],  // CHEQUES/TRANSFERENCIAS PENDIENTES DE DEBITAR EN EL BANCO
+    gastosBancariosPdf: r2(gastosBancariosPdf),
+    gastosBancariosExcel: r2(gastosBancariosExcel),
     gastosBancariosSinContabilizar: r2(gastosBancariosPdf - gastosBancariosExcel),
     coincidenciasAuto: dCred.matches.length + dDeb.matches.length,
     lotesAuto: loteCred.notas.length + loteDeb.notas.length,
+    arrastreResuelto: rB1.matches.length + rB2.matches.length + rB3.matches.length + rB4.matches.length,
+    arrastrePendiente: rB1.excelSinMatch.length + rB2.pdfSinMatch.length + rB3.pdfSinMatch.length + rB4.excelSinMatch.length,
   };
 }
 
@@ -26719,6 +26749,20 @@ function concilErrMsg(e) {
   try { const s = JSON.stringify(e); return s && s !== '{}' ? s : String(e); } catch (_) { return String(e); }
 }
 
+// Busca la última conciliación confirmada de este banco ANTES del período
+// actual (compara como texto 'YYYY-MM', que ordena bien) y devuelve su
+// detalle (las 4 tablas + gastos bancarios sin contabilizar) para arrastrar
+// lo que sigue pendiente. null si no hay ninguna anterior.
+async function concilArrastreCargar(bancoId, periodoActual) {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
+    const res = await supaFetch(`/rest/v1/conciliacion_historial?banco_id=eq.${bancoId}&periodo=lt.${periodoActual}&select=periodo,detalle&order=periodo.desc&limit=1`, { headers: { Authorization: 'Bearer ' + session.token } });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows[0] || null;
+  } catch (e) { console.warn('No se pudo cargar el arrastre del mes anterior:', e.message); return null; }
+}
+
 async function concilAnalizar() {
   const statusId = 'concil-analizar-status';
   const bancoId = document.getElementById('concil-banco-select').value;
@@ -26760,20 +26804,29 @@ async function concilAnalizar() {
     const ext = tu.input;
     const movsPdf = (ext.movimientos || []).map(m => ({ fecha: m.fecha, concepto: m.concepto || '', debito: m.debito || 0, credito: m.credito || 0, esGastoBancario: !!m.es_gasto_bancario }));
 
+    showMsg(statusId, 'loading', 'Buscando el mes anterior para arrastrar pendientes...');
+    const periodo = fechaISO.slice(0, 7);
+    const anterior = await concilArrastreCargar(bancoId, periodo);
+    const arrastre = anterior?.detalle || null;
+
     showMsg(statusId, 'loading', 'Comparando...');
-    const r = concilConciliar(movsExcel, movsPdf);
+    const r = concilConciliar(movsExcel, movsPdf, arrastre);
     const saldoContabilidad = movsExcel.length ? (movsExcel[movsExcel.length - 1].saldo ?? null) : null;
     const saldoExtracto = ext.saldo_final != null ? ext.saldo_final : null;
+    // Los gastos bancarios que quedaron sin contabilizar el mes pasado tampoco
+    // se "resuelven solos" — si seguían sin registrarse, se suman a lo nuevo.
+    const gastosBancariosSinContabilizar = r.gastosBancariosSinContabilizar + (arrastre?.gastosBancariosSinContabilizar || 0);
 
     _concilState = {
       bancoId, banco, empresa: currentEmpresa, fechaISO,
       movsExcel, movsPdf, saldoContabilidad, saldoExtracto,
       b1: r.b1, b2: r.b2, b3: r.b3, b4: r.b4,
       gastosBancariosPdf: r.gastosBancariosPdf, gastosBancariosExcel: r.gastosBancariosExcel,
-      gastosBancariosSinContabilizar: r.gastosBancariosSinContabilizar,
+      gastosBancariosSinContabilizar: Math.round(gastosBancariosSinContabilizar * 100) / 100,
     };
     concilRenderResultado();
-    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente${r.lotesAuto ? ` y ${r.lotesAuto} lote(s) (ej. sueldos, gastos bancarios) se agruparon contra un asiento único` : ''}. Revisá las tablas antes de confirmar.`);
+    const notaArrastre = anterior ? ` Se arrastraron los pendientes de ${anterior.periodo} — ${r.arrastreResuelto} ya se resolvieron y ${r.arrastrePendiente} siguen abiertos.` : ' No encontré una conciliación anterior de este banco para arrastrar pendientes (¿es la primera vez, o el mes anterior no se confirmó todavía desde MAIA?).';
+    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente${r.lotesAuto ? ` y ${r.lotesAuto} lote(s) (ej. sueldos, gastos bancarios) se agruparon contra un asiento único` : ''}.${notaArrastre} Revisá las tablas antes de confirmar.`);
   } catch (e) {
     showMsg(statusId, 'error', '✕ ' + concilErrMsg(e));
   } finally {
@@ -26801,14 +26854,16 @@ function concilRenderResultado() {
     </div>
     <div style="margin-top:10px;font-size:15px;font-weight:600;color:${Math.abs(calc.diferencia) < 1 ? 'var(--green)' : 'var(--red)'}">
       Diferencia: $ ${concilNumFmt(calc.diferencia)} ${Math.abs(calc.diferencia) < 1 ? '✓ concilia' : ''}
-    </div>`;
+    </div>
+    <p class="hint" style="margin-top:6px">🕐 = pendiente arrastrado de un mes anterior (se sigue arrastrando hasta que aparezca del otro lado, o lo borrás a mano si ya no corresponde).</p>`;
 
   const sums = { b1: calc.sumB1, b2: calc.sumB2, b3: calc.sumB3, b4: calc.sumB4 };
   const bloqueHtml = (key, label) => `
     <div class="card" style="margin-bottom:10px">
       <div class="card-label">${esc(label)} <span style="font-weight:400;color:var(--text2)">— $ ${concilNumFmt(sums[key])}</span></div>
       ${s[key].length ? s[key].map((r, i) => `
-        <div style="display:grid;grid-template-columns:130px 1fr 130px 30px;gap:6px;margin-bottom:4px;align-items:center">
+        <div style="display:grid;grid-template-columns:20px 130px 1fr 130px 30px;gap:6px;margin-bottom:4px;align-items:center">
+          <span title="${r.arrastrado ? 'Pendiente de un mes anterior' : 'Nuevo de este mes'}">${r.arrastrado ? '🕐' : ''}</span>
           <input type="date" value="${r.fecha || ''}" onchange="concilEditarFila('${key}',${i},'fecha',this.value)" style="font-size:12px" />
           <input value="${esc(r.concepto || '')}" onchange="concilEditarFila('${key}',${i},'concepto',this.value)" style="font-size:12px" />
           <input type="number" step="0.01" value="${r.monto}" onchange="concilEditarFila('${key}',${i},'monto',this.value)" style="font-size:12px" />
@@ -26912,10 +26967,14 @@ async function concilConfirmar() {
 
     showMsg(statusId, 'loading', 'Guardando registro...');
     const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
-    await supaFetch('/rest/v1/conciliacion_historial', {
+    // Se guarda el detalle completo (no solo la diferencia final) para poder
+    // arrastrar lo que siga pendiente al conciliar el mes que viene.
+    const detalle = { b1: s.b1, b2: s.b2, b3: s.b3, b4: s.b4, gastosBancariosSinContabilizar: s.gastosBancariosSinContabilizar || 0 };
+    const histResp = await supaFetch('/rest/v1/conciliacion_historial', {
       method: 'POST', headers: { Authorization: 'Bearer ' + session.token },
-      body: JSON.stringify({ banco_id: s.bancoId, empresa: s.empresa, periodo, diferencia_final: concilRecalcular().diferencia, confirmado_por_nombre: currentUser?.nombre || currentUser?.email || null })
-    }).catch(() => {});
+      body: JSON.stringify({ banco_id: s.bancoId, empresa: s.empresa, periodo, diferencia_final: concilRecalcular().diferencia, confirmado_por_nombre: currentUser?.nombre || currentUser?.email || null, detalle })
+    }).catch(() => null);
+    if (!histResp || !histResp.ok) console.warn('No se pudo guardar el registro en conciliacion_historial — el mes que viene no va a poder arrastrar los pendientes de este. ¿Corriste conciliacion_historial_add_detalle.sql?');
 
     showMsg(statusId, 'success', `✓ Guardado en la carpeta "${periodo}" — hoja "${sheetName}" agregada al Excel.`);
   } catch (e) {
