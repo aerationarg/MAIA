@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.34</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.35</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.34</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.35</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11659,6 +11659,7 @@ function procesosStep2RenderHojaPanel() {
     const rangoTxt = [c.rango ? 'Rango: '+c.rango : '', c.rango_limite ? 'Límite: '+c.rango_limite : ''].filter(Boolean).join(' · ');
     const formulaRaw = c.isFormula ? String(model.grid[c.row][c.col] || '') : '';
     const formulaTxt = c.formulaLegible ? c.formulaLegible : formulaRaw;
+    const forzada = c.isFormula && (h.celdasForzadas || []).includes(c.ref);
     // Unidad, origen/rango y fórmula van cada uno en su propia columna a la
     // derecha del valor (no apilados) — así se pueden leer las dos cosas de
     // una fila que tenga fórmula Y rango a la vez, sin que una tape a la otra.
@@ -11671,7 +11672,9 @@ function procesosStep2RenderHojaPanel() {
     return `
     <div class="ps2-row">
       <span class="ps2-key"><span style="font-family:monospace;font-size:11px;font-weight:600;color:var(--text2);background:var(--surface2);border-radius:4px;padding:0 4px;margin-right:5px">${esc(c.ref)}</span>${esc(c.label)}</span>
-      ${(c.isFormula || mapeo)
+      ${forzada
+        ? `<span class="ps2-val" style="background:#fff3cd;color:#8a6d00;display:flex;align-items:center;justify-content:flex-end;gap:4px" title="Fijado a mano por el chat de diseño — ya NO se recalcula solo aunque cambien sus datos de entrada">🔒 ${valTxt!=null?esc(valTxt):''}<button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:10px" onclick="procesosStep2RestaurarFormula('${safe}','${c.ref}')" title="Restaurar la fórmula para que vuelva a recalcularse sola">↺</button></span>`
+        : (c.isFormula || mapeo)
         ? `<span class="ps2-val" style="background:var(--surface2)" title="${esc(origenTxt)}">${valTxt!=null?esc(valTxt):''}</span>`
         : `<input class="ps2-val" value="${valTxt!=null?esc(valTxt):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" />`}
       <span class="ps2-unidad">${c.unidad?esc(c.unidad):''}</span>
@@ -11745,6 +11748,11 @@ function procesosStep2RenderHojaPanel() {
     </div>
   `;
   procesosStep2RenderPlantaCompactaSelector(nombre);
+  // El panel entero se re-arma de cero en cada respuesta (el ${chat} de arriba
+  // ya incluye el mensaje nuevo) — sin esto el navegador deja el scroll del
+  // chat en 0 (arriba de todo) cada vez, en vez de quedarse en el último mensaje.
+  const chatBox = document.getElementById('procesos-step2-chat-box');
+  if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
 }
 
 // Modelos de planta compacta disponibles (documentos de referencia,
@@ -12217,6 +12225,13 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       const seguro = c ? procesosStep2ValorGuardable(hf.getCellValue({ sheet: 0, row: c.row, col: c.col })) : null;
       if (seguro != null) nuevosValores[ref] = seguro;
     });
+    // Una celda de fórmula "fijada" a mano queda como un número fijo adentro de
+    // HyperFormula — no se recalcula más aunque cambien sus datos de entrada, ni
+    // en esta sesión ni en las que vengan (se vuelve a aplicar así cada vez que
+    // se reconstruye la hoja). Sin este registro, esa celda quedaba congelada
+    // para siempre sin que se notara por qué — se guarda la lista para poder
+    // marcarlo en pantalla y ofrecer deshacerlo (procesosStep2RestaurarFormula).
+    const celdasForzadasFinal = Array.from(new Set([...(hPrev.celdasForzadas || []), ...celdasForzadas]));
     // Limpia lo que ya hubiera quedado guardado de una versión anterior con un
     // error de HyperFormula como "valor" (objeto) — si no, seguiría trabando
     // la apertura de la hoja.
@@ -12228,7 +12243,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // siempre cae en el proyecto correcto y nunca se mezcla con otro.
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
-    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, confirmada: false });
+    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, confirmada: false });
     h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
@@ -12244,6 +12259,27 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
   } finally {
     _procesosStep2ChatEnviando[nombre] = false;
   }
+}
+
+// Deshace un "set" a mano sobre una celda de fórmula: la devuelve a la fórmula
+// original (guardada tal cual en model.grid, ej. "=SUM(...)") para que vuelva
+// a recalcularse sola con HyperFormula.
+function procesosStep2RestaurarFormula(nombre, ref) {
+  const p = procesosCurrentProyecto;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({}, dd.hojas[nombre]);
+  h.celdasForzadas = (h.celdasForzadas || []).filter(r => r !== ref);
+  h.valores = Object.assign({}, h.valores);
+  delete h.valores[ref];
+  dd.hojas[nombre] = h;
+  const model = procesosStep2State.hojaModels[nombre];
+  const c = model && model.cells.find(x => x.ref === ref);
+  const hf = procesosStep2GetHF(nombre);
+  if (c && hf && model.grid[c.row] && model.grid[c.row][c.col] != null) {
+    hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[model.grid[c.row][c.col]]]);
+  }
+  procesosSaveProyecto({ diseno_data: dd }, p).then(() => { if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel(); });
 }
 
 async function procesosStep2GuardarHoja(nombre) {
