@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.36</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.37</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.36</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.37</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -24965,14 +24965,24 @@ const DFS_TOOL_ETAPA = {
 async function dfsLlamar(contenido, tool, maxTokens) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
-  const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: maxTokens, tools: [tool], tool_choice: { type: 'tool', name: tool.name }, messages: [{ role: 'user', content: contenido }] })
-  });
-  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
-  const data = await resp.json();
-  const tu = data.content?.find(c => c.type === 'tool_use');
-  if (!tu) throw new Error('La IA no devolvió una respuesta con la forma esperada.');
+  const intentar = async tokens => {
+    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: tokens, tools: [tool], tool_choice: { type: 'tool', name: tool.name }, messages: [{ role: 'user', content: contenido }] })
+    });
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+    const data = await resp.json();
+    return { tu: data.content?.find(c => c.type === 'tool_use'), cortado: data.stop_reason === 'max_tokens' };
+  };
+  // Con fuentes densas (ej. un P&ID con muchos equipos/TAGs) la respuesta a
+  // veces se corta antes de terminar el JSON de la herramienta por falta de
+  // espacio — como "etapas" va al final del objeto, un corte temprano (en
+  // "objetivo"/"generales") la deja vacía SIN ningún error visible (pasó con
+  // un plano real: "La IA no identificó etapas" sin que en realidad hubiera
+  // fallado, solo se había quedado sin lugar). Reintenta una vez con el doble.
+  let { tu, cortado } = await intentar(maxTokens);
+  if ((!tu || cortado) && maxTokens < 16000) ({ tu, cortado } = await intentar(maxTokens * 2));
+  if (!tu) throw new Error(cortado ? 'La respuesta de la IA se cortó antes de terminar (la fuente puede ser muy densa) — probá de nuevo, o con menos archivos adjuntos a la vez.' : 'La IA no devolvió una respuesta con la forma esperada.');
   return tu.input || {};
 }
 function dfsClave(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
