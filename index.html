@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.37</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.38</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.37</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.38</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26938,23 +26938,33 @@ async function concilAnalizar() {
     const apiKey = getApiKey();
     if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
     const b64 = await fileToBase64(_concilPdfFile);
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5', max_tokens: 8000,
-        tools: [CONCIL_TOOL_EXTRAER_PDF], tool_choice: { type: 'tool', name: CONCIL_TOOL_EXTRAER_PDF.name },
-        messages: [{
-          role: 'user', content: [
-            { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
-            { type: 'text', text: 'Extraé todos los movimientos de este extracto bancario, en orden, sin omitir ninguno. Prestá especial atención a distinguir los movimientos reales (transferencias, pagos, depósitos, cheques, plazos fijos, traspasos) de los cargos bancarios (comisiones, IVA sobre comisiones, impuesto ley 25413, SIRCREB, IBTC, percepciones/retenciones de IIBB, sellos, etc.) — estos últimos van con es_gasto_bancario=true.' }
-          ]
-        }]
-      })
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
-    const data = await resp.json();
-    const tu = data.content?.find(c => c.type === 'tool_use');
-    if (!tu) throw new Error('La IA no devolvió los movimientos — probá de nuevo.');
+    const intentarExtraer = async maxTokens => {
+      const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5', max_tokens: maxTokens,
+          tools: [CONCIL_TOOL_EXTRAER_PDF], tool_choice: { type: 'tool', name: CONCIL_TOOL_EXTRAER_PDF.name },
+          messages: [{
+            role: 'user', content: [
+              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+              { type: 'text', text: 'Extraé todos los movimientos de este extracto bancario, en orden, sin omitir ninguno. Prestá especial atención a distinguir los movimientos reales (transferencias, pagos, depósitos, cheques, plazos fijos, traspasos) de los cargos bancarios (comisiones, IVA sobre comisiones, impuesto ley 25413, SIRCREB, IBTC, percepciones/retenciones de IIBB, sellos, etc.) — estos últimos van con es_gasto_bancario=true.' }
+            ]
+          }]
+        })
+      });
+      if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
+      const data = await resp.json();
+      return { tu: data.content?.find(c => c.type === 'tool_use'), cortado: data.stop_reason === 'max_tokens' };
+    };
+    // Un extracto largo (varias páginas, muchos movimientos) puede cortarse
+    // antes de terminar de listarlos todos por falta de espacio — reintenta
+    // una vez con el doble en vez de devolver 0 movimientos sin avisar.
+    let { tu, cortado } = await intentarExtraer(8000);
+    // Si se cortó, nunca conviene quedarse con una lista PARCIAL de movimientos
+    // (arruinaría la conciliación en silencio, pareciendo una diferencia real) —
+    // mejor reintentar entero con más espacio.
+    if (!tu || cortado) ({ tu, cortado } = await intentarExtraer(20000));
+    if (!tu) throw new Error(cortado ? 'La respuesta de la IA se cortó antes de terminar (el extracto puede tener muchos movimientos) — probá de nuevo.' : 'La IA no devolvió los movimientos — probá de nuevo.');
     const ext = tu.input;
     const movsPdf = (ext.movimientos || []).map(m => ({ fecha: m.fecha, concepto: m.concepto || '', debito: m.debito || 0, credito: m.credito || 0, esGastoBancario: !!m.es_gasto_bancario }));
 
