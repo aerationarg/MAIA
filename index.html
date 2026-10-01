@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.38</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.39</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.38</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.39</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26814,9 +26814,14 @@ function concilBuildSheetPlan(input) {
     const dataValues = [];
     for (let i = 0; i < (dataEnd - dataStart + 1); i++) {
       const r = rows[i];
-      dataValues.push(r ? [concilFechaDMY(r.fecha), r.concepto, r.monto] : ['', '', '']);
+      // La fecha va como número de serie de Excel, no como texto "DD/MM/YYYY"
+      // — igual que en Rendiciones: si se manda el string, Excel decide solo
+      // si es DD/MM o MM/DD, y con el día ≤12 a veces lo invierte. El formato
+      // de visualización (dd/mm/yyyy) se fija aparte, ver fechaCol más abajo.
+      const serial = r && r.fecha ? rendFechaASerial(concilFechaDMY(r.fecha)) : null;
+      dataValues.push(r ? [serial != null ? serial : '', r.concepto, r.monto] : ['', '', '']);
     }
-    ops.push({ type: 'values', range: `B${dataStart}:D${dataEnd}`, values: dataValues });
+    ops.push({ type: 'values', range: `B${dataStart}:D${dataEnd}`, values: dataValues, fechaCol: `B${dataStart}:B${dataEnd}` });
     ops.push({ type: 'formula', range: `D${sumRow}`, formula: `=SUM(D${dataStart}:D${dataEnd})`, bold: true });
   });
   return { sheetName, ops };
@@ -27088,6 +27093,17 @@ async function concilEjecutarPlan(token, siteId, itemId, plan) {
     if (op.highlight) {
       await fetch(shBase + `range(address='${op.range}')/format/fill`, {
         method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ color: '#FFFF00' })
+      }).catch(() => {});
+    }
+    if (op.fechaCol) {
+      // Las fechas se mandaron como número de serie (ver concilBuildSheetPlan)
+      // — esto solo fija cómo se VEN, es cosmético, no vale la pena frenar
+      // todo si llega a fallar. El array de formato tiene que tener una fila
+      // por cada fila del rango (ej. "B17:B19" -> 3 filas), si no Graph lo rechaza.
+      const mRango = /^[A-Z]+(\d+):[A-Z]+(\d+)$/.exec(op.fechaCol);
+      const filasRango = mRango ? (Number(mRango[2]) - Number(mRango[1]) + 1) : 1;
+      await fetch(shBase + `range(address='${op.fechaCol}')`, {
+        method: 'PATCH', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ numberFormat: Array.from({ length: filasRango }, () => ['dd/mm/yyyy']) })
       }).catch(() => {});
     }
   }
