@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.42</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.43</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.42</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.43</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13239,6 +13239,49 @@ function procesosFlowsheetExpandirIconos(lista, cap) {
 // (arrastre) — un offset {x,y} sumado a la posición calculada automáticamente,
 // para que un equipo/etapa nuevo siga apareciendo en su lugar automático
 // hasta que se lo acomode.
+// ── Flechas sueltas: tipos (color/estilo), formas y armado del path ──
+const PF_FLECHA_TIPOS = {
+  proceso: { label: 'Proceso (líquido)', color: '#c2185b', dash: '' },
+  lodos: { label: 'Lodos', color: '#9a6b2f', dash: '' },
+  recirc: { label: 'Recirculación (punteada)', color: '#7b4fa3', dash: '6 4' },
+  aire: { label: 'Aire', color: '#0d8fa3', dash: '' },
+  quimico: { label: 'Químico / dosificación', color: '#c77500', dash: '' },
+  manual: { label: 'Genérica (roja)', color: '#c0392b', dash: '' },
+};
+const PF_FLECHA_FORMAS = { recta: 'Recta (quiebra en cada punto)', curva: 'Curva suave', codos: 'En ángulo recto' };
+// Migra en el lugar una flecha vieja {x1,y1,x2,y2} a la forma nueva {pts:[...]}.
+function procesosFlowsheetFlechaPts(f) {
+  if (!Array.isArray(f.pts)) {
+    f.pts = [{ x: f.x1, y: f.y1 }, { x: f.x2, y: f.y2 }];
+    delete f.x1; delete f.y1; delete f.x2; delete f.y2;
+  }
+  return f.pts;
+}
+function procesosFlowsheetFlechaPath(pts, forma) {
+  if (!pts || pts.length < 2) return '';
+  const r = n => Math.round(n * 10) / 10;
+  let P = pts.map(p => [p.x, p.y]);
+  if (forma === 'codos') {
+    const Q = [P[0]];
+    for (let i = 1; i < P.length; i++) { Q.push([P[i][0], P[i - 1][1]]); Q.push(P[i]); }
+    P = Q.filter((p, i) => i === 0 || p[0] !== Q[i - 1][0] || p[1] !== Q[i - 1][1]);
+    if (P.length < 2) return '';
+    return 'M' + P.map(p => r(p[0]) + ',' + r(p[1])).join(' L');
+  }
+  if (forma === 'curva') {
+    if (P.length === 2) {
+      const [a, b] = P, dx = b[0] - a[0], dy = b[1] - a[1];
+      return `M${r(a[0])},${r(a[1])} Q${r((a[0] + b[0]) / 2 - dy * 0.2)},${r((a[1] + b[1]) / 2 + dx * 0.2)} ${r(b[0])},${r(b[1])}`;
+    }
+    let d = `M${r(P[0][0])},${r(P[0][1])}`;
+    for (let i = 0; i < P.length - 1; i++) {
+      const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || p2;
+      d += ` C${r(p1[0] + (p2[0] - p0[0]) / 6)},${r(p1[1] + (p2[1] - p0[1]) / 6)} ${r(p2[0] - (p3[0] - p1[0]) / 6)},${r(p2[1] - (p3[1] - p1[1]) / 6)} ${r(p2[0])},${r(p2[1])}`;
+    }
+    return d;
+  }
+  return 'M' + P.map(p => r(p[0]) + ',' + r(p[1])).join(' L');
+}
 function procesosFlowsheetLayoutGet(p) {
   const l = (p.equipos_data && p.equipos_data.layout) || {};
   return { etapas: l.etapas || {}, equipos: l.equipos || {}, puertos: l.puertos || {}, flechas: l.flechas || {}, etiquetas: l.etiquetas || {} };
@@ -13254,7 +13297,7 @@ function procesosFlowsheetEscala(layout, tipo, id) {
   return (o && o.escala) || 1;
 }
 function procesosFlowsheetAttrEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
-function procesosFlowsheetDragWrap(tipo, id, inner, hit, noResize) {
+function procesosFlowsheetDragWrap(tipo, id, inner, hit, noResize, extraAttrs) {
   if (!id) return inner;
   // Los íconos se dibujan con stroke y fill="none" — sin un área de "hit"
   // rellena (aunque transparente), solo se podría arrastrar clickeando
@@ -13272,7 +13315,7 @@ function procesosFlowsheetDragWrap(tipo, id, inner, hit, noResize) {
   // procesosFlowsheetResizeMove), para que la vista previa crezca/achique
   // sobre el lugar en vez de salir volando desde el origen del SVG.
   const handle = (hit && !noResize) ? `<rect data-resize-tipo="${tipo}" data-resize-id="${procesosFlowsheetAttrEsc(id)}" data-anchor-x="${hit.x+hit.w/2}" data-anchor-y="${hit.y+hit.h/2}" x="${hit.x+hit.w-HS}" y="${hit.y+hit.h-HS}" width="${HS}" height="${HS}" fill="#ffffff" stroke="#8a8a86" stroke-width="1" style="cursor:nwse-resize"/>` : '';
-  return `<g class="pf-drag" data-drag-tipo="${tipo}" data-drag-id="${procesosFlowsheetAttrEsc(id)}" style="cursor:move">${hitRect}${inner}${handle}</g>`;
+  return `<g class="pf-drag" data-drag-tipo="${tipo}" data-drag-id="${procesosFlowsheetAttrEsc(id)}" ${extraAttrs || ''} style="cursor:move">${hitRect}${inner}${handle}</g>`;
 }
 // Arma, para una fila de "chips" (ícono + tag, usado tanto para los equipos
 // de afuera como para el grid de la etapa "caja" sin figura conocida), su
@@ -13301,13 +13344,13 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
     const ccx = xIni + col * celda + celda / 2 + off.x, ccy = yTop + fila * celda + celda / 2 - 6 + off.y;
     const iconoIA = eq.icono === 'generico' && iconosIA ? iconosIA[procesosNormTxt(eq.tipoOriginal)] : null;
     let item = procesosFlowsheetIconoSvg(eq.icono, ccx, ccy, iconoR, '#2e7d32', iconoIA && iconoIA.path);
-    item += `<text x="${ccx}" y="${ccy + iconoR/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10" ondblclick="event.stopPropagation();procesosFlowsheetEquipoEtiquetaRenombrar('${procesosFlowsheetAttrEsc(eq.origenEtapa)}','${procesosFlowsheetAttrEsc(eq.idReal)}')" style="cursor:text">${procesosDiagramaSvgEsc(eq.etiqueta)}</text>`;
+    item += `<text x="${ccx}" y="${ccy + iconoR/2 + 12}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10" data-pf-accion="equipoetiq" data-pf-a="${procesosFlowsheetAttrEsc(eq.origenEtapa)}" data-pf-b="${procesosFlowsheetAttrEsc(eq.idReal)}" style="cursor:text">${procesosDiagramaSvgEsc(eq.etiqueta)}</text>`;
     // "generico" = no matchea ningún ícono conocido del catálogo (cae en la
     // cajita punteada con iniciales) — ofrece inventarle un diseño con IA en
     // vez de dejarlo así para siempre (ver procesosFlowsheetInventarIcono).
     if (eq.icono === 'generico' && !iconoIA) {
       const bx2 = ccx + iconoR * 0.42, by2 = ccy - iconoR * 0.42;
-      item += `<circle cx="${bx2}" cy="${by2}" r="8" fill="#fff" stroke="#8a6d3b" stroke-width="1.3" style="cursor:pointer" onclick="event.stopPropagation();procesosFlowsheetInventarIcono('${procesosFlowsheetAttrEsc(eq.origenEtapa)}','${procesosFlowsheetAttrEsc(eq.idReal)}')"><title>Inventar diseño con IA</title></circle>`;
+      item += `<circle cx="${bx2}" cy="${by2}" r="8" fill="#fff" stroke="#8a6d3b" stroke-width="1.3" style="cursor:pointer" data-pf-accion="inventar" data-pf-a="${procesosFlowsheetAttrEsc(eq.origenEtapa)}" data-pf-b="${procesosFlowsheetAttrEsc(eq.idReal)}"><title>Inventar diseño con IA</title></circle>`;
       item += `<text x="${bx2}" y="${by2+3}" text-anchor="middle" font-size="9" style="cursor:pointer;pointer-events:none">✨</text>`;
     }
     if (eq.dosifNumero || eq.aireNumero) {
@@ -13594,8 +13637,7 @@ function procesosFlowsheetSvg(p) {
   if (zonas.length && !zonasJuntoALod) totalH = Math.max(totalH, zonas[0]._zy + padTop + MARGIN);
   let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Flowsheet de equipos" style="max-width:100%;height:auto;background:${c.surface}">`;
   const colorRecirc = '#7b4fa3';
-  const colorManual = '#c0392b';
-  svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker><marker id="pfd2-arrow-recirc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colorRecirc}"/></marker><marker id="pfd2-arrow-manual" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colorManual}"/></marker></defs>`;
+  svg += `<defs><marker id="pfd2-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${magenta}"/></marker><marker id="pfd2-arrow-lodos" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${marron}"/></marker><marker id="pfd2-arrow-recirc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${colorRecirc}"/></marker>${Object.entries(PF_FLECHA_TIPOS).map(([k, t]) => `<marker id="pfd2-arrow-t-${k}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${t.color}"/></marker>`).join('')}</defs>`;
   // Línea de nivel de terreno: ahora es el piso de referencia de TODAS las
   // unidades (no un indicador excepcional), así que se dibuja siempre que
   // haya al menos una unidad en la fila.
@@ -13620,7 +13662,7 @@ function procesosFlowsheetSvg(p) {
     const bombasRecirc = []; // bombas "de recirculación" (interna, RAS, lodos...) — NO van a la siguiente etapa, vuelven a una anterior
     const equiposEt = (p.equipos_data && p.equipos_data.etapas && p.equipos_data.etapas[et.nombre]) || {};
     const tituloEt = equiposEt.tituloCustom || et.nombre;
-    s += `<text x="${x + et.w/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13" ondblclick="procesosFlowsheetEtapaRenombrar('${procesosFlowsheetAttrEsc(et.nombre)}')" style="cursor:text">${procesosDiagramaSvgEsc(tituloEt)}</text>`;
+    s += `<text x="${x + et.w/2}" y="${y + 20}" text-anchor="middle" fill="${c.text}" font-weight="600" font-size="13" data-pf-accion="etapa" data-pf-a="${procesosFlowsheetAttrEsc(et.nombre)}" style="cursor:text">${procesosDiagramaSvgEsc(tituloEt)}</text>`;
     if (et.dimsTxt) s += `<text x="${x + et.w/2}" y="${y + 34}" text-anchor="middle" fill="${c.text2}" font-size="10">${procesosDiagramaSvgEsc(et.dimsTxt)}</text>`;
     let cy = y + HEADER_H + (et.dimsTxt ? 14 : 0);
     if (!et.equipos.length && et.tipoFig !== 'tanque' && et.tipoFig !== 'daf' && et.tipoFig !== 'pozo' && et.tipoFig !== 'sedimentador' && et.tipoFig !== 'desinfeccion' && et.tipoFig !== 'maquina') {
@@ -13837,9 +13879,16 @@ function procesosFlowsheetSvg(p) {
     const yBase = tieneAgua ? etY + HEADER_H + (et.dimsTxt ? 14 : 0) + 32 : etY + et.h / 2;
     return { x: etX + et.w + off.x, y: yBase + off.y };
   }
+  // Los marcadores NO se dibujan en el momento (el de ENTRADA de una etapa se
+  // genera mientras se dibuja la anterior, o sea ANTES que la caja de la
+  // etapa que lo contiene — y el área de arrastre de esa caja, dibujada
+  // después, lo tapaba: se terminaba moviendo la unidad en vez del punto).
+  // Se juntan acá y se dibujan todos al final, arriba de todo.
+  const puertosTop = [];
   function puertoMarcadorSvg(id, px, py) {
-    const marker = `<circle cx="${px}" cy="${py}" r="3.5" fill="#fff" stroke="${c.text2}" stroke-width="1.2"/>`;
-    return procesosFlowsheetDragWrap('puerto', id, marker, { x: px - 9, y: py - 9, w: 18, h: 18 }, true);
+    const marker = `<circle cx="${px}" cy="${py}" r="4.5" fill="#fff" stroke="${c.text2}" stroke-width="1.4"/>`;
+    puertosTop.push(procesosFlowsheetDragWrap('puerto', id, marker, { x: px - 11, y: py - 11, w: 22, h: 22 }, true));
+    return '';
   }
   if (liq.length) svg += `<text x="${padSides}" y="${padTop - 9}" fill="${c.text2}" font-size="10" font-weight="600">EFLUENTE LÍQUIDO</text>`;
   liq.forEach((et, i) => {
@@ -13957,23 +14006,31 @@ function procesosFlowsheetSvg(p) {
     const { svg: cajaSvg } = caja(xZ, yZ, z, false);
     svg += procesosFlowsheetDragWrap('etapa', z.nombre, cajaSvg, { x: xZ, y: yZ, w: z.w, h: z.h });
   });
-  // Flechas sueltas agregadas a mano (no atadas a ningún equipo/etapa — ver
-  // "+ Flecha") — cuerpo arrastrable entero (tipo 'flecha') + un puntito en
-  // cada extremo arrastrable por separado (tipo 'flecha_punto', id
-  // "<idFlecha>__p1"/"__p2") para poder afinar dónde apunta cada punta.
+  // Los puntitos de entrada/salida de las flechas automáticas van arriba de
+  // todo lo dibujado (ver puertoMarcadorSvg) para que se puedan agarrar.
+  svg += puertosTop.join('');
+  // Flechas sueltas agregadas a mano (ver "+ Flecha"): una serie de puntos
+  // (pts) unidos según la forma (recta/curva/ángulo recto), con la punta de
+  // flecha en el último. Cuerpo arrastrable entero (tipo 'flecha') + un
+  // puntito por cada punto (tipo 'flecha_punto', id "<idFlecha>__<n>").
   Object.entries(layout.flechas || {}).forEach(([id, f]) => {
-    const linea = `<line x1="${f.x1}" y1="${f.y1}" x2="${f.x2}" y2="${f.y2}" stroke="${colorManual}" stroke-width="2.2" marker-end="url(#pfd2-arrow-manual)" ondblclick="event.stopPropagation();procesosFlowsheetFlechaBorrar('${procesosFlowsheetAttrEsc(id)}')" style="cursor:pointer"/>`;
-    const minX = Math.min(f.x1, f.x2), minY = Math.min(f.y1, f.y2);
-    svg += procesosFlowsheetDragWrap('flecha', id, linea, { x: minX - 6, y: minY - 6, w: Math.abs(f.x2 - f.x1) + 12, h: Math.abs(f.y2 - f.y1) + 12 }, true);
-    svg += procesosFlowsheetDragWrap('flecha_punto', id + '__p1', `<circle cx="${f.x1}" cy="${f.y1}" r="4" fill="#fff" stroke="${colorManual}" stroke-width="1.4"/>`, { x: f.x1 - 9, y: f.y1 - 9, w: 18, h: 18 }, true);
-    svg += procesosFlowsheetDragWrap('flecha_punto', id + '__p2', `<circle cx="${f.x2}" cy="${f.y2}" r="4" fill="#fff" stroke="${colorManual}" stroke-width="1.4"/>`, { x: f.x2 - 9, y: f.y2 - 9, w: 18, h: 18 }, true);
+    const pts = procesosFlowsheetFlechaPts(f);
+    const clave = PF_FLECHA_TIPOS[f.tipo] ? f.tipo : 'manual', tp = PF_FLECHA_TIPOS[clave];
+    const d = procesosFlowsheetFlechaPath(pts, f.forma);
+    if (!d) return;
+    const dash = tp.dash ? ` stroke-dasharray="${tp.dash}"` : '';
+    const cuerpo = `<path d="${d}" fill="none" stroke="${tp.color}" stroke-width="2.2"${dash} marker-end="url(#pfd2-arrow-t-${clave})"/><path d="${d}" fill="none" stroke="transparent" stroke-width="14" pointer-events="stroke"/>`;
+    svg += procesosFlowsheetDragWrap('flecha', id, cuerpo, null, true, `data-pf-accion="flecha" data-pf-a="${procesosFlowsheetAttrEsc(id)}"`);
+    pts.forEach((pt, i) => {
+      const circ = `<circle cx="${pt.x}" cy="${pt.y}" r="3.6" fill="#fff" fill-opacity="0.75" stroke="${tp.color}" stroke-width="1.4"/>`;
+      svg += procesosFlowsheetDragWrap('flecha_punto', id + '__' + i, circ, { x: pt.x - 11, y: pt.y - 11, w: 22, h: 22 }, true, `data-pf-accion="flecha-punto" data-pf-a="${procesosFlowsheetAttrEsc(id)}" data-pf-b="${i}"`);
+    });
   });
   // Etiquetas de texto libre agregadas a mano (ver "+ Etiqueta") — se
-  // arrastran como un punto más (misma mecánica que un puerto); el texto se
-  // edita con doble click (ver procesosFlowsheetEtiquetaRenombrar).
+  // arrastran como un punto más; doble clic para editar/borrar el texto.
   Object.entries(layout.etiquetas || {}).forEach(([id, et2]) => {
-    const texto = `<text x="${et2.x}" y="${et2.y}" fill="${c.text}" font-size="11" font-weight="600" ondblclick="procesosFlowsheetEtiquetaRenombrar('${procesosFlowsheetAttrEsc(id)}')" style="cursor:text">${procesosDiagramaSvgEsc(et2.texto || '')}</text>`;
-    svg += procesosFlowsheetDragWrap('etiqueta', id, texto, { x: et2.x - 4, y: et2.y - 13, w: Math.max(20, (et2.texto || '').length * 6.5), h: 18 }, true);
+    const texto = `<text x="${et2.x}" y="${et2.y}" fill="${c.text}" font-size="11" font-weight="600" style="cursor:text">${procesosDiagramaSvgEsc(et2.texto || '')}</text>`;
+    svg += procesosFlowsheetDragWrap('etiqueta', id, texto, { x: et2.x - 4, y: et2.y - 13, w: Math.max(20, (et2.texto || '').length * 6.5), h: 18 }, true, `data-pf-accion="etiqueta" data-pf-a="${procesosFlowsheetAttrEsc(id)}"`);
   });
   svg += `</svg>`;
   return svg;
@@ -14076,6 +14133,7 @@ function procesosFlowsheetDragInit(container, adapter) {
   _pfSvgEl = svgEl;
   svgEl.style.touchAction = 'none';
   svgEl.addEventListener('pointerdown', procesosFlowsheetDragStart);
+  svgEl.addEventListener('pointermove', procesosFlowsheetFlechaMove);
 }
 function procesosFlowsheetDragStart(ev) {
   if (_pfPlacingEquipo) { procesosFlowsheetEquipoColocarClick(ev); return; }
@@ -14097,6 +14155,10 @@ function procesosFlowsheetDragStart(ev) {
     scaleX: 1 / ctm.a, scaleY: 1 / ctm.d,
     startX: ev.clientX, startY: ev.clientY,
     dx: 0, dy: 0,
+    accion: (() => {
+      const ac = ev.target.closest('[data-pf-accion]');
+      return ac && g.contains(ac) ? { tipo: ac.getAttribute('data-pf-accion'), a: ac.getAttribute('data-pf-a'), b: ac.getAttribute('data-pf-b') } : null;
+    })(),
   };
   g.style.opacity = '0.85';
   try { g.setPointerCapture(ev.pointerId); } catch (e) {}
@@ -14123,7 +14185,25 @@ function procesosFlowsheetDragEnd(ev) {
     procesosFlowsheetGuardarOffset(d.tipo, d.id, d.dx, d.dy);
   } else {
     d.el.removeAttribute('transform');
+    if (d.accion) procesosFlowsheetAccionClick(d.accion);
   }
+}
+// Clic / doble clic detectados a mano sobre los pointer events: como el
+// arrastre captura el puntero en el grupo (setPointerCapture), el navegador
+// manda los eventos click/dblclick al grupo y no al texto o circulito que se
+// tocó — por eso los handlers onclick/ondblclick de cada elemento nunca se
+// disparaban. Acá se mira qué elemento se tocó en el pointerdown.
+let _pfUltimoClick = null;
+function procesosFlowsheetAccionClick(ac) {
+  if (ac.tipo === 'inventar') { procesosFlowsheetInventarIcono(ac.a, ac.b); return; }
+  const ahora = Date.now(), key = ac.tipo + '|' + ac.a + '|' + ac.b;
+  if (!_pfUltimoClick || _pfUltimoClick.key !== key || ahora - _pfUltimoClick.t > 500) { _pfUltimoClick = { key, t: ahora }; return; }
+  _pfUltimoClick = null;
+  if (ac.tipo === 'etapa') procesosFlowsheetEtapaRenombrar(ac.a);
+  else if (ac.tipo === 'equipoetiq') procesosFlowsheetEquipoEtiquetaRenombrar(ac.a, ac.b);
+  else if (ac.tipo === 'etiqueta') procesosFlowsheetEtiquetaRenombrar(ac.a);
+  else if (ac.tipo === 'flecha') procesosFlowsheetFlechaEditar(ac.a);
+  else if (ac.tipo === 'flecha-punto') procesosFlowsheetFlechaPuntoBorrar(ac.a, parseInt(ac.b, 10));
 }
 // 'etapa' -> layout.etapas, 'puerto' -> layout.puertos, cualquier otro
 // ('equipo') -> layout.equipos — usado tanto al guardar offset como escala.
@@ -14145,14 +14225,13 @@ function procesosFlowsheetGuardarOffset(tipo, id, dx, dy) {
   // extremo (id compuesto "<idFlecha>__p1"/"__p2") desplaza solo ese punto.
   if (tipo === 'flecha') {
     const f = layout.flechas && layout.flechas[id];
-    if (f) { f.x1 = Math.round(f.x1 + dx); f.y1 = Math.round(f.y1 + dy); f.x2 = Math.round(f.x2 + dx); f.y2 = Math.round(f.y2 + dy); }
+    if (f) procesosFlowsheetFlechaPts(f).forEach(pt => { pt.x = Math.round(pt.x + dx); pt.y = Math.round(pt.y + dy); });
   } else if (tipo === 'flecha_punto') {
     const i = id.lastIndexOf('__');
     const f = layout.flechas && layout.flechas[id.slice(0, i)];
-    const punto = id.slice(i + 2);
     if (f) {
-      if (punto === 'p1') { f.x1 = Math.round(f.x1 + dx); f.y1 = Math.round(f.y1 + dy); }
-      else { f.x2 = Math.round(f.x2 + dx); f.y2 = Math.round(f.y2 + dy); }
+      const pt = procesosFlowsheetFlechaPts(f)[parseInt(id.slice(i + 2), 10)];
+      if (pt) { pt.x = Math.round(pt.x + dx); pt.y = Math.round(pt.y + dy); }
     }
   } else {
     const grupo = procesosFlowsheetGrupoLayout(layout, tipo);
@@ -14300,8 +14379,10 @@ function procesosFlowsheetEquipoElegir(idx) {
 }
 function procesosFlowsheetPlacingCancelar() {
   _pfPlacingEquipo = null;
-  _pfPlacingFlecha = false; _pfFlechaPrimerPunto = null;
+  _pfPlacingFlecha = false; _pfFlechaPts = [];
   _pfPlacingEtiqueta = false;
+  if (_pfPreviewEl) { _pfPreviewEl.remove(); _pfPreviewEl = null; }
+  document.querySelectorAll('.pf-terminar-btn').forEach(b => b.remove());
   document.querySelectorAll('.pf-placing-hint').forEach(el => el.style.display = 'none');
   document.querySelectorAll('[data-drag-tipo="etapa"]').forEach(el => el.style.cursor = 'move');
   if (_pfSvgEl) _pfSvgEl.style.cursor = '';
@@ -14344,8 +14425,10 @@ function procesosFlowsheetEquipoAgregar(nombreEtapa, catalogoItem) {
 // el texto. _pfSvgEl guarda el <svg> actual (lo setea procesosFlowsheetDragInit)
 // para poder convertir el clic a coordenadas del SVG con su CTM.
 let _pfPlacingFlecha = false;
-let _pfFlechaPrimerPunto = null;
+let _pfFlechaPts = [];
+let _pfFlechaCfg = { forma: 'recta', tipo: 'proceso' };
 let _pfPlacingEtiqueta = false;
+let _pfPreviewEl = null;
 function procesosFlowsheetPuntoSvg(ev) {
   if (!_pfSvgEl) return null;
   const ctm = _pfSvgEl.getScreenCTM();
@@ -14353,47 +14436,125 @@ function procesosFlowsheetPuntoSvg(ev) {
   const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(ctm.inverse());
   return { x: Math.round(pt.x), y: Math.round(pt.y) };
 }
-function procesosFlowsheetFlechaIniciar() {
-  document.querySelectorAll('.pf-equipos-panel').forEach(p => p.style.display = 'none');
-  _pfPlacingFlecha = true; _pfFlechaPrimerPunto = null;
-  document.querySelectorAll('.pf-placing-hint').forEach(el => {
-    el.style.display = 'flex';
-    const t = el.querySelector('.pf-placing-hint-texto');
-    if (t) t.textContent = 'Hacé clic en el origen de la flecha';
+// Diálogo chico para elegir forma + tipo de flecha (al crearla y al editarla).
+function procesosFlowsheetFlechaDialogo(titulo, cfg, onOk, onBorrar) {
+  const prev = document.getElementById('pf-flecha-dialogo');
+  if (prev) prev.remove();
+  const ov = document.createElement('div');
+  ov.id = 'pf-flecha-dialogo';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:10000;display:flex;align-items:center;justify-content:center';
+  const opts = (tabla, sel) => Object.entries(tabla).map(([k, v]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(typeof v === 'string' ? v : v.label)}</option>`).join('');
+  ov.innerHTML = `<div class="card" style="width:340px;max-width:92vw;margin:0">
+    <div class="card-label">${esc(titulo)}</div>
+    <label>Forma</label><select id="pf-fd-forma" style="margin-bottom:10px">${opts(PF_FLECHA_FORMAS, cfg.forma)}</select>
+    <label>Tipo</label><select id="pf-fd-tipo" style="margin-bottom:12px">${opts(PF_FLECHA_TIPOS, cfg.tipo)}</select>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" id="pf-fd-ok" style="width:auto">Aceptar</button>
+      <button class="btn btn-secondary btn-sm" id="pf-fd-cancel" style="width:auto">Cancelar</button>
+      ${onBorrar ? '<button class="btn btn-secondary btn-sm" id="pf-fd-del" style="width:auto;color:var(--red)">Borrar flecha</button>' : ''}
+    </div></div>`;
+  document.body.appendChild(ov);
+  const cerrar = () => ov.remove();
+  ov.querySelector('#pf-fd-cancel').addEventListener('click', cerrar);
+  ov.querySelector('#pf-fd-ok').addEventListener('click', () => {
+    const forma = ov.querySelector('#pf-fd-forma').value, tipo = ov.querySelector('#pf-fd-tipo').value;
+    cerrar(); onOk({ forma, tipo });
   });
-  if (_pfSvgEl) _pfSvgEl.style.cursor = 'crosshair';
+  if (onBorrar) ov.querySelector('#pf-fd-del').addEventListener('click', () => { cerrar(); onBorrar(); });
+}
+function procesosFlowsheetFlechaIniciar() {
+  procesosFlowsheetFlechaDialogo('Nueva flecha', _pfFlechaCfg, cfg => {
+    _pfFlechaCfg = cfg;
+    document.querySelectorAll('.pf-equipos-panel').forEach(p => p.style.display = 'none');
+    _pfPlacingFlecha = true; _pfFlechaPts = [];
+    document.querySelectorAll('.pf-placing-hint').forEach(el => {
+      el.style.display = 'flex';
+      const t = el.querySelector('.pf-placing-hint-texto');
+      if (t) t.textContent = 'Hacé clic para ir marcando los puntos — la flecha va en el último. Doble clic en el último punto (o "Terminar") para cerrarla.';
+      if (!el.querySelector('.pf-terminar-btn')) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn btn-primary btn-sm pf-terminar-btn'; b.style.cssText = 'width:auto;padding:4px 10px'; b.textContent = '✓ Terminar';
+        b.addEventListener('click', procesosFlowsheetFlechaTerminar);
+        el.insertBefore(b, el.lastElementChild);
+      }
+    });
+    if (_pfSvgEl) _pfSvgEl.style.cursor = 'crosshair';
+  });
+}
+function procesosFlowsheetFlechaPreview(extra) {
+  if (!_pfSvgEl) return;
+  if (!_pfPreviewEl) {
+    _pfPreviewEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    _pfPreviewEl.setAttribute('fill', 'none');
+    _pfPreviewEl.setAttribute('stroke-width', '2.2');
+    _pfPreviewEl.setAttribute('opacity', '0.6');
+    _pfPreviewEl.setAttribute('pointer-events', 'none');
+    _pfSvgEl.appendChild(_pfPreviewEl);
+  }
+  const tp = PF_FLECHA_TIPOS[_pfFlechaCfg.tipo] || PF_FLECHA_TIPOS.manual;
+  _pfPreviewEl.setAttribute('stroke', tp.color);
+  if (tp.dash) _pfPreviewEl.setAttribute('stroke-dasharray', tp.dash); else _pfPreviewEl.removeAttribute('stroke-dasharray');
+  const pts = _pfFlechaPts.concat(extra ? [extra] : []);
+  _pfPreviewEl.setAttribute('d', procesosFlowsheetFlechaPath(pts, _pfFlechaCfg.forma));
+}
+function procesosFlowsheetFlechaMove(ev) {
+  if (!_pfPlacingFlecha || !_pfFlechaPts.length) return;
+  const pt = procesosFlowsheetPuntoSvg(ev);
+  if (pt) procesosFlowsheetFlechaPreview(pt);
 }
 function procesosFlowsheetFlechaClick(ev) {
   ev.preventDefault();
   ev.stopPropagation();
   const pt = procesosFlowsheetPuntoSvg(ev);
   if (!pt) return;
-  if (!_pfFlechaPrimerPunto) {
-    _pfFlechaPrimerPunto = pt;
-    document.querySelectorAll('.pf-placing-hint-texto').forEach(t => t.textContent = 'Hacé clic en el destino de la flecha');
-    return;
-  }
-  const a = _pfAdapter;
-  if (a) {
-    procesosFlowsheetUndoPush(a.modelo);
-    const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
-    const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {} });
-    layout.flechas = layout.flechas || {};
-    layout.flechas[procesosFlowsheetIdNuevo('fl')] = { x1: _pfFlechaPrimerPunto.x, y1: _pfFlechaPrimerPunto.y, x2: pt.x, y2: pt.y };
-    a.guardar();
-    a.rerender();
-  }
+  const ult = _pfFlechaPts[_pfFlechaPts.length - 1];
+  // Clic casi encima del último punto = doble clic = cerrar la flecha ahí.
+  if (ult && Math.abs(ult.x - pt.x) < 7 && Math.abs(ult.y - pt.y) < 7) { procesosFlowsheetFlechaTerminar(); return; }
+  _pfFlechaPts.push(pt);
+  procesosFlowsheetFlechaPreview(null);
+}
+function procesosFlowsheetFlechaTerminar() {
+  const pts = _pfFlechaPts.slice(), cfg = _pfFlechaCfg;
   procesosFlowsheetPlacingCancelar();
+  const a = _pfAdapter;
+  if (!a || pts.length < 2) return;
+  procesosFlowsheetUndoPush(a.modelo);
+  const ed = a.modelo.equipos_data || (a.modelo.equipos_data = {});
+  const layout = ed.layout || (ed.layout = { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {} });
+  layout.flechas = layout.flechas || {};
+  layout.flechas[procesosFlowsheetIdNuevo('fl')] = { pts, forma: cfg.forma, tipo: cfg.tipo };
+  a.guardar();
+  a.rerender();
+}
+function procesosFlowsheetFlechaEditar(id) {
+  const a = _pfAdapter;
+  const f = a && a.modelo.equipos_data && a.modelo.equipos_data.layout && a.modelo.equipos_data.layout.flechas && a.modelo.equipos_data.layout.flechas[id];
+  if (!f) return;
+  procesosFlowsheetFlechaDialogo('Editar flecha', { forma: f.forma || 'recta', tipo: f.tipo || 'manual' }, cfg => {
+    procesosFlowsheetUndoPush(a.modelo);
+    f.forma = cfg.forma; f.tipo = cfg.tipo;
+    a.guardar(); a.rerender();
+  }, () => procesosFlowsheetFlechaBorrar(id));
 }
 function procesosFlowsheetFlechaBorrar(id) {
   const a = _pfAdapter;
   if (!a) return;
-  if (!confirm('¿Borrar esta flecha?')) return;
   procesosFlowsheetUndoPush(a.modelo);
   const layout = a.modelo.equipos_data && a.modelo.equipos_data.layout;
   if (layout && layout.flechas) delete layout.flechas[id];
   a.guardar();
   a.rerender();
+}
+// Doble clic en un punto de la flecha: lo saca (la flecha tiene que quedar con 2 como mínimo).
+function procesosFlowsheetFlechaPuntoBorrar(id, idx) {
+  const a = _pfAdapter;
+  const f = a && a.modelo.equipos_data && a.modelo.equipos_data.layout && a.modelo.equipos_data.layout.flechas && a.modelo.equipos_data.layout.flechas[id];
+  if (!f) return;
+  const pts = procesosFlowsheetFlechaPts(f);
+  if (pts.length <= 2) { alert('Una flecha necesita al menos 2 puntos. Para sacarla toda, doble clic sobre la línea.'); return; }
+  procesosFlowsheetUndoPush(a.modelo);
+  pts.splice(idx, 1);
+  a.guardar(); a.rerender();
 }
 function procesosFlowsheetEtiquetaIniciar() {
   document.querySelectorAll('.pf-equipos-panel').forEach(p => p.style.display = 'none');
@@ -14523,6 +14684,7 @@ const PROCESOS_FLOWSHEET_TOOL_INVENTAR_ICONO = {
   }
 };
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && (_pfPlacingEquipo || _pfPlacingFlecha || _pfPlacingEtiqueta)) procesosFlowsheetPlacingCancelar(); });
+document.addEventListener('keydown', ev => { if (ev.key === 'Enter' && _pfPlacingFlecha) procesosFlowsheetFlechaTerminar(); });
 // ── Deshacer (Ctrl+Z de los flows) ──────────────────────
 // Una pila de snapshots {diseno_data, equipos_data} por proyecto — tomados
 // SIEMPRE antes de cualquier cambio real (arrastrar, redimensionar,
