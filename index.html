@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.49</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.50</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.49</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.50</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9466,6 +9466,8 @@ function procesosStep2Html(p) {
 
 function procesosStep2AfterRender() {
   const st = procesosStep2State;
+  procesosStep2TrenConectar();
+  requestAnimationFrame(procesosStep2TrenConectar);
   if (st.loading) showMsg('procesos-step2-status','loading', st.loadingMsg || 'Cargando...');
   else if (st.error) showMsg('procesos-step2-status','error', '✕ '+st.error);
   else if (!st.workbook && !st.autoLoadIntentado) {
@@ -10718,6 +10720,33 @@ function procesosStep2TrenFlujo(grupos) {
   return { porGrupo, porInstancia };
 }
 
+// Dibuja las flechas del diagrama de bloques ramificado: una curva desde el
+// borde derecho de cada etapa hasta el borde izquierdo de las que alimenta.
+// Mide las cajas ya armadas en pantalla (por eso va después del render) y se
+// vuelve a dibujar sola si cambia el tamaño del diagrama.
+function procesosStep2TrenConectarUno(w) {
+  const svg = w.querySelector('svg.tren-edges'), g = svg && svg.querySelector('g');
+  if (!g) return;
+  const base = w.getBoundingClientRect();
+  svg.setAttribute('width', w.scrollWidth); svg.setAttribute('height', w.scrollHeight);
+  let paths = '';
+  (w.getAttribute('data-aristas') || '').split(',').filter(Boolean).forEach(a => {
+    const [de, ha] = a.split('>');
+    const A = w.querySelector(`[data-tren-nodo="${de}"]`), B = w.querySelector(`[data-tren-nodo="${ha}"]`);
+    if (!A || !B) return;
+    const ra = A.getBoundingClientRect(), rb = B.getBoundingClientRect();
+    const x1 = ra.right - base.left, y1 = ra.top + ra.height / 2 - base.top, x2 = rb.left - base.left - 1, y2 = rb.top + rb.height / 2 - base.top;
+    const dx = Math.max(16, Math.min(60, Math.abs(x2 - x1) / 2));
+    paths += `<path d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}" fill="none" stroke-width="1.8" style="stroke:var(--blue)" marker-end="url(#tren-arr)"/>`;
+  });
+  g.innerHTML = paths;
+}
+function procesosStep2TrenConectar() {
+  document.querySelectorAll('.tren-ramif').forEach(w => {
+    procesosStep2TrenConectarUno(w);
+    if (!w._pfRo && typeof ResizeObserver !== 'undefined') { w._pfRo = new ResizeObserver(() => procesosStep2TrenConectarUno(w)); w._pfRo.observe(w); }
+  });
+}
 // Diagrama de bloques del tren, en horizontal (con salto de línea si no entra):
 // un bloque por etapa con flechas entre etapas consecutivas; las instancias en
 // paralelo van apiladas, las de serie en fila; las hojas auxiliares
@@ -10743,6 +10772,30 @@ function procesosStep2TrenDiagramaHtml(grupos, opts) {
   const caja = (nombre, extra) => `<div style="border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;text-align:center;color:var(--text)${extra || ''}">${esc(nombre)}${confirmadas[nombre] ? ' <span style="color:var(--green)">✓</span>' : ''}${matDe(nombre) ? `<div style="font-size:10px;font-weight:400;color:var(--text2);margin-top:2px">🧱 ${esc(matDe(nombre))}</div>` : ''}</div>`;
   const flecha = (txt) => `<div style="align-self:center;padding:0 4px;color:var(--text2);font-size:18px;line-height:1">${txt || '→'}</div>`;
   const ultimaLiquida = etapas.length ? etapas[etapas.length - 1].gi : null;
+  // ¿El tren es una línea simple, o tiene ramas (dos corrientes que van por
+  // separado y se juntan más adelante, una etapa que toma la salida de otra que
+  // no es la inmediata anterior...)? Si es una línea simple se dibuja como
+  // siempre; si no, se arma en columnas (una por "capa" del flujo) y filas
+  // (una por rama), con las flechas reales entre cada etapa y las que la
+  // alimentan — ver procesosStep2TrenConectar.
+  const gisLiq = new Set(etapas.map(e => e.gi));
+  const predsDe = gi => { const r = []; (flujo.porGrupo[gi] || []).forEach(e => { if (e.tipo === 'unidad' && e.gi !== gi && gisLiq.has(e.gi) && !r.includes(e.gi)) r.push(e.gi); }); return r; };
+  const lineal = etapas.every((e, idx) => { const ps = predsDe(e.gi); return idx === 0 ? ps.length === 0 : (ps.length === 1 && ps[0] === etapas[idx - 1].gi); });
+  let finales = new Set(ultimaLiquida != null ? [ultimaLiquida] : []);
+  const capa = {}, fila = {}, aristas = [];
+  if (!lineal) {
+    const ocupado = new Set();
+    etapas.forEach(({ gi }) => {
+      const ps = predsDe(gi);
+      const c = ps.length ? 1 + Math.max(...ps.map(q => capa[q] || 0)) : 0;
+      let r = ps.length ? Math.min(...ps.map(q => fila[q] || 0)) : 0;
+      while (ocupado.has(c + '|' + r)) r++;
+      capa[gi] = c; fila[gi] = r; ocupado.add(c + '|' + r);
+      ps.forEach(q => aristas.push([q, gi]));
+    });
+    const conSucesor = new Set(aristas.map(x => x[0]));
+    finales = new Set(etapas.filter(e => !conSucesor.has(e.gi)).map(e => e.gi));
+  }
   // Un bloque por etapa. "prevGi" es la etapa inmediata anterior de SU línea
   // (para no repetir "toma la salida de…" cuando la flecha ya lo dice).
   const armarBloque = ({ g, gi }, numero, prevGi, lodos) => {
@@ -10756,16 +10809,16 @@ function procesosStep2TrenDiagramaHtml(grupos, opts) {
     const lineas = [];
     const corr = entradas.filter(e => e.tipo === 'corriente').map(e => e.nombre);
     if (corr.length) lineas.push('▸ entra: ' + esc(corr.join(' + ')));
-    entradas.filter(e => e.tipo === 'unidad' && e.gi !== prevGi).forEach(e => lineas.push('← toma la salida de ' + esc(e.nombre)));
+    if (lineal) entradas.filter(e => e.tipo === 'unidad' && e.gi !== prevGi).forEach(e => lineas.push('← toma la salida de ' + esc(e.nombre)));
     entradas.filter(e => e.tipo === 'lodos' && e.gi !== prevGi).forEach(e => lineas.push('↳ recibe los lodos de ' + esc(e.nombre)));
-    if (gi === ultimaLiquida) lineas.push('<span style="color:var(--green);font-weight:600">✓ efluente final (se compara con la normativa)</span>');
+    if (!lodos && finales.has(gi)) lineas.push('<span style="color:var(--green);font-weight:600">✓ efluente final (se compara con la normativa)</span>');
     if (generanLodos.has(gi)) lineas.push('<span style="color:#9a6b2f;font-weight:600">↓ de acá salen lodos</span>');
     const aux = auxDe(g);
     const colorBorde = lodos ? '#9a6b2f' : 'var(--blue)';
     const colorFondo = lodos ? 'rgba(154,107,47,.12)' : 'var(--blue-bg)';
     return `
       <div style="display:flex;flex-direction:column;gap:4px;min-width:120px;max-width:220px">
-        <div style="border:1.5px solid ${colorBorde};background:${colorFondo};border-radius:10px;padding:8px">
+        <div data-tren-nodo="${lodos ? 'l' : ''}${gi}" style="border:1.5px solid ${colorBorde};background:${colorFondo};border-radius:10px;padding:8px">
           <div style="font-size:10px;color:var(--text2);text-align:center;margin-bottom:4px">${numero}</div>
           ${titulo}${instHtml}
         </div>
@@ -10780,7 +10833,14 @@ function procesosStep2TrenDiagramaHtml(grupos, opts) {
   const sueltasHtml = sueltas.length ? `<div class="hint" style="margin:6px 0 0">Auxiliares sin etapa asociada: ${sueltas.map(a => esc(a.instancias.map(i => i.nombre).join(', '))).join(', ')}</div>` : '';
   const flechaPrincipal = '<div style="align-self:flex-start;margin-top:30px;padding:0 5px;color:var(--blue);font-size:22px;line-height:1">→</div>';
   const flechaLodos = '<div style="align-self:flex-start;margin-top:30px;padding:0 5px;color:#9a6b2f;font-size:22px;line-height:1">→</div>';
-  const filaLiquida = etapas.length ? `<div style="display:flex;flex-wrap:wrap;align-items:flex-start;row-gap:14px;padding:6px 0">${bloques.join(flechaPrincipal)}</div>` : '';
+  const ncols = lineal ? 0 : Math.max(...etapas.map(e => capa[e.gi])) + 1;
+  const filaLiquida = !etapas.length ? '' : lineal
+    ? `<div style="display:flex;flex-wrap:wrap;align-items:flex-start;row-gap:14px;padding:6px 0">${bloques.join(flechaPrincipal)}</div>`
+    : `<div style="overflow-x:auto;padding:6px 0"><div class="tren-ramif" data-aristas="${aristas.map(x => x.join('>')).join(',')}" style="position:relative;width:max-content;min-width:100%">
+        <svg class="tren-edges" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible" width="10" height="10"><defs><marker id="tren-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--blue)"/></marker></defs><g></g></svg>
+        <div style="display:grid;grid-template-columns:repeat(${ncols}, minmax(130px, 175px));column-gap:42px;row-gap:16px;align-items:start;position:relative">
+          ${etapas.map((e, idx) => `<div style="grid-column:${capa[e.gi] + 1};grid-row:${fila[e.gi] + 1}">${bloques[idx]}</div>`).join('')}
+        </div></div></div>`;
   const filaLodos = etapasLodos.length ? `
     <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
       <div style="font-size:11px;font-weight:600;color:#9a6b2f;margin-bottom:4px">Línea de lodos — no es el efluente final</div>
