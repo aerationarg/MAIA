@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.48</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.49</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.48</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.49</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -22195,15 +22195,16 @@ async function cotizCatalogoRender() {
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
     const q = encodeURIComponent(texto);
-    let url = `/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo&limit=${COTIZ_CATALOGO_LIMITE}`;
+    let url = `/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo,id`;
     if (texto) url += `&or=(marca.ilike.*${q}*,modelo.ilike.*${q}*,codigo.ilike.*${q}*,descripcion.ilike.*${q}*)`;
     Object.entries(filtros).forEach(([campo, val]) => { if (val) url += `&${campo}=ilike.*${encodeURIComponent(val)}*`; });
     const [res, resReservas] = await Promise.all([
-      supaFetch(url, {headers:{Authorization:'Bearer '+session.token}}),
+      supaFetch(`${url}&limit=${COTIZ_CATALOGO_LIMITE}&offset=0`, {headers:{Authorization:'Bearer '+session.token, Prefer:'count=exact'}}),
       supaFetch(`/rest/v1/cotizaciones?select=q_numero,cliente,items&empresa=eq.${currentEmpresa}&stock_reservado=eq.true`, {headers:{Authorization:'Bearer '+session.token}}),
     ]);
     const rows = await res.json();
     if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<p class="hint">No se pudo cargar el catálogo.</p>'; return; }
+    const totalCr = parseInt((res.headers.get('Content-Range') || '').split('/')[1], 10);
     if (!rows.length) { el.innerHTML = (texto || Object.values(filtros).some(Boolean)) ? '<p class="hint">Sin resultados para esa búsqueda.</p>' : '<p class="hint">Todavía no hay productos cargados.</p>'; return; }
     // Mapa catalogo_id → detalle de qué cotizaciones tienen reservado ese
     // producto (Q + cliente + cantidad), para poder mostrarlo junto al
@@ -22230,6 +22231,20 @@ async function cotizCatalogoRender() {
     const hov = 'onmouseenter="procesosHoverTexto(this)" onmouseleave="procesosHoverTextoOcultar()" onfocus="procesosHoverTextoOcultar()"';
     const inputTxt = (r, campo, w, ph) => `<input id="cc-${r.id}-${campo}" value="${esc(r[campo]||'')}" ${ph?`placeholder="${esc(ph)}"`:''} style="width:${w}px" ${hov} />`;
     const inputNum = (r, campo, w) => `<input id="cc-${r.id}-${campo}" value="${esc(String(r[campo]||0))}" style="width:${w||52}px;text-align:right" oninput="cotizCatalogoRecalcularTotalFila('${r.id}')" ${hov} />`;
+    const filaHtml = r => {
+            const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(r[campo])||0), 0);
+            return `<tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:4px 6px;font-family:monospace;font-size:10px;color:var(--text2)" title="${esc(r.id)}">${esc(r.id.slice(0,8))}</td>
+              <td style="padding:2px">${inputTxt(r,'marca',90)}</td>
+              <td style="padding:2px">${inputTxt(r,'modelo',90)}</td>
+              <td style="padding:2px">${inputTxt(r,'codigo',80)}</td>
+              <td style="padding:2px"><input id="cc-${r.id}-descripcion" value="${esc(r.descripcion||'')}" style="width:240px" ${hov} /></td>
+              ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
+              <td id="cc-${r.id}-total" style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
+              <td style="padding:2px;white-space:nowrap"><button class="btn btn-primary btn-sm" onclick="cotizCatalogoGuardarFila('${r.id}')" title="Guardar los cambios de esta fila">💾</button> <button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
+            </tr>`;
+    };
+    _cotizCatalogoEstado = { urlBase: url, offset: rows.length, total: isNaN(totalCr) ? null : totalCr, hayMas: rows.length >= COTIZ_CATALOGO_LIMITE, filaHtml, cargando: false };
     el.innerHTML = `
       <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -22243,26 +22258,57 @@ async function cotizCatalogoRender() {
           <th style="text-align:right;padding:4px 6px;color:var(--text2);font-weight:600">Total</th>
           <th></th>
         </tr></thead>
-        <tbody>
-          ${rows.map(r => {
-            const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(r[campo])||0), 0);
-            return `<tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:4px 6px;font-family:monospace;font-size:10px;color:var(--text2)" title="${esc(r.id)}">${esc(r.id.slice(0,8))}</td>
-              <td style="padding:2px">${inputTxt(r,'marca',90)}</td>
-              <td style="padding:2px">${inputTxt(r,'modelo',90)}</td>
-              <td style="padding:2px">${inputTxt(r,'codigo',80)}</td>
-              <td style="padding:2px"><input id="cc-${r.id}-descripcion" value="${esc(r.descripcion||'')}" style="width:240px" ${hov} /></td>
-              ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
-              <td id="cc-${r.id}-total" style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
-              <td style="padding:2px;white-space:nowrap"><button class="btn btn-primary btn-sm" onclick="cotizCatalogoGuardarFila('${r.id}')" title="Guardar los cambios de esta fila">💾</button> <button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
-            </tr>`;
-          }).join('')}
+        <tbody id="cc-tbody">
+          ${rows.map(filaHtml).join('')}
         </tbody>
       </table>
       </div>
-      <p class="hint" style="margin-top:6px">Total: suma de Stock + Reserva + Coronel + Revisión + Alquiler.${rows.length >= COTIZ_CATALOGO_LIMITE ? ` Se muestran los primeros ${COTIZ_CATALOGO_LIMITE} — afiná la búsqueda si no encontrás lo que buscás.` : ''}</p>
+      <p class="hint" style="margin-top:6px">Total: suma de Stock + Reserva + Coronel + Revisión + Alquiler.</p>
+      <div id="cc-vermas"></div>
     `;
+    cotizCatalogoVerMasRender();
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
+}
+// Catálogo de Stock paginado: se cargan de a COTIZ_CATALOGO_LIMITE filas y
+// "Ver más" / "Ver todo" suman las siguientes al final de la tabla (sin
+// redibujarla, así no se pierde lo que se esté editando en otras filas).
+let _cotizCatalogoEstado = null;
+function cotizCatalogoVerMasRender() {
+  const box = document.getElementById('cc-vermas'), e = _cotizCatalogoEstado;
+  if (!box || !e) return;
+  const quedan = e.total != null ? e.total - e.offset : (e.hayMas ? 1 : 0);
+  const cuenta = e.total != null ? `Mostrando ${e.offset} de ${e.total} productos.` : `Mostrando ${e.offset} productos.`;
+  box.innerHTML = `<p class="hint" style="margin:6px 0">${cuenta}</p>` + (quedan > 0 ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-secondary btn-sm" ${e.cargando ? 'disabled' : ''} onclick="cotizCatalogoVerMas(false)">${e.cargando ? 'Cargando...' : `Ver más${e.total != null ? ' (' + Math.min(COTIZ_CATALOGO_LIMITE, quedan) + ')' : ''}`}</button>
+      <button class="btn btn-secondary btn-sm" ${e.cargando ? 'disabled' : ''} onclick="cotizCatalogoVerMas(true)">Ver todo${e.total != null ? ' (' + quedan + ' más)' : ''}</button>
+    </div>` : '');
+}
+async function cotizCatalogoVerMas(todo) {
+  const e = _cotizCatalogoEstado;
+  if (!e || e.cargando) return;
+  e.cargando = true;
+  cotizCatalogoVerMasRender();
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    for (;;) {
+      const res = await supaFetch(`${e.urlBase}&limit=${COTIZ_CATALOGO_LIMITE}&offset=${e.offset}`, {headers:{Authorization:'Bearer '+session.token}});
+      const rows = await res.json();
+      if (_cotizCatalogoEstado !== e) return; // se volvió a buscar/filtrar mientras cargaba
+      if (!res.ok || !Array.isArray(rows)) throw new Error('No se pudo cargar más.');
+      const tbody = document.getElementById('cc-tbody');
+      if (tbody) tbody.insertAdjacentHTML('beforeend', rows.map(e.filaHtml).join(''));
+      e.offset += rows.length;
+      e.hayMas = rows.length >= COTIZ_CATALOGO_LIMITE;
+      if (!todo || !e.hayMas) break;
+      cotizCatalogoVerMasRender();
+    }
+  } catch (err) {
+    alert(err.message || 'No se pudo cargar más.');
+  } finally {
+    e.cargando = false;
+    if (_cotizCatalogoEstado === e) cotizCatalogoVerMasRender();
+  }
 }
 async function cotizCatalogoAdd() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
