@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.43</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.44</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.43</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.44</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8126,15 +8126,16 @@ function procesosStep1Html(p) {
 
       <div class="gap"></div>
       <div class="card-label">Proyectos anteriores parecidos (detectados por IA)</div>
+      <p class="hint" style="margin:-4px 0 8px">Solo se muestran los que coinciden en al menos 3 de 4 criterios: tecnología, tipo de efluente, rubro y caudal.</p>
       <div id="procesos-step1-similares-status"></div>
-      ${refs.length ? refs.map((r,i) => `
+      ${refs.some(r => (r.coincide || []).length >= PROCESOS_SIMILARES_MIN_COINCIDENCIAS) ? refs.map((r,i) => (r.coincide || []).length < PROCESOS_SIMILARES_MIN_COINCIDENCIAS ? '' : `
         <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:var(--text)">
           <input type="checkbox" ${r.incluido?'checked':''} onchange="procesosToggleReferencia(${i})" />
           <span><b>${esc(r.nombre)}</b>${r.coincide && r.coincide.length ? ` <span style="font-size:11px;color:var(--text2);border:1px solid var(--border);border-radius:8px;padding:1px 6px">${r.coincide.length}/4 · ${r.coincide.join(', ')}</span>` : ''}${r.motivo?' — '+esc(r.motivo):''}</span>
-        </label>`).join('') : '<p class="hint">Todavía no se detectaron proyectos parecidos.</p>'}
+        </label>`).join('') : '<p class="hint">No hay proyectos anteriores parecidos (que coincidan en al menos 3 de los 4 criterios: tecnología, tipo de efluente, rubro y caudal).</p>'}
       <button class="btn btn-secondary btn-sm" onclick="procesosDetectarSimilares()" style="margin-top:6px">↻ Volver a detectar</button>
 
-      ${procesosTecnologiaSectionHtml(p)}
+      ${procesosTecnologiaFijadaHtml(p)}
 
       <div class="gap"></div>
       <button class="btn btn-primary" onclick="procesosAvanzarPaso(2)">Continuar al Paso 2 →</button>
@@ -8612,6 +8613,14 @@ function procesosStep1CancelarChooser() {
   renderProcesosStepContent();
 }
 
+// Un proyecto anterior solo se considera parecido si coincide al menos en
+// este número de los 4 criterios (tecnología, tipo de efluente, rubro, caudal).
+const PROCESOS_SIMILARES_MIN_COINCIDENCIAS = 3;
+// Referencias incluidas Y que cumplen el mínimo — también aplica a las que
+// quedaron guardadas de antes con menos coincidencias.
+function procesosRefsIncluidas(p) {
+  return ((p && p.proyectos_referencia) || []).filter(r => r.incluido && Array.isArray(r.coincide) && r.coincide.length >= PROCESOS_SIMILARES_MIN_COINCIDENCIAS);
+}
 async function procesosDetectarSimilares() {
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-similares-status';
@@ -8641,7 +8650,7 @@ async function procesosDetectarSimilares() {
     // Se compara en estos 4 puntos puntuales (no "relevancia" en general) y se
     // ordena por CANTIDAD de puntos en los que coincide — primero los que
     // coinciden en todos o casi todos, después los que coinciden en menos.
-    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nComparalos contra el proyecto nuevo en estos 4 puntos puntuales:\n1. "tecnologia" — la tecnología de tratamiento solicitada/prevista para el proyecto nuevo (si se menciona) vs. la tecnología usada en el proyecto anterior (ej. MBR, lodos activados, DAF, etc.).\n2. "tipo_efluente" — tipo/composición del efluente (cloacal, industrial, mixto, y de qué proceso viene).\n3. "rubro" — rubro/industria del cliente.\n4. "caudal" — calculalo con esta fórmula, no a ojo: razón = caudal_mayor / caudal_menor (los dos en la misma unidad, ej. m3/día). Si el caudal MENOR de los dos es menor a 50, coincide cuando razón ≤ 2 (ej. 20 vs 40: razón 2,0 → SÍ coincide). Si el caudal menor es 50 o más, coincide cuando razón ≤ 1,75 (ej. 200 vs 350: razón 1,75 → SÍ coincide; 273 vs 1350: razón ≈4,9 → NO coincide; 950 vs 1050: razón ≈1,1 → SÍ coincide aunque cruce de "cientos" a "miles", lo único que importa acá es la razón calculada, no la cantidad de dígitos). Si no podés determinar un caudal numérico para el proyecto anterior, no marques "caudal" como coincidente.\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) con los proyectos más parecidos (máximo 5), en este formato: {"similares":[{"numero":1,"coincide":["tecnologia","rubro"],"motivo":"..."}]}. En "coincide" listá SOLO los puntos de los 4 de arriba en los que realmente coincide (usando exactamente esas 4 palabras clave), puede ser una lista vacía si no coincide en ninguno pero igual te parece relevante mencionarlo. ORDENÁ la lista de mayor a menor cantidad de puntos coincidentes — primero los que coinciden en los 4, después los que coinciden en 3, etc. Si dos coinciden en la misma cantidad de puntos, el que tenga "tecnologia" entre los suyos va primero (es el más determinante). En "motivo" contá en una frase corta en qué coincide y en qué no. Si ninguno es relevante, devolvé {"similares":[]}.`;
+    const prompt = `Este es el resumen de un cliente/proyecto nuevo:\n${procesosResumenCampos(p)}\n\nEsta es la lista de proyectos anteriores de la empresa:\n${listado}\n\nComparalos contra el proyecto nuevo en estos 4 puntos puntuales:\n1. "tecnologia" — la tecnología de tratamiento solicitada/prevista para el proyecto nuevo (si se menciona) vs. la tecnología usada en el proyecto anterior (ej. MBR, lodos activados, DAF, etc.).\n2. "tipo_efluente" — tipo/composición del efluente (cloacal, industrial, mixto, y de qué proceso viene).\n3. "rubro" — rubro/industria del cliente.\n4. "caudal" — calculalo con esta fórmula, no a ojo: razón = caudal_mayor / caudal_menor (los dos en la misma unidad, ej. m3/día). Si el caudal MENOR de los dos es menor a 50, coincide cuando razón ≤ 2 (ej. 20 vs 40: razón 2,0 → SÍ coincide). Si el caudal menor es 50 o más, coincide cuando razón ≤ 1,75 (ej. 200 vs 350: razón 1,75 → SÍ coincide; 273 vs 1350: razón ≈4,9 → NO coincide; 950 vs 1050: razón ≈1,1 → SÍ coincide aunque cruce de "cientos" a "miles", lo único que importa acá es la razón calculada, no la cantidad de dígitos). Si no podés determinar un caudal numérico para el proyecto anterior, no marques "caudal" como coincidente.\n\nDevolvé SOLO un JSON (sin backticks ni texto extra) SOLO con los proyectos que coincidan en AL MENOS 3 de los 4 puntos (máximo 5), en este formato: {"similares":[{"numero":1,"coincide":["tecnologia","rubro"],"motivo":"..."}]}. En "coincide" listá SOLO los puntos de los 4 de arriba en los que realmente coincide (usando exactamente esas 4 palabras clave), NO incluyas ningún proyecto que coincida en 2 puntos o menos, por más relevante que te parezca (lo descarta el sistema igual). ORDENÁ la lista de mayor a menor cantidad de puntos coincidentes — primero los que coinciden en los 4, después los que coinciden en 3, etc. Si dos coinciden en la misma cantidad de puntos, el que tenga "tecnologia" entre los suyos va primero (es el más determinante). En "motivo" contá en una frase corta en qué coincide y en qué no. Si ninguno es relevante, devolvé {"similares":[]}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1000, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
@@ -8650,10 +8659,14 @@ async function procesosDetectarSimilares() {
     const data = await resp.json();
     const text = data.content?.find(c=>c.type==='text')?.text || '{}';
     const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    // Solo cuentan los proyectos que coinciden en al menos 3 de los 4 criterios
+    // (se vuelve a verificar acá por si la IA devuelve alguno de menos).
+    const CRITERIOS_SIMILARES = ['tecnologia', 'tipo_efluente', 'rubro', 'caudal'];
     const sugeridos = (parsed.similares||[]).map(s => {
       const proj = catalogo[s.numero-1];
-      return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, coincide: Array.isArray(s.coincide) ? s.coincide : [], incluido: true } : null;
-    }).filter(Boolean);
+      const coincide = Array.isArray(s.coincide) ? s.coincide.filter((c, i, a) => CRITERIOS_SIMILARES.includes(c) && a.indexOf(c) === i) : [];
+      return proj ? { id: proj.id, nombre: proj.nombre, motivo: s.motivo, coincide, incluido: true } : null;
+    }).filter(r => r && r.coincide.length >= PROCESOS_SIMILARES_MIN_COINCIDENCIAS);
 
     await procesosSaveProyecto({ proyectos_referencia: sugeridos }, p);
     if (procesosCurrentProyecto === p) renderProcesosStepContent();
@@ -9230,102 +9243,21 @@ async function procesosTecnologiaEstimarInputsCore(p) {
   return parsed;
 }
 
-async function procesosTecnologiaDerivarInputs() {
-  const p = procesosCurrentProyecto;
-  const statusId = 'procesos-tecnologia-status';
-  showMsg(statusId, 'loading', 'Estimando datos con IA...');
-  try {
-    await procesosTecnologiaEstimarInputsCore(p);
-    if (procesosCurrentProyecto === p) { showMsg(statusId,'success','✓ Datos estimados — revisalos abajo antes de proponer.'); renderProcesosStepContent(); }
-  } catch(e) {
-    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
-  }
-}
-
-function procesosTecnologiaUpdateInput(campo, val, esBool) {
-  const p = procesosCurrentProyecto;
-  const inputs = Object.assign({}, p.info_cliente?.mcdm_inputs || {});
-  inputs[campo] = esBool ? val : (val === '' ? null : (isNaN(Number(val)) ? val : Number(val)));
-  const info = Object.assign({}, p.info_cliente, { mcdm_inputs: inputs });
-  procesosSaveProyectoDebounced({ info_cliente: info });
-}
-
-async function procesosTecnologiaProponer() {
-  const p = procesosCurrentProyecto;
-  const statusId = 'procesos-tecnologia-status';
-  try {
-    const apiKey = getApiKey();
-    if (!apiKey) throw new Error('API key no disponible.');
-    let inputs = p.info_cliente?.mcdm_inputs;
-    if (!inputs) {
-      // No hacía falta abrir el panel de "Datos para la selección" a mano
-      // primero — si nunca se estimaron, se estiman acá mismo antes de seguir.
-      showMsg(statusId, 'loading', 'Estimando datos del proyecto con IA...');
-      inputs = await procesosTecnologiaEstimarInputsCore(p);
-      if (procesosCurrentProyecto !== p) return;
-    }
-    showMsg(statusId, 'loading', 'Calculando puntaje y proponiendo tecnologías...');
-    const { matrix, pesos, categoriasPorCriterio, camposPorCriterio, campos2PorCriterio } = await procesosMcdmCargar();
-    const mcdm = mcdmSelect(inputs, matrix, pesos, categoriasPorCriterio, camposPorCriterio, campos2PorCriterio);
-    // Si el criterio tiene categoría (ej. "Espacio disponible (Amplio)"), se
-    // la muestra siempre entre paréntesis — así queda explícito de qué lado
-    // salió el puntaje, sin la ambigüedad de una etiqueta genérica sola.
-    const factorTxt = x => `${MCDM_CRITERIO_LABEL[x.criterio]||x.criterio}${x.categoria?' ('+x.categoria+')':''}`;
-    const analisisMcdm = MCDM_TECHNOLOGIES.map(t => {
-      const s = mcdm.scores[t];
-      if (s.excluded) return `- ${MCDM_TECH_LABEL[t]}: excluida (${s.exclusionReasons.map(r=>MCDM_CRITERIO_LABEL[r]||r).join(', ')})`;
-      return `- ${MCDM_TECH_LABEL[t]}: ${s.score}/100${s.top.length?' — principales factores: '+s.top.map(factorTxt).join(', '):''}`;
-    }).join('\n');
-
-    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const prefsRes = await supaFetch(`/rest/v1/procesos_tecnologia_prefs?select=tecnologia,sigla,preferencia,experiencia&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}});
-    const prefsRows = prefsRes.ok ? await prefsRes.json() : [];
-    const preferenciasTecnologia = prefsRows.length
-      ? prefsRows.map(r => `${r.tecnologia}${r.sigla?' ('+r.sigla+')':''}: ${r.preferencia||'(sin preferencia cargada)'}${r.experiencia?' — Experiencia: '+r.experiencia.replace(/\n/g,'; '):''}`).join('\n')
-      : '(sin preferencias cargadas todavía — Cfg Procesos IA > Preferencias por tecnología)';
-
-    const datosProyecto = `${procesosResumenCampos(p)}\n\nDatos puntuales para selección de tecnología:\n${inputs.requestedTechnology ? `- Tecnología solicitada EXPLÍCITAMENTE por el cliente: ${procesosTecLabel(inputs.requestedTechnology)} — dale mucho peso a esto, es un pedido directo, no algo inferido.\n` : ''}- Tipo de efluente: ${inputs.effluentType||'—'}\n- Caudal: ${inputs.flowRate!=null?inputs.flowRate+' m3/día':'—'}\n- DBO: ${inputs.bod!=null?inputs.bod+' mg/L':'—'}\n- DQO: ${inputs.cod!=null?inputs.cod+' mg/L':'—'}\n- Sitio de descarga: ${inputs.dischargeSite||'—'}\n- Situación actual: ${inputs.currentSituation||'—'}`;
-
-    const DEFAULT_TEMPLATE = `Sos un experto en ingeniería de tratamiento de aguas residuales de Aeration, una empresa argentina especializada en sistemas de tratamiento de efluentes.\n\nTu tarea es proponer entre 1 y 3 tecnologías candidatas para este proyecto.\n\nDatos del proyecto:\n{{datosProyecto}}\n\nPreferencias de Aeration por tecnología (por qué se elige o no cada una, y experiencia real):\n{{preferenciasTecnologia}}\n\nAnálisis cuantitativo (MCDM, solo como referencia, no vinculante):\n{{analisisMcdm}}\n\nConsiderá:\n1. El tipo de industria y efluente.\n2. El caudal y las cargas orgánicas (DBO/DQO).\n3. Los requerimientos de calidad de salida y el sitio de descarga.\n4. Las preferencias y experiencia de Aeration por tecnología (de arriba).\n5. La viabilidad técnico-económica para este proyecto puntual.\n6. Continuidad tecnológica: si la situación actual menciona una tecnología ya instalada, la recomendación por defecto debe ser ampliar/escalar/optimizar esa misma tecnología, salvo que exista una razón técnica o regulatoria de peso (no alcanza la calidad exigida, o el caudal nuevo supera 3 veces la capacidad instalada). Cambiar de tecnología implica costos de CAPEX, capacitación y logística — el sesgo debe ser siempre hacia la continuidad.\n7. Combinaciones: la mayoría de los proyectos van con UNA sola tecnología, pero si hay una razón técnica concreta (por ejemplo carga orgánica muy alta que conviene reducir con un pretratamiento antes de la etapa biológica principal, o un requerimiento que la tecnología principal no resuelve bien sola) podés proponer una COMBINACIÓN de dos tecnologías de la lista, en el orden en que irían en el tren de tratamiento. No la propongas solo porque "no está mal" — tiene que aportar algo concreto que una sola tecnología no logre.\n\nInstrucciones de salida:\n- Proponé entre 1 y 3 opciones, sin repetir tecnologías ni combinaciones, usando SOLO nombres de esta lista: Lagunas, Lodos Activados, MBR, MBBR, SBR, Lecho Percolador, Anaeróbico.\n- Para una tecnología combinada, poné "tecnologia" como los dos nombres separados por " + ", en el orden del tren de tratamiento (ej. "Anaeróbico + MBR").\n- Cada justificación: un párrafo corto (máx. 100 palabras) en español, citando datos concretos del proyecto — nada de afirmaciones genéricas que aplicarían a cualquier proyecto. Si es una combinación, explicá específicamente por qué hace falta la combinación y no alcanza con una sola.\n- El puntaje MCDM es una referencia cuantitativa, no vinculante — podés proponer otra tecnología (o combinación) si el criterio cualitativo (preferencias de Aeration, continuidad tecnológica) lo justifica mejor. El MCDM no evalúa combinaciones, solo tecnologías individuales.\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"opciones":[{"tecnologia":"MBR","justificacion":"..."},{"tecnologia":"Anaeróbico + MBR","justificacion":"..."}]}`;
-
-    const template = await procesosPromptText('tecnologia_seleccion', DEFAULT_TEMPLATE);
-    const prompt = procesosPromptFill(template, { datosProyecto, preferenciasTecnologia, analisisMcdm });
-
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:1500, messages:[{role:'user', content:[{type:'text', text:prompt}]}] })
-    });
-    if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message||'Error de la IA'); }
-    const data = await resp.json();
-    const text = data.content?.find(c=>c.type==='text')?.text || '{}';
-    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
-
-    // Cada opción puede ser una sola tecnología ("MBR") o una combinación de
-    // dos separadas por "+" ("Anaerobico+MBR") — el MCDM no evalúa
-    // combinaciones, así que para esas se guarda el puntaje de CADA
-    // componente por separado en vez de inventar un número combinado.
-    const nombreATech = {}; MCDM_TECHNOLOGIES.forEach(t => { nombreATech[MCDM_TECH_LABEL[t]] = t; nombreATech[t] = t; });
-    const opciones = (parsed.opciones||[]).map(o => {
-      const componentes = String(o.tecnologia||'').split('+').map(s => s.trim()).map(n => nombreATech[n] || n).filter(t => MCDM_TECHNOLOGIES.includes(t));
-      if (!componentes.length) return null;
-      const componentesUnicos = componentes.filter((t,i) => componentes.indexOf(t)===i).slice(0,2);
-      const tecnologia = componentesUnicos.join('+');
-      const puntajes = componentesUnicos.map(t => ({ tecnologia:t, puntaje: mcdm.scores[t]?.score ?? null, top: mcdm.scores[t]?.top || [] }));
-      return { tecnologia, justificacion: o.justificacion||'', puntajes };
-    }).filter(Boolean).filter((o,i,arr) => arr.findIndex(x=>x.tecnologia===o.tecnologia)===i).slice(0,3);
-
-    if (!opciones.length) throw new Error('La IA no devolvió ninguna opción válida.');
-    await procesosSaveProyecto({ tecnologia_opciones: opciones }, p);
-    if (procesosCurrentProyecto === p) { showMsg(statusId,'success','✓ Propuesta lista.'); renderProcesosStepContent(); }
-  } catch(e) {
-    if (procesosCurrentProyecto === p) showMsg(statusId,'error','✕ '+e.message);
-  }
-}
-
-async function procesosTecnologiaConfirmar(tech) {
-  const p = procesosCurrentProyecto;
-  await procesosSaveProyecto({ tecnologia_confirmada: tech }, p);
-  if (procesosCurrentProyecto === p) renderProcesosStepContent();
+// La tecnología YA NO se elige en el Paso 1: el tren (incluida la tecnología
+// biológica) se define en el Paso 2. Lo que sí se mantiene "por detrás" es el
+// cálculo de compatibilidad por tecnología (MCDM) — ver
+// procesosTecnologiaReferenciaTxt, que lo pasa como referencia no vinculante
+// al armar/ajustar el tren del Paso 2, sin mostrar puntajes ni pedir elegir.
+//
+// Los proyectos viejos que ya tenían una tecnología elegida la siguen usando
+// (el Paso 2 la respeta) — se muestra acá, sola y con la opción de sacarla,
+// para que no quede una decisión escondida.
+function procesosTecnologiaFijadaHtml(p) {
+  if (!p.tecnologia_confirmada) return '';
+  return `
+    <div class="gap"></div>
+    <p style="font-size:13px;color:var(--text2)">Este proyecto tiene una tecnología fijada de antes: <b style="color:var(--text)">${esc(procesosTecLabel(p.tecnologia_confirmada))}</b>. El Paso 2 la respeta al armar el tren. <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaQuitarConfirmacion()" style="margin-left:6px">Quitar</button></p>
+  `;
 }
 function procesosTecnologiaQuitarConfirmacion() {
   const p = procesosCurrentProyecto;
@@ -9333,85 +9265,36 @@ function procesosTecnologiaQuitarConfirmacion() {
   if (procesosCurrentProyecto === p) renderProcesosStepContent();
 }
 
-function procesosTecnologiaInputsHtml(p) {
-  const inp = p.info_cliente?.mcdm_inputs || {};
-  const row = (label, inner) => `<div class="result-field"><span class="result-key">${label}</span>${inner}</div>`;
-  const num = (campo, val) => `<input class="result-val" type="number" step="any" value="${val!=null?val:''}" oninput="procesosTecnologiaUpdateInput('${campo}',this.value)" style="max-width:120px" />`;
-  const bool = (campo, val) => `<input type="checkbox" ${val?'checked':''} onchange="procesosTecnologiaUpdateInput('${campo}',this.checked,true)" />`;
-  return `
-    <div style="margin-bottom:10px">
-      ${row('Tecnología solicitada por el cliente', `
-        <select onchange="procesosTecnologiaUpdateInput('requestedTechnology',this.value)">
-          <option value="" ${!inp.requestedTechnology?'selected':''}>(ninguna en particular)</option>
-          ${MCDM_TECHNOLOGIES.map(t => `<option value="${t}" ${inp.requestedTechnology===t?'selected':''}>${MCDM_TECH_LABEL[t]}</option>`).join('')}
-        </select>`)}
-      ${row('Tipo de efluente', `<input class="result-val" value="${esc(inp.effluentType||'')}" oninput="procesosTecnologiaUpdateInput('effluentType',this.value)" />`)}
-      ${row('Caudal (m3/día)', num('flowRate', inp.flowRate))}
-      ${row('DBO (mg/L)', num('bod', inp.bod))}
-      ${row('DQO (mg/L)', num('cod', inp.cod))}
-      ${row('Nitrógeno total (mg/L)', num('nitrogenTotal', inp.nitrogenTotal))}
-      ${row('Fósforo total (mg/L)', num('phosphorusTotal', inp.phosphorusTotal))}
-      ${row('Aceites y grasas (mg/L)', num('oilsAndGreases', inp.oilsAndGreases))}
-      ${row('Superficie disponible (m2)', num('availableArea', inp.availableArea))}
-      ${row('Temperatura mín. invernal (°C)', num('minWinterTemperature', inp.minWinterTemperature))}
-      ${row('Relación caudal pico/promedio', num('peakAverageRatio', inp.peakAverageRatio))}
-      ${row('Nivel de tóxicos', `
-        <select onchange="procesosTecnologiaUpdateInput('toxicCompoundsLevel',this.value)">
-          ${['NONE','LOW','MODERATE','HIGH'].map(l => `<option value="${l}" ${inp.toxicCompoundsLevel===l?'selected':''}>${({NONE:'Ninguno',LOW:'Bajo',MODERATE:'Moderado',HIGH:'Alto'})[l]}</option>`).join('')}
-        </select>`)}
-      ${row('Requiere reúso del efluente', bool('reuseRequired', inp.reuseRequired))}
-      ${row('Prioriza bajo CAPEX', bool('priorityLowCapex', inp.priorityLowCapex))}
-      ${row('Prioriza bajo OPEX/energía', bool('priorityOpex', inp.priorityOpex))}
-      ${row('Prioriza mínima generación de lodos', bool('priorityLowSludge', inp.priorityLowSludge))}
-      ${row('Prioriza operación simple', bool('prioritySimpleOps', inp.prioritySimpleOps))}
-    </div>
-    <label style="font-size:12px;color:var(--text2)">Situación actual (¿ya tiene una planta instalada?)</label>
-    <textarea rows="2" oninput="procesosTecnologiaUpdateInput('currentSituation',this.value)" style="margin-bottom:6px">${esc(inp.currentSituation||'')}</textarea>
-    <label style="font-size:12px;color:var(--text2)">Sitio de descarga</label>
-    <input value="${esc(inp.dischargeSite||'')}" oninput="procesosTecnologiaUpdateInput('dischargeSite',this.value)" />
-  `;
-}
-
-function procesosTecnologiaSectionHtml(p) {
-  const opciones = p.tecnologia_opciones || [];
-  const confirmada = p.tecnologia_confirmada;
-  return `
-    <div class="gap"></div>
-    <div class="card-label">Elegir tecnología</div>
-    ${confirmada ? `
-      <p style="font-size:14px;margin-bottom:8px">✓ Tecnología elegida: <b>${esc(procesosTecLabel(confirmada))}</b> <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaQuitarConfirmacion()" style="margin-left:8px">Cambiar</button></p>
-    ` : `
-      <details open style="margin-bottom:10px">
-        <summary style="cursor:pointer;font-size:13px;color:var(--text2)">Datos para la selección (estimados con IA, revisalos y corregilos si hace falta)</summary>
-        <div style="margin-top:10px">
-          <button class="btn btn-secondary btn-sm" onclick="procesosTecnologiaDerivarInputs()" style="margin-bottom:10px">✨ Estimar con IA</button>
-          ${procesosTecnologiaInputsHtml(p)}
-        </div>
-      </details>
-      <button class="btn btn-primary" onclick="procesosTecnologiaProponer()">✦ Proponer tecnologías</button>
-      <div id="procesos-tecnologia-status"></div>
-      ${opciones.length ? `
-        <div class="gap"></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          ${opciones.map(o => `
-            <div class="card" style="flex:1;min-width:240px">
-              <div class="card-label">${esc(procesosTecLabel(o.tecnologia))}</div>
-              <div style="font-size:13px;color:var(--text2);margin:0 0 8px">
-                ${(o.puntajes||[]).map(pt => `<div>${esc(MCDM_TECH_LABEL[pt.tecnologia]||pt.tecnologia)} — Puntaje: <b style="color:var(--text)">${pt.puntaje!=null?pt.puntaje+'/100':'N/D'}</b>${pt.top&&pt.top.length?' · '+pt.top.map(t=>MCDM_CRITERIO_LABEL[t.criterio]||t.criterio).join(', '):''}</div>`).join('')}
-              </div>
-              <p style="font-size:13px;white-space:pre-wrap">${esc(o.justificacion)}</p>
-              <button class="btn btn-primary btn-sm" onclick="procesosTecnologiaConfirmar('${o.tecnologia}')" style="margin-top:8px">Elegir</button>
-            </div>`).join('')}
-        </div>
-      ` : ''}
-      <div class="gap"></div>
-      <label style="font-size:12px;color:var(--text2)">O elegí cualquier otra tecnología directamente</label>
-      <select onchange="if(this.value) procesosTecnologiaConfirmar(this.value)" style="margin-top:4px">
-        <option value="">Elegir tecnología...</option>
-        ${MCDM_TECHNOLOGIES.map(t => `<option value="${t}">${MCDM_TECH_LABEL[t]}</option>`).join('')}
-      </select>
-    `}
-  `;
+// Cálculo de compatibilidad por tecnología (sin IA para el puntaje; solo la
+// estimación de los datos de entrada, que se guarda para no repetirla) +
+// preferencias de negocio de Aeration por tecnología, devueltos como texto
+// para sumar al prompt del Paso 2. Nunca frena el flujo: ante cualquier error
+// devuelve '' y el Paso 2 sigue como si no hubiera referencia.
+async function procesosTecnologiaReferenciaTxt(p) {
+  try {
+    let inputs = p.info_cliente?.mcdm_inputs;
+    if (!inputs) inputs = await procesosTecnologiaEstimarInputsCore(p);
+    const { matrix, pesos, categoriasPorCriterio, camposPorCriterio, campos2PorCriterio } = await procesosMcdmCargar();
+    const mcdm = mcdmSelect(inputs, matrix, pesos, categoriasPorCriterio, camposPorCriterio, campos2PorCriterio);
+    const factorTxt = x => `${MCDM_CRITERIO_LABEL[x.criterio]||x.criterio}${x.categoria?' ('+x.categoria+')':''}`;
+    const analisis = MCDM_TECHNOLOGIES.map(t => {
+      const s = mcdm.scores[t];
+      if (s.excluded) return `- ${MCDM_TECH_LABEL[t]}: excluida (${s.exclusionReasons.map(r=>MCDM_CRITERIO_LABEL[r]||r).join(', ')})`;
+      return `- ${MCDM_TECH_LABEL[t]}: ${s.score}/100${s.top.length?' — principales factores: '+s.top.map(factorTxt).join(', '):''}`;
+    }).join('\n');
+    let prefsTxt = '';
+    try {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      const prefsRes = await supaFetch(`/rest/v1/procesos_tecnologia_prefs?select=tecnologia,sigla,preferencia,experiencia&empresa=eq.${currentEmpresa}&order=orden`, {headers:{Authorization:'Bearer '+session.token}});
+      const prefsRows = prefsRes.ok ? await prefsRes.json() : [];
+      if (prefsRows.length) prefsTxt = '\n\nPreferencias de negocio de Aeration por tecnología:\n' + prefsRows.map(r => `${r.tecnologia}${r.sigla?' ('+r.sigla+')':''}: ${r.preferencia||'(sin preferencia cargada)'}${r.experiencia?' — Experiencia: '+r.experiencia.replace(/\n/g,'; '):''}`).join('\n');
+    } catch (e) { /* sin preferencias */ }
+    const pedida = inputs.requestedTechnology ? `\nEl cliente pidió explícitamente: ${procesosTecLabel(inputs.requestedTechnology)} — dale mucho peso.` : '';
+    return `\n\nReferencia interna de compatibilidad de cada tecnología con este proyecto (puntaje 0-100 calculado automáticamente a partir de los datos del cliente; es una guía NO vinculante — la tecnología biológica del tren la definís vos con criterio técnico, y no hace falta que sea la de mayor puntaje si hay una razón para otra):\n${analisis}${pedida}${prefsTxt}`;
+  } catch (e) {
+    console.warn('No se pudo calcular la referencia de tecnología:', e.message);
+    return '';
+  }
 }
 
 async function procesosAvanzarPaso(step) {
@@ -10156,7 +10039,7 @@ async function procesosStep2CargarPlanilla(forzarSugerencia) {
           // etiquetas parecidas). El resto de las etapas auxiliares
           // (pretratamiento, desinfección, deshidratación, etc.) se siguen
           // evaluando normalmente.
-          const tecTxt = p.tecnologia_confirmada
+          const tecTxt = !p.tecnologia_confirmada ? await procesosTecnologiaReferenciaTxt(p) : p.tecnologia_confirmada
             ? `\n\nTecnología de tratamiento ya elegida para este proyecto en el Paso 1: ${procesosTecLabel(p.tecnologia_confirmada)}${p.tecnologia_confirmada.includes('+') ? ' (combinación de dos tecnologías — van a hacer falta hojas para AMBAS etapas, en ese orden dentro del tren)' : ''}. Para la etapa biológica principal, incluí SOLO las hojas coherentes con esa tecnología específica — no incluyas hojas de tecnologías alternativas que cumplirían la misma función (ej. si ya se eligió MBR, no incluyas SBR o Lodos Activados convencional para esa misma etapa aunque tengan etiquetas parecidas). Excepción: si la carga orgánica es tan elevada que una sola unidad de esa tecnología no puede tratarla (ni siquiera con varias en paralelo tiene sentido), sí podés combinarla EN SERIE con otra tecnología que reduzca la carga (explicalo en el "motivo"). Las demás etapas auxiliares del tren (pretratamiento, desinfección, deshidratación de lodos, etc.) evalualas normalmente según el proyecto.\n`
             : '';
           const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration (cuándo se necesita cada etapa, y rangos de eficiencia de remoción por etapa y por tecnología) — usalos como referencia para decidir.\n\n' : '';
@@ -10965,7 +10848,7 @@ async function procesosStep2TrenChatSend() {
         return `"${c.nombre}":\n${vals || '  (sin parámetros cargados)'}`;
       }).join('\n') + '\n\n'
       : '';
-    const tecTxt = p.tecnologia_confirmada ? `\n\nTecnología ya elegida en el Paso 1: ${procesosTecLabel(p.tecnologia_confirmada)}.` : '';
+    const tecTxt = p.tecnologia_confirmada ? `\n\nTecnología ya elegida en el Paso 1: ${procesosTecLabel(p.tecnologia_confirmada)}.` : await procesosTecnologiaReferenciaTxt(p);
     const firmas = st.workbook.SheetNames.map(nombre => {
       const model = st.hojaModels[nombre] || (st.hojaModels[nombre] = procesosStep2BuildModel(st.workbook.Sheets[nombre]));
       const labels = model.cells.slice(0, 15).map(c => c.label).filter(Boolean);
@@ -12555,7 +12438,7 @@ function procesosResumenEquipos(p, incluirNoConfirmadas) {
 // etapas similares en esos proyectos, no solo en los valores de diseño sueltos.
 async function procesosGetResumenesReferencias() {
   const p = procesosCurrentProyecto;
-  const refs = (p.proyectos_referencia || []).filter(r => r.incluido);
+  const refs = procesosRefsIncluidas(p);
   if (!refs.length) return '';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session') || 'null');
@@ -16120,7 +16003,7 @@ async function procesosBuildContexto(hastaStep, incluirChatGeneral, incluirEquip
   const p = procesosCurrentProyecto;
   let ctx = `Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\n\n`;
   if (p.info_cliente?.campos || p.info_cliente?.corrientes?.length) ctx += `Información del cliente/proyecto:\n${procesosResumenCampos(p)}\n\n`;
-  const refs = (p.proyectos_referencia||[]).filter(r=>r.incluido);
+  const refs = procesosRefsIncluidas(p);
   if (refs.length) ctx += `Proyectos anteriores similares tomados como referencia:\n${refs.map(r=>'- '+r.nombre+(r.motivo?' ('+r.motivo+')':'')).join('\n')}\n\n`;
   const fichasCtx = await procesosFichasTxt(p, hastaStep >= 4 ? ['general', 'propuesta'] : ['general']);
   if (fichasCtx) ctx += fichasCtx + '\n';
@@ -26455,7 +26338,7 @@ function fichaCoincide(nombre, u) {
 }
 // Fichas de los proyectos de referencia incluidos en el proyecto actual (con caché de 5 min)
 async function procesosFichasRefs(p) {
-  const ids = ((p && p.proyectos_referencia) || []).filter(r => r.incluido).map(r => r.id);
+  const ids = procesosRefsIncluidas(p).map(r => r.id);
   if (!ids.length) return [];
   const ahora = Date.now();
   const faltan = ids.filter(id => !_fichasCache[id] || ahora - _fichasCache[id].t > 300000);
