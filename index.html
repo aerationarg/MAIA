@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.64</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.63</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.64</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -24211,6 +24211,26 @@ function cotizArmadoSetItemCampo(id, campo, val) {
   });
   cotizArmadoRecalcularTotales();
   cotizArmadoRender();
+  // Ítem de Stock sin precio en la Lista de precios al que se le acaba de definir uno: se ofrece cargarlo ahí
+  if (campo === 'precio_unitario' && Number(val) > 0) { const it = st.items.find(x => x.id === id); if (it && it.lista_vacia && it.catalogo_id) setTimeout(() => cotizArmadoOfrecerPrecioLista(id), 0); }
+}
+async function cotizArmadoOfrecerPrecioLista(id) {
+  const st = cotizArmadoInit();
+  const it = st.items.find(x => x.id === id);
+  if (!it || !it.lista_vacia || !it.catalogo_id) return;
+  it.lista_vacia = false; // se pregunta una sola vez por ítem
+  const precio = Number(it.precio_base != null && it.precio_base !== '' ? it.precio_base : it.precio_unitario) || 0;
+  if (!(precio > 0)) return;
+  const monedaLista = st.moneda === 'Peso' ? 'ARS' : 'USD';
+  if (!confirm(`"${(it.descripcion || '').slice(0, 80)}" no tiene precio en la Lista de precios.
+
+¿Querés cargar ${monedaLista} ${procesosFormatearNumero(precio)} como su precio de lista?`)) return;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${it.catalogo_id}`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + session.token }, body: JSON.stringify({ precio_lista: precio, moneda_lista: monedaLista }) });
+    if (!res.ok) throw new Error('Error ' + res.status);
+    alert('✓ Precio cargado en la Lista de precios.');
+  } catch (e) { alert('No se pudo cargar el precio en la Lista de precios: ' + e.message); }
 }
 
 // ── Armar la cotización desde archivos / texto (IA) ──
@@ -24327,7 +24347,7 @@ async function cotizArmadoDesdeArchivos() {
       let item;
       if (m && m.origen === 'cat') {
         cuentas.cat++;
-        item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(m.row), cantidad, precio_unitario: m.row.precio_lista != null ? Number(m.row.precio_lista) : precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.id, origen_ia: 'stock' };
+        item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(m.row), cantidad, precio_unitario: m.row.precio_lista != null ? Number(m.row.precio_lista) : precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.id, origen_ia: 'stock', lista_vacia: m.row.precio_lista == null || Number(m.row.precio_lista) === 0 };
       } else if (m) {
         cuentas.hist++;
         item = { id: procesosNuevoId(), descripcion: m.row.descripcion || cotizDescripcionItem(m.row), cantidad, precio_unitario: Number(m.row.precio_unitario) || precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.catalogo_id || null, origen_ia: 'vendido' };
@@ -24424,7 +24444,7 @@ async function cotizArmadoBuscarItems() {
         <div class="result-field" style="flex-direction:column;align-items:flex-start;gap:4px">
           <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))} <span style="color:var(--text2)">· En stock: ${esc(String(r.cantidad_stock??0))}</span><br><span style="color:var(--text2);font-weight:400">${esc(r.descripcion||'')}</span></span>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
-            ${r.precio_lista!=null ? precios.map(([tipo,label,valor]) => `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','${tipo}')" title="Agregar con ${esc(label)}">${esc(label)}: ${esc(moneda)} ${procesosFormatearNumero(valor)}</span>`).join('') : '<span class="hint">Sin precio cargado</span>'}
+            ${r.precio_lista!=null ? precios.map(([tipo,label,valor]) => `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','${tipo}')" title="Agregar con ${esc(label)}">${esc(label)}: ${esc(moneda)} ${procesosFormatearNumero(valor)}</span>`).join('') : `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','venta')" title="Agregarlo sin precio y definirlo después">Sin precio — agregar igual</span>`}
           </div>
         </div>`;
       }).join('');
@@ -24453,7 +24473,7 @@ function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   // ventas en vez de quedar vacíos. catalogo_id solo se guarda cuando el
   // ítem vino de Stock (no del historial ni cargado a mano) — es lo que
   // permite descontar stock automáticamente al marcar vendida.
-  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null });
+  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null, lista_vacia: origen==='cat' && (row.precio_lista == null || Number(row.precio_lista) === 0) });
   cotizArmadoOrdenarItems(st);
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
