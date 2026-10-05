@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.65</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.66</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.65</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.66</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -29147,10 +29147,12 @@ function concilConciliar(movsExcel, movsPdf, arrastre, ventanaDias, ventanaLoteD
 // ── Parseo del Excel de movimientos contables ──
 function concilExcelFechaISO(v) {
   if (v == null || v === '') return null;
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  // Una celda de fecha inválida (o un número que no es una fecha) devuelve null en vez de romper todo el análisis con "Invalid time value"
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
   if (typeof v === 'number') {
-    const ms = Math.round((v - 25569) * 86400 * 1000);
-    return new Date(ms).toISOString().slice(0, 10);
+    if (!isFinite(v)) return null;
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
   }
   const s = String(v).trim();
   let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
@@ -29182,6 +29184,8 @@ function concilParseExcelMovs(rows) {
   }
   if (headerIdx === -1) throw new Error('No encontré las columnas Fecha/Concepto/Debe/Haber en el Excel — ¿es el archivo de movimientos correcto?');
   const out = [];
+  const omitidas = []; // filas con importe pero sin fecha válida: no se pueden conciliar, se le avisa al usuario
+  out.omitidas = omitidas;
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i] || [];
     const fecha = concilExcelFechaISO(row[colFecha]);
@@ -29190,7 +29194,7 @@ function concilParseExcelMovs(rows) {
     const haber = colHaber >= 0 ? concilNum(row[colHaber]) : 0;
     const saldo = colSaldo >= 0 && row[colSaldo] !== '' && row[colSaldo] != null ? concilNum(row[colSaldo]) : null;
     if (!fecha && !debe && !haber) continue;
-    if (!fecha) continue;
+    if (!fecha) { omitidas.push({ fila: i + 1, concepto: String(concepto || '').trim().slice(0, 40), valorFecha: String(row[colFecha] == null ? '' : row[colFecha]).slice(0, 25) }); continue; }
     out.push({ fecha, concepto: String(concepto || '').trim(), debe, haber, saldo });
   }
   return out;
@@ -29437,7 +29441,7 @@ async function concilAnalizar() {
     };
     concilRenderResultado();
     const notaArrastre = anterior ? ` Se arrastraron los pendientes de ${anterior.periodo} — ${r.arrastreResuelto} ya se resolvieron y ${r.arrastrePendiente} siguen abiertos.` : ' No encontré una conciliación anterior de este banco para arrastrar pendientes (¿es la primera vez, o el mes anterior no se confirmó todavía desde MAIA?).';
-    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente${r.lotesAuto ? ` y ${r.lotesAuto} lote(s) (ej. sueldos, gastos bancarios) se agruparon contra un asiento único` : ''}.${notaArrastre} Revisá las tablas antes de confirmar.`);
+    showMsg(statusId, 'success', `✓ Listo — ${r.coincidenciasAuto} movimiento(s) coincidieron automáticamente${r.lotesAuto ? ` y ${r.lotesAuto} lote(s) (ej. sueldos, gastos bancarios) se agruparon contra un asiento único` : ''}.${notaArrastre} Revisá las tablas antes de confirmar.` + (movsExcel.omitidas && movsExcel.omitidas.length ? ` ⚠ ${movsExcel.omitidas.length} fila(s) del Excel tienen importe pero la fecha no es válida y NO se compararon (fila${movsExcel.omitidas.length > 1 ? 's' : ''} ${movsExcel.omitidas.slice(0, 8).map(o => o.fila + (o.valorFecha ? ' [fecha: "' + o.valorFecha + '"]' : '')).join(', ')}${movsExcel.omitidas.length > 8 ? '...' : ''}) — corregilas en el Excel si son movimientos reales.` : ''));
   } catch (e) {
     showMsg(statusId, 'error', '✕ ' + concilErrMsg(e));
   } finally {
