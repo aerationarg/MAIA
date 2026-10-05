@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.66</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.67</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.66</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.67</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1219,6 +1219,12 @@
       <div class="card">
         <div class="card-label">Fuentes de Imputación</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usan para precargar el campo "Imputación" (u otro que configures) en Rendiciones. Misma configuración para todas las empresas.</p>
+      </div>
+      <div class="card">
+        <div class="card-label">Exportar la base comercial</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Baja en un solo Excel todo el contenido de Stock, Lista de precios, Clientes (con contactos, sucursales y lugares de entrega), Cotizaciones (con sus ítems) e Historial de ventas de la empresa que tengas elegida arriba (AA / AS), para pasárselo a otra persona.</p>
+        <button class="btn btn-secondary" onclick="comercialExportarExcel()">⬇ Exportar base comercial a Excel</button>
+        <div id="comercial-export-status" style="margin-top:8px"></div>
       </div>
       <div class="card">
         <div class="card-label">Excel de Clientes</div>
@@ -22106,6 +22112,60 @@ async function clientesFetchTodosConContactos() {
     offset += PAGINA;
   }
   return todos;
+}
+// ── Exportar toda la base comercial (Stock, Lista de precios, Clientes, Cotizaciones, Historial de ventas) a un solo Excel ──
+async function comercialTraerTodo(path) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const out = [];
+  for (let off = 0; off < 200000; off += 1000) {
+    const res = await supaFetch(`${path}${path.includes('?') ? '&' : '?'}limit=1000&offset=${off}`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) { if (res.status === 404) return []; throw new Error('No se pudo leer ' + path.split('?')[0].split('/').pop() + ' (' + res.status + ').'); }
+    const rows = await res.json();
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+async function comercialExportarExcel() {
+  const sid = 'comercial-export-status';
+  try {
+    showMsg(sid, 'loading', 'Leyendo Stock y Lista de precios...');
+    await cotizDescuentosLoad();
+    const E = `empresa=eq.${currentEmpresa}`;
+    const catalogo = await comercialTraerTodo(`/rest/v1/cotizaciones_catalogo?select=*&${E}&order=marca,modelo,id`);
+    showMsg(sid, 'loading', 'Leyendo Clientes...');
+    const clientes = await comercialTraerTodo('/rest/v1/clientes?select=*,clientes_contactos(*)&order=nombre_empresa,id');
+    const sucursales = await comercialTraerTodo('/rest/v1/clientes_sucursales?select=*&order=id');
+    const lugares = await comercialTraerTodo('/rest/v1/clientes_lugares_entrega?select=*&order=id');
+    showMsg(sid, 'loading', 'Leyendo Cotizaciones e Historial de ventas...');
+    const cotizaciones = await comercialTraerTodo(`/rest/v1/cotizaciones?select=*&${E}&order=created_at.desc,id`);
+    const historial = await comercialTraerTodo(`/rest/v1/cotizaciones_historial_ventas?select=*&${E}&order=fecha.desc,id`);
+    const nomCliente = {}; clientes.forEach(c => { nomCliente[c.id] = c.nombre_empresa || ''; });
+    const n = v => (v == null || v === '' ? '' : v);
+    const total = r => (r.items || []).reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0), 0);
+    const pv = (r, k) => r.precio_lista != null ? cotizPVCalc(r.precio_lista, _cotizDescuentos[k]) : '';
+    const hojas = [];
+    hojas.push(['Stock y precios', [['Marca', 'Modelo', 'Código', 'Descripción', 'Stock', 'Reserva', 'Coronel', 'Revisión', 'Alquiler', 'Total', 'Moneda', 'Costo', 'Precio de venta', 'PV 1', 'PV 2', 'PV AS']].concat(catalogo.map(r => [
+      n(r.marca), n(r.modelo), n(r.codigo), n(r.descripcion), n(r.cantidad_stock), n(r.cantidad_reserva), n(r.cantidad_coronel), n(r.cantidad_revision), n(r.cantidad_alquiler),
+      COTIZ_STOCK_COLS.reduce((a, [c]) => a + (Number(r[c]) || 0), 0), n(r.moneda_lista), n(r.costo), n(r.precio_lista), pv(r, 'dto1'), pv(r, 'dto2'), pv(r, 'dtoAS')]))]);
+    hojas.push(['Clientes', [['Empresa', 'Rubro', 'Tamaño', 'Descripción', 'Cantidad de contactos']].concat(clientes.map(c => [n(c.nombre_empresa), n(c.rubro), n(c.tamano), n(c.descripcion), (c.clientes_contactos || []).length]))]);
+    hojas.push(['Contactos', [['Empresa', 'Nombre', 'Apellido', 'Cargo', 'E-mail', 'Celular']].concat(clientes.flatMap(c => (c.clientes_contactos || []).map(ct => [n(c.nombre_empresa), n(ct.nombre), n(ct.apellido), n(ct.cargo), n(ct.email), n(ct.celular)])))]);
+    if (sucursales.length) hojas.push(['Sucursales', [['Empresa', 'Sucursal']].concat(sucursales.map(s => [nomCliente[s.cliente_id] || '', n(s.nombre)]))]);
+    if (lugares.length) hojas.push(['Lugares de entrega', [['Empresa', 'Lugar de entrega']].concat(lugares.map(l => [nomCliente[l.cliente_id] || '', n(l.texto)]))]);
+    const fechaDe = r => n(r.fecha || (r.created_at || '').slice(0, 10));
+    hojas.push(['Cotizaciones', [['Fecha', 'Q', 'Rev.', 'Cliente', 'Atención', 'E-mail', 'Teléfono', 'Referencia', 'Estado', 'Moneda', 'Subtotal', 'IVA %', 'Total', 'Forma de pago', 'Plazo de entrega', 'Validez', 'Lugar de entrega', 'Observaciones']].concat(cotizaciones.map(r => [
+      fechaDe(r), n(r.q_numero), n(r.revision), n(r.cliente), n(r.atencion), n(r.email), n(r.telefono), n(r.referencia), n(r.estado), n(r.moneda),
+      r.subtotal != null ? r.subtotal : total(r), n(r.iva), r.total != null ? r.total : '', n(r.forma_pago), n(r.plazo_entrega), n(r.validez_oferta), n(r.lugar_entrega), n(r.observaciones)]))]);
+    hojas.push(['Ítems de cotizaciones', [['Q', 'Cliente', 'Fecha', 'Estado', 'Cantidad', 'Marca', 'Modelo', 'Descripción', 'Precio unitario', 'Dto. del ítem %', 'Total del ítem']].concat(cotizaciones.flatMap(r => (r.items || []).map(it => [
+      n(r.q_numero), n(r.cliente), fechaDe(r), n(r.estado), n(it.cantidad), n(it.marca), n(it.modelo), n(it.descripcion), n(it.precio_unitario), n(it.dto_item), (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0)])))]);
+    // Historial de ventas: todas las columnas que traiga la tabla (menos ids internos)
+    const colsH = [...new Set(historial.flatMap(r => Object.keys(r)))].filter(k => !/(^id$|_id$|^empresa$|updated_at)/.test(k));
+    hojas.push(['Historial de ventas', [colsH].concat(historial.map(r => colsH.map(k => { const v = r[k]; return v != null && typeof v === 'object' ? JSON.stringify(v) : n(v); })))]);
+    const wb = XLSX.utils.book_new();
+    hojas.forEach(([nombre, filas]) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(filas), nombre.slice(0, 31)));
+    XLSX.writeFile(wb, `Base comercial ${currentEmpresa} - ${new Date().toISOString().slice(0, 10)}.xlsx`);
+    showMsg(sid, 'success', `✓ Exportado: ${catalogo.length} productos, ${clientes.length} clientes, ${cotizaciones.length} cotizaciones, ${historial.length} filas de historial de ventas.`);
+  } catch (e) { showMsg(sid, 'error', '✕ ' + e.message); }
 }
 async function clientesExportarExcel() {
   const statusId = 'clientes-export-status';
