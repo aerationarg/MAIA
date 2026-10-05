@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.51</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.52</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.51</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.52</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11624,6 +11624,8 @@ function procesosStep2RenderHojaPanel() {
     if (enPlantaCompacta) infoLineas.push(`🏭 ${esc(h.plantaCompacta.modelo)}`);
     if (rangoTxt) infoLineas.push(esc(rangoTxt));
     if (c.notaLibre) infoLineas.push('💬 ' + esc(c.notaLibre));
+    const moCelda = (h.motivos || {})[c.ref];
+    if (moCelda) infoLineas.push(`<span title="${esc(moCelda.motivo + ' — ' + moCelda.origen + ', ' + moCelda.fecha)}">📝 ${esc(moCelda.motivo.length > 90 ? moCelda.motivo.slice(0, 88) + '…' : moCelda.motivo)}</span>`);
     return `
     <div class="ps2-row">
       <span class="ps2-key"><span style="font-family:monospace;font-size:11px;font-weight:600;color:var(--text2);background:var(--surface2);border-radius:4px;padding:0 4px;margin-right:5px">${esc(c.ref)}</span>${esc(c.label)}</span>
@@ -11880,6 +11882,7 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   dd.hojas = Object.assign({}, dd.hojas);
   const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
   h.valores = Object.assign({}, h.valores, { [cellRef]: numVal });
+  h.motivos = Object.assign({}, h.motivos, { [cellRef]: { motivo: 'lo cargó o modificó el usuario a mano', origen: 'edición manual', fecha: new Date().toLocaleDateString('es-AR') } });
   h.confirmada = false;
   dd.hojas[nombre] = h;
   // Guardado directo (no debounced): así no queda ningún guardado viejo
@@ -11932,6 +11935,12 @@ function procesosConCache(blocks) {
 // eso pasara de verdad en la planilla). Con una tool call forzada, la forma
 // de la respuesta la valida la API — no hay forma de responder sin pasar
 // por "acciones", aunque venga vacío.
+// Modelo del chat de diseño de cada unidad. Para los mensajes que escribe el
+// usuario se usa con razonamiento adaptativo (la IA piensa antes de contestar y
+// puede responder en texto cuando solo se le pregunta algo); para el
+// autocompletado automático de datos faltantes se mantiene la herramienta
+// forzada (sin razonamiento), para que siempre devuelva acciones aplicables.
+const PROCESOS_STEP2_CHAT_MODEL = 'claude-sonnet-5-5';
 const PROCESOS_STEP2_TOOL = {
   name: 'aplicar_cambios',
   description: 'Aplica los cambios de diseño a la planilla de esta unidad y devuelve la respuesta conversacional para el usuario.',
@@ -11953,6 +11962,7 @@ const PROCESOS_STEP2_TOOL = {
             valor_objetivo: { type: 'number', description: 'Solo para "buscar_objetivo": el valor que tiene que dar celda_objetivo.' },
             min: { type: 'number', description: 'Solo para "buscar_objetivo": límite inferior razonable para el valor de "variar".' },
             max: { type: 'number', description: 'Solo para "buscar_objetivo": límite superior razonable para el valor de "variar".' },
+            motivo: { type: 'string', description: 'OBLIGATORIO en "set" y "buscar_objetivo": la razón de diseño CONCRETA de este valor, en una frase, con los números/celdas en que se apoya (ej. "volumen adoptado = largo 7,5 × ancho 5 × alto 4,4 para tener ≥4 m de líquido para los difusores, aunque el calculado C16 da 67 m³"). Queda registrado junto a la celda para poder explicarlo después — no escribas una razón genérica ni inventada.' },
           },
           required: ['tipo'],
         },
@@ -11986,6 +11996,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
   const msg = msgOverride != null ? msgOverride.trim() : (input?.value || '').trim();
   if (!msg) return;
   const statusId = 'procesos-step2-chat-status';
+  const esAuto = msgOverride != null; // mensaje armado por el sistema (autocompletado), no escrito por el usuario
   // Evita mandar dos mensajes en simultáneo a la misma hoja — si se solapan,
   // el guardado de uno puede pisar al del otro y se pierde un mensaje.
   if (_procesosStep2ChatEnviando[nombre]) { showMsg(statusId, 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
@@ -12015,7 +12026,8 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
       valoresPrompt[c.ref] = val;
       const contenido = model.grid[c.row][c.col];
-      const extra = [c.rango ? 'rango normal: ' + c.rango : '', c.rango_limite ? 'rango límite: ' + c.rango_limite : '', c.notas ? 'notas: ' + c.notas : ''].filter(Boolean).join(' | ');
+      const mo = (hPrev.motivos || {})[c.ref];
+      const extra = [c.rango ? 'rango normal: ' + c.rango : '', c.rango_limite ? 'rango límite: ' + c.rango_limite : '', c.notas ? 'notas: ' + c.notas : '', mo ? `motivo registrado (${mo.origen}, ${mo.fecha}): ${mo.motivo}` : ''].filter(Boolean).join(' | ');
       return `${c.ref} | ${c.label}${c.claveLibre ? ' [símbolo ' + c.claveLibre + ']' : ''}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'fórmula: ' + contenido : 'dato editable'} | valor actual: ${procesosStep2ValorTexto(val)}${extra ? ' | ' + extra : ''}`;
     }).join('\n');
     const historialPrevio = (hPrev.chat || []).slice(0, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
@@ -12100,16 +12112,31 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // "de memoria" (o del estado previo a sus propios cambios) el texto no
     // coincide con lo que después se ve en las celdas — se lo aclaramos.
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
-    const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
+    const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
+    const pedir = (modelo, extra) => procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, tools: [PROCESOS_STEP2_TOOL], tool_choice: { type: 'tool', name: PROCESOS_STEP2_TOOL.name }, messages: [{ role: 'user', content: [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }] }] })
+      body: JSON.stringify(Object.assign({ model: modelo, tools: [PROCESOS_STEP2_TOOL], messages: [{ role: 'user', content: contenidoMsg }] }, extra))
     });
+    const forzado = { max_tokens: 4000, tool_choice: { type: 'tool', name: PROCESOS_STEP2_TOOL.name } };
+    // Mensaje del usuario: razonamiento adaptativo (no admite tool_choice
+    // forzado, así que la herramienta queda opcional y, si la IA contesta en
+    // texto, ese texto es la respuesta sin cambios). Autocompletado: herramienta
+    // forzada y sin razonamiento, como antes.
+    let resp = await pedir(PROCESOS_STEP2_CHAT_MODEL, esAuto ? forzado : { max_tokens: 16000, thinking: { type: 'adaptive' } });
+    // Por si el modelo nuevo o el razonamiento no estuvieran disponibles para la
+    // cuenta: se vuelve al modo de antes en vez de dejar el chat sin respuesta.
+    if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) {
+      if (!esAuto) resp = await pedir(PROCESOS_STEP2_CHAT_MODEL, forzado);
+      if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) resp = await pedir('claude-sonnet-4-5', forzado);
+    }
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
     const data = await resp.json();
     const toolUse = data.content?.find(c => c.type === 'tool_use');
-    if (!toolUse) throw new Error('La IA no devolvió una respuesta con la forma esperada.');
-    const parsed = toolUse.input || {};
+    const textoLibre = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
+    if (!toolUse && !textoLibre) throw new Error(data.stop_reason === 'max_tokens' ? 'La respuesta de la IA se cortó antes de terminar — probá de nuevo.' : 'La IA no devolvió una respuesta con la forma esperada.');
+    const parsed = toolUse ? (toolUse.input || {}) : { reply: textoLibre, acciones: [] };
     if (parsed.leccion_aprendida) procesosStep2PendingLeccion = { hoja: nombre, texto: parsed.leccion_aprendida };
 
     // Hoja libre: la IA también puede cambiar la ESTRUCTURA (agregar/editar/quitar filas y fórmulas)
@@ -12140,6 +12167,16 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
 
     const cellByRef = r => model.cells.find(c => c.ref === r);
     const celdasForzadas = new Set(); // celdas de fórmula que el chat pisó a mano — hay que guardarlas igual que un dato editable, si no se pierden al refrescar
+    // Registro de POR QUÉ cada celda tiene su valor (lo usa después el propio chat
+    // para explicarlo sin inventar, y se muestra en la hoja junto a la celda).
+    const nuevosMotivos = Object.assign({}, hPrev.motivos);
+    const registrarMotivo = (ref, a) => {
+      nuevosMotivos[ref] = {
+        motivo: ((a.motivo || '').trim() || ('respuesta al pedido: "' + msg.slice(0, 160) + '"')).slice(0, 500),
+        origen: esAuto ? 'autocompletado de la IA' : 'chat con la IA',
+        fecha: new Date().toLocaleDateString('es-AR'),
+      };
+    };
     (parsed.acciones || []).forEach(a => {
       try {
         if (a.tipo === 'set') {
@@ -12151,11 +12188,13 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
           if (c) {
             hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(a.valor)]]);
             if (c.isFormula) celdasForzadas.add(c.ref);
+            registrarMotivo(c.ref, a);
           }
         } else if (a.tipo === 'buscar_objetivo') {
           const cv = cellByRef(a.variar), co = cellByRef(a.celda_objetivo);
           if (cv && co && !cv.isFormula && co.isFormula) {
             procesosStep2GoalSeek(hf, cv, co, Number(a.valor_objetivo), a.min != null ? Number(a.min) : undefined, a.max != null ? Number(a.max) : undefined);
+            registrarMotivo(cv.ref, a);
           }
         }
       } catch (_e) { /* acción individual inválida, seguir con las demás */ }
@@ -12212,7 +12251,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // siempre cae en el proyecto correcto y nunca se mezcla con otro.
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
-    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, confirmada: false });
+    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, motivos: nuevosMotivos, confirmada: false });
     h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
@@ -12241,6 +12280,8 @@ function procesosStep2RestaurarFormula(nombre, ref) {
   h.celdasForzadas = (h.celdasForzadas || []).filter(r => r !== ref);
   h.valores = Object.assign({}, h.valores);
   delete h.valores[ref];
+  h.motivos = Object.assign({}, h.motivos);
+  delete h.motivos[ref];
   dd.hojas[nombre] = h;
   const model = procesosStep2State.hojaModels[nombre];
   const c = model && model.cells.find(x => x.ref === ref);
