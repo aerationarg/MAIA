@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.54</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.55</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.54</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.55</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -857,6 +857,20 @@
           </div>
           <div id="flowsheets-chat-status"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Config Propuestas (biblioteca de texto estándar por tecnología + imágenes) ═══ -->
+    <div class="panel" id="panel-cfg-propuestas">
+      <div class="card">
+        <div class="card-label">Texto estándar por tecnología</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Cargá el documento (.docx) de cada tecnología de tratamiento biológico: MAIA separa con IA lo que va en la oferta de lo que no (explicaciones teóricas, cosas de un proyecto puntual), te deja revisarlo y guarda el texto estándar y sus fotos. Al armar una propuesta se usa el de la tecnología que tenga el proyecto.</p>
+        <div id="prop-cfg-tecnologias">Cargando...</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Imágenes para las ofertas</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Fotos y esquemas de equipos, obras de referencia y normativa. Subí imágenes sueltas o un .zip (las carpetas "Referencias obras" y "Normativa" definen la categoría): la IA sugiere palabras clave, tecnologías y epígrafe a partir del nombre — revisalos. Al armar una propuesta se eligen las que correspondan a los equipos y tecnologías del proyecto.</p>
+        <div id="prop-cfg-imagenes">Cargando...</div>
       </div>
     </div>
 
@@ -2305,6 +2319,7 @@ function switchPanel(name) {
   if (name === 'cfg-concil') concilBancosCfgRender();
   if (name === 'procesos') renderProcesosList();
   if (name === 'flowsheets') renderFlowsheetsList();
+  if (name === 'cfg-propuestas') propCfgRender();
   if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
@@ -25720,6 +25735,528 @@ function docxDescargar(blob, nombre) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+// ══ Propuestas — biblioteca: texto estándar por tecnología + imágenes para las ofertas ══
+// Cfg Propuestas. Dos tablas (ver SQL "propuestas_biblioteca"): propuesta_tecnologias (una fila por
+// tecnología, con secciones de texto en el mismo formato que las secciones del Paso 4, donde las
+// imágenes van como líneas [[img:ID|pie]]) y propuesta_imagenes (equipos, esquemas, obras de
+// referencia, normativa; la imagen va en base64 en la fila). Al armar una propuesta se eligen de acá
+// el texto de la tecnología del proyecto y las fotos que correspondan a sus equipos.
+const PROP_TECNOLOGIAS = [
+  { clave: 'LodosActivados', nombre: 'Lodos activados' }, { clave: 'MBR', nombre: 'MBR' }, { clave: 'MBR-GForce', nombre: 'MBR G-Force' },
+  { clave: 'MBBR', nombre: 'MBBR' }, { clave: 'SBR', nombre: 'SBR' }, { clave: 'LechoPercolador', nombre: 'Lecho percolador' },
+  { clave: 'Anaerobico', nombre: 'Anaeróbico (EGSB)' }, { clave: 'Lagunas', nombre: 'Lagunas' },
+];
+const PROP_IMG_CATEGORIAS = { equipo: 'Equipo', esquema: 'Esquema / funcionamiento', referencia: 'Obra de referencia', normativa: 'Normativa', tecnologia: 'De un documento de tecnología', otro: 'Otro' };
+let _propBib = { imagenes: null, tecnologias: null, datos: new Map(), borrador: null, ocupado: false };
+
+function propHeaders(extra) { const s = JSON.parse(localStorage.getItem('daia_session') || 'null'); return Object.assign({ Authorization: 'Bearer ' + (s && s.token) }, extra || {}); }
+function propEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function propTecNombre(clave) { const t = PROP_TECNOLOGIAS.find(x => x.clave === clave); return t ? t.nombre : clave; }
+function propNormTxt(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+
+// ── Carga ──
+async function propImagenesCargar(force) {
+  if (_propBib.imagenes && !force) return _propBib.imagenes;
+  const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=id,nombre,categoria,tags,tecnologias,pie,mime,ancho,alto,origen&empresa=eq.${currentEmpresa}&order=categoria,nombre`, { headers: propHeaders() });
+  const rows = res.ok ? await res.json() : null;
+  if (!Array.isArray(rows)) throw new Error('No se pudo cargar la biblioteca de imágenes — ¿corriste el SQL de la biblioteca de propuestas?');
+  _propBib.imagenes = rows;
+  return rows;
+}
+async function propTecnologiasCargar(force) {
+  if (_propBib.tecnologias && !force) return _propBib.tecnologias;
+  const res = await supaFetch(`/rest/v1/propuesta_tecnologias?select=*&empresa=eq.${currentEmpresa}&order=nombre`, { headers: propHeaders() });
+  const rows = res.ok ? await res.json() : null;
+  if (!Array.isArray(rows)) throw new Error('No se pudo cargar la biblioteca de tecnologías — ¿corriste el SQL de la biblioteca de propuestas?');
+  _propBib.tecnologias = rows;
+  return rows;
+}
+// base64 de una imagen (se baja de a una y se guarda en memoria)
+async function propImagenDatos(id) {
+  if (_propBib.datos.has(id)) return _propBib.datos.get(id);
+  const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=mime,data_b64&id=eq.${id}`, { headers: propHeaders() });
+  const rows = res.ok ? await res.json() : [];
+  const d = rows[0] ? { mime: rows[0].mime, b64: rows[0].data_b64 } : null;
+  if (d) _propBib.datos.set(id, d);
+  return d;
+}
+const PROP_MIME_PREVISUALIZABLE = /^image\/(png|jpe?g|gif|webp|bmp)$/;
+function propDataUrl(d) { return d && PROP_MIME_PREVISUALIZABLE.test(d.mime) ? `data:${d.mime};base64,${d.b64}` : null; }
+
+// ── Lectura de un .docx (texto, tablas e imágenes en orden) ──
+// Devuelve { titulo, bloques:[{t:'h',nivel,texto}|{t:'p',texto,negrita}|{t:'li',texto}|{t:'cap',texto}|{t:'tabla',filas}|{t:'img',ref}], imagenes:[{ref,nombre,mime,bytes}] }
+async function propDocxParsear(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  const leer = async n => { const f = zip.file(n); return f ? (await f.async('string')).replace(/^﻿/, '') : null; };
+  const parse = s => new DOMParser().parseFromString(s, 'text/xml');
+  const hijos = (el, nombreLocal) => Array.from(el.childNodes).filter(n => n.nodeType === 1 && n.localName === nombreLocal);
+  const desc = (el, nombreLocal) => Array.from(el.getElementsByTagName('*')).filter(n => n.localName === nombreLocal);
+  const attr = (el, nombre) => { if (!el) return null; for (const a of Array.from(el.attributes)) if (a.localName === nombre) return a.value; return null; };
+  const estilos = {};
+  const stXml = await leer('word/styles.xml');
+  if (stXml) desc(parse(stXml).documentElement, 'style').forEach(s => { const nm = hijos(s, 'name')[0]; estilos[attr(s, 'styleId')] = nm ? attr(nm, 'val') : attr(s, 'styleId'); });
+  const rels = {};
+  const relXml = await leer('word/_rels/document.xml.rels');
+  if (relXml) desc(parse(relXml).documentElement, 'Relationship').forEach(r => { if (/image/.test(attr(r, 'Type') || '')) rels[attr(r, 'Id')] = attr(r, 'Target'); });
+  const imagenes = [], refPorArchivo = {};
+  const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', emf: 'image/x-emf', wmf: 'image/x-wmf', bmp: 'image/bmp' };
+  const registrarImagen = async rid => {
+    const target = rels[rid]; if (!target) return null;
+    const ruta = target.startsWith('/') ? target.slice(1) : 'word/' + target.replace(/^\.\//, '');
+    if (refPorArchivo[ruta]) return refPorArchivo[ruta];
+    const f = zip.file(ruta); if (!f) return null;
+    const ext = (ruta.split('.').pop() || '').toLowerCase();
+    const ref = 'tmp' + (imagenes.length + 1);
+    imagenes.push({ ref, nombre: ruta.split('/').pop(), mime: MIME[ext] || 'application/octet-stream', bytes: await f.async('uint8array') });
+    refPorArchivo[ruta] = ref;
+    return ref;
+  };
+  const textoDe = p => {
+    let t = '';
+    (function rec(n) {
+      for (const c of Array.from(n.childNodes)) {
+        if (c.nodeType !== 1) continue;
+        if (c.localName === 't') t += c.textContent;
+        else if (c.localName === 'tab') t += '\t';
+        else if (c.localName === 'br') t += '\n';
+        else if (c.localName === 'instrText' || c.localName === 'drawing' || c.localName === 'pict') continue;
+        else rec(c);
+      }
+    })(p);
+    return t.replace(/ /g, ' ');
+  };
+  // ¿todo el texto del párrafo está en negrita? (sirve para detectar subtítulos que no usan estilo de título)
+  const esNegrita = p => {
+    const runs = hijos(p, 'r').filter(r => desc(r, 't').some(t => t.textContent.trim()));
+    return runs.length > 0 && runs.every(r => { const rpr = hijos(r, 'rPr')[0]; const b = rpr && hijos(rpr, 'b')[0]; return b && attr(b, 'val') !== '0' && attr(b, 'val') !== 'false'; });
+  };
+  const imgsDe = async p => {
+    const out = [];
+    for (const b of desc(p, 'blip')) { const r = await registrarImagen(attr(b, 'embed')); if (r) out.push(r); }
+    for (const b of desc(p, 'imagedata')) { const r = await registrarImagen(attr(b, 'id')); if (r) out.push(r); }
+    return out;
+  };
+  const doc = parse(await leer('word/document.xml'));
+  const body = desc(doc.documentElement, 'body')[0];
+  const bloques = [];
+  let titulo = '';
+  for (const ch of Array.from(body.childNodes)) {
+    if (ch.nodeType !== 1) continue;
+    if (ch.localName === 'p') {
+      const ppr = hijos(ch, 'pPr')[0];
+      const stId = ppr && hijos(ppr, 'pStyle')[0] ? attr(hijos(ppr, 'pStyle')[0], 'val') : null;
+      const estilo = (stId && estilos[stId]) || 'Normal';
+      const lista = !!(ppr && hijos(ppr, 'numPr')[0]) || /list/i.test(estilo);
+      const texto = textoDe(ch).trim();
+      const imgs = await imgsDe(ch);
+      const m = /^heading\s*(\d)/i.exec(estilo);
+      if (m && texto) bloques.push({ t: 'h', nivel: +m[1], texto });
+      else if (/^referencia$|^title$|^t[ií]tulo$/i.test(estilo) && texto) { if (!titulo) titulo = texto; }
+      else {
+        imgs.forEach(r => bloques.push({ t: 'img', ref: r }));
+        if (texto) {
+          const esCap = /caption|html preformatted/i.test(estilo) || (/^(figura|imagen|esquema|tabla)\s*[\dIVX]*[.:]/i.test(texto) && texto.length < 160);
+          bloques.push({ t: esCap ? 'cap' : (lista ? 'li' : 'p'), texto, estilo, negrita: esNegrita(ch) && texto.length < 80 });
+        }
+      }
+    } else if (ch.localName === 'tbl') {
+      const filas = hijos(ch, 'tr').map(tr => hijos(tr, 'tc').map(tc => hijos(tc, 'p').map(p => textoDe(p).trim()).filter(Boolean).join(' / ')));
+      if (filas.length) bloques.push({ t: 'tabla', filas });
+    }
+  }
+  return { titulo, bloques, imagenes };
+}
+
+// ── De los bloques del .docx al formato de texto de las secciones del Paso 4 ──
+//   "### X" subtítulo de etapa · "## X" subtítulo en negrita · "- X" viñeta · "| a | b |" fila de tabla
+//   "[[img:ID|pie]]" imagen con epígrafe. Cada Título 1/2 del documento abre una sección.
+function propDocxASecciones(parsed) {
+  const secs = [];
+  let cur = null;
+  const abrir = t => { cur = { titulo: t, bloques: [] }; secs.push(cur); };
+  parsed.bloques.forEach(b => { if (b.t === 'h' && b.nivel <= 2) abrir(b.texto); else { if (!cur) abrir('Introducción'); cur.bloques.push(b); } });
+  return secs.filter(s => s.bloques.length).map((s, i) => {
+    const out = [], bl = s.bloques;
+    const usadas = new Set();
+    for (let i2 = 0; i2 < bl.length; i2++) {
+      const b = bl[i2];
+      if (b.t === 'img') {
+        let pie = '';
+        const antes = bl[i2 - 1], desp = bl[i2 + 1];
+        if (antes && antes.t === 'cap' && !usadas.has(i2 - 1)) { pie = antes.texto; usadas.add(i2 - 1); }
+        else if (desp && desp.t === 'cap' && !usadas.has(i2 + 1)) { pie = desp.texto; usadas.add(i2 + 1); }
+        // la línea del epígrafe ya se escribió antes si venía arriba: se saca para no duplicarla
+        if (usadas.has(i2 - 1) && out.length && out[out.length - 1] === (antes && antes.texto)) out.pop();
+        out.push(`[[img:${b.ref}|${pie.replace(/[|\]]/g, ' ')}]]`);
+      } else if (b.t === 'cap') { if (!usadas.has(i2)) out.push(b.texto); }
+      else if (b.t === 'h') out.push('### ' + b.texto);
+      else if (b.t === 'li') out.push('- ' + b.texto);
+      else if (b.t === 'tabla') b.filas.forEach(f => out.push('| ' + f.map(c => c.replace(/\|/g, '/')).join(' | ') + ' |'));
+      else if (b.negrita) out.push('## ' + b.texto);
+      else out.push(b.texto);
+    }
+    return { id: 's' + (i + 1), titulo: s.titulo, incluir: true, tipo: '', motivo: '', texto: out.join('\n') };
+  });
+}
+function propTecClaveDeTitulo(t) {
+  const n = propNormTxt(t);
+  if (/g.?force/.test(n)) return 'MBR-GForce';
+  if (/mbbr/.test(n)) return 'MBBR';
+  if (/\bmbr\b/.test(n)) return 'MBR';
+  if (/\bsbr\b/.test(n)) return 'SBR';
+  if (/percolador/.test(n)) return 'LechoPercolador';
+  if (/anaer|egsb|ecsb/.test(n)) return 'Anaerobico';
+  if (/lodos activ|barros activ/.test(n)) return 'LodosActivados';
+  if (/laguna/.test(n)) return 'Lagunas';
+  return '';
+}
+
+// ── Llamada a la IA con herramienta forzada (modelo nuevo, con vuelta al anterior si no está disponible) ──
+async function propLlamarForzado(tool, prompt, maxTokens) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('API key no disponible.');
+  const pedir = modelo => procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: modelo, max_tokens: maxTokens || 4000, tools: [tool], tool_choice: { type: 'tool', name: tool.name }, messages: [{ role: 'user', content: typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt }] })
+  });
+  let resp = await pedir(typeof PROCESOS_STEP2_CHAT_MODEL !== 'undefined' ? PROCESOS_STEP2_CHAT_MODEL : 'claude-sonnet-4-5');
+  if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) resp = await pedir('claude-sonnet-4-5');
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const tu = data.content && data.content.find(c => c.type === 'tool_use');
+  if (!tu) throw new Error(data.stop_reason === 'max_tokens' ? 'La respuesta de la IA se cortó — probá de nuevo.' : 'La IA no devolvió la respuesta esperada.');
+  return tu.input || {};
+}
+const PROP_TOOL_CLASIFICAR = {
+  name: 'clasificar_secciones',
+  description: 'Indica qué secciones de un documento de tecnología van en la propuesta al cliente.',
+  input_schema: { type: 'object', properties: { secciones: { type: 'array', items: { type: 'object', properties: {
+    n: { type: 'number', description: 'Número de la sección, tal como figura en la lista.' },
+    incluir: { type: 'boolean', description: 'true si es texto estándar que va en la oferta al cliente.' },
+    tipo: { type: 'string', enum: ['descripcion', 'ventajas', 'comparacion', 'rendimientos', 'sistema', 'referencias_fotos', 'teoria', 'especifico_proyecto', 'otro'] },
+    motivo: { type: 'string', description: 'Una frase corta con el porqué.' },
+  }, required: ['n', 'incluir', 'tipo', 'motivo'] } } }, required: ['secciones'] },
+};
+async function propTecClasificarSecciones(nombre, secciones) {
+  const lista = secciones.map((s, i) => {
+    const lineas = s.texto.split('\n');
+    const nImg = lineas.filter(l => l.startsWith('[[img:')).length, nTab = lineas.filter(l => l.startsWith('| ')).length;
+    return `${i + 1}. "${s.titulo}" — ${lineas.length} líneas${nTab ? ', ' + nTab + ' filas de tabla' : ''}${nImg ? ', ' + nImg + ' imágenes' : ''}\n   Empieza así: ${s.texto.replace(/\[\[img:[^\]]*\]\]/g, '[imagen]').slice(0, 420).replace(/\n/g, ' ⏎ ')}`;
+  }).join('\n\n');
+  const prompt = `Este es un documento interno de Aeration Argentina con el texto y las fotos ESTÁNDAR de la tecnología "${nombre}", para reusar en las propuestas técnico-comerciales a clientes. Tiene secciones que sí van en una oferta y otras que no. Decidí, sección por sección, si va en la propuesta al cliente.\n\nVA (incluir=true): descripción/generalidades del sistema pensada para el cliente, ventajas, comparación contra lodos activados u otras tecnologías, rendimientos/valores de salida esperados, descripción del sistema y sus unidades, fotos de equipos y de obras de referencia.\nNO VA (incluir=false): explicaciones teóricas de química/microbiología/termodinámica que alargan la oferta sin vender (ej. pasos de la degradación anaeróbica con reacciones), texto que es de UN proyecto puntual (cantidad de tanques, capacidades, tablas de suministro/precios, "el proceso estará compuesto por dos tanques"), encabezados genéricos sin contenido propio (ej. "PROPUESTA TÉCNICA"), notas internas.\nSi una sección mezcla ambas cosas, marcá incluir=true y aclaralo en el motivo (el usuario la edita después).\n\nSecciones del documento:\n\n${lista}`;
+  const r = await propLlamarForzado(PROP_TOOL_CLASIFICAR, prompt, 3000);
+  const porN = {}; (r.secciones || []).forEach(x => { porN[x.n] = x; });
+  return secciones.map((s, i) => {
+    const c = porN[i + 1];
+    return c ? Object.assign({}, s, { incluir: !!c.incluir, tipo: c.tipo || '', motivo: c.motivo || '' }) : s;
+  });
+}
+// Si la IA no está disponible: se incluye todo salvo lo que claramente es de un proyecto puntual
+function propTecClasificarHeuristico(secciones) {
+  return secciones.map(s => {
+    const excl = /^suministro$|^propuesta t[eé]cnica$|^etapas de proceso$/i.test(propNormTxt(s.titulo).trim());
+    return Object.assign({}, s, { incluir: !excl, motivo: excl ? 'Parece específica de un proyecto puntual (revisala).' : '' });
+  });
+}
+
+// ── Imágenes: alta masiva (archivos sueltos o .zip), con compresión de las muy pesadas ──
+function propLeerBuffer(file) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsArrayBuffer(file); }); }
+function propBytesABase64(bytes) {
+  let s = ''; const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(s);
+}
+function propDimensionesImagen(mime, b64) {
+  return new Promise(res => {
+    if (!PROP_MIME_PREVISUALIZABLE.test(mime)) return res({ ancho: null, alto: null });
+    const im = new Image();
+    im.onload = () => res({ ancho: im.naturalWidth, alto: im.naturalHeight, img: im });
+    im.onerror = () => res({ ancho: null, alto: null });
+    im.src = `data:${mime};base64,${b64}`;
+  });
+}
+// Si pesa más de ~2,5 MB se baja a un máximo de 2000 px (JPEG) — el resto se guarda tal cual
+async function propPrepararImagen(mime, bytes) {
+  let b64 = propBytesABase64(bytes);
+  let dim = await propDimensionesImagen(mime, b64);
+  if (bytes.length > 2.5 * 1024 * 1024 && dim.img) {
+    const esc = Math.min(1, 2000 / Math.max(dim.ancho, dim.alto));
+    const cv = document.createElement('canvas'); cv.width = Math.round(dim.ancho * esc); cv.height = Math.round(dim.alto * esc);
+    const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(dim.img, 0, 0, cv.width, cv.height);
+    b64 = cv.toDataURL('image/jpeg', 0.85).split(',')[1]; mime = 'image/jpeg'; dim = { ancho: cv.width, alto: cv.height };
+  }
+  return { mime, b64, ancho: dim.ancho, alto: dim.alto };
+}
+function propMimeDeNombre(n) { const e = (n.split('.').pop() || '').toLowerCase(); return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }[e] || null; }
+function propCategoriaDeRuta(ruta) {
+  const r = propNormTxt(ruta);
+  if (/normativa/.test(r)) return 'normativa';
+  if (/referencia|obras/.test(r)) return 'referencia';
+  if (/esquema|proceso|funcionamiento|operacion|ficha tecnica|grafico|limpieza|secuencia|comparacion|\bvs\b/.test(r)) return 'esquema';
+  return 'equipo';
+}
+async function propImagenesSubir(fileList, statusId) {
+  if (_propBib.ocupado) return;
+  _propBib.ocupado = true;
+  try {
+    const items = [];
+    for (const f of Array.from(fileList)) {
+      if (/\.zip$/i.test(f.name)) {
+        const zip = await JSZip.loadAsync(await propLeerBuffer(f));
+        for (const e of Object.values(zip.files)) {
+          if (e.dir || /(^|\/)(__MACOSX|\.)/.test(e.name)) continue;
+          const mime = propMimeDeNombre(e.name); if (!mime) continue;
+          items.push({ ruta: e.name, mime, bytes: await e.async('uint8array') });
+        }
+      } else {
+        const mime = propMimeDeNombre(f.name) || (/^image\//.test(f.type) ? f.type : null);
+        if (mime) items.push({ ruta: f.name, mime, bytes: new Uint8Array(await propLeerBuffer(f)) });
+      }
+    }
+    if (!items.length) { showMsg(statusId, 'error', 'No encontré imágenes (PNG, JPG, GIF o WebP) en lo que subiste.'); return; }
+    const existentes = new Set((await propImagenesCargar(true)).map(i => propNormTxt(i.nombre)));
+    const nuevas = [];
+    let n = 0, omitidas = 0;
+    for (const it of items) {
+      n++;
+      showMsg(statusId, 'loading', `Subiendo ${n} de ${items.length}...`);
+      const nombre = it.ruta.split('/').pop().replace(/\.[^.]+$/, '').trim();
+      if (existentes.has(propNormTxt(nombre))) { omitidas++; continue; }
+      const prep = await propPrepararImagen(it.mime, it.bytes);
+      const body = { empresa: currentEmpresa, nombre, categoria: propCategoriaDeRuta(it.ruta), mime: prep.mime, ancho: prep.ancho, alto: prep.alto, data_b64: prep.b64, origen: 'carga manual' };
+      const res = await supaFetch('/rest/v1/propuesta_imagenes', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify(body) });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`No se pudo guardar "${nombre}": ${e.message || res.status}`); }
+      const fila = (await res.json())[0];
+      if (fila) { _propBib.datos.set(fila.id, { mime: prep.mime, b64: prep.b64 }); nuevas.push(fila); }
+    }
+    await propImagenesCargar(true);
+    let msg = `✓ Se subieron ${nuevas.length} imagen(es).${omitidas ? ` Se omitieron ${omitidas} que ya estaban (mismo nombre).` : ''}`;
+    if (nuevas.length) {
+      showMsg(statusId, 'loading', 'La IA está sugiriendo palabras clave, tecnologías y epígrafes...');
+      try { await propImagenesSugerirMetadatos(nuevas.map(x => x.id)); msg += ' Sugerí palabras clave, tecnologías y epígrafes: revisalos.'; }
+      catch (e) { msg += ' (No pude sugerir los metadatos automáticamente — cargalos a mano: ' + e.message + ')'; }
+    }
+    await propImagenesCargar(true);
+    propCfgImagenesRender();
+    showMsg(statusId, 'success', msg);
+  } catch (e) {
+    showMsg(statusId, 'error', '✕ ' + e.message);
+  } finally { _propBib.ocupado = false; }
+}
+const PROP_TOOL_METADATOS = {
+  name: 'sugerir_metadatos_imagenes',
+  description: 'Sugiere palabras clave, tecnologías y epígrafe para cada imagen de la biblioteca.',
+  input_schema: { type: 'object', properties: { imagenes: { type: 'array', items: { type: 'object', properties: {
+    n: { type: 'number' },
+    tags: { type: 'string', description: 'Palabras clave en minúscula separadas por coma, para encontrarla según el equipo del proyecto (tipo de equipo, marca, modelo, función). Ej: "soplante, aerzen, blower, aireación".' },
+    tecnologias: { type: 'array', items: { type: 'string' }, description: 'Claves de tecnología a las que se asocia (solo si corresponde claramente): LodosActivados, MBR, MBR-GForce, MBBR, SBR, LechoPercolador, Anaerobico, Lagunas.' },
+    pie: { type: 'string', description: 'Epígrafe corto y prolijo para la propuesta, sin "Figura N" (ej. "Soplante de lóbulos Aerzen con cabina de insonorización").' },
+  }, required: ['n', 'tags', 'pie'] } } }, required: ['imagenes'] },
+};
+async function propImagenesSugerirMetadatos(ids) {
+  const lista = (_propBib.imagenes || []).filter(i => ids.includes(i.id));
+  if (!lista.length) return;
+  for (let k = 0; k < lista.length; k += 40) {
+    const lote = lista.slice(k, k + 40);
+    const txt = lote.map((i, j) => `${j + 1}. "${i.nombre}" (categoría: ${PROP_IMG_CATEGORIAS[i.categoria] || i.categoria})`).join('\n');
+    const prompt = `Estas son imágenes (por su nombre de archivo) de una biblioteca de fotos para propuestas de plantas de tratamiento de efluentes de Aeration Argentina: equipos, esquemas de funcionamiento, obras de referencia y normativa. Para cada una sugerí palabras clave (para encontrarla cuando el proyecto incluya ese equipo), la/s tecnología/s a las que se asocia y un epígrafe prolijo. Para obras de referencia, el epígrafe es el cliente y lugar (y la planta, si el nombre lo dice), y la tecnología la que indique el nombre (ej. "DAF", "MBR", "MBBR"); para normativa, el nombre de la norma. No inventes datos que el nombre no sugiera.\n\n${txt}`;
+    const r = await propLlamarForzado(PROP_TOOL_METADATOS, prompt, 4000);
+    for (const x of (r.imagenes || [])) {
+      const im = lote[x.n - 1]; if (!im) continue;
+      const tec = (x.tecnologias || []).filter(t => PROP_TECNOLOGIAS.some(p => p.clave === t)).join(',');
+      await supaFetch(`/rest/v1/propuesta_imagenes?id=eq.${im.id}`, { method: 'PATCH', headers: propHeaders(), body: JSON.stringify({ tags: x.tags || '', tecnologias: tec, pie: x.pie || '' }) });
+    }
+  }
+}
+async function propImagenUpdate(id, campo, valor) {
+  await supaFetch(`/rest/v1/propuesta_imagenes?id=eq.${id}`, { method: 'PATCH', headers: propHeaders(), body: JSON.stringify({ [campo]: valor }) });
+  const im = (_propBib.imagenes || []).find(i => i.id === id); if (im) im[campo] = valor;
+}
+async function propImagenEliminar(id) {
+  const im = (_propBib.imagenes || []).find(i => i.id === id);
+  if (!confirm(`¿Eliminar la imagen "${im ? im.nombre : ''}" de la biblioteca?`)) return;
+  await supaFetch(`/rest/v1/propuesta_imagenes?id=eq.${id}`, { method: 'DELETE', headers: propHeaders() });
+  _propBib.imagenes = (_propBib.imagenes || []).filter(i => i.id !== id); _propBib.datos.delete(id);
+  propCfgImagenesRender();
+}
+
+// ── Pantalla Cfg Propuestas ──
+async function propCfgRender() {
+  await Promise.all([propCfgTecnologiasRender(), propCfgImagenesRender()]);
+}
+async function propCfgTecnologiasRender() {
+  const el = document.getElementById('prop-cfg-tecnologias'); if (!el) return;
+  if (_propBib.borrador) { propEditorRender(); return; }
+  el.innerHTML = 'Cargando...';
+  try {
+    const rows = await propTecnologiasCargar(true);
+    const lista = rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:13px">${rows.map(t => {
+      const sec = Array.isArray(t.contenido) ? t.contenido : [];
+      return `<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px"><b>${propEsc(t.nombre)}</b> <span class="hint" style="display:inline">(${propEsc(t.clave)})</span></td><td style="padding:6px;color:var(--text2)">${sec.filter(s => s.incluir).length} de ${sec.length} secciones incluidas${t.origen ? ' · ' + propEsc(t.origen) : ''}</td><td style="padding:6px;text-align:right;white-space:nowrap"><button class="btn btn-secondary btn-sm" onclick="propTecEditar('${t.id}')">Editar</button> <button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="propTecEliminar('${t.id}')">Eliminar</button></td></tr>`;
+    }).join('')}</table>` : '<p class="hint">Todavía no hay tecnologías cargadas.</p>';
+    el.innerHTML = lista + `
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="prop-tec-file" accept=".docx" style="display:none" onchange="propTecImportar(this.files[0]); this.value=''" />
+        <button class="btn btn-primary btn-sm" style="width:auto" onclick="document.getElementById('prop-tec-file').click()">+ Cargar documento de tecnología (.docx)</button>
+      </div>
+      <div id="prop-tec-status" style="margin-top:8px"></div>`;
+  } catch (e) { el.innerHTML = `<p class="hint" style="color:var(--red)">${propEsc(e.message)}</p>`; }
+}
+async function propCfgImagenesRender() {
+  const el = document.getElementById('prop-cfg-imagenes'); if (!el) return;
+  try {
+    const imgs = await propImagenesCargar();
+    const fCat = (document.getElementById('prop-img-fcat') || {}).value || '';
+    const fTxt = propNormTxt((document.getElementById('prop-img-ftxt') || {}).value || '');
+    const vis = imgs.filter(i => (!fCat || i.categoria === fCat) && (!fTxt || propNormTxt(i.nombre + ' ' + i.tags + ' ' + i.tecnologias).includes(fTxt)));
+    el.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <input type="file" id="prop-img-file" accept="image/*,.zip" multiple style="display:none" onchange="propImagenesSubir(this.files,'prop-img-status'); this.value=''" />
+        <button class="btn btn-primary btn-sm" style="width:auto" onclick="document.getElementById('prop-img-file').click()">+ Subir imágenes o un .zip</button>
+        <select id="prop-img-fcat" onchange="propCfgImagenesRender()" style="width:auto"><option value="">Todas las categorías</option>${Object.entries(PROP_IMG_CATEGORIAS).map(([k, v]) => `<option value="${k}" ${fCat === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+        <input id="prop-img-ftxt" placeholder="Buscar..." value="${propEsc((document.getElementById('prop-img-ftxt') || {}).value || '')}" oninput="propCfgImagenesFiltrar()" style="width:200px" />
+        <span class="hint" style="margin:0">${vis.length} de ${imgs.length}</span>
+      </div>
+      <div id="prop-img-status" style="margin-bottom:8px"></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px">
+        ${vis.map(i => `
+          <div class="card" style="margin:0;padding:10px">
+            <div style="height:120px;display:flex;align-items:center;justify-content:center;background:var(--surface2);border-radius:6px;margin-bottom:8px;overflow:hidden"><img data-prop-thumb="${i.id}" style="max-width:100%;max-height:120px" alt="" /></div>
+            <label style="font-size:11px">Nombre</label><input value="${propEsc(i.nombre)}" onchange="propImagenUpdate('${i.id}','nombre',this.value)" />
+            <label style="font-size:11px;margin-top:4px">Categoría</label>
+            <select onchange="propImagenUpdate('${i.id}','categoria',this.value)">${Object.entries(PROP_IMG_CATEGORIAS).map(([k, v]) => `<option value="${k}" ${i.categoria === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+            <label style="font-size:11px;margin-top:4px" title="Palabras que identifican el equipo — se usan para elegir la foto según los equipos del proyecto">Palabras clave</label><input value="${propEsc(i.tags)}" onchange="propImagenUpdate('${i.id}','tags',this.value)" />
+            <label style="font-size:11px;margin-top:4px" title="Claves separadas por coma. Opciones: ${PROP_TECNOLOGIAS.map(t => t.clave).join(', ')}">Tecnologías</label><input value="${propEsc(i.tecnologias)}" onchange="propImagenUpdate('${i.id}','tecnologias',this.value)" />
+            <label style="font-size:11px;margin-top:4px">Epígrafe en la propuesta</label><input value="${propEsc(i.pie)}" onchange="propImagenUpdate('${i.id}','pie',this.value)" />
+            <button class="btn btn-secondary btn-sm" style="margin-top:8px;color:var(--red)" onclick="propImagenEliminar('${i.id}')">Eliminar</button>
+          </div>`).join('') || '<p class="hint">No hay imágenes para mostrar.</p>'}
+      </div>`;
+    propCfgCargarMiniaturas();
+  } catch (e) { el.innerHTML = `<p class="hint" style="color:var(--red)">${propEsc(e.message)}</p>`; }
+}
+let _propFiltroTimer = null;
+function propCfgImagenesFiltrar() { clearTimeout(_propFiltroTimer); _propFiltroTimer = setTimeout(() => { const v = document.getElementById('prop-img-ftxt').value; propCfgImagenesRender().then(() => { const e = document.getElementById('prop-img-ftxt'); if (e) { e.focus(); e.setSelectionRange(v.length, v.length); } }); }, 300); }
+// Miniaturas: se bajan de a una cuando entran en pantalla
+function propCfgCargarMiniaturas() {
+  const imgs = Array.from(document.querySelectorAll('img[data-prop-thumb]'));
+  const cargar = async el => {
+    const d = await propImagenDatos(el.getAttribute('data-prop-thumb'));
+    const url = propDataUrl(d);
+    if (url) el.src = url; else { el.replaceWith(Object.assign(document.createElement('span'), { className: 'hint', textContent: d ? 'Vista previa no disponible (' + d.mime.replace('image/', '').toUpperCase() + ')' : 'No se pudo cargar' })); }
+  };
+  if (typeof IntersectionObserver === 'undefined') { imgs.forEach(cargar); return; }
+  const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { io.unobserve(e.target); cargar(e.target); } }), { rootMargin: '200px' });
+  imgs.forEach(i => io.observe(i));
+}
+
+// ── Cargar un documento de tecnología: lectura → clasificación con IA → revisión → guardar ──
+async function propTecImportar(file) {
+  if (!file) return;
+  const st = 'prop-tec-status';
+  try {
+    showMsg(st, 'loading', 'Leyendo el documento...');
+    const parsed = await propDocxParsear(await propLeerBuffer(file));
+    let secciones = propDocxASecciones(parsed);
+    if (!secciones.length) throw new Error('No encontré contenido en el documento.');
+    const titulo = parsed.titulo || file.name.replace(/\.docx$/i, '');
+    const nombre = titulo.replace(/^tecnolog[ií]a\s*/i, '').trim() || titulo;
+    showMsg(st, 'loading', 'La IA está separando lo que va en la oferta de lo que no...');
+    let aviso = '';
+    try { secciones = await propTecClasificarSecciones(nombre, secciones); }
+    catch (e) { secciones = propTecClasificarHeuristico(secciones); aviso = 'No pude clasificar con la IA (' + e.message + ') — revisá a mano qué secciones incluir.'; }
+    const imagenes = {}; parsed.imagenes.forEach(im => { imagenes[im.ref] = im; });
+    const clave = propTecClaveDeTitulo(titulo + ' ' + file.name) || '';
+    _propBib.borrador = { id: null, clave, nombre, origen: file.name, secciones, imagenes, aviso };
+    propEditorRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+function propTecEditar(id) {
+  const t = (_propBib.tecnologias || []).find(x => x.id === id); if (!t) return;
+  _propBib.borrador = { id: t.id, clave: t.clave, nombre: t.nombre, origen: t.origen || '', secciones: JSON.parse(JSON.stringify(t.contenido || [])), imagenes: {}, aviso: '' };
+  propEditorRender();
+}
+async function propTecEliminar(id) {
+  const t = (_propBib.tecnologias || []).find(x => x.id === id);
+  if (!confirm(`¿Eliminar el texto estándar de "${t ? t.nombre : ''}"? (Las imágenes quedan en la biblioteca.)`)) return;
+  await supaFetch(`/rest/v1/propuesta_tecnologias?id=eq.${id}`, { method: 'DELETE', headers: propHeaders() });
+  propCfgTecnologiasRender();
+}
+function propEditorCancelar() { _propBib.borrador = null; propCfgTecnologiasRender(); }
+// Miniaturas de las imágenes citadas en el texto de una sección (borrador en memoria o ya guardadas)
+function propEditorMiniaturasHtml(texto) {
+  const ids = []; String(texto || '').replace(/\[\[img:([^|\]]+)\|?([^\]]*)\]\]/g, (_, id, pie) => { ids.push({ id, pie }); return ''; });
+  return ids.map(({ id, pie }) => {
+    const bor = _propBib.borrador && _propBib.borrador.imagenes[id];
+    let src = '';
+    if (bor && PROP_MIME_PREVISUALIZABLE.test(bor.mime)) { if (!bor._url) bor._url = URL.createObjectURL(new Blob([bor.bytes], { type: bor.mime })); src = bor._url; }
+    const cuerpo = bor ? (src ? `<img src="${src}" style="max-width:110px;max-height:80px" alt="">` : `<span class="hint">vector ${propEsc(bor.mime.replace('image/x-', '').toUpperCase())} (se incluye igual en el Word)</span>`)
+      : `<img data-prop-thumb="${propEsc(id)}" style="max-width:110px;max-height:80px" alt="">`;
+    return `<div style="display:inline-block;margin:4px 8px 0 0;vertical-align:top;font-size:11px;max-width:130px">${cuerpo}<div style="color:var(--text2)">${propEsc(pie).slice(0, 60)}</div></div>`;
+  }).join('');
+}
+function propEditorRender() {
+  const el = document.getElementById('prop-cfg-tecnologias'); const b = _propBib.borrador; if (!el || !b) return;
+  const optsClave = ['<option value="">— elegir —</option>'].concat(PROP_TECNOLOGIAS.map(t => `<option value="${t.clave}" ${b.clave === t.clave ? 'selected' : ''}>${propEsc(t.nombre)} (${t.clave})</option>`)).join('');
+  el.innerHTML = `
+    <div class="card" style="margin:0;border-color:var(--blue)">
+      <div class="card-label">${b.id ? 'Editar' : 'Revisar y cargar'} — texto estándar de una tecnología</div>
+      ${b.aviso ? `<p class="hint" style="color:var(--red)">${propEsc(b.aviso)}</p>` : ''}
+      <p class="hint" style="margin-bottom:10px">La IA marcó qué secciones del documento van en la oferta (✓) y cuáles no (explicaciones teóricas, cosas de un proyecto puntual...). Revisá cada una: podés tildar/destildar y editar el texto. Las líneas <code>[[img:...]]</code> son las fotos (dejalas o borralas). Al guardar, las fotos del documento pasan a la biblioteca de imágenes.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+        <div><label style="font-size:12px">Tecnología (clave)</label><select onchange="_propBib.borrador.clave=this.value; if(this.value && !_propBib.borrador.nombre) _propBib.borrador.nombre=propTecNombre(this.value)">${optsClave}</select></div>
+        <div><label style="font-size:12px">Nombre</label><input value="${propEsc(b.nombre)}" oninput="_propBib.borrador.nombre=this.value" /></div>
+      </div>
+      ${b.secciones.map((s, i) => `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;${s.incluir ? '' : 'opacity:.65'}">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="checkbox" ${s.incluir ? 'checked' : ''} onchange="_propBib.borrador.secciones[${i}].incluir=this.checked; propEditorRender()" title="Incluir en la propuesta" />
+            <input value="${propEsc(s.titulo)}" oninput="_propBib.borrador.secciones[${i}].titulo=this.value" style="flex:1;font-weight:600" />
+            <button class="btn btn-secondary btn-sm" style="width:auto" onclick="_propBib.borrador.secciones.splice(${i},1); propEditorRender()" title="Quitar esta sección">✕</button>
+          </div>
+          ${s.motivo ? `<p class="hint" style="margin:4px 0 0">${s.incluir ? '✓' : '✗'} ${propEsc(s.tipo ? s.tipo + ' — ' : '')}${propEsc(s.motivo)}</p>` : ''}
+          <textarea rows="${Math.min(14, Math.max(3, s.texto.split('\n').length))}" style="width:100%;margin-top:6px;font-size:12px" oninput="_propBib.borrador.secciones[${i}].texto=this.value">${propEsc(s.texto)}</textarea>
+          <div>${propEditorMiniaturasHtml(s.texto)}</div>
+        </div>`).join('')}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" style="width:auto" onclick="_propBib.borrador.secciones.push({id:'s'+Date.now(),titulo:'Nueva sección',incluir:true,tipo:'',motivo:'',texto:''}); propEditorRender()">+ Agregar sección</button>
+        <button class="btn btn-primary" style="width:auto" onclick="propTecGuardar()">✓ Guardar</button>
+        <button class="btn btn-secondary" style="width:auto" onclick="propEditorCancelar()">Cancelar</button>
+      </div>
+      <div id="prop-tec-status" style="margin-top:8px"></div>
+    </div>`;
+  propCfgCargarMiniaturas();
+}
+async function propTecGuardar() {
+  const b = _propBib.borrador; if (!b) return;
+  const st = 'prop-tec-status';
+  if (!b.clave) { showMsg(st, 'error', 'Elegí la tecnología (clave) a la que corresponde.'); return; }
+  if (!b.nombre.trim()) { showMsg(st, 'error', 'Poné un nombre.'); return; }
+  try {
+    // 1) las fotos del documento que se usan en alguna sección pasan a la biblioteca (una sola vez cada una)
+    const usadas = new Set();
+    b.secciones.forEach(s => String(s.texto).replace(/\[\[img:(tmp\d+)\|?[^\]]*\]\]/g, (_, id) => { usadas.add(id); return ''; }));
+    const mapa = {};
+    let n = 0;
+    for (const ref of usadas) {
+      const im = b.imagenes[ref]; if (!im) continue;
+      n++; showMsg(st, 'loading', `Guardando imágenes (${n} de ${usadas.size})...`);
+      const prep = PROP_MIME_PREVISUALIZABLE.test(im.mime) ? await propPrepararImagen(im.mime, im.bytes) : { mime: im.mime, b64: propBytesABase64(im.bytes), ancho: null, alto: null };
+      const nombreImg = `${b.nombre} — ${im.nombre}`;
+      const res = await supaFetch('/rest/v1/propuesta_imagenes', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombreImg, categoria: 'tecnologia', tecnologias: b.clave, mime: prep.mime, ancho: prep.ancho, alto: prep.alto, data_b64: prep.b64, origen: b.origen || '' }) });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error('No se pudo guardar una imagen: ' + (e.message || res.status)); }
+      const fila = (await res.json())[0]; mapa[ref] = fila.id; _propBib.datos.set(fila.id, { mime: prep.mime, b64: prep.b64 });
+    }
+    const secciones = b.secciones.map(s => Object.assign({}, s, { texto: String(s.texto).replace(/\[\[img:(tmp\d+)(\|?[^\]]*)\]\]/g, (m, id, resto) => mapa[id] ? `[[img:${mapa[id]}${resto.startsWith('|') ? resto : '|' + resto}]]` : '') }));
+    // 2) el texto estándar (una fila por tecnología: si ya existía, se reemplaza)
+    showMsg(st, 'loading', 'Guardando...');
+    const res = await supaFetch('/rest/v1/propuesta_tecnologias?on_conflict=empresa,clave', { method: 'POST', headers: propHeaders({ Prefer: 'resolution=merge-duplicates,return=minimal' }), body: JSON.stringify({ empresa: currentEmpresa, clave: b.clave, nombre: b.nombre.trim(), contenido: secciones, origen: b.origen || '', updated_at: new Date().toISOString() }) });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.message || 'HTTP ' + res.status); }
+    _propBib.borrador = null; _propBib.imagenes = null;
+    await propCfgRender();
+    showMsg('prop-tec-status', 'success', `✓ Se guardó "${b.nombre}" — ${secciones.filter(s => s.incluir).length} secciones incluidas y ${n} imagen(es) nuevas en la biblioteca.`);
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
 // ══ DFS — Descripción Funcional / Memoria de funcionamiento (área Documentación) ══
 // Documento por proyecto: portada + objetivo + generales + una sección por etapa
 // (narrativa + alarmas) + tabla de alarmas + tablas de rangos y parámetros.
@@ -28359,6 +28896,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-microorganismos', label:'Cfg Microorganismos', area:'Laboratorio', icon:NAV_GEAR_ICON },
   { id:'cfg-procesos',  label:'Cfg Procesos IA',      area:'Procesos',      icon:NAV_GEAR_ICON },
   { id:'cfg-documentacion', label:'Cfg Documentación', area:'Procesos', icon:NAV_GEAR_ICON },
+  { id:'cfg-propuestas', label:'Cfg Propuestas', area:'Procesos', icon:NAV_GEAR_ICON },
 ];
 
 function navAreaSlug(area) { return area.toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
@@ -28410,7 +28948,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
   'Administración':    ['rend','viajes','hallazgos','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -28418,7 +28956,7 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','manual-operacion','cfg-procesos','cfg-documentacion'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','manual-operacion','cfg-procesos','cfg-documentacion','cfg-propuestas'],
   'RRHH':              ['rend','viajes','hallazgos'],
   'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -28627,6 +29165,7 @@ const PANEL_TITLES = {
   'cfg-np-int': 'Configuración — NP Internacional',
   'procesos': 'Procesos IA',
   'cfg-procesos': 'Configuración — Procesos IA',
+  'cfg-propuestas': 'Configuración — Propuestas',
   'flowsheets': 'Flowsheets',
   'mantenimiento': 'Mantenimiento',
   'dfs': 'DFS — Descripción funcional',
