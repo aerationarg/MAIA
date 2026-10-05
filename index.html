@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.56</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.57</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.56</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.57</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -857,6 +857,19 @@
           </div>
           <div id="flowsheets-chat-status"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ PANEL: Propuestas (propuesta directa a partir de archivos / descripción) ═══ -->
+    <div class="panel" id="panel-propuestas">
+      <div class="card">
+        <div class="card-label">Nueva propuesta</div>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Para cuando el diseño ya está definido: mandale a la IA los archivos (pliego, memoria, planilla de equipos...) y/o una descripción, y arma la propuesta directo — sin pasar por los pasos de Procesos IA.</p>
+        <div id="propuestas-form"></div>
+      </div>
+      <div class="card">
+        <div class="card-label">Propuestas armadas</div>
+        <div id="propuestas-lista" class="empty">Cargando...</div>
       </div>
     </div>
 
@@ -2320,6 +2333,7 @@ function switchPanel(name) {
   if (name === 'procesos') renderProcesosList();
   if (name === 'flowsheets') renderFlowsheetsList();
   if (name === 'cfg-propuestas') propCfgRender();
+  if (name === 'propuestas') propuestasRender();
   if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
@@ -7808,8 +7822,11 @@ async function renderProcesosList() {
   el.innerHTML = 'Cargando...';
   try {
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    const res = await supaFetch(`/rest/v1/procesos_proyectos?select=id,nombre,cliente,paso_actual,creado_por_nombre,created_at&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
-    const rows = await res.json();
+    // "origen" lo agrega el SQL de la biblioteca de propuestas — si todavía no se corrió, se pide sin esa columna
+    let res = await supaFetch(`/rest/v1/procesos_proyectos?select=id,nombre,cliente,paso_actual,creado_por_nombre,created_at,origen&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    if (!res.ok) res = await supaFetch(`/rest/v1/procesos_proyectos?select=id,nombre,cliente,paso_actual,creado_por_nombre,created_at&empresa=eq.${currentEmpresa}&order=created_at.desc`, {headers:{Authorization:'Bearer '+session.token}});
+    let rows = await res.json();
+    if (Array.isArray(rows)) rows = rows.filter(r => r.origen !== 'propuesta');
     if (!res.ok || !Array.isArray(rows) || !rows.length) { el.innerHTML = '<div class="empty">No hay proyectos todavía.</div>'; return; }
     el.innerHTML = rows.map(p => `
       <div class="file-item" style="cursor:pointer" onclick="procesosAbrirProyecto('${p.id}')">
@@ -7866,6 +7883,7 @@ async function procesosAbrirProyecto(id) {
   // de modificación — se reusa tal cual quedó. Solo se resetea manualmente
   // al procesar resúmenes nuevos (procesosDocGenerarResumen) o al abrir un
   // proyecto DISTINTO (automático, por el chequeo de id).
+  if (procesosCurrentProyecto.origen === 'propuesta') procesosCurrentProyecto._viewingStep = 4; // propuesta directa: solo el Paso 4
   document.getElementById('procesos-list-view').style.display = 'none';
   document.getElementById('procesos-proyecto-view').style.display = '';
   renderProcesosProyectoHeader();
@@ -7877,7 +7895,7 @@ async function procesosAbrirProyecto(id) {
 function renderProcesosProyectoHeader() {
   const p = procesosCurrentProyecto;
   document.getElementById('procesos-proyecto-nombre').value = p.nombre || '';
-  document.getElementById('procesos-proyecto-paso-label').textContent = `Paso ${p.paso_actual}/4 — ${PROCESOS_STEP_LABEL[p.paso_actual]||''}`;
+  document.getElementById('procesos-proyecto-paso-label').textContent = p.origen === 'propuesta' ? 'Propuesta directa (armada a partir de archivos / descripción)' : `Paso ${p.paso_actual}/4 — ${PROCESOS_STEP_LABEL[p.paso_actual]||''}`;
   document.getElementById('procesos-proyecto-categoria').value = p.categoria || '';
 }
 function procesosProyectoUpdateNombre(val) {
@@ -7888,10 +7906,11 @@ function procesosProyectoUpdateCategoria(val) {
 }
 
 function procesosVolverALista() {
+  const eraPropuesta = procesosCurrentProyecto && procesosCurrentProyecto.origen === 'propuesta';
   procesosCurrentProyecto = null;
   document.getElementById('procesos-proyecto-view').style.display = 'none';
   document.getElementById('procesos-list-view').style.display = '';
-  renderProcesosList();
+  if (eraPropuesta) navSelect('propuestas'); else renderProcesosList();
 }
 
 // IMPORTANTE: recibe explícitamente a qué proyecto guardar (segundo parámetro,
@@ -7938,6 +7957,7 @@ function renderProcesosStepsNav() {
   const el = document.getElementById('procesos-steps-nav');
   const p = procesosCurrentProyecto;
   const viendo = p._viewingStep || p.paso_actual;
+  if (p.origen === 'propuesta') { el.innerHTML = '<span class="badge" style="background:var(--blue-bg);color:var(--blue)">📄 Propuesta</span>'; return; }
   el.innerHTML = [1,2,3,4].map(s => `
     <button class="btn ${s===viendo?'btn-primary':'btn-secondary'} btn-sm" ${s>p.paso_actual?'disabled':''} onclick="procesosVerPaso(${s})">${s}. ${esc(PROCESOS_STEP_LABEL[s])}</button>
   `).join('');
@@ -26006,7 +26026,7 @@ function propNormTxt(s) { return String(s || '').toLowerCase().normalize('NFD').
 // ── Carga ──
 async function propImagenesCargar(force) {
   if (_propBib.imagenes && !force) return _propBib.imagenes;
-  const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=id,nombre,categoria,tags,tecnologias,pie,mime,ancho,alto,origen&empresa=eq.${currentEmpresa}&order=categoria,nombre`, { headers: propHeaders() });
+  const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=id,nombre,categoria,tags,tecnologias,pie,mime,ancho,alto,origen,ruta&empresa=eq.${currentEmpresa}&order=categoria,nombre`, { headers: propHeaders() });
   const rows = res.ok ? await res.json() : null;
   if (!Array.isArray(rows)) throw new Error('No se pudo cargar la biblioteca de imágenes — ¿corriste el SQL de la biblioteca de propuestas?');
   _propBib.imagenes = rows;
@@ -26020,12 +26040,31 @@ async function propTecnologiasCargar(force) {
   _propBib.tecnologias = rows;
   return rows;
 }
-// base64 de una imagen (se baja de a una y se guarda en memoria)
+// Las imágenes viven en Supabase Storage (bucket público "propuestas"); en la tabla queda solo la ruta.
+function propImagenUrl(ruta) { return ruta ? `${SUPA_URL}/storage/v1/object/public/propuestas/${ruta.split('/').map(encodeURIComponent).join('/')}` : null; }
+async function propImagenSubirStorage(mime, b64) {
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/x-emf': 'emf', 'image/x-wmf': 'wmf', 'image/bmp': 'bmp' }[mime] || 'bin';
+  const ruta = `${currentEmpresa}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const res = await supaFetch(`/storage/v1/object/propuestas/${ruta}`, { method: 'POST', headers: propHeaders({ 'Content-Type': mime, 'x-upsert': 'false' }), body: propBase64ABytes(b64) });
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error('No se pudo subir la imagen a Storage: ' + (e.message || e.error || res.status) + ' — ¿corriste el SQL de Storage de propuestas?'); }
+  return ruta;
+}
+// { mime, b64 } de una imagen (se baja de a una y se guarda en memoria)
 async function propImagenDatos(id) {
   if (_propBib.datos.has(id)) return _propBib.datos.get(id);
-  const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=mime,data_b64&id=eq.${id}`, { headers: propHeaders() });
-  const rows = res.ok ? await res.json() : [];
-  const d = rows[0] ? { mime: rows[0].mime, b64: rows[0].data_b64 } : null;
+  let im = (_propBib.imagenes || []).find(i => i.id === id);
+  let d = null;
+  if (im && im.ruta) {
+    const r = await fetch(propImagenUrl(im.ruta)).catch(() => null);
+    if (r && r.ok) d = { mime: im.mime, b64: propBytesABase64(new Uint8Array(await r.arrayBuffer())) };
+  } else {
+    const res = await supaFetch(`/rest/v1/propuesta_imagenes?select=mime,data_b64,ruta&id=eq.${id}`, { headers: propHeaders() });
+    const rows = res.ok ? await res.json() : [];
+    if (rows[0]) {
+      if (rows[0].ruta) { const r = await fetch(propImagenUrl(rows[0].ruta)).catch(() => null); if (r && r.ok) d = { mime: rows[0].mime, b64: propBytesABase64(new Uint8Array(await r.arrayBuffer())) }; }
+      else if (rows[0].data_b64) d = { mime: rows[0].mime, b64: rows[0].data_b64 };
+    }
+  }
   if (d) _propBib.datos.set(id, d);
   return d;
 }
@@ -26272,7 +26311,8 @@ async function propImagenesSubir(fileList, statusId) {
       const nombre = it.ruta.split('/').pop().replace(/\.[^.]+$/, '').trim();
       if (existentes.has(propNormTxt(nombre))) { omitidas++; continue; }
       const prep = await propPrepararImagen(it.mime, it.bytes);
-      const body = { empresa: currentEmpresa, nombre, categoria: propCategoriaDeRuta(it.ruta), mime: prep.mime, ancho: prep.ancho, alto: prep.alto, data_b64: prep.b64, origen: 'carga manual' };
+      const rutaSt = await propImagenSubirStorage(prep.mime, prep.b64);
+      const body = { empresa: currentEmpresa, nombre, categoria: propCategoriaDeRuta(it.ruta), mime: prep.mime, ancho: prep.ancho, alto: prep.alto, ruta: rutaSt, origen: 'carga manual' };
       const res = await supaFetch('/rest/v1/propuesta_imagenes', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify(body) });
       if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`No se pudo guardar "${nombre}": ${e.message || res.status}`); }
       const fila = (await res.json())[0];
@@ -26325,6 +26365,7 @@ async function propImagenEliminar(id) {
   const im = (_propBib.imagenes || []).find(i => i.id === id);
   if (!confirm(`¿Eliminar la imagen "${im ? im.nombre : ''}" de la biblioteca?`)) return;
   await supaFetch(`/rest/v1/propuesta_imagenes?id=eq.${id}`, { method: 'DELETE', headers: propHeaders() });
+  if (im && im.ruta) await supaFetch(`/storage/v1/object/propuestas/${im.ruta}`, { method: 'DELETE', headers: propHeaders() }).catch(() => {});
   _propBib.imagenes = (_propBib.imagenes || []).filter(i => i.id !== id); _propBib.datos.delete(id);
   propCfgImagenesRender();
 }
@@ -26389,7 +26430,10 @@ function propCfgImagenesFiltrar() { clearTimeout(_propFiltroTimer); _propFiltroT
 function propCfgCargarMiniaturas() {
   const imgs = Array.from(document.querySelectorAll('img[data-prop-thumb]'));
   const cargar = async el => {
-    const d = await propImagenDatos(el.getAttribute('data-prop-thumb'));
+    const idm = el.getAttribute('data-prop-thumb');
+    const info = (_propBib.imagenes || []).find(i => i.id === idm);
+    if (info && info.ruta && PROP_MIME_PREVISUALIZABLE.test(info.mime)) { el.src = propImagenUrl(info.ruta); return; }
+    const d = await propImagenDatos(idm);
     const url = propDataUrl(d);
     if (url) el.src = url; else { el.replaceWith(Object.assign(document.createElement('span'), { className: 'hint', textContent: d ? 'Vista previa no disponible (' + d.mime.replace('image/', '').toUpperCase() + ')' : 'No se pudo cargar' })); }
   };
@@ -26491,7 +26535,8 @@ async function propTecGuardar() {
       n++; showMsg(st, 'loading', `Guardando imágenes (${n} de ${usadas.size})...`);
       const prep = PROP_MIME_PREVISUALIZABLE.test(im.mime) ? await propPrepararImagen(im.mime, im.bytes) : { mime: im.mime, b64: propBytesABase64(im.bytes), ancho: null, alto: null };
       const nombreImg = `${b.nombre} — ${im.nombre}`;
-      const res = await supaFetch('/rest/v1/propuesta_imagenes', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombreImg, categoria: 'tecnologia', tecnologias: b.clave, mime: prep.mime, ancho: prep.ancho, alto: prep.alto, data_b64: prep.b64, origen: b.origen || '' }) });
+      const rutaSt = await propImagenSubirStorage(prep.mime, prep.b64);
+      const res = await supaFetch('/rest/v1/propuesta_imagenes', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify({ empresa: currentEmpresa, nombre: nombreImg, categoria: 'tecnologia', tecnologias: b.clave, mime: prep.mime, ancho: prep.ancho, alto: prep.alto, ruta: rutaSt, origen: b.origen || '' }) });
       if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error('No se pudo guardar una imagen: ' + (e.message || res.status)); }
       const fila = (await res.json())[0]; mapa[ref] = fila.id; _propBib.datos.set(fila.id, { mime: prep.mime, b64: prep.b64 });
     }
@@ -26504,6 +26549,181 @@ async function propTecGuardar() {
     await propCfgRender();
     showMsg('prop-tec-status', 'success', `✓ Se guardó "${b.nombre}" — ${secciones.filter(s => s.incluir).length} secciones incluidas y ${n} imagen(es) nuevas en la biblioteca.`);
   } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
+// ══ Propuestas directas (solapa Propuestas): una propuesta armada a partir de archivos y/o una descripción ══
+// Para cuando el diseño ya está definido (pliego, memoria de cálculo, planilla de equipos, mail...): la IA lee lo que
+// se le manda y arma el proyecto (datos del cliente, corrientes, etapas y equipos) y, con eso, se genera la propuesta
+// con exactamente lo mismo que el Paso 4 de Procesos IA (secciones, texto estándar de la tecnología y fotos de la
+// biblioteca, Word con la plantilla). Se guarda como un proyecto de Procesos IA con origen='propuesta' y se abre en
+// el Paso 4 (sin pasar por los pasos 1 a 3).
+let _propDirecta = { archivos: [], ocupado: false };
+
+async function propuestasRender() {
+  propuestasFormRender();
+  await propuestasListaRender();
+}
+function propuestasFormRender() {
+  const el = document.getElementById('propuestas-form'); if (!el) return;
+  const a = _propDirecta.archivos;
+  const nombreVal = (document.getElementById('propuestas-nombre') || {}).value || '';
+  const textoVal = (document.getElementById('propuestas-texto') || {}).value || '';
+  el.innerHTML = `
+    <label>Nombre de la propuesta (cliente / proyecto)</label>
+    <input id="propuestas-nombre" value="${propEsc(nombreVal)}" placeholder="Ej: Planta de tratamiento — Cliente X" style="margin-bottom:10px" />
+    <label>Descripción o instrucciones</label>
+    <textarea id="propuestas-texto" rows="6" placeholder="Contá qué hay que ofertar: cliente, ubicación, caudal y parámetros, tren de tratamiento y equipos definidos, normativa, requerimientos del pliego, qué incluir o dejar afuera... (opcional si adjuntás archivos con el diseño)" style="width:100%;resize:vertical;margin-bottom:8px">${propEsc(textoVal)}</textarea>
+    <div id="propuestas-archivos" style="margin-bottom:8px">${a.map((f, i) => `<div class="file-item"><div class="file-icon">📎</div><div class="file-info"><div class="file-name">${propEsc(f.name)}</div><div class="file-size">${Math.round(f.size / 1024)} KB</div></div><button class="np-item-remove" onclick="propuestasArchivoQuitar(${i})">&#x2715;</button></div>`).join('')}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="file" id="propuestas-file-input" multiple accept=".pdf,.docx,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none" onchange="propuestasArchivosAgregar(this.files); this.value=''" />
+      <button class="btn btn-secondary" style="width:auto;padding:10px 14px" onclick="document.getElementById('propuestas-file-input').click()">📎 Adjuntar archivos (PDF, Word, Excel, imagen)</button>
+      <button class="btn btn-primary" id="propuestas-crear-btn" style="width:auto;padding:10px 18px" onclick="propuestasCrear()">✦ Armar propuesta</button>
+    </div>
+    <p class="hint" style="margin-top:6px">La IA lee todo, arma los datos del proyecto (corrientes, etapas, equipos) y genera la propuesta con el texto estándar de la tecnología y las fotos de la biblioteca. Después la revisás y editás sección por sección, como en el Paso 4 de Procesos IA.</p>
+    <div id="propuestas-status" style="margin-top:8px"></div>`;
+}
+function propuestasArchivosAgregar(fileList) {
+  Array.from(fileList).forEach(f => { if (!_propDirecta.archivos.some(x => x.name === f.name && x.size === f.size)) _propDirecta.archivos.push(f); });
+  propuestasFormRender();
+}
+function propuestasArchivoQuitar(i) { _propDirecta.archivos.splice(i, 1); propuestasFormRender(); }
+
+async function propuestasListaRender() {
+  const el = document.getElementById('propuestas-lista'); if (!el) return;
+  el.innerHTML = 'Cargando...';
+  try {
+    const res = await supaFetch(`/rest/v1/procesos_proyectos?select=id,nombre,cliente,creado_por_nombre,created_at,updated_at&empresa=eq.${currentEmpresa}&origen=eq.propuesta&order=created_at.desc`, { headers: propHeaders() });
+    const rows = await res.json();
+    if (!res.ok || !Array.isArray(rows)) { el.innerHTML = '<div class="empty">No se pudo cargar — ¿corriste el SQL de la biblioteca de propuestas (columna "origen")?</div>'; return; }
+    el.innerHTML = rows.length ? rows.map(p => `
+      <div class="file-item" style="cursor:pointer" onclick="propuestasAbrir('${p.id}')">
+        <div class="file-icon">📄</div>
+        <div class="file-info"><div class="file-name">${propEsc(p.nombre)}${p.cliente ? ' — ' + propEsc(p.cliente) : ''}</div><div class="file-size">${propEsc(p.creado_por_nombre || '')} · ${new Date(p.created_at).toLocaleDateString('es-AR')}</div></div>
+        <button class="np-item-remove" onclick="event.stopPropagation();propuestasEliminar('${p.id}')">&#x2715;</button>
+      </div>`).join('') : '<div class="empty">Todavía no armaste ninguna propuesta directa.</div>';
+  } catch (e) { el.innerHTML = '<div class="empty">Error al cargar las propuestas.</div>'; }
+}
+async function propuestasEliminar(id) {
+  if (!confirm('¿Eliminar esta propuesta? Esta acción no se puede deshacer.')) return;
+  const res = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${id}`, { method: 'DELETE', headers: propHeaders() });
+  if (!res.ok) { alert('No se pudo eliminar la propuesta.'); return; }
+  propuestasListaRender();
+}
+// Se abre en el visor de Procesos IA, directo en el Paso 4
+async function propuestasAbrir(id) {
+  navSelect('procesos');
+  await procesosAbrirProyecto(id);
+}
+
+// ── Lectura de lo que se mandó → proyecto estructurado ──
+const PROP_TOOL_EXTRAER = {
+  name: 'extraer_proyecto',
+  description: 'Devuelve el proyecto de tratamiento de efluentes tal como surge de los archivos y la descripción.',
+  input_schema: { type: 'object', properties: {
+    cliente: { type: 'string', description: 'Nombre del cliente / empresa destinataria de la propuesta ("" si no figura).' },
+    ubicacion: { type: 'string', description: 'Ubicación de la planta ("" si no figura).' },
+    campos: { type: 'object', additionalProperties: { type: 'string' }, description: 'Información general: una clave por cada campo de texto pedido, con el nombre EXACTO, y su valor (texto). "" si no hay dato.' },
+    corrientes: { type: 'array', description: 'Corrientes de efluente a tratar, cada una con sus parámetros.', items: { type: 'object', properties: {
+      nombre: { type: 'string' },
+      parametros: { type: 'array', items: { type: 'object', properties: { nombre: { type: 'string', description: 'Nombre EXACTO del parámetro pedido.' }, valor: { type: ['number', 'string', 'null'] }, unidad: { type: 'string' }, limite_normativo: { type: ['number', 'string', 'null'] } }, required: ['nombre', 'valor', 'unidad'] } },
+    }, required: ['nombre', 'parametros'] } },
+    etapas: { type: 'array', description: 'Etapas del tren de tratamiento EN ORDEN (primero la línea líquida y después la de lodos).', items: { type: 'object', properties: {
+      nombre: { type: 'string' },
+      linea: { type: 'string', enum: ['liquido', 'lodos'] },
+      descripcion: { type: 'string', description: 'Qué hace la etapa y cómo está planteada (1-3 frases), según los archivos.' },
+      dimensiones: { type: 'array', items: { type: 'object', properties: { etiqueta: { type: 'string', description: 'Ej: "Volumen", "Largo", "Diámetro", "Tiempo de retención".' }, valor: { type: ['number', 'string'] }, unidad: { type: 'string' } }, required: ['etiqueta', 'valor'] } },
+      equipos: { type: 'array', items: { type: 'object', properties: { tipo: { type: 'string', description: 'Tipo de equipo (ej. "Bomba sumergible", "Soplador", "Difusor de burbuja fina", "Tamiz estático").' }, cantidad: { type: 'number' }, especificacion: { type: 'string' }, modelo: { type: 'string', description: 'Marca/modelo si está definido ("" si no).' } }, required: ['tipo', 'cantidad'] } },
+    }, required: ['nombre', 'linea', 'equipos'] } },
+    caratula: { type: 'object', properties: { destinatario_empresa: { type: 'string' }, suministro_objeto: { type: 'string', description: 'Ej: "Planta de tratamiento de efluentes cloacales".' }, ref_numero: { type: 'string' } } },
+  }, required: ['campos', 'corrientes', 'etapas'] },
+};
+async function propuestasBloquesDeArchivos(archivos) {
+  const bloques = [];
+  for (const f of archivos) {
+    const buf = await propLeerBuffer(f);
+    if (procesosArchivoLocalEsPdf(f.name) || procesosArchivoLocalEsImagen(f.name)) {
+      bloques.push({ type: 'text', text: `Archivo adjunto: ${f.name}` });
+      bloques.push(procesosArchivoLocalContentBlock(f.name, buf));
+    } else if (procesosArchivoLocalEsWord(f.name)) {
+      bloques.push({ type: 'text', text: `Archivo adjunto: ${f.name}\n\n${(await procesosArchivoLocalExtraerDocx(buf)).slice(0, 120000)}` });
+    } else if (procesosArchivoLocalEsExcel(f.name)) {
+      bloques.push({ type: 'text', text: `Archivo adjunto: ${f.name}\n\n${procesosArchivoLocalExtraerXlsx(buf).slice(0, 120000)}` });
+    } else throw new Error(`"${f.name}": tipo de archivo no soportado (PDF, Word, Excel o imagen).`);
+  }
+  return bloques;
+}
+function propuestasArmarProyecto(ext, camposDef) {
+  const textoFields = camposDef.filter(f => f.tipo !== 'parametro').map(f => f.name);
+  const campos = {};
+  textoFields.forEach(n => { const v = (ext.campos && ext.campos[n]) || ''; if (String(v).trim()) campos[n] = String(v).trim(); });
+  // por si la IA devuelve un campo con otro nombre, no se pierde
+  Object.entries(ext.campos || {}).forEach(([k, v]) => { if (!(k in campos) && String(v || '').trim()) campos[k] = String(v).trim(); });
+  const corrientes = (ext.corrientes || []).map(c => ({
+    nombre: c.nombre || 'Efluente',
+    campos: Object.fromEntries((c.parametros || []).map(pa => [pa.nombre, { valor: pa.valor == null ? '' : pa.valor, unidad: pa.unidad || '', limite_normativo: pa.limite_normativo == null ? '' : pa.limite_normativo, fuente: '' }])),
+  }));
+  const orden = [], hojas = {}, etapasEq = {};
+  (ext.etapas || []).forEach(e => {
+    let nombre = String(e.nombre || '').trim(); if (!nombre) return;
+    while (hojas[nombre]) nombre += ' (2)';
+    orden.push(nombre);
+    const vce = {};
+    (e.dimensiones || []).forEach(d => { vce[d.etiqueta + (d.unidad ? ' (' + d.unidad + ')' : '')] = d.valor; });
+    hojas[nombre] = { seleccionada: true, confirmada: true, tipo: 'etapa', hojaBase: nombre, linea: e.linea === 'lodos' ? 'lodos' : 'liquido', motivo: e.descripcion || '', valores: {}, chat: [], valoresConEtiqueta: vce };
+    etapasEq[nombre] = { equipos: (e.equipos || []).map(q => ({ id: procesosNuevoId(), tipo: q.tipo, cantidad: Number(q.cantidad) || 1, especificacion: q.especificacion || '', modelo: q.modelo || '', justificacion: '' })), chat: [], confirmada: true };
+  });
+  return {
+    info_cliente: { campos, corrientes },
+    diseno_data: { orden, hojas },
+    equipos_data: { etapas: etapasEq, layout: { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {}, marcas: {} } },
+  };
+}
+async function propuestasCrear() {
+  if (_propDirecta.ocupado) return;
+  const nombre = ((document.getElementById('propuestas-nombre') || {}).value || '').trim();
+  const texto = ((document.getElementById('propuestas-texto') || {}).value || '').trim();
+  const st = 'propuestas-status';
+  if (!nombre) { showMsg(st, 'error', 'Poné un nombre para la propuesta.'); return; }
+  if (!texto && !_propDirecta.archivos.length) { showMsg(st, 'error', 'Escribí una descripción o adjuntá al menos un archivo.'); return; }
+  _propDirecta.ocupado = true;
+  const btn = document.getElementById('propuestas-crear-btn'); if (btn) btn.disabled = true;
+  try {
+    showMsg(st, 'loading', 'Leyendo los archivos...');
+    const bloques = await propuestasBloquesDeArchivos(_propDirecta.archivos);
+    const camposDef = getProcesosIAFields().filter(f => f.name.trim());
+    const campoTxt = camposDef.filter(f => f.tipo !== 'parametro').map(f => `- "${f.name}": ${f.desc || ''}`).join('\n');
+    const paramTxt = camposDef.filter(f => f.tipo === 'parametro').map(f => `- "${f.name}": ${f.desc || ''}`).join('\n');
+    const prompt = `Vas a armar los datos de un proyecto de tratamiento de efluentes de Aeration Argentina para generar una propuesta técnico-comercial, a partir de lo que mandó el usuario (descripción y/o archivos: pliego, memoria, planilla de equipos, mails, planos...). Extraé SOLO lo que figura — no inventes valores; lo que no esté, dejalo vacío o null.\n\nNombre de la propuesta: ${nombre}\n\n${texto ? 'DESCRIPCIÓN / INSTRUCCIONES DEL USUARIO:\n' + texto + '\n\n' : ''}Campos de información general a completar (usá el nombre EXACTO como clave en "campos"):\n${campoTxt || '(ninguno configurado)'}\n\nParámetros de cada corriente de efluente (usá el nombre EXACTO en "parametros"; con su unidad y, si el pliego/norma lo da, el límite normativo):\n${paramTxt || '(ninguno configurado)'}\n\nEtapas: el tren de tratamiento definido, en orden, con la línea de lodos al final; para cada una, sus equipos con cantidad (y marca/modelo si está definido) y sus dimensiones si figuran. Si los archivos traen un diseño ya definido (equipos, volúmenes, capacidades), respetalo tal cual. Si solo hay una descripción general, armá las etapas razonables que ahí se mencionan y dejá los equipos que no estén definidos fuera.`;
+    showMsg(st, 'loading', 'La IA está leyendo el diseño y armando el proyecto (puede tardar)...');
+    const ext = await propLlamarForzado(PROP_TOOL_EXTRAER, [...bloques, { type: 'text', text: prompt }], 8000);
+    const proy = propuestasArmarProyecto(ext, camposDef);
+    if (!proy.diseno_data.orden.length) throw new Error('La IA no encontró etapas de tratamiento en lo que mandaste — agregá más detalle del tren o adjuntá el archivo del diseño.');
+    showMsg(st, 'loading', 'Creando la propuesta...');
+    const cliente = (ext.cliente || (ext.caratula && ext.caratula.destinatario_empresa) || '').trim();
+    const body = Object.assign({
+      empresa: currentEmpresa, nombre, cliente, origen: 'propuesta', creado_por: currentUser.id, creado_por_nombre: currentUser.nombre || currentUser.email,
+      paso_actual: 4, proyectos_referencia: [], chat_historial: texto ? [{ role: 'user', content: texto }] : [],
+    }, proy);
+    const res = await supaFetch('/rest/v1/procesos_proyectos', { method: 'POST', headers: propHeaders({ Prefer: 'return=representation' }), body: JSON.stringify(body) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.length) throw new Error('No se pudo crear la propuesta' + (data && data.message ? ': ' + data.message : '') + ' — ¿corriste el SQL de la biblioteca de propuestas (columna "origen")?');
+    const id = data[0].id;
+    _propDirecta.archivos = [];
+    showMsg(st, 'success', '✓ Proyecto armado — abriendo la propuesta y generando el contenido...');
+    navSelect('procesos');
+    await procesosAbrirProyecto(id);
+    // carátula sugerida (destinatario, objeto, ubicación)
+    const pa = procesosCurrentProyecto;
+    if (pa && pa.id === id && (ext.caratula || ext.ubicacion)) {
+      const pd = Object.assign({}, procesosPropuestaSeedIfNeeded(pa));
+      pd.caratula = Object.assign({}, pd.caratula, ext.caratula || {}, ext.ubicacion ? { ubicacion: ext.ubicacion } : {});
+      await procesosSaveProyecto({ propuesta_data: pd }, pa);
+      renderProcesosStepContent();
+    }
+    procesosStep4GenerarConIA();
+  } catch (e) {
+    showMsg(st, 'error', '✕ ' + e.message);
+  } finally { _propDirecta.ocupado = false; const b2 = document.getElementById('propuestas-crear-btn'); if (b2) b2.disabled = false; }
 }
 
 // ══ DFS — Descripción Funcional / Memoria de funcionamiento (área Documentación) ══
@@ -29132,6 +29352,7 @@ const NAV_SECTIONS = [
   { id:'mantenimiento', label:'Mantenimiento', area:'Procesos', icon:'<svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>' },
   { id:'dfs', label:'DFS', area:'Procesos', icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h8M8 9h2"/></svg>' },
   { id:'manual-operacion', label:'Manual de operación', area:'Procesos', icon:'<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>' },
+  { id:'propuestas', label:'Propuestas', area:'Procesos', icon:'<svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13h8M8 17h5"/></svg>' },
   { id:'flowsheets', label:'Flowsheets',      area:'Procesos',       icon:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4"/><path d="M17.5 10v4"/></svg>' },
 ];
 const NAV_CONFIG_SECTIONS = [
@@ -29197,7 +29418,7 @@ function renderNavGroup(containerId, groupId, items, allowedIds) {
 // Orden alfabético — se usa tal cual para las listas desplegables de sector (ver
 // adminUsersList / crear usuario), así que el orden de las claves acá importa.
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','propuestas','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
   'Administración':    ['rend','viajes','hallazgos','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
   'Cadista':           ['rend','viajes','hallazgos'],
   'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
@@ -29205,7 +29426,7 @@ const SECTOR_TABS = {
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','flowsheets','mantenimiento','dfs','manual-operacion','cfg-procesos','cfg-documentacion','cfg-propuestas'],
+  'Procesos':          ['rend','viajes','hallazgos','procesos','propuestas','flowsheets','mantenimiento','dfs','manual-operacion','cfg-procesos','cfg-documentacion','cfg-propuestas'],
   'RRHH':              ['rend','viajes','hallazgos'],
   'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
   'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
@@ -29416,6 +29637,7 @@ const PANEL_TITLES = {
   'cfg-procesos': 'Configuración — Procesos IA',
   'cfg-propuestas': 'Configuración — Propuestas',
   'flowsheets': 'Flowsheets',
+  'propuestas': 'Propuestas',
   'mantenimiento': 'Mantenimiento',
   'dfs': 'DFS — Descripción funcional',
   'manual-operacion': 'Manual de operación',
