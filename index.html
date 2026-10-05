@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.62</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.63</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.62</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.63</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -17084,7 +17084,8 @@ function procesosPropuestaItemsDesdeEquipos(p) {
     etapas.forEach(nombre => {
       (ed[nombre].equipos || []).forEach(eq => {
         const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
-        const it = { id: procesosNuevoId(), etapa: alt ? etiqueta + ' · ' + nombre : nombre, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null };
+        const nombreProp = ((p.propuesta_data && p.propuesta_data.nombres_etapas) || {})[nombre] || nombre;
+        const it = { id: procesosNuevoId(), etapa: alt ? etiqueta + ' · ' + nombreProp : nombreProp, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null };
         if (alt) { it.alternativa = alt; it.alternativaEtiqueta = etiqueta; }
         items.push(it);
       });
@@ -17266,6 +17267,62 @@ function procesosStep4RecargarItemsDesdeEquipos() {
   renderProcesosStepContent();
 }
 
+// ── Nombres completos de las etapas en la propuesta ──
+// En el diseño las etapas se llaman como la planilla ("LA", "Sed 2°", "Pozo cloac"). En la propuesta tienen que figurar con un nombre
+// completo y claro ("Reactor biológico de lodos activados", "Sedimentador secundario"...). La IA propone el nombre de cada una al
+// generar el contenido; queda guardado en propuesta_data.nombres_etapas {nombre del diseño → nombre para la propuesta} y se usa en
+// "Etapas de proceso" y en las tablas de Suministro y Propuesta comercial (el diseño de los pasos 2 y 3 no se toca).
+const PROP_TOOL_NOMBRAR_ETAPAS = {
+  name: 'nombrar_etapas',
+  description: 'Da a cada etapa del tren un nombre completo y claro para mostrar en la propuesta al cliente.',
+  input_schema: { type: 'object', properties: { etapas: { type: 'array', items: { type: 'object', properties: {
+    nombre: { type: 'string', description: 'Nombre actual de la etapa, EXACTAMENTE como figura en la lista.' },
+    nombre_completo: { type: 'string', description: 'Nombre completo para la propuesta (si el actual ya está bien, el mismo).' },
+  }, required: ['nombre', 'nombre_completo'] } } }, required: ['etapas'] },
+};
+async function propNombresEtapasIA(p) {
+  const dd = p.diseno_data || {}, hojas = dd.hojas || {}, ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const nombres = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false);
+  if (!nombres.length) return {};
+  const lista = nombres.map(n => {
+    const eq = ((ed[n] && ed[n].equipos) || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}`).join('; ');
+    const h = hojas[n];
+    return `- "${n}"${h.hojaBase && h.hojaBase !== n ? ` (planilla: ${h.hojaBase})` : ''}${h.linea === 'lodos' ? ' [línea de lodos]' : ''}${eq ? ' — equipos: ' + eq : ''}`;
+  }).join('\n');
+  const prompt = `Estás armando una propuesta técnico-comercial de Aeration Argentina${p.nombre ? ' para "' + p.nombre + '"' : ''}${p.tecnologia_confirmada ? ' (tecnología: ' + p.tecnologia_confirmada + ')' : ''}. El tren de tratamiento tiene estas etapas, con los nombres abreviados que usa la planilla de diseño:\n${lista}\n\nDale a cada etapa un nombre completo y claro para mostrar al cliente. Reglas: (1) en español, corto (hasta ~6 palabras), con mayúscula inicial solo en la primera palabra salvo siglas o nombres propios; (2) desabreviá (ej. "Sed 2°" → "Sedimentador secundario", "LA" → "Reactor biológico de lodos activados", "Pozo cloac" → "Pozo de bombeo cloacal", "Anóxico" → "Reactor anóxico"), usando la tecnología y los equipos de la etapa para entender de qué se trata; (3) no inventes una función que la etapa no tenga ni agregues la palabra "etapa"; (4) si el nombre actual ya es completo y claro, devolvé el mismo; (5) no repitas el mismo nombre en dos etapas.`;
+  const r = await propLlamarForzado(PROP_TOOL_NOMBRAR_ETAPAS, prompt, 2000);
+  const mapa = {}, usados = new Set(nombres);
+  (r.etapas || []).forEach(x => {
+    const orig = String(x.nombre || '').trim(), nuevo = String(x.nombre_completo || '').trim();
+    if (!nombres.includes(orig) || !nuevo || nuevo === orig) return;
+    if (usados.has(nuevo) || Object.values(mapa).includes(nuevo)) return; // sin repetidos
+    mapa[orig] = nuevo;
+  });
+  return mapa;
+}
+// Aplica el mapa a "Etapas de proceso" (líneas "### nombre") y a los ítems comerciales (incluye "Alternativa · nombre")
+function propAplicarNombresEtapas(pd, mapa) {
+  if (!mapa || !Object.keys(mapa).length) return pd;
+  pd.nombres_etapas = Object.assign({}, pd.nombres_etapas, mapa);
+  const ep = pd.secciones && pd.secciones.etapas_proceso;
+  if (ep && ep.texto) pd.secciones.etapas_proceso = Object.assign({}, ep, { texto: propRenombrarEtapasTexto(ep.texto, pd.nombres_etapas) });
+  pd.comercial_items = (pd.comercial_items || []).map(it => {
+    if (!it.etapa) return it;
+    const i = it.etapa.indexOf(' · ');
+    const pref = i >= 0 ? it.etapa.slice(0, i + 3) : '', nom = i >= 0 ? it.etapa.slice(i + 3) : it.etapa;
+    return pd.nombres_etapas[nom] ? Object.assign({}, it, { etapa: pref + pd.nombres_etapas[nom] }) : it;
+  });
+  return pd;
+}
+function propRenombrarEtapasTexto(texto, mapa) {
+  return String(texto || '').split('\n').map(l => {
+    const t = l.trim();
+    if (!t.startsWith('### ')) return l;
+    const nom = t.slice(4).trim();
+    return mapa && mapa[nom] ? '### ' + mapa[nom] : l;
+  }).join('\n');
+}
+
 // ── Generación con IA + chat por sección ──────────────────────────────────
 async function procesosStep4GenerarConIA() {
   const p = procesosCurrentProyecto;
@@ -17311,6 +17368,10 @@ async function procesosStep4GenerarConIA() {
     pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
     pd.secciones = Object.assign({}, pd.secciones);
     Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
+    // Nombres completos de las etapas (en vez de "LA", "Sed 2°"...)
+    let avisoNombres = '';
+    try { showMsg(statusId, 'loading', 'Poniéndole nombre completo a las etapas...'); propAplicarNombresEtapas(pd, await propNombresEtapasIA(p)); }
+    catch (e) { avisoNombres = ' (No pude completar los nombres de las etapas: ' + e.message + ')'; }
     // Texto estándar de la tecnología + fotos de equipos/normativa/referencias de la biblioteca (Cfg Propuestas)
     let resumenBib = '';
     try { showMsg(statusId, 'loading', 'Agregando el texto estándar y las fotos de la biblioteca...'); resumenBib = (await procesosPropuestaAplicarBiblioteca(p, pd)).resumen; }
@@ -17318,7 +17379,7 @@ async function procesosStep4GenerarConIA() {
     await procesosSaveProyecto({ propuesta_data: pd }, p);
     if (procesosCurrentProyecto === p) {
       renderProcesosStepContent();
-      showMsg(statusId, 'success', '✓ Contenido generado. ' + resumenBib);
+      showMsg(statusId, 'success', '✓ Contenido generado. ' + resumenBib + avisoNombres);
     }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
@@ -17382,7 +17443,8 @@ async function procesosStep4SeccionChatSend(key) {
     // procesosStep2ChatSend).
     const pd2 = Object.assign({}, p.propuesta_data);
     pd2.secciones = Object.assign({}, pd2.secciones);
-    const sec2 = Object.assign({}, pd2.secciones[key], sec, { texto: parsed.texto_nuevo != null ? parsed.texto_nuevo : sec.texto });
+    const textoNuevo = parsed.texto_nuevo != null ? (key === 'etapas_proceso' ? propRenombrarEtapasTexto(parsed.texto_nuevo, pd2.nombres_etapas) : parsed.texto_nuevo) : sec.texto;
+    const sec2 = Object.assign({}, pd2.secciones[key], sec, { texto: textoNuevo });
     sec2.chat = sec.chat.concat([{role:'assistant', content: parsed.reply || '(sin respuesta)'}]);
     pd2.secciones[key] = sec2;
     await procesosSaveProyecto({ propuesta_data: pd2 }, p);
