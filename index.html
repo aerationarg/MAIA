@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.59</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.59</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -833,6 +833,8 @@
             <div style="display:flex;gap:6px;position:relative">
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetEquiposToggle('pf-equipos-panel-flowsheets')" title="Agregar un equipo a mano">+ Equipos</button>
               <div id="pf-equipos-panel-flowsheets" class="pf-equipos-panel" style="display:none;position:absolute;top:32px;right:0;z-index:20"></div>
+              <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetEquiposToggle('pf-unidades-panel-flowsheets','unidades')" title="Agregar una unidad del tren (DAF, sedimentador, laberinto de cloración, reactor...)">+ Unidades</button>
+              <div id="pf-unidades-panel-flowsheets" class="pf-equipos-panel" style="display:none;position:absolute;top:32px;right:0;z-index:20"></div>
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetFlechaIniciar()" title="Dibujar una flecha suelta entre dos puntos cualquiera">+ Flecha</button>
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetEtiquetaIniciar()" title="Agregar un texto libre en el diagrama">+ Etiqueta</button>
               <button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetDeshacer()" title="Deshace el último cambio (arrastre, chat o generar)">↩ Deshacer</button>
@@ -14373,6 +14375,7 @@ function procesosFlowsheetDragInit(container, adapter) {
 }
 function procesosFlowsheetDragStart(ev) {
   if (_pfPlacingEquipo) { procesosFlowsheetEquipoColocarClick(ev); return; }
+  if (_pfPlacingUnidad) { procesosFlowsheetUnidadColocarClick(ev); return; }
   if (_pfPlacingFlecha) { procesosFlowsheetFlechaClick(ev); return; }
   if (_pfPlacingEtiqueta) { procesosFlowsheetEtiquetaClick(ev); return; }
   const handle = ev.target.closest('[data-resize-tipo]');
@@ -14495,7 +14498,7 @@ function procesosFlowsheetBorrarSeleccion() {
 }
 document.addEventListener('keydown', ev => {
   if (ev.key !== 'Delete' && ev.key !== 'Backspace') return;
-  if (!_pfSel || _pfPlacingEquipo || _pfPlacingFlecha || _pfPlacingEtiqueta) return;
+  if (!_pfSel || _pfPlacingEquipo || _pfPlacingUnidad || _pfPlacingFlecha || _pfPlacingEtiqueta) return;
   if (!_pfSvgEl || !_pfSvgEl.isConnected || !_pfSvgEl.getClientRects().length) return;
   const t = document.activeElement;
   if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
@@ -14674,13 +14677,13 @@ function procesosFlowsheetEquiposPanelHtml() {
   }).join('');
   return `<div style="display:flex;flex-wrap:wrap;gap:6px;width:540px;max-width:80vw;max-height:280px;overflow-y:auto;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:0 4px 14px rgba(0,0,0,0.15)">${items}</div>`;
 }
-function procesosFlowsheetEquiposToggle(panelId) {
+function procesosFlowsheetEquiposToggle(panelId, modo) {
   const panel = document.getElementById(panelId);
   if (!panel) return;
   const abrir = panel.style.display === 'none' || !panel.style.display;
   document.querySelectorAll('.pf-equipos-panel').forEach(p => { if (p !== panel) p.style.display = 'none'; });
   panel.style.display = abrir ? 'block' : 'none';
-  if (abrir) panel.innerHTML = procesosFlowsheetEquiposPanelHtml();
+  if (abrir) panel.innerHTML = modo === 'unidades' ? procesosFlowsheetUnidadesPanelHtml() : procesosFlowsheetEquiposPanelHtml();
 }
 // ── Galería de solo lectura (Cfg Procesos IA > "Diseño de equipos para
 // Flowsheets") — mismo catálogo que el panel "+ Equipos" pero en tarjetas
@@ -14712,6 +14715,7 @@ function procesosFlowsheetEquipoElegir(idx) {
 }
 function procesosFlowsheetPlacingCancelar() {
   _pfPlacingEquipo = null;
+  _pfPlacingUnidad = null;
   _pfPlacingFlecha = false; _pfFlechaPts = [];
   _pfPlacingEtiqueta = false;
   if (_pfPreviewEl) { _pfPreviewEl.remove(); _pfPreviewEl = null; }
@@ -14750,6 +14754,115 @@ function procesosFlowsheetEquipoAgregar(nombreEtapa, catalogoItem) {
   et.equipos.push({ id: procesosNuevoId(), tipo: catalogoItem.tipo, cantidad: 1, especificacion: '', modelo: '', justificacion: '' });
   a.guardar();
   a.rerender();
+}
+// ── Botón "Unidades" del toolbar (solo en la solapa Flowsheets) — agregar una unidad entera del tren ─────────────
+// El nombre de la unidad es lo que decide qué figura se dibuja (ver PROCESOS_FLOWSHEET_FIGURAS: pozo, sedimentador, DAF,
+// laberinto de cloración, máquina, tanque...). Se elige la unidad en el panel y se hace clic en la etapa DESPUÉS de la cual
+// va (clic en un lugar vacío del dibujo = al final); si el flowsheet está vacío se agrega directo.
+const PROCESOS_FLOWSHEET_UNIDADES = [
+  { label: 'Pozo de bombeo', nombre: 'Pozo de bombeo', fig: 'pozo' },
+  { label: 'Reja', nombre: 'Reja', fig: 'maquina' },
+  { label: 'Tamiz', nombre: 'Tamiz', fig: 'maquina' },
+  { label: 'Desarenador', nombre: 'Desarenador', fig: 'maquina' },
+  { label: 'Ecualización', nombre: 'Tanque de ecualización', fig: 'tanque' },
+  { label: 'Floculación', nombre: 'Floculación', fig: 'tanque' },
+  { label: 'DAF (flotación)', nombre: 'DAF', fig: 'daf' },
+  { label: 'Reactor biológico', nombre: 'Reactor biológico', fig: 'tanque' },
+  { label: 'Aireación', nombre: 'Aireación', fig: 'tanque' },
+  { label: 'Lodos activados', nombre: 'Lodos activados', fig: 'tanque' },
+  { label: 'SBR', nombre: 'SBR', fig: 'tanque' },
+  { label: 'MBR', nombre: 'MBR', fig: 'tanque' },
+  { label: 'MBBR', nombre: 'MBBR', fig: 'tanque' },
+  { label: 'Anóxico', nombre: 'Tanque anóxico', fig: 'tanque' },
+  { label: 'Anaeróbico', nombre: 'Reactor anaeróbico', fig: 'tanque' },
+  { label: 'Lecho percolador', nombre: 'Lecho percolador', fig: 'tanque' },
+  { label: 'Laguna', nombre: 'Laguna', fig: 'tanque' },
+  { label: 'Sedimentador', nombre: 'Sedimentador secundario', fig: 'sedimentador' },
+  { label: 'Clarificador', nombre: 'Clarificador', fig: 'sedimentador' },
+  { label: 'Desinfección (cloración)', nombre: 'Desinfección', fig: 'desinfeccion' },
+  { label: 'Desinfección UV', nombre: 'Desinfección UV', fig: 'tanque' },
+  { label: 'Espesador de lodos', nombre: 'Espesador de lodos', fig: 'sedimentador', linea: 'lodos' },
+  { label: 'Digestor de lodos', nombre: 'Digestor de lodos', fig: 'tanque', linea: 'lodos' },
+  { label: 'Deshidratación de lodos', nombre: 'Deshidratación de lodos', fig: 'maquina', linea: 'lodos' },
+  { label: 'Centrífuga de lodos', nombre: 'Centrífuga de lodos', fig: 'maquina', linea: 'lodos' },
+  { label: 'Filtro banda / prensa', nombre: 'Filtro banda', fig: 'maquina', linea: 'lodos' },
+  { label: 'Otra unidad (caja)', nombre: '', fig: 'caja' },
+];
+// Dibujito de cada tipo de figura para el panel (no es el dibujo real del flowsheet, solo para reconocerlas)
+function procesosFlowsheetUnidadIconoSvg(fig, lodos) {
+  const c = lodos ? '#8d6e63' : '#2e7d32';
+  const base = `fill="none" stroke="${c}" stroke-width="1.6" stroke-linejoin="round"`;
+  const cuerpo = {
+    tanque: `<rect x="6" y="9" width="28" height="24" ${base}/><path d="M6 17 Q13 14 20 17 T34 17" ${base}/>`,
+    sedimentador: `<path d="M5 9 H35 V22 L24 33 H16 L5 22 Z" ${base}/><path d="M5 15 H35" ${base}/>`,
+    pozo: `<rect x="9" y="6" width="22" height="28" ${base}/><path d="M9 16 Q15 13 20 16 T31 16" ${base}/><circle cx="20" cy="27" r="3.5" ${base}/>`,
+    maquina: `<rect x="5" y="12" width="30" height="18" rx="2" ${base}/><circle cx="14" cy="21" r="4" ${base}/><path d="M22 17 H31 M22 21 H31 M22 25 H31" ${base}/>`,
+    daf: `<rect x="5" y="9" width="30" height="24" ${base}/><path d="M5 15 H35" ${base}/><circle cx="14" cy="24" r="1.6" ${base}/><circle cx="21" cy="28" r="1.6" ${base}/><circle cx="27" cy="22" r="1.6" ${base}/>`,
+    desinfeccion: `<rect x="5" y="9" width="30" height="24" ${base}/><path d="M12 9 V26 M19 33 V16 M26 9 V26" ${base}/>`,
+    caja: `<rect x="6" y="10" width="28" height="22" ${base} stroke-dasharray="4 3"/>`,
+  }[fig] || '';
+  return `<svg width="40" height="40" viewBox="0 0 40 40" style="flex-shrink:0">${cuerpo}</svg>`;
+}
+function procesosFlowsheetUnidadesPanelHtml() {
+  const boton = (u, i) => `<button type="button" class="btn btn-secondary btn-sm" style="display:flex;flex-direction:column;align-items:center;gap:2px;width:84px;height:78px;padding:4px" onclick="procesosFlowsheetUnidadElegir(${i})">` +
+    procesosFlowsheetUnidadIconoSvg(u.fig, u.linea === 'lodos') + `<span style="font-size:10px;line-height:1.15;text-align:center;color:var(--text)">${esc(u.label)}</span></button>`;
+  const liq = PROCESOS_FLOWSHEET_UNIDADES.map((u, i) => [u, i]).filter(([u]) => u.linea !== 'lodos' && u.fig !== 'caja');
+  const lod = PROCESOS_FLOWSHEET_UNIDADES.map((u, i) => [u, i]).filter(([u]) => u.linea === 'lodos');
+  const otra = PROCESOS_FLOWSHEET_UNIDADES.map((u, i) => [u, i]).filter(([u]) => u.fig === 'caja');
+  const titulo = t => `<div style="width:100%;font-size:11px;font-weight:600;color:var(--text2);margin-top:2px">${t}</div>`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px;width:540px;max-width:80vw;max-height:340px;overflow-y:auto;padding:10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:0 4px 14px rgba(0,0,0,0.15)">`
+    + titulo('Línea líquida') + liq.map(([u, i]) => boton(u, i)).join('')
+    + titulo('Línea de lodos') + lod.map(([u, i]) => boton(u, i)).join('')
+    + titulo('Otra') + otra.map(([u, i]) => boton(u, i)).join('') + `</div>`;
+}
+let _pfPlacingUnidad = null;
+function procesosFlowsheetUnidadElegir(idx) {
+  const u = PROCESOS_FLOWSHEET_UNIDADES[idx];
+  document.querySelectorAll('.pf-equipos-panel').forEach(pn => pn.style.display = 'none');
+  const p = flowsheetsCurrentProyecto;
+  if (!p) { alert('Primero abrí o creá un flowsheet.'); return; }
+  if (!(p.diseno_data?.orden || []).length) { flowsheetsUnidadAgregar(u, null); return; }
+  _pfPlacingUnidad = u;
+  document.querySelectorAll('.pf-placing-hint').forEach(el => {
+    el.style.display = 'flex';
+    const t = el.querySelector('.pf-placing-hint-texto');
+    if (t) t.textContent = `Hacé clic en la etapa DESPUÉS de la cual va: ${u.label} (clic en un lugar vacío = al final)`;
+  });
+  document.querySelectorAll('[data-drag-tipo="etapa"]').forEach(el => el.style.cursor = 'crosshair');
+}
+function procesosFlowsheetUnidadColocarClick(ev) {
+  const g = ev.target.closest('[data-drag-tipo="etapa"]');
+  let despues = null;
+  if (g) {
+    despues = g.getAttribute('data-drag-id');
+    if (despues === 'Zona de químicos' || despues === 'Zona de soplantes') { alert(`"${despues}" no es una etapa del tren — elegí una etapa real.`); return; }
+  } else if (ev.target.closest('[data-drag-tipo]')) return; // un equipo, flecha, etc.: no es un lugar vacío
+  ev.preventDefault();
+  ev.stopPropagation();
+  const u = _pfPlacingUnidad;
+  procesosFlowsheetPlacingCancelar();
+  flowsheetsUnidadAgregar(u, despues);
+}
+function flowsheetsUnidadAgregar(u, despuesDe) {
+  const p = flowsheetsCurrentProyecto;
+  if (!p || !u) return;
+  const ingresado = prompt('Nombre de la unidad (el nombre define cómo se dibuja):', u.nombre);
+  if (ingresado === null) return;
+  const base = ingresado.trim() || u.nombre;
+  if (!base) return;
+  const hojas = (p.diseno_data && p.diseno_data.hojas) || {};
+  let nombre = base, n = 2;
+  while (hojas[nombre]) nombre = base + ' ' + (n++);
+  const linea = u.linea === 'lodos' ? 'lodos' : 'liquido';
+  const hojaPrev = despuesDe ? hojas[despuesDe] : null;
+  // una unidad de la línea de lodos recibe los lodos de la etapa líquida después de la cual se la pone
+  const origenLodos = linea === 'lodos' && hojaPrev && hojaPrev.linea !== 'lodos' ? despuesDe : null;
+  const r = flowsheetsAplicarAcciones(p, [{ tipo: 'agregar_etapa', nombre, linea, origenLodos, despues_de: despuesDe || null, equipos: [] }]);
+  if (!r) { alert('No se pudo agregar la unidad.'); return; }
+  procesosFlowsheetUndoPush(p);
+  p.diseno_data = r.diseno_data; p.equipos_data = r.equipos_data;
+  flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data }, p);
+  renderFlowsheetsDiagrama();
 }
 // ── Flechas sueltas y etiquetas de texto libre ──────────
 // Mismo "modo colocando" que + Equipos (ver _pfPlacingEquipo de arriba),
@@ -15016,7 +15129,7 @@ const PROCESOS_FLOWSHEET_TOOL_INVENTAR_ICONO = {
     required: ['path_svg', 'descripcion_corta']
   }
 };
-document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && (_pfPlacingEquipo || _pfPlacingFlecha || _pfPlacingEtiqueta)) procesosFlowsheetPlacingCancelar(); });
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && (_pfPlacingEquipo || _pfPlacingUnidad || _pfPlacingFlecha || _pfPlacingEtiqueta)) procesosFlowsheetPlacingCancelar(); });
 document.addEventListener('keydown', ev => { if (ev.key === 'Enter' && _pfPlacingFlecha) procesosFlowsheetFlechaTerminar(); });
 // ── Deshacer (Ctrl+Z de los flows) ──────────────────────
 // Una pila de snapshots {diseno_data, equipos_data} por proyecto — tomados
@@ -22801,6 +22914,44 @@ async function cotizMarcasCargar() {
   if (dl) dl.innerHTML = _cotizMarcasCache.map(m => `<option value="${esc(m)}"></option>`).join('');
   return _cotizMarcasCache;
 }
+// Filtro PostgREST "contiene TODAS las palabras, cada una en CUALQUIERA de las columnas" — con comillas para que las comas,
+// paréntesis y demás caracteres de la palabra (ej. "25,4") no rompan el filtro. Se hace en el servidor para buscar en TODO el
+// catálogo (antes se traían solo los primeros 300 y lo que quedaba más abajo no aparecía).
+function cotizFiltroPalabras(texto, campos) {
+  // Las letras con tilde se buscan con "_" (comodín de una letra) para que "lóbulos" encuentre también "lobulos"
+  const pals = String(texto || '').split(/\s+/).map(x => x.replace(/["\\*%&#+]/g, '').replace(/[áéíóúüñÁÉÍÓÚÜÑ]/g, '_')).filter(Boolean).slice(0, 8);
+  if (!pals.length) return '';
+  return 'and=(' + pals.map(x => 'or(' + campos.map(c => `${c}.ilike."*${encodeURIComponent(x)}*"`).join(',') + ')').join(',') + ')';
+}
+// Código sugerido para un producto nuevo: "AA" + (el mayor número de código AA que ya exista + 1)
+async function cotizCatalogoProximoCodigo() {
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    let maxN = -1, maxDigitos = '', maxPrefijo = 'AA';
+    for (let off = 0; off < 50000; off += 1000) {
+      const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=codigo&empresa=eq.${currentEmpresa}&codigo=ilike.AA*&order=id&limit=1000&offset=${off}`, {headers:{Authorization:'Bearer '+session.token}});
+      const rows = res.ok ? await res.json() : [];
+      rows.forEach(r => {
+        const m = /^(AA[\s\-_.]*)(\d+)$/i.exec(String(r.codigo || '').trim());
+        if (m && Number(m[2]) > maxN) { maxN = Number(m[2]); maxDigitos = m[2]; maxPrefijo = m[1]; }
+      });
+      if (rows.length < 1000) break;
+    }
+    if (maxN < 0) return 'AA1';
+    const ancho = /^0/.test(maxDigitos) ? maxDigitos.length : 0;
+    return maxPrefijo + String(maxN + 1).padStart(ancho, '0');
+  } catch (e) { return ''; }
+}
+// "Marca Modelo — Descripción" (sin repetir si la descripción ya empieza con marca y modelo)
+function cotizDescripcionItem(r) {
+  const mm = [r.marca, r.modelo].map(x => String(x || '').trim()).filter(Boolean).join(' ');
+  const d = String(r.descripcion || '').trim();
+  if (mm && d && !d.toLowerCase().includes(mm.toLowerCase())) return mm + ' — ' + d;
+  return d || mm;
+}
+// Los campos de texto del Stock muestran todo su contenido: crecen en alto (segunda línea) en vez de cortarse
+function cotizAutoAltura(el) { if (!el) return; el.style.height = 'auto'; el.style.height = (el.scrollHeight + 2) + 'px'; }
+function cotizAutoAlturaTodos(raiz) { (raiz || document).querySelectorAll('textarea.cc-area').forEach(cotizAutoAltura); }
 const COTIZ_CATALOGO_LIMITE = 150;
 async function cotizCatalogoRender() {
   const el = document.getElementById('cotiz-catalogo-list');
@@ -22848,16 +22999,15 @@ async function cotizCatalogoRender() {
     // Al pasar el mouse por un campo cuyo texto no entra en su ancho, se
     // muestra el texto completo (mismo tooltip que usa Procesos IA).
     const hov = 'onmouseenter="procesosHoverTexto(this)" onmouseleave="procesosHoverTextoOcultar()" onfocus="procesosHoverTextoOcultar()"';
-    const inputTxt = (r, campo, w, ph) => `<input id="cc-${r.id}-${campo}" value="${esc(r[campo]||'')}" ${ph?`placeholder="${esc(ph)}"`:''} style="width:${w}px" ${hov} />`;
+    const areaTxt = (r, campo, w) => `<textarea id="cc-${r.id}-${campo}" class="cc-area" rows="1" style="width:${w}px;resize:none;overflow:hidden;line-height:1.3;font-size:12px;padding:4px 6px;box-sizing:border-box;display:block" oninput="cotizAutoAltura(this)">${esc(r[campo]||'')}</textarea>`;
     const inputNum = (r, campo, w) => `<input id="cc-${r.id}-${campo}" value="${esc(String(r[campo]||0))}" style="width:${w||52}px;text-align:right" oninput="cotizCatalogoRecalcularTotalFila('${r.id}')" ${hov} />`;
     const filaHtml = r => {
             const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(r[campo])||0), 0);
             return `<tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:4px 6px;font-family:monospace;font-size:10px;color:var(--text2)" title="${esc(r.id)}">${esc(r.id.slice(0,8))}</td>
-              <td style="padding:2px">${inputTxt(r,'marca',90)}</td>
-              <td style="padding:2px">${inputTxt(r,'modelo',90)}</td>
-              <td style="padding:2px">${inputTxt(r,'codigo',80)}</td>
-              <td style="padding:2px"><input id="cc-${r.id}-descripcion" value="${esc(r.descripcion||'')}" style="width:240px" ${hov} /></td>
+              <td style="padding:2px;vertical-align:top">${areaTxt(r,'marca',110)}</td>
+              <td style="padding:2px;vertical-align:top">${areaTxt(r,'modelo',130)}</td>
+              <td style="padding:2px;vertical-align:top">${areaTxt(r,'codigo',90)}</td>
+              <td style="padding:2px;vertical-align:top">${areaTxt(r,'descripcion',340)}</td>
               ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px">${inputNum(r,campo)}</td>`).join('')}
               <td id="cc-${r.id}-total" style="padding:2px 6px;text-align:right;font-weight:600">${esc(String(total))}</td>
               <td style="padding:2px;white-space:nowrap"><button class="btn btn-primary btn-sm" onclick="cotizCatalogoGuardarFila('${r.id}')" title="Guardar los cambios de esta fila">💾</button> <button class="btn btn-secondary btn-sm" onclick="cotizCatalogoEliminar('${r.id}')">✕</button></td>
@@ -22868,7 +23018,6 @@ async function cotizCatalogoRender() {
       <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="border-bottom:2px solid var(--border)">
-          <th style="text-align:left;padding:4px 6px;color:var(--text2);font-weight:600">ID</th>
           <th style="text-align:left;padding:4px 6px;color:var(--text2);font-weight:600">Marca</th>
           <th style="text-align:left;padding:4px 6px;color:var(--text2);font-weight:600">Modelo</th>
           <th style="text-align:left;padding:4px 6px;color:var(--text2);font-weight:600">Código</th>
@@ -22886,6 +23035,7 @@ async function cotizCatalogoRender() {
       <div id="cc-vermas"></div>
     `;
     cotizCatalogoVerMasRender();
+    cotizAutoAlturaTodos(el);
   } catch(e) { el.innerHTML = '<p class="hint">Error al cargar el catálogo.</p>'; }
 }
 // Catálogo de Stock paginado: se cargan de a COTIZ_CATALOGO_LIMITE filas y
@@ -22916,7 +23066,7 @@ async function cotizCatalogoVerMas(todo) {
       if (_cotizCatalogoEstado !== e) return; // se volvió a buscar/filtrar mientras cargaba
       if (!res.ok || !Array.isArray(rows)) throw new Error('No se pudo cargar más.');
       const tbody = document.getElementById('cc-tbody');
-      if (tbody) tbody.insertAdjacentHTML('beforeend', rows.map(e.filaHtml).join(''));
+      if (tbody) { tbody.insertAdjacentHTML('beforeend', rows.map(e.filaHtml).join('')); cotizAutoAlturaTodos(tbody); }
       e.offset += rows.length;
       e.hayMas = rows.length >= COTIZ_CATALOGO_LIMITE;
       if (!todo || !e.hayMas) break;
@@ -22931,9 +23081,10 @@ async function cotizCatalogoVerMas(todo) {
 }
 async function cotizCatalogoAdd() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const codigoSugerido = await cotizCatalogoProximoCodigo(); // AA + último + 1 (se puede cambiar en la fila)
   const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
     method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-    body: JSON.stringify({ empresa: currentEmpresa, marca:'', modelo:'', descripcion:'', moneda_lista:'USD' })
+    body: JSON.stringify({ empresa: currentEmpresa, marca:'', modelo:'', codigo: codigoSugerido, descripcion:'', moneda_lista:'USD' })
   });
   if (!res.ok) { alert('No se pudo agregar.'); return; }
   cotizCatalogoRender();
@@ -23559,6 +23710,16 @@ function cotizArmadoRender() {
       <input type="checkbox" ${st._mantenerVersion?'checked':''} onchange="cotizArmadoSetCampo('_mantenerVersion',this.checked); cotizArmadoRender();" style="width:auto" />
       Mantener el número de versión actual (sobrescribe el mismo Excel/PDF en vez de generar REV${(st._revisionAnterior||0)+1})
     </label>` : ''}
+    <div style="border:1px dashed var(--border);border-radius:var(--radius-sm);padding:10px;margin-bottom:12px">
+      <label style="font-size:12px;font-weight:600">🤖 Armar desde archivos o texto</label>
+      <p class="hint" style="margin:2px 0 8px">Adjuntá el pedido del cliente (PDF, imágenes, Word, Excel) y/o pegá un mail: la IA completa los campos y los ítems, buscándolos en Stock y en lo vendido antes. Después los revisás y editás como siempre.</p>
+      <input type="file" id="cotiz-ia-file" multiple accept=".pdf,.docx,.xlsx,.xls,.jpg,.jpeg,.png" style="display:none" onchange="cotizIaArchivosAgregar(this.files); this.value=''" />
+      <button class="btn btn-secondary btn-sm" onclick="document.getElementById('cotiz-ia-file').click()">+ Adjuntar archivos</button>
+      ${_cotizIa.archivos.map((f, i) => `<span style="display:inline-flex;align-items:center;gap:4px;margin:4px 0 0 8px;font-size:12px;background:var(--surface2);border-radius:4px;padding:2px 6px">${esc(f.name)} <a href="#" onclick="cotizIaArchivoQuitar(${i}); return false;" style="color:var(--red);text-decoration:none">✕</a></span>`).join('')}
+      <textarea rows="2" placeholder="Opcional: pegá un mail o indicá qué cotizar..." style="width:100%;margin-top:8px" oninput="_cotizIa.texto=this.value">${esc(_cotizIa.texto)}</textarea>
+      <button class="btn btn-primary btn-sm" id="cotiz-ia-btn" style="margin-top:8px" onclick="cotizArmadoDesdeArchivos()" ${_cotizIa.ocupado ? 'disabled' : ''}>Analizar con IA y cargar</button>
+      <div id="cotiz-ia-status"></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
       <div style="position:relative">
         <label style="font-size:12px">Cliente</label>
@@ -23644,9 +23805,13 @@ function cotizArmadoRender() {
       </div>` : `
       <div class="field-row" style="padding:6px 0;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">
         <input value="${esc(String(it.cantidad))}" placeholder="Cant." style="width:56px" onchange="cotizArmadoSetItemCampo('${it.id}','cantidad',this.value)" />
-        <input value="${esc(it.descripcion)}" placeholder="Descripción" style="flex:2;min-width:220px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)" />
-        <input value="${esc(String(it.precio_unitario))}" placeholder="Precio unitario" style="width:120px" onchange="cotizArmadoSetItemCampo('${it.id}','precio_unitario',this.value)" />
-        <span style="width:100px;font-size:13px;align-self:center">${procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0))}</span>
+        <div style="flex:2;min-width:220px">
+          <textarea rows="2" placeholder="Descripción" style="width:100%;resize:vertical;font-size:13px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)">${esc(it.descripcion)}</textarea>
+          ${it.origen_ia ? `<span style="font-size:11px;color:${it.origen_ia === 'sin coincidencia' ? 'var(--red)' : 'var(--blue)'}">🤖 ${esc(it.origen_ia === 'stock' ? 'Coincide con un producto de Stock' : it.origen_ia === 'vendido' ? 'Coincide con algo vendido antes' : 'Sin coincidencia en Stock ni ventas — revisalo')}</span>` : ''}
+        </div>
+        <div style="width:110px"><input value="${esc(String(it.precio_base != null && it.precio_base !== '' ? it.precio_base : it.precio_unitario))}" placeholder="Precio unit." style="width:100%" title="Precio unitario (de lista)" onchange="cotizArmadoSetItemCampo('${it.id}','precio_unitario',this.value)" /></div>
+        <div style="width:64px;display:flex;align-items:center;gap:2px"><input value="${esc(String(Number(it.dto_item)||''))}" placeholder="Dto" style="width:44px" title="Descuento propio de este ítem (%)" onchange="cotizArmadoSetItemCampo('${it.id}','dto_item',this.value)" /><span style="font-size:12px">%</span></div>
+        <div style="width:110px;font-size:13px;align-self:center;text-align:right">${Number(it.dto_item) > 0 ? `<span style="font-size:11px;color:var(--text2)">neto ${procesosFormatearNumero(it.precio_unitario)}</span><br>` : ''}${procesosFormatearNumero((Number(it.cantidad)||0)*(Number(it.precio_unitario)||0))}</div>
         <button class="btn btn-secondary btn-sm" onclick="cotizArmadoEliminarItem('${it.id}')">✕</button>
       </div>`).join('') : '<p class="hint">Todavía no agregaste ítems.</p>'}
     ${st.items.length ? `
@@ -23692,6 +23857,11 @@ function cotizArmadoSetCampo(campo, val) {
 // cantidad*precio_unitario sin saber que es un descuento.
 function cotizArmadoRecalcularTotales() {
   const st = cotizArmadoInit();
+  // Descuento propio de cada ítem: precio neto = precio de lista del ítem − su dto % (lo que lee el resto del código sigue siendo precio_unitario)
+  (st.items||[]).forEach(it => {
+    if (it.tipo === 'descuento' || it.precio_base == null || it.precio_base === '') return;
+    it.precio_unitario = Math.round((Number(it.precio_base)||0) * (1 - (Number(it.dto_item)||0)/100) * 100) / 100;
+  });
   const sumaNormales = (st.items||[]).filter(it => it.tipo !== 'descuento').reduce((a,it) => a + (Number(it.cantidad)||0)*(Number(it.precio_unitario)||0), 0);
   (st.items||[]).forEach(it => {
     if (it.tipo !== 'descuento') return;
@@ -23870,7 +24040,7 @@ async function cotizArmadoAgregarManual() {
   if (confirm('¿Este ítem es un producto que también querés agregar al catálogo de Stock?')) {
     const marca = (prompt('Marca:') || '').trim();
     const modelo = (prompt('Modelo:') || '').trim();
-    const codigo = (prompt('Código (opcional):') || '').trim();
+    const codigo = (prompt('Código (sugerido, podés cambiarlo):', await cotizCatalogoProximoCodigo()) || '').trim();
     const descripcion = (prompt('Descripción:') || '').trim();
     const precioStr = (prompt('Precio de lista (opcional, sin moneda):') || '').trim();
     const monedaLista = /^ars$/i.test((prompt('Moneda del precio de lista — USD o ARS:', 'USD') || 'USD').trim()) ? 'ARS' : 'USD';
@@ -23884,7 +24054,7 @@ async function cotizArmadoAgregarManual() {
       if (nuevo) {
         item.catalogo_id = nuevo.id;
         item.marca = marca; item.modelo = modelo;
-        item.descripcion = descripcion || [marca,modelo].filter(Boolean).join(' ');
+        item.descripcion = cotizDescripcionItem({ marca, modelo, descripcion });
         if (precioStr !== '') item.precio_unitario = Number(precioStr) || 0;
       } else {
         alert('No se pudo crear el producto en Stock — se agrega igual el ítem a la cotización, sin vincular.');
@@ -23927,9 +24097,153 @@ function cotizArmadoEliminarItem(id) {
 }
 function cotizArmadoSetItemCampo(id, campo, val) {
   const st = cotizArmadoInit();
-  st.items = st.items.map(it => it.id===id ? Object.assign({}, it, { [campo]: campo==='descripcion' ? val : (val===''?'':Number(val)) }) : it);
+  st.items = st.items.map(it => {
+    if (it.id !== id) return it;
+    const n = Object.assign({}, it);
+    if (campo === 'descripcion') n.descripcion = val;
+    else if (campo === 'precio_unitario' && it.tipo !== 'descuento') { n.precio_base = val === '' ? '' : Number(val); n.precio_unitario = n.precio_base; } // el precio que se escribe es el de lista; el neto (con el dto del ítem) lo calcula cotizArmadoRecalcularTotales
+    else if (campo === 'dto_item') { if (n.precio_base == null || n.precio_base === '') n.precio_base = Number(it.precio_unitario) || 0; n.dto_item = val === '' ? 0 : Math.max(0, Math.min(100, Number(val) || 0)); }
+    else n[campo] = val === '' ? '' : Number(val);
+    return n;
+  });
   cotizArmadoRecalcularTotales();
   cotizArmadoRender();
+}
+
+// ── Armar la cotización desde archivos / texto (IA) ──
+// Se adjunta el pedido del cliente (PDF, imágenes, Word, Excel, un mail pegado...) y la IA saca los datos de cabecera y los
+// ítems; cada ítem se busca después en Stock y en lo vendido (mismo criterio que el buscador: marca, modelo, código y
+// descripción) para usar el producto y el precio ya cargados. Lo que no se encuentra queda como ítem manual, marcado.
+let _cotizIa = { archivos: [], texto: '', ocupado: false };
+const COTIZ_TOOL_EXTRAER = {
+  name: 'extraer_cotizacion',
+  description: 'Devuelve los datos de la cotización que surgen de los archivos / el texto.',
+  input_schema: { type: 'object', properties: {
+    cliente: { type: 'string', description: 'Empresa a la que se le cotiza ("" si no figura).' },
+    atencion: { type: 'string', description: 'Persona de contacto ("" si no figura).' },
+    telefono: { type: 'string' }, celular: { type: 'string' }, email: { type: 'string' },
+    referencia: { type: 'string', description: 'Referencia / asunto / número de pedido del cliente.' },
+    moneda: { type: 'string', enum: ['Dólar', 'Peso', ''], description: 'Moneda pedida ("" si no se aclara).' },
+    forma_pago: { type: 'string' }, forma_cancelacion: { type: 'string' }, plazo_entrega: { type: 'string' }, lugar_entrega: { type: 'string' }, validez_oferta: { type: 'string' },
+    observaciones: { type: 'string', description: 'Condiciones o aclaraciones particulares que pida el cliente ("" si no hay).' },
+    items: { type: 'array', description: 'Cada producto o servicio a cotizar, en el orden en que figura.', items: { type: 'object', properties: {
+      cantidad: { type: 'number' },
+      marca: { type: 'string', description: '"" si no figura.' },
+      modelo: { type: 'string', description: 'Modelo / código de fabricante ("" si no figura).' },
+      codigo: { type: 'string', description: 'Código interno o de catálogo ("" si no figura).' },
+      descripcion: { type: 'string', description: 'Descripción tal como figura.' },
+      precio_unitario: { type: ['number', 'null'], description: 'Precio unitario SOLO si el archivo lo trae; null si no.' },
+    }, required: ['descripcion'] } },
+  }, required: ['items'] },
+};
+function cotizIaArchivosAgregar(fileList) { _cotizIa.archivos.push(...Array.from(fileList || [])); cotizArmadoRender(); }
+function cotizIaArchivoQuitar(i) { _cotizIa.archivos.splice(i, 1); cotizArmadoRender(); }
+// Busca el ítem pedido en Stock y después en lo vendido. Devuelve { origen:'cat'|'hist', row } o null.
+async function cotizIaBuscarCoincidencia(ex) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const H = {headers:{Authorization:'Bearer '+session.token}};
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const toks = s => norm(s).split(/[^a-z0-9]+/).filter(t => t.length >= 2);
+  const limpio = s => encodeURIComponent(String(s || '').replace(/["\\*%&#+]/g, '').trim());
+  const tEx = new Set(toks([ex.marca, ex.modelo, ex.codigo, ex.descripcion].join(' ')));
+  const nMod = norm(ex.modelo).replace(/\s+/g, ''), nCod = norm(ex.codigo).replace(/\s+/g, '');
+  const puntaje = r => {
+    const rMod = norm(r.modelo).replace(/\s+/g, ''), rCod = norm(r.codigo).replace(/\s+/g, '');
+    if (nCod.length >= 3 && rCod && rCod === nCod) return 1;
+    if (nMod.length >= 3 && rMod && (rMod === nMod || (rMod.length >= 4 && nMod.includes(rMod)) || (nMod.length >= 4 && rMod.includes(nMod)))) return 0.95;
+    const tr = new Set(toks([r.marca, r.modelo, r.codigo, r.descripcion].join(' ')));
+    if (!tr.size || !tEx.size) return 0;
+    let hit = 0; tEx.forEach(t => { if (tr.has(t)) hit++; });
+    return 2 * hit / (tEx.size + tr.size);
+  };
+  // palabras para buscar en el servidor: del texto original (con tildes, que el filtro convierte en comodín), las más largas primero y las sin tilde antes
+  const conTilde = w => /[áéíóúüñ]/.test(w);
+  const palabras = [...new Set(String([ex.marca, ex.modelo, ex.codigo, ex.descripcion].join(' ').toLowerCase()).split(/[^a-z0-9áéíóúüñ]+/).filter(w => w.length >= 3))].sort((a, b) => (conTilde(a) - conTilde(b)) || b.length - a.length);
+  const q = (tabla, filtro) => supaFetch(`/rest/v1/${tabla}?select=*&empresa=eq.${currentEmpresa}&${filtro}&limit=40`, H).then(r => r.ok ? r.json() : []).catch(() => []);
+  const buscarEn = async tabla => {
+    const esCat = tabla === 'cotizaciones_catalogo';
+    const campos = esCat ? ['marca', 'modelo', 'codigo', 'descripcion'] : ['marca', 'modelo', 'descripcion'];
+    const lotes = [];
+    if (esCat && ex.codigo && limpio(ex.codigo)) lotes.push(q(tabla, `codigo=ilike."*${limpio(ex.codigo)}*"`));
+    if (ex.modelo && limpio(ex.modelo)) lotes.push(q(tabla, `modelo=ilike."*${limpio(ex.modelo)}*"`));
+    if (palabras.length) lotes.push(q(tabla, cotizFiltroPalabras(palabras.slice(0, 2).join(' '), campos)));
+    if (palabras.length > 1) lotes.push(q(tabla, cotizFiltroPalabras(palabras[0], campos)));
+    const vistos = new Map();
+    (await Promise.all(lotes)).forEach(rows => (Array.isArray(rows) ? rows : []).forEach(r => vistos.set(r.id, r)));
+    let mejor = null, mp = 0;
+    vistos.forEach(r => { const s = puntaje(r); if (s > mp) { mp = s; mejor = r; } });
+    return mp >= 0.45 ? mejor : null;
+  };
+  const cat = await buscarEn('cotizaciones_catalogo');
+  if (cat) return { origen: 'cat', row: cat };
+  const hist = await buscarEn('cotizaciones_historial_ventas');
+  return hist ? { origen: 'hist', row: hist } : null;
+}
+async function cotizArmadoDesdeArchivos() {
+  if (_cotizIa.ocupado) return;
+  const sid = 'cotiz-ia-status';
+  const texto = _cotizIa.texto.trim();
+  if (!texto && !_cotizIa.archivos.length) { showMsg(sid, 'error', 'Adjuntá al menos un archivo o escribí un texto.'); return; }
+  _cotizIa.ocupado = true;
+  const btn = document.getElementById('cotiz-ia-btn'); if (btn) btn.disabled = true;
+  try {
+    const st = cotizArmadoInit();
+    showMsg(sid, 'loading', 'Leyendo los archivos...');
+    const bloques = await propuestasBloquesDeArchivos(_cotizIa.archivos);
+    const prompt = `Vas a armar una cotización de Aeration a partir de lo que mandó el usuario (el pedido de un cliente, un mail, una planilla, una cotización de otro proveedor, fotos...). Sacá SOLO lo que figura — no inventes datos; lo que no esté, dejalo vacío (y precio_unitario en null). Cada producto o servicio a cotizar es un ítem, en el orden en que aparece, con su cantidad (1 si no se indica), marca, modelo y código si figuran. Si un mismo producto aparece repetido, sumá las cantidades.${texto ? '\n\nTEXTO / INSTRUCCIONES DEL USUARIO:\n' + texto : ''}`;
+    showMsg(sid, 'loading', 'La IA está leyendo el pedido...');
+    const ex = await propLlamarForzado(COTIZ_TOOL_EXTRAER, [...bloques, { type: 'text', text: prompt }], 6000);
+    const resumen = [];
+    // Cliente: se busca en Clientes (así se cargan también contactos, lugares de entrega y condiciones de la última venta)
+    const nombreCli = String(ex.cliente || '').trim();
+    if (nombreCli) {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      const buscarCli = async t => { const r = await supaFetch(`/rest/v1/clientes?select=id,nombre_empresa,rubro&nombre_empresa=ilike."*${encodeURIComponent(t.replace(/["\\*%&#+]/g, ''))}*"&order=nombre_empresa&limit=8`, {headers:{Authorization:'Bearer '+session.token}}); return r.ok ? await r.json() : []; };
+      let rows = await buscarCli(nombreCli);
+      if (!rows.length) { const pal = nombreCli.split(/\s+/).filter(w => w.length >= 4); if (pal.length) rows = await buscarCli(pal[0]); }
+      const exacto = rows.find(c => c.nombre_empresa.trim().toLowerCase() === nombreCli.toLowerCase());
+      const elegido = exacto || (rows.length === 1 ? rows[0] : null);
+      if (elegido) { showMsg(sid, 'loading', 'Cargando el cliente...'); _cotizArmadoClienteSugerencias = [elegido]; await cotizArmadoClienteSeleccionar(elegido.id); resumen.push('cliente "' + elegido.nombre_empresa + '" (de Clientes)'); }
+      else { st.cliente = nombreCli; st.cliente_id = null; resumen.push(rows.length ? `cliente "${nombreCli}" — hay ${rows.length} parecidos en Clientes, elegí el correcto` : `cliente "${nombreCli}" (no está en Clientes)`); }
+    }
+    ['atencion', 'telefono', 'celular', 'email', 'referencia', 'forma_pago', 'forma_cancelacion', 'plazo_entrega', 'lugar_entrega', 'validez_oferta'].forEach(k => { const v = String(ex[k] || '').trim(); if (v) st[k] = v; });
+    if (ex.moneda) st.moneda = ex.moneda;
+    const obs = String(ex.observaciones || '').trim();
+    if (obs && !(st.observaciones || '').includes(obs)) st.observaciones = ((st.observaciones || '').trim() + '\n' + obs).trim();
+    // Ítems
+    const cuentas = { cat: 0, hist: 0, nada: 0 };
+    const lista = (ex.items || []).filter(x => String(x.descripcion || x.modelo || '').trim());
+    let n = 0;
+    for (const x of lista) {
+      n++;
+      showMsg(sid, 'loading', `Buscando en Stock y ventas (${n} de ${lista.length})...`);
+      const cantidad = Number(x.cantidad) > 0 ? Number(x.cantidad) : 1;
+      const precioArchivo = x.precio_unitario != null && x.precio_unitario !== '' ? Number(x.precio_unitario) || 0 : 0;
+      let m = null;
+      try { m = await cotizIaBuscarCoincidencia(x); } catch (e) { m = null; }
+      let item;
+      if (m && m.origen === 'cat') {
+        cuentas.cat++;
+        item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(m.row), cantidad, precio_unitario: m.row.precio_lista != null ? Number(m.row.precio_lista) : precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.id, origen_ia: 'stock' };
+      } else if (m) {
+        cuentas.hist++;
+        item = { id: procesosNuevoId(), descripcion: m.row.descripcion || cotizDescripcionItem(m.row), cantidad, precio_unitario: Number(m.row.precio_unitario) || precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.catalogo_id || null, origen_ia: 'vendido' };
+      } else {
+        cuentas.nada++;
+        item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(x), cantidad, precio_unitario: precioArchivo, marca: x.marca || null, modelo: x.modelo || null, catalogo_id: null, origen_ia: 'sin coincidencia' };
+      }
+      st.items.push(item);
+    }
+    cotizArmadoOrdenarItems(st);
+    cotizArmadoRecalcularTotales();
+    _cotizIa.archivos = []; _cotizIa.texto = '';
+    cotizArmadoRender();
+    const partes = [`${lista.length} ítem(s): ${cuentas.cat} de Stock, ${cuentas.hist} de lo vendido antes, ${cuentas.nada} sin coincidencia`];
+    if (resumen.length) partes.unshift(resumen.join(', '));
+    showMsg(sid, cuentas.nada ? 'warning' : 'success', '✓ Cargué ' + partes.join(' — ') + '. Revisá los ítems marcados con 🤖 (precio y coincidencia) antes de generar.');
+  } catch (e) {
+    showMsg(sid, 'error', '✕ ' + e.message);
+  } finally { _cotizIa.ocupado = false; const b2 = document.getElementById('cotiz-ia-btn'); if (b2) b2.disabled = false; }
 }
 
 let _cotizBuscarItemsTimeout = null;
@@ -23954,15 +24268,23 @@ async function cotizArmadoBuscarItems() {
     // se evita armar el filtro de texto como or()/and() agrupado de
     // PostgREST porque el texto puede traer comas u otros caracteres que
     // ese formato interpreta como separadores y rompen el filtro.
-    const queries = [
-      supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&order=fecha.desc&limit=300`, {headers:{Authorization:'Bearer '+session.token}}),
-      supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&empresa=eq.${currentEmpresa}&order=marca,modelo&limit=300`, {headers:{Authorization:'Bearer '+session.token}}),
-    ];
-    if (clienteActual) queries.push(supaFetch(`/rest/v1/cotizaciones_historial_ventas?select=*&empresa=eq.${currentEmpresa}&cliente=ilike.*${encodeURIComponent(clienteActual)}*&order=fecha.desc&limit=200`, {headers:{Authorization:'Bearer '+session.token}}));
-    const [histRes, catRes, histClienteRes] = await Promise.all(queries);
-    const histGeneralAll = histRes.ok ? await histRes.json() : [];
-    const catAll = catRes.ok ? await catRes.json() : [];
-    const histClienteAll = histClienteRes && histClienteRes.ok ? await histClienteRes.json() : [];
+    // La búsqueda se hace en el servidor, en todas las columnas (marca, modelo, código y descripción en el catálogo; marca,
+    // modelo y descripción en lo vendido) y sobre TODO lo cargado. Si por algún motivo el filtro fallara, se vuelve a
+    // traer un conjunto amplio y se filtra acá.
+    const fCat = cotizFiltroPalabras(texto, ['marca', 'modelo', 'codigo', 'descripcion']);
+    const fHist = cotizFiltroPalabras(texto, ['marca', 'modelo', 'descripcion']);
+    const H = {headers:{Authorization:'Bearer '+session.token}};
+    const pedir = async (tabla, filtro, resto, limite) => {
+      let r = await supaFetch(`/rest/v1/${tabla}?select=*&empresa=eq.${currentEmpresa}${resto}&${filtro}&limit=${limite}`, H);
+      if (r.ok) return await r.json();
+      r = await supaFetch(`/rest/v1/${tabla}?select=*&empresa=eq.${currentEmpresa}${resto}&limit=1000`, H);
+      return r.ok ? await r.json() : [];
+    };
+    const [histGeneralAll, catAll, histClienteAll] = await Promise.all([
+      pedir('cotizaciones_historial_ventas', fHist, '&order=fecha.desc', 150),
+      pedir('cotizaciones_catalogo', fCat, '&order=marca,modelo', 80),
+      clienteActual ? pedir('cotizaciones_historial_ventas', fHist, `&cliente=ilike.*${encodeURIComponent(clienteActual)}*&order=fecha.desc`, 100) : Promise.resolve([]),
+    ]);
 
     const palabras = texto.toLowerCase().split(/\s+/).filter(Boolean);
     const contieneTodas = campos => {
@@ -23997,7 +24319,7 @@ async function cotizArmadoBuscarItems() {
         ];
         return `
         <div class="result-field" style="flex-direction:column;align-items:flex-start;gap:4px">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))} <span style="color:var(--text2)">· En stock: ${esc(String(r.cantidad_stock??0))}</span><br><span style="color:var(--text2);font-weight:400">${esc((r.descripcion||'').slice(0,80))}</span></span>
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))} <span style="color:var(--text2)">· En stock: ${esc(String(r.cantidad_stock??0))}</span><br><span style="color:var(--text2);font-weight:400">${esc(r.descripcion||'')}</span></span>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${r.precio_lista!=null ? precios.map(([tipo,label,valor]) => `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','${tipo}')" title="Agregar con ${esc(label)}">${esc(label)}: ${esc(moneda)} ${procesosFormatearNumero(valor)}</span>`).join('') : '<span class="hint">Sin precio cargado</span>'}
           </div>
@@ -24011,7 +24333,8 @@ function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   const st = cotizArmadoInit();
   const row = (origen==='hist' ? _cotizUltimaBusqueda.hist : _cotizUltimaBusqueda.cat).find(r => r.id === id);
   if (!row) return;
-  const descripcion = row.descripcion || [row.marca,row.modelo].filter(Boolean).join(' ');
+  // Del Stock se escribe "Marca Modelo — Descripción"; lo vendido antes ya trae su descripción completa tal cual se cotizó
+  const descripcion = origen === 'hist' ? (row.descripcion || [row.marca,row.modelo].filter(Boolean).join(' ')) : cotizDescripcionItem(row);
   let precio;
   if (origen === 'hist') {
     precio = row.precio_unitario;
