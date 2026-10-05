@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.56</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.55</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.56</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -869,7 +869,7 @@
       </div>
       <div class="card">
         <div class="card-label">Imágenes para las ofertas</div>
-        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Fotos y esquemas de equipos, obras de referencia y normativa. Subí imágenes sueltas o un .zip (las carpetas "Referencias obras" y "Normativa" definen la categoría): la IA sugiere palabras clave, tecnologías y epígrafe a partir del nombre — revisalos. Al armar una propuesta se eligen las que correspondan a los equipos y tecnologías del proyecto.</p>
+        <p class="hint" style="margin-top:-6px;margin-bottom:10px">Fotos y esquemas de equipos, obras de referencia y normativa. Subí imágenes sueltas (PNG, JPG o GIF) o un .zip (las carpetas "Referencias obras" y "Normativa" definen la categoría): la IA sugiere palabras clave, tecnologías y epígrafe a partir del nombre — revisalos. Al armar una propuesta se eligen las que correspondan a los equipos y tecnologías del proyecto.</p>
         <div id="prop-cfg-imagenes">Cargando...</div>
       </div>
     </div>
@@ -16533,7 +16533,7 @@ function procesosPropuestaBuscarEncabezado(doc, nivel, texto) {
 // Parsea un fragmento XML (uno o más elementos hermanos) y devuelve sus
 // nodos ya importados al documento destino, listos para insertar.
 function procesosPropuestaParsearFragmento(doc, xmlStr) {
-  const wrapped = `<w:tmproot xmlns:w="${PROCESOS_PROPUESTA_WNS}">${xmlStr}</w:tmproot>`;
+  const wrapped = `<w:tmproot xmlns:w="${PROCESOS_PROPUESTA_WNS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">${xmlStr}</w:tmproot>`;
   const frag = new DOMParser().parseFromString(wrapped, 'application/xml');
   const root = frag.documentElement;
   const nodes = [];
@@ -16572,8 +16572,23 @@ function procesosPropuestaTextoAXml(texto, tipo) {
     if (l.startsWith('## ')) return procesosPropuestaParrafoSubtitulo(l.slice(3).trim());
     return null;
   };
-  if (tipo === 'bullets') return lineas.map(l => marcador(l) || procesosPropuestaParrafoVineta(l)).join('');
-  return lineas.map(l => marcador(l) || procesosPropuestaParrafoNormal(l)).join('');
+  // Además: "[[img:ID|epígrafe]]" = imagen de la biblioteca, "| a | b |" = fila de tabla, "[[biblioteca]]" = marca
+  // interna (no se escribe) y "- x" = viñeta (también en las secciones de prosa).
+  let out = '', tabla = [];
+  const volcarTabla = () => { if (tabla.length) { out += tabla.length > 1 ? propTablaProsaXml(tabla) : procesosPropuestaParrafoNormal(tabla[0].replace(/^\|\s*|\s*\|$/g, '')); tabla = []; } };
+  lineas.forEach(l => {
+    if (l.startsWith('|')) { tabla.push(l); return; }
+    volcarTabla();
+    if (l === '[[biblioteca]]') return;
+    const m = PROP_IMG_TOKEN_RE.exec(l);
+    if (m) { out += propImagenParrafosXml(m[1], m[2]); return; }
+    const mk = marcador(l);
+    if (mk) { out += mk; return; }
+    if (/^- /.test(l)) out += procesosPropuestaParrafoVineta(l.slice(2).trim());
+    else out += tipo === 'bullets' ? procesosPropuestaParrafoVineta(l) : procesosPropuestaParrafoNormal(l);
+  });
+  volcarTabla();
+  return out;
 }
 // Arma una tabla completa (encabezado en negrita + filas de datos) a partir
 // de arrays ya parseados — usada para "Parámetros de diseño" y "Calidad de
@@ -16785,8 +16800,11 @@ function procesosPropuestaAplicarDatos(doc, p) {
   PROCESOS_PROPUESTA_SECCIONES.forEach(s => {
     const texto = (pd.secciones && pd.secciones[s.key] && pd.secciones[s.key].texto) || '';
     if (s.columnas) {
-      const filas = procesosPropuestaParsearFilasTabla(texto, s.columnas.length);
-      const tablaXml = procesosPropuestaTablaXml(s.columnas, filas.length ? filas : [['Sin datos cargados todavía', ...Array(s.columnas.length - 1).fill('')]], s.anchos);
+      const lineasTxt = String(texto).split('\n');
+      const lineasImg = lineasTxt.filter(l => PROP_IMG_TOKEN_RE.test(l.trim()));
+      const filas = procesosPropuestaParsearFilasTabla(lineasTxt.filter(l => !PROP_IMG_TOKEN_RE.test(l.trim())).join('\n'), s.columnas.length);
+      const tablaXml = procesosPropuestaTablaXml(s.columnas, filas.length ? filas : [['Sin datos cargados todavía', ...Array(s.columnas.length - 1).fill('')]], s.anchos)
+        + lineasImg.map(l => { const m = PROP_IMG_TOKEN_RE.exec(l.trim()); return propImagenParrafosXml(m[1], m[2]); }).join('');
       procesosPropuestaReemplazarBloqueTabla(doc, s.nivel, s.heading, tablaXml);
     } else {
       procesosPropuestaReemplazarBloque(doc, s.nivel, s.heading, texto, s.tipo);
@@ -16799,7 +16817,7 @@ function procesosPropuestaAplicarDatos(doc, p) {
 }
 // Vuelca el contenido del documento ya fusionado a un HTML simple, solo para
 // la vista previa dentro de MAIA (no es lo que se descarga).
-function procesosPropuestaDocATextoHtml(doc) {
+function procesosPropuestaDocATextoHtml(doc, imgCtx) {
   const body = doc.getElementsByTagName('w:body')[0];
   if (!body) return '<p class="hint">No se pudo leer el contenido.</p>';
   let html = '';
@@ -16811,11 +16829,18 @@ function procesosPropuestaDocATextoHtml(doc) {
       const styles = node.getElementsByTagName('w:pStyle');
       const styleVal = styles.length ? styles[0].getAttribute('w:val') : null;
       const texto = procesosPropuestaElText(node).trim();
+      const blips = node.getElementsByTagName('a:blip');
+      if (blips.length) {
+        const url = imgCtx && imgCtx.previews[blips[0].getAttribute('r:embed')];
+        html += url ? `<div style="text-align:center;margin:8px 0"><img src="${url}" style="max-width:70%;max-height:260px" alt=""></div>` : '<div class="hint" style="text-align:center;margin:8px 0">[imagen vectorial — se incluye en el Word]</div>';
+        continue;
+      }
       if (!texto) continue;
       if (styleVal === 'Ttulo1') html += `<h3 style="margin:14px 0 4px">${esc(texto)}</h3>`;
       else if (styleVal === 'Ttulo2') html += `<h4 style="margin:10px 0 4px">${esc(texto)}</h4>`;
       else if (styleVal === 'Ttulo3') html += `<h5 style="margin:8px 0 2px">${esc(texto)}</h5>`;
       else if (styleVal === 'Prrafodelista') html += `<div style="margin-left:16px;font-size:13px">• ${esc(texto)}</div>`;
+      else if (/^Figura \d+\. /.test(texto)) html += `<p style="font-size:11px;font-style:italic;text-align:center;margin:0 0 8px">${esc(texto)}</p>`;
       else html += `<p style="font-size:13px;margin:4px 0">${esc(texto)}</p>`;
     } else if (node.tagName === 'w:tbl') {
       const filas = procesosPropuestaHijos(node, 'w:tr');
@@ -17010,7 +17035,8 @@ function procesosStep4Html(p) {
     <p class="hint" style="margin:6px 0 10px">Se usa la plantilla vinculada como "Propuesta base" en Cfg Procesos IA — se completa con lo definido en los pasos anteriores, se puede editar cada sección a mano o pedirle ajustes a la IA por chat, y se genera el Word manteniendo el formato y la letra chica original.</p>
     <div id="procesos-step4-status"></div>
     <button class="btn btn-primary" onclick="procesosStep4GenerarConIA()">✦ Generar contenido con IA</button>
-    <p class="hint" style="margin-top:4px">Redacta las secciones sin texto todavía (parámetros, calidad de vuelco, tecnología, etapas) y sugiere los datos de la carátula. No toca las secciones de términos estándar — esas las podés editar o pedirle ajustes vos, si hace falta.</p>
+    <button class="btn btn-secondary" style="margin-left:8px" onclick="procesosStep4AgregarBiblioteca()" title="Vuelve a elegir de la biblioteca (Cfg Propuestas) el texto estándar de la tecnología y las fotos de los equipos, sin volver a redactar con IA">📷 Texto estándar y fotos de la biblioteca</button>
+    <p class="hint" style="margin-top:4px">Redacta las secciones (parámetros, calidad de vuelco, tecnología, etapas), sugiere los datos de la carátula y agrega de la biblioteca de propuestas el texto estándar de la tecnología y las fotos de los equipos y de la norma. No toca las secciones de términos estándar — esas las podés editar o pedirle ajustes vos, si hace falta.</p>
     <div class="gap"></div>
 
     <label>Datos de la carátula</label>
@@ -17053,6 +17079,8 @@ function procesosStep4SeccionPanelHtml(meta) {
     <div class="card" style="margin-top:8px">
       <p class="hint" style="margin-bottom:6px">${meta.columnas ? `Una línea = una fila de la tabla, con el formato "${meta.columnas.join(' | ')}".` : meta.key === 'etapas_proceso' ? 'Una línea "### Nombre de la etapa" por cada etapa (se ve como título), seguida de una línea con su descripción.' : meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>
       <textarea rows="${meta.tipo==='bullets'?12:6}" oninput="procesosStep4SetSeccionTexto('${meta.key}', this.value)">${esc(sec.texto||'')}</textarea>
+      ${propMiniaturasTextoHtml(sec.texto)}
+      ${/\[\[img:|\[\[biblioteca\]\]/.test(sec.texto || '') ? '<p class="hint" style="margin-top:4px">Las líneas <code>[[img:...]]</code> son fotos de la biblioteca (borrá la línea para sacarla) y <code>[[biblioteca]]</code> marca desde dónde el texto lo agregó la biblioteca.</p>' : ''}
       <div class="gap"></div>
       <label>Chat de esta sección</label>
       <div style="display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto;margin-bottom:8px">
@@ -17150,10 +17178,14 @@ async function procesosStep4GenerarConIA() {
     pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
     pd.secciones = Object.assign({}, pd.secciones);
     Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
+    // Texto estándar de la tecnología + fotos de equipos/normativa/referencias de la biblioteca (Cfg Propuestas)
+    let resumenBib = '';
+    try { showMsg(statusId, 'loading', 'Agregando el texto estándar y las fotos de la biblioteca...'); resumenBib = (await procesosPropuestaAplicarBiblioteca(p, pd)).resumen; }
+    catch (e) { resumenBib = 'No se pudo usar la biblioteca de propuestas: ' + e.message; }
     await procesosSaveProyecto({ propuesta_data: pd }, p);
     if (procesosCurrentProyecto === p) {
-      const st = document.getElementById(statusId); if (st) st.innerHTML = '';
       renderProcesosStepContent();
+      showMsg(statusId, 'success', '✓ Contenido generado. ' + resumenBib);
     }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
@@ -17194,6 +17226,7 @@ async function procesosStep4SeccionChatSend(key) {
       : meta.key === 'etapas_proceso'
         ? 'una línea por cada etapa del proceso: esa línea tiene que empezar con "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto), y en la línea siguiente una descripción breve (sin el "### ")'
         : meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
+    const formatoTxtFinal = formatoTxt + '. IMPORTANTE: las líneas que empiezan con "[[img:" (fotos de la biblioteca de la empresa), las filas de tabla que empiezan con "|" y la línea "[[biblioteca]]" tenés que conservarlas TAL CUAL en "texto_nuevo" (no inventes ni cambies ids de imagen); solo las movés o quitás si el usuario lo pide.';
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : '';
@@ -17201,7 +17234,7 @@ async function procesosStep4SeccionChatSend(key) {
     const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta sección.\n\n' : '';
     const DEFAULT_TEMPLATE_STEP4_CHAT = `{{contexto}}\nEstás ayudando a redactar la sección "{{seccionLabel}}" de una propuesta técnica de Aeration Argentina (formato: {{formatoTxt}}).\n\nTexto actual de la sección:\n"""\n{{textoActual}}\n"""\n\n{{historialTxt}}{{ofertasTxt}}{{archivosProyectoTxt}}Pedido del usuario: "{{msg}}"\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"...respuesta conversacional breve en español...","texto_nuevo":"...el texto completo y final de la sección, con el formato pedido arriba..."}\n\nSi el usuario solo pregunta o pide una aclaración sin pedir cambios, dejá "texto_nuevo" igual al texto actual.`;
     const templateStep4Chat = await procesosPromptText('step4_chat', DEFAULT_TEMPLATE_STEP4_CHAT);
-    const prompt = procesosPromptFill(templateStep4Chat, { contexto, seccionLabel: meta.label, formatoTxt, textoActual: sec.texto || '(vacío)', historialTxt, ofertasTxt, archivosProyectoTxt, msg });
+    const prompt = procesosPromptFill(templateStep4Chat, { contexto, seccionLabel: meta.label, formatoTxt: formatoTxtFinal, textoActual: sec.texto || '(vacío)', historialTxt, ofertasTxt, archivosProyectoTxt, msg });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method:'POST', headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body: JSON.stringify({ model:'claude-sonnet-4-5', max_tokens:3000, messages:[{role:'user', content:[...procesosConCache([...ofertasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), {type:'text', text:prompt}]}] })
@@ -17251,15 +17284,20 @@ async function procesosStep4ConstruirDoc() {
   if (xmlStr.charCodeAt(0) === 0xFEFF) xmlStr = xmlStr.slice(1);
   const doc = new DOMParser().parseFromString(xmlStr, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('No se pudo leer el XML de la plantilla.');
-  procesosPropuestaAplicarDatos(doc, p);
-  return { zip, doc };
+  // Imágenes de la biblioteca citadas en las secciones: se meten en el .docx antes de armar el texto
+  const ids = propIdsImagenesEnTextos(Object.values((p.propuesta_data && p.propuesta_data.secciones) || {}).map(s => s && s.texto));
+  if (ids.length) { try { await propImagenesCargar(); } catch (e) { /* sin metadatos: se usan tamaños por defecto */ } }
+  _procesosPropImg = await propPrepararImagenesDoc(zip, ids);
+  let imgCtx;
+  try { procesosPropuestaAplicarDatos(doc, p); } finally { imgCtx = _procesosPropImg; _procesosPropImg = null; }
+  return { zip, doc, imgCtx };
 }
 async function procesosStep4Previsualizar() {
   const statusId = 'procesos-step4-generar-status';
   showMsg(statusId, 'loading', 'Generando vista previa...');
   try {
-    const { doc } = await procesosStep4ConstruirDoc();
-    const html = procesosPropuestaDocATextoHtml(doc);
+    const { doc, imgCtx } = await procesosStep4ConstruirDoc();
+    const html = procesosPropuestaDocATextoHtml(doc, imgCtx);
     const st = document.getElementById(statusId); if (st) st.innerHTML = '';
     document.getElementById('procesos-step4-preview').innerHTML = `<div class="card" style="margin-top:10px;max-height:500px;overflow-y:auto">${html}</div>`;
   } catch(e) {
@@ -17283,6 +17321,217 @@ async function procesosStep4Descargar() {
   } catch(e) {
     showMsg(statusId, 'error', '✕ No se pudo generar la propuesta: ' + e.message);
   }
+}
+
+// ══ Propuestas — uso de la biblioteca en la propuesta (Paso 4 y solapa Propuestas) ══
+// El texto de las secciones admite, además de "## ", "### " y viñetas:
+//   [[img:ID|epígrafe]]   una imagen de la biblioteca (con epígrafe "Figura N. ...")
+//   | a | b | c |        filas de una tabla (la primera es el encabezado)
+//   [[biblioteca]]        marca desde dónde el texto lo agregó la biblioteca (se reemplaza al volver a elegir)
+const PROP_IMG_TOKEN_RE = /^\[\[img:([^|\]]+)\|?([^\]]*)\]\]$/;
+let _procesosPropImg = null; // contexto mientras se arma el Word: { mapa:{id:{rid,cx,cy,mime}}, contador, previews:{rid:dataUrl|null} }
+
+// Tamaño de un EMF en mm (cabecera: rectángulo "frame" en centésimas de mm)
+function propEmfDimensionesMm(bytes) {
+  if (!bytes || bytes.length < 40) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (dv.getUint32(0, true) !== 1) return null;
+  const w = (dv.getInt32(32, true) - dv.getInt32(24, true)) / 100, h = (dv.getInt32(36, true) - dv.getInt32(28, true)) / 100;
+  return w > 0 && h > 0 ? { w, h } : null;
+}
+function propBase64ABytes(b64) { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+// Ids de imagen citados en los textos de las secciones
+function propIdsImagenesEnTextos(textos) {
+  const ids = [];
+  textos.forEach(t => String(t || '').split('\n').forEach(l => { const m = PROP_IMG_TOKEN_RE.exec(l.trim()); if (m && !ids.includes(m[1])) ids.push(m[1]); }));
+  return ids;
+}
+// Mete las imágenes en el .docx (carpeta media, relaciones y tipos de contenido) y arma el contexto
+async function propPrepararImagenesDoc(zip, ids) {
+  const ctx = { mapa: {}, contador: 0, previews: {} };
+  if (!ids.length) return ctx;
+  const EXT = { 'image/png': 'png', 'image/jpeg': 'jpeg', 'image/gif': 'gif', 'image/x-emf': 'emf', 'image/bmp': 'bmp' };
+  const TIPO = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', emf: 'image/x-emf', bmp: 'image/bmp' };
+  const infoImgs = _propBib.imagenes || [];
+  const rels = [], exts = new Set();
+  let n = 0;
+  for (const id of ids) {
+    const d = await propImagenDatos(id);
+    const ext = d && EXT[d.mime];
+    if (!ext) continue;
+    n++;
+    const bytes = propBase64ABytes(d.b64);
+    const meta = infoImgs.find(i => i.id === id) || {};
+    let cx, cy;
+    if (ext === 'emf') { const mm = propEmfDimensionesMm(bytes) || { w: 120, h: 80 }; cx = mm.w * 36000; cy = mm.h * 36000; }
+    else { cx = (meta.ancho || 400) * 9525; cy = (meta.alto || 300) * 9525; }
+    const esc = Math.min(1, 5040000 / cx, 3600000 / cy); // máx. ~14 cm de ancho y 10 de alto
+    cx = Math.round(cx * esc); cy = Math.round(cy * esc);
+    const rid = 'rIdProp' + n, nombre = `propimg${n}.${ext}`;
+    zip.file('word/media/' + nombre, bytes);
+    rels.push(`<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${nombre}"/>`);
+    exts.add(ext);
+    ctx.mapa[id] = { rid, cx, cy, mime: d.mime };
+    ctx.previews[rid] = propDataUrl(d);
+  }
+  if (rels.length) {
+    const relPath = 'word/_rels/document.xml.rels';
+    let rx = zip.file(relPath) ? await zip.file(relPath).async('string') : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    rx = rx.replace('</Relationships>', rels.join('') + '</Relationships>');
+    zip.file(relPath, rx);
+    let ct = await zip.file('[Content_Types].xml').async('string');
+    exts.forEach(ext => { if (!new RegExp(`Extension="${ext}"`, 'i').test(ct)) ct = ct.replace(/<Types[^>]*>/, m => m + `<Default Extension="${ext}" ContentType="${TIPO[ext]}"/>`); });
+    zip.file('[Content_Types].xml', ct);
+  }
+  return ctx;
+}
+function propDrawingXml(rid, cx, cy, n) {
+  return `<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${9000 + n}" name="Imagen ${n}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${9000 + n}" name="Imagen ${n}"/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+}
+// Imagen centrada + epígrafe "Figura N. ..." (si hay)
+function propImagenParrafosXml(id, pie) {
+  const ctx = _procesosPropImg, im = ctx && ctx.mapa[id];
+  if (!im) return '';
+  ctx.contador++;
+  const n = ctx.contador;
+  let xml = `<w:p><w:pPr><w:keepNext/><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r>${propDrawingXml(im.rid, im.cx, im.cy, n)}</w:r></w:p>`;
+  const txt = String(pie || '').trim();
+  if (txt) xml += `<w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/><w:iCs/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc('Figura ' + n + '. ' + txt)}</w:t></w:r></w:p>`;
+  return xml;
+}
+function propTablaProsaXml(lineas) {
+  const filas = lineas.map(l => l.replace(/^\|\s*/, '').replace(/\s*\|\s*$/, '').split(/\s*\|\s*/));
+  const nCols = Math.max(...filas.map(f => f.length));
+  const norm = filas.map(f => { const c = f.slice(); while (c.length < nCols) c.push(''); return c; });
+  const ancho = Math.floor(9639 / nCols), anchos = Array(nCols).fill(ancho);
+  return procesosPropuestaTablaXml(norm[0], norm.slice(1), anchos) + '<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>';
+}
+
+// ── Elegir de la biblioteca: texto estándar de la tecnología del proyecto + fotos de sus equipos ──
+const PROP_TEC_PATRONES = [
+  ['MBR-GForce', /g.?force|mbr.?gf/], ['MBBR', /mbbr/], ['MBR', /\bmbr\b|biorreactor de membran|membrane bioreactor/],
+  ['SBR', /\bsbr\b|secuencial/], ['LechoPercolador', /percolador|trickling/], ['Anaerobico', /anaer|uasb|egsb|ecsb/],
+  ['LodosActivados', /lodos? activ|barros? activ|aireaci[oó]n extendida/],
+];
+// Tecnologías biológicas del proyecto según el nombre de sus etapas (en el orden del tren) — la línea de
+// lodos y las etapas auxiliares no cuentan (ej. un digestor anaeróbico de lodos no es la tecnología biológica)
+function propTecnologiasDelProyecto(p) {
+  const dd = p.diseno_data || {};
+  const textos = [];
+  if (p.tecnologia_confirmada) String(p.tecnologia_confirmada).split('+').forEach(t => textos.push(t));
+  (dd.orden || []).forEach(n => {
+    const h = dd.hojas && dd.hojas[n];
+    if (!h || !h.seleccionada || h.tipo === 'auxiliar' || h.linea === 'lodos') return;
+    if (/digest|espes|deshidrat|\blodos?\b/.test(propNormTxt(n))) return;
+    textos.push(n); if (h.hojaBase) textos.push(h.hojaBase);
+  });
+  const claves = [];
+  textos.forEach(t => {
+    const n = propNormTxt(t);
+    for (const [clave, re] of PROP_TEC_PATRONES) { if (re.test(n) || propNormTxt(clave) === n) { if (!claves.includes(clave)) claves.push(clave); break; } }
+  });
+  return claves;
+}
+function propTecBloqueTexto(tec) {
+  const out = [`### Tecnología ${tec.nombre}`];
+  (tec.contenido || []).filter(s => s.incluir).forEach(s => { out.push('## ' + s.titulo); if (String(s.texto).trim()) out.push(String(s.texto).trim()); });
+  return out.join('\n');
+}
+const PROP_TOOL_ELEGIR_IMAGENES = {
+  name: 'elegir_imagenes',
+  description: 'Elige las imágenes de la biblioteca que corresponden a cada etapa de la propuesta.',
+  input_schema: { type: 'object', properties: {
+    por_etapa: { type: 'array', items: { type: 'object', properties: { etapa: { type: 'string', description: 'Nombre de la etapa, tal cual figura en la lista.' }, imagenes: { type: 'array', items: { type: 'string' }, description: 'Ids de imágenes (máx. 3), en el orden en que conviene mostrarlas.' } }, required: ['etapa', 'imagenes'] } },
+    normativa: { type: ['string', 'null'], description: 'Id de la imagen de normativa de vuelco que corresponde a este proyecto, o null si ninguna aplica.' },
+    referencias: { type: 'array', items: { type: 'string' }, description: 'Ids (máx. 3) de obras de referencia relevantes para este proyecto (misma tecnología y/o rubro parecido).' },
+  }, required: ['por_etapa', 'normativa', 'referencias'] },
+};
+async function propSeleccionarImagenesIA(p, claves, etapas, imagenes) {
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const equiposTxt = Object.entries(ed).map(([n, e]) => `- ${n}: ` + ((e.equipos || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}${q.modelo ? ' (' + q.modelo + ')' : ''}${q.especificacion ? ' — ' + q.especificacion : ''}`).join('; ') || '(sin equipos cargados)')).join('\n') || '(no hay equipos cargados)';
+  const cat = c => imagenes.filter(i => i.categoria === c);
+  const linea = i => `${i.id} | ${i.nombre} | palabras clave: ${i.tags || '—'} | tecnologías: ${i.tecnologias || '—'}`;
+  const campos = (p.info_cliente && p.info_cliente.campos) || {};
+  const dato = k => { const x = Object.keys(campos).find(n => propNormTxt(n).includes(k)); return x ? `${x}: ${String(campos[x]).slice(0, 300)}` : ''; };
+  const prompt = `Armás una propuesta técnica de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''}. Tecnologías biológicas del proyecto: ${claves.join(', ') || '(no identificadas)'}.\n${[dato('ubicaci'), dato('normativa'), dato('vuelco')].filter(Boolean).join('\n')}\n\nETAPAS de la sección "Etapas de proceso" (usá estos nombres exactamente):\n${etapas.map(e => '- ' + e).join('\n')}\n\nEQUIPOS cargados en el proyecto, por etapa:\n${equiposTxt}\n\nBIBLIOTECA de imágenes de equipos y esquemas (id | nombre | palabras clave | tecnologías):\n${[...cat('equipo'), ...cat('esquema')].map(linea).join('\n') || '(vacía)'}\n\nBIBLIOTECA de normativa de vuelco:\n${cat('normativa').map(linea).join('\n') || '(vacía)'}\n\nBIBLIOTECA de obras de referencia:\n${cat('referencia').map(linea).join('\n') || '(vacía)'}\n\nReglas: (1) Para cada etapa elegí, solo si el proyecto realmente tiene ese equipo o proceso en esa etapa, las imágenes que lo muestran (foto del equipo y, si ayuda a explicarlo, un esquema de funcionamiento); máx. 3 por etapa. (2) Si el proyecto especifica una marca/modelo distinto al de la imagen, no la uses; si no especifica marca, podés usar la foto típica del equipo. (3) No repitas una imagen en dos etapas. (4) Una etapa sin imagen apropiada va con lista vacía — no fuerces. (5) Normativa: la que corresponda a la jurisdicción/norma del proyecto, o null. (6) Referencias: hasta 3 obras de la misma tecnología o de un rubro parecido al del proyecto, o ninguna.`;
+  return await propLlamarForzado(PROP_TOOL_ELEGIR_IMAGENES, prompt, 3000);
+}
+// Saca de un texto las líneas de imagen y, si hay marca de biblioteca, todo lo que sigue
+function propQuitarImagenes(texto) { return String(texto || '').split('\n').filter(l => !PROP_IMG_TOKEN_RE.test(l.trim())).join('\n'); }
+function propQuitarBloqueBiblioteca(texto) { const i = String(texto || '').indexOf('[[biblioteca]]'); return (i >= 0 ? String(texto).slice(0, i) : String(texto || '')).replace(/\s+$/, ''); }
+// Agrega, al final de cada etapa ("### Nombre"), las imágenes elegidas
+function propInsertarImagenesEnEtapas(texto, porEtapa, pieDe) {
+  const out = []; let actual = null;
+  const volcar = () => { if (actual != null && porEtapa[actual]) porEtapa[actual].forEach(id => out.push(`[[img:${id}|${pieDe(id)}]]`)); };
+  String(texto || '').split('\n').forEach(l => {
+    const t = l.trim();
+    if (t.startsWith('### ')) { volcar(); actual = t.slice(4).trim(); }
+    out.push(l);
+  });
+  volcar();
+  return out.join('\n');
+}
+// Aplica a la propuesta (propuesta_data) el texto estándar y las fotos de la biblioteca. Devuelve un resumen.
+async function procesosPropuestaAplicarBiblioteca(p, pd) {
+  const avisos = [];
+  const tecs = await propTecnologiasCargar(true), imagenes = await propImagenesCargar(true);
+  if (!tecs.length && !imagenes.length) return { resumen: 'La biblioteca de propuestas está vacía (Cfg Propuestas), así que no se agregó texto estándar ni fotos.', pd };
+  pd.secciones = Object.assign({}, pd.secciones);
+  const sec = k => Object.assign({ texto: '', chat: [] }, pd.secciones[k]);
+  const claves = propTecnologiasDelProyecto(p);
+  const pieDe = id => { const i = imagenes.find(x => x.id === id); return i ? (i.pie || i.nombre) : ''; };
+  const idsValidos = new Set(imagenes.map(i => i.id));
+
+  // 1) fotos de equipos por etapa + normativa + referencias (la IA elige de la biblioteca)
+  let sel = null;
+  const etapasSec = sec('etapas_proceso');
+  const etapas = propQuitarImagenes(etapasSec.texto).split('\n').filter(l => l.trim().startsWith('### ')).map(l => l.trim().slice(4).trim());
+  if (imagenes.some(i => ['equipo', 'esquema', 'normativa', 'referencia'].includes(i.categoria))) {
+    try { sel = await propSeleccionarImagenesIA(p, claves, etapas, imagenes); }
+    catch (e) { avisos.push('No pude elegir las fotos con la IA (' + e.message + ').'); }
+  }
+  const usadas = new Set();
+  const limpiar = ids => (ids || []).filter(id => idsValidos.has(id) && !usadas.has(id) && usadas.add(id)).slice(0, 3);
+  let nFotos = 0;
+  const porEtapa = {};
+  if (sel) (sel.por_etapa || []).forEach(x => { const ids = limpiar(x.imagenes); if (ids.length) { porEtapa[x.etapa] = ids; nFotos += ids.length; } });
+  pd.secciones.etapas_proceso = Object.assign({}, etapasSec, { texto: propInsertarImagenesEnEtapas(propQuitarImagenes(etapasSec.texto), porEtapa, pieDe) });
+  const vuelco = sec('intro_calidad_vuelco');
+  let normaTxt = propQuitarImagenes(vuelco.texto);
+  if (sel && sel.normativa && idsValidos.has(sel.normativa) && !usadas.has(sel.normativa)) { usadas.add(sel.normativa); normaTxt += `\n[[img:${sel.normativa}|${pieDe(sel.normativa)}]]`; nFotos++; }
+  pd.secciones.intro_calidad_vuelco = Object.assign({}, vuelco, { texto: normaTxt });
+
+  // 2) texto estándar de la/s tecnología/s (después del texto que redactó la IA)
+  const sTec = sec('intro_seleccion_tecnologia');
+  const bloques = [];
+  const sinTexto = [];
+  claves.forEach(c => { const t = tecs.find(x => x.clave === c); if (t) bloques.push(propTecBloqueTexto(t)); else sinTexto.push(propTecNombre(c)); });
+  if (sel) { const refs = limpiar(sel.referencias); if (refs.length) { bloques.push('## Obras de referencia\n' + refs.map(id => `[[img:${id}|${pieDe(id)}]]`).join('\n')); nFotos += refs.length; } }
+  const base = propQuitarBloqueBiblioteca(sTec.texto);
+  pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: bloques.length ? base + '\n[[biblioteca]]\n' + bloques.join('\n') : base });
+  if (!claves.length) avisos.push('No identifiqué la tecnología biológica del proyecto en los nombres de las etapas, así que no agregué texto estándar de tecnología.');
+  if (sinTexto.length) avisos.push('No hay texto estándar cargado para: ' + sinTexto.join(', ') + ' (Cfg Propuestas).');
+  const tecUsadas = claves.filter(c => tecs.some(x => x.clave === c));
+  return { resumen: `Se agregó el texto estándar de ${tecUsadas.length ? tecUsadas.map(propTecNombre).join(', ') : 'ninguna tecnología'} y ${nFotos} foto(s) de la biblioteca.` + (avisos.length ? ' ' + avisos.join(' ') : ''), pd };
+}
+async function procesosStep4AgregarBiblioteca() {
+  const p = procesosCurrentProyecto;
+  const statusId = 'procesos-step4-status';
+  showMsg(statusId, 'loading', 'Eligiendo el texto estándar y las fotos de la biblioteca...');
+  try {
+    const pd = Object.assign({}, procesosPropuestaSeedIfNeeded(p));
+    const r = await procesosPropuestaAplicarBiblioteca(p, pd);
+    await procesosSaveProyecto({ propuesta_data: r.pd }, p);
+    if (procesosCurrentProyecto === p) { renderProcesosStepContent(); showMsg('procesos-step4-status', 'success', '✓ ' + r.resumen); }
+  } catch (e) { if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message); }
+}
+// Miniaturas de las imágenes que cita un texto (para el panel de edición de cada sección)
+function propMiniaturasTextoHtml(texto) {
+  const items = [];
+  String(texto || '').split('\n').forEach(l => { const m = PROP_IMG_TOKEN_RE.exec(l.trim()); if (m) items.push({ id: m[1], pie: m[2] }); });
+  if (!items.length) return '';
+  setTimeout(propCfgCargarMiniaturas, 0);
+  return `<div style="margin-top:6px">${items.map(({ id, pie }) => `<div style="display:inline-block;margin:4px 8px 0 0;vertical-align:top;font-size:11px;max-width:120px"><img data-prop-thumb="${propEsc(id)}" style="max-width:110px;max-height:80px" alt=""><div style="color:var(--text2)">${propEsc(pie).slice(0, 50)}</div></div>`).join('')}</div>`;
 }
 
 // ── Chat del proyecto ───────────────────────────────────
@@ -25987,7 +26236,7 @@ async function propPrepararImagen(mime, bytes) {
   }
   return { mime, b64, ancho: dim.ancho, alto: dim.alto };
 }
-function propMimeDeNombre(n) { const e = (n.split('.').pop() || '').toLowerCase(); return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }[e] || null; }
+function propMimeDeNombre(n) { const e = (n.split('.').pop() || '').toLowerCase(); return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' }[e] || null; }
 function propCategoriaDeRuta(ruta) {
   const r = propNormTxt(ruta);
   if (/normativa/.test(r)) return 'normativa';
