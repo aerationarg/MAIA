@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.58</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.57</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.58</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -17492,6 +17492,34 @@ function propInsertarImagenesEnEtapas(texto, porEtapa, pieDe) {
   return out.join('\n');
 }
 // Aplica a la propuesta (propuesta_data) el texto estándar y las fotos de la biblioteca. Devuelve un resumen.
+// El texto estándar de una tecnología habla de TODAS las unidades de la planta tipo (ej. lodos activados: digestión, desinfección...).
+// Antes de pegarlo se le pide a la IA que marque qué líneas describen unidades/equipos que ESTE proyecto no tiene. Solo se quitan
+// líneas (no se reescribe nada, así el texto sigue siendo el estándar) y ante la duda se deja. Si la IA falla, queda el texto completo.
+const PROP_TOOL_ADAPTAR = {
+  name: 'adaptar_texto',
+  description: 'Indica qué líneas del texto estándar de una tecnología describen unidades o equipos que el proyecto NO tiene y hay que quitar.',
+  input_schema: { type: 'object', properties: { quitar: { type: 'array', items: { type: 'object', properties: {
+    n: { type: 'number', description: 'Número de la línea a quitar, tal como figura en la lista.' },
+    motivo: { type: 'string', description: 'Frase corta: qué unidad/equipo ausente describe.' },
+  }, required: ['n', 'motivo'] } } }, required: ['quitar'] },
+};
+function propProyectoResumenTxt(p) {
+  const orden = (p.diseno_data && p.diseno_data.orden) || [], hojas = (p.diseno_data && p.diseno_data.hojas) || {}, ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  return orden.filter(n => hojas[n] && hojas[n].seleccionada !== false).map(n => {
+    const eq = ((ed[n] && ed[n].equipos) || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}${q.modelo ? ' (' + q.modelo + ')' : ''}`).join('; ');
+    return `- ${n}${hojas[n].linea === 'lodos' ? ' [línea de lodos]' : ''}${eq ? ': ' + eq : ''}`;
+  }).join('\n') || '(sin etapas)';
+}
+async function propAdaptarTextoTecnologia(p, nombreTec, texto) {
+  const lineas = texto.split('\n');
+  const lista = lineas.map((l, i) => i === 0 ? null : `${i}. ${l.replace(/\[\[img:[^|\]]*\|?([^\]]*)\]\]/, '[imagen: $1]').slice(0, 260)}`).filter(Boolean).join('\n');
+  const prompt = `Estás armando una propuesta técnico-comercial de Aeration Argentina. Abajo está el TEXTO ESTÁNDAR de la tecnología "${nombreTec}" (descripción genérica de la planta tipo, una línea por número) y el TREN DE TRATAMIENTO REAL de este proyecto.\n\nTREN DEL PROYECTO:\n${propProyectoResumenTxt(p)}\n\nTEXTO ESTÁNDAR:\n${lista}\n\nIndicá qué líneas hay que QUITAR porque describen una etapa, unidad o equipo que el proyecto NO tiene (ej.: si el texto describe digestión de lodos o desinfección y el proyecto no tiene esas etapas, quitar esos subtítulos y sus párrafos, y el ítem correspondiente de la lista de unidades). Reglas: (1) quitá SOLO lo que claramente describe algo ausente; ante la duda NO quites. (2) el texto general de la tecnología, sus ventajas, comparaciones y rendimientos se quedan. (3) no quites filas de tablas. (4) si quitás un subtítulo ("## ...") quitá también todas las líneas de su contenido; si quitás una unidad de una lista, quitá solo ese ítem. (5) quitá también las imágenes de una unidad ausente. (6) una unidad puede estar con otro nombre en el proyecto (ej. "Sedimentador secundario" = clarificación) — en ese caso se queda.`;
+  const r = await propLlamarForzado(PROP_TOOL_ADAPTAR, prompt, 3000);
+  const quitar = new Map();
+  (r.quitar || []).forEach(x => { const n = Math.round(Number(x.n)); if (n >= 1 && n < lineas.length && !/^\|/.test(lineas[n])) quitar.set(n, x.motivo || ''); });
+  if (quitar.size > (lineas.length - 1) * 0.6) return { texto, quitadas: [], aviso: 'la IA quiso quitar demasiado texto, se dejó completo' };
+  return { texto: lineas.filter((_, i) => !quitar.has(i)).join('\n'), quitadas: [...quitar.keys()].map(n => ({ n, linea: lineas[n], motivo: quitar.get(n) })) };
+}
 async function procesosPropuestaAplicarBiblioteca(p, pd) {
   const avisos = [];
   const tecs = await propTecnologiasCargar(true), imagenes = await propImagenesCargar(true);
@@ -17525,14 +17553,27 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   const sTec = sec('intro_seleccion_tecnologia');
   const bloques = [];
   const sinTexto = [];
-  claves.forEach(c => { const t = tecs.find(x => x.clave === c); if (t) bloques.push(propTecBloqueTexto(t)); else sinTexto.push(propTecNombre(c)); });
+  const adaptaciones = [];
+  for (const c of claves) {
+    const t = tecs.find(x => x.clave === c);
+    if (!t) { sinTexto.push(propTecNombre(c)); continue; }
+    let txt = propTecBloqueTexto(t);
+    try {
+      const a = await propAdaptarTextoTecnologia(p, t.nombre, txt);
+      txt = a.texto;
+      const subt = a.quitadas.filter(q => q.linea.startsWith('## ')).map(q => q.linea.slice(3));
+      if (a.aviso) avisos.push(t.nombre + ': ' + a.aviso + '.');
+      else if (a.quitadas.length) adaptaciones.push(`${t.nombre}: se quitaron ${a.quitadas.length} línea(s) de unidades que el proyecto no tiene` + (subt.length ? ' (' + subt.join(', ') + ')' : ''));
+    } catch (e) { avisos.push(`No pude adaptar el texto de ${t.nombre} al proyecto (${e.message}): quedó el texto estándar completo, revisalo.`); }
+    bloques.push(txt);
+  }
   if (sel) { const refs = limpiar(sel.referencias); if (refs.length) { bloques.push('## Obras de referencia\n' + refs.map(id => `[[img:${id}|${pieDe(id)}]]`).join('\n')); nFotos += refs.length; } }
   const base = propQuitarBloqueBiblioteca(sTec.texto);
   pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: bloques.length ? base + '\n[[biblioteca]]\n' + bloques.join('\n') : base });
   if (!claves.length) avisos.push('No identifiqué la tecnología biológica del proyecto en los nombres de las etapas, así que no agregué texto estándar de tecnología.');
   if (sinTexto.length) avisos.push('No hay texto estándar cargado para: ' + sinTexto.join(', ') + ' (Cfg Propuestas).');
   const tecUsadas = claves.filter(c => tecs.some(x => x.clave === c));
-  return { resumen: `Se agregó el texto estándar de ${tecUsadas.length ? tecUsadas.map(propTecNombre).join(', ') : 'ninguna tecnología'} y ${nFotos} foto(s) de la biblioteca.` + (avisos.length ? ' ' + avisos.join(' ') : ''), pd };
+  return { resumen: `Se agregó el texto estándar de ${tecUsadas.length ? tecUsadas.map(propTecNombre).join(', ') : 'ninguna tecnología'} y ${nFotos} foto(s) de la biblioteca.` + (adaptaciones.length ? ' ' + adaptaciones.join('; ') + '.' : '') + (avisos.length ? ' ' + avisos.join(' ') : ''), pd };
 }
 async function procesosStep4AgregarBiblioteca() {
   const p = procesosCurrentProyecto;
