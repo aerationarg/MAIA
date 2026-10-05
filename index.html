@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.53</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.54</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.53</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.54</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11379,6 +11379,7 @@ function procesosStep2AbrirHoja(nombre) {
   if (procesosStep2PendingLeccion && procesosStep2PendingLeccion.hoja !== nombre) procesosStep2PendingLeccion = null;
   procesosStep2PropagarCadena(nombre);
   procesosStep2RenderHojaPanel();
+  procesosStep2AsegurarChequeoReq(nombre);
   procesosStep2AutoCompletarSiHaceFalta(nombre);
 }
 
@@ -11521,6 +11522,152 @@ function procesosStep2ParsearRango(txt) {
 // Celdas de la hoja que hoy están con error, fuera de su rango límite o fuera
 // de su rango normal (las que se alimentan por mapeo desde el Paso 1 / otra
 // hoja no se incluyen: no se pueden "arreglar" tocando esta hoja).
+// ── Chequeo automático de los "Requerimientos de diseño" del pliego ──────────
+// La IA solo RELACIONA (una vez por hoja y por contenido del pliego): de los
+// requerimientos numéricos del pliego, cuáles aplican a esta unidad, qué celda
+// de la hoja los representa y qué mínimo/máximo piden (en la unidad de la
+// celda). El cumplimiento en sí lo calcula el código cada vez que se dibuja la
+// hoja, con los valores actuales — así se actualiza solo al cambiar cualquier
+// dato, sin volver a llamar a la IA ni depender de que "se acuerde" de verificar.
+const PROCESOS_REQ_TOOL = {
+  name: 'relacionar_requerimientos',
+  description: 'Devuelve los requerimientos numéricos del pliego que aplican a esta unidad, relacionados con las celdas de su hoja.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            requerimiento: { type: 'string', description: 'El parámetro pedido, citado breve y fiel al pliego (ej. "θc 20-30 días", "TRH sedimentador > 3 h").' },
+            celda: { type: ['string', 'null'], description: 'Referencia (ej. "C16") de la celda de ESTA hoja que representa ese parámetro, o null si la hoja no tiene una celda equivalente.' },
+            minimo: { type: ['number', 'null'], description: 'Valor mínimo requerido, convertido a la UNIDAD de la celda. null si no hay mínimo.' },
+            maximo: { type: ['number', 'null'], description: 'Valor máximo requerido, convertido a la UNIDAD de la celda. null si no hay máximo.' },
+          },
+          required: ['requerimiento', 'celda', 'minimo', 'maximo'],
+        },
+      },
+    },
+    required: ['items'],
+  },
+};
+const _procesosReqEnCurso = {};
+function procesosStep2FirmaReq(nombre, model, raw) {
+  const s = nombre + '|' + raw.texto + '|' + model.cells.map(c => c.ref + c.label + (c.unidad || '')).join(';');
+  let hash = 5381;
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) + hash + s.charCodeAt(i)) | 0;
+  return String(hash);
+}
+function procesosStep2EvaluarReq(hf, model, it) {
+  const c = it.celda && model.cells.find(x => x.ref === it.celda);
+  if (!c) return { estado: 'sin_celda' };
+  const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+  if (typeof v !== 'number' || !isFinite(v)) return { estado: 'sin_valor', c };
+  const tol = Math.abs(v) * 1e-3 + 1e-9; // tolerancia mínima para que un redondeo no cuente como incumplimiento
+  const bajo = it.minimo != null && v < it.minimo - tol, alto = it.maximo != null && v > it.maximo + tol;
+  return { estado: (bajo || alto) ? 'no_cumple' : 'cumple', v, c, bajo, alto };
+}
+function procesosStep2ReqRangoTxt(it) {
+  if (it.minimo != null && it.maximo != null) return `${procesosFormatearNumero(it.minimo)} – ${procesosFormatearNumero(it.maximo)}`;
+  if (it.maximo != null) return `≤ ${procesosFormatearNumero(it.maximo)}`;
+  if (it.minimo != null) return `≥ ${procesosFormatearNumero(it.minimo)}`;
+  return '';
+}
+async function procesosStep2RelacionarRequerimientos(nombre, model, p, raw) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('API key no disponible.');
+  const dd = p.diseno_data || {};
+  const ordenTxt = (dd.orden || []).filter(n => dd.hojas && dd.hojas[n] && dd.hojas[n].seleccionada && dd.hojas[n].tipo !== 'auxiliar').map((n, i) => `${i + 1}. ${n}`).join('\n');
+  const celdasTxt = model.cells.map(c => `${c.ref} | ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''} | ${c.isFormula ? 'resultado calculado' : 'dato editable'}`).join('\n');
+  const prompt = `Unidad de un tren de tratamiento de efluentes: "${nombre}".\nTren completo del proyecto:\n${ordenTxt}\n\nREQUERIMIENTOS DE DISEÑO DEL CLIENTE (del pliego):\n${raw.texto}\n\nCeldas de la hoja de cálculo de esta unidad:\n${celdasTxt}\n\nTarea: de los requerimientos del pliego, tomá SOLO los que (a) aplican a ESTA unidad según su función en el tren (ignorá los de otras unidades, y los de seguridad/EPP, obra civil, tableros, etc.) y (b) son numéricos: un valor tope, un mínimo o un rango sobre un parámetro. Para cada uno devolvé la celda de la hoja que representa ESE parámetro (si hay varias, la que mejor lo mide; null si la hoja no tiene una equivalente) y el mínimo/máximo requerido CONVERTIDO a la unidad de esa celda (ej. el pliego pide "TRH 18-36 h" y la celda está en días: minimo 0.75, maximo 1.5; "<30 min" y la celda en min: maximo 30, minimo null; ">3 h" → minimo 3). No inventes requerimientos que el pliego no diga ni cambies sus valores. Si ninguno aplica, devolvé items vacío.`;
+  const pedir = modelo => procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: modelo, max_tokens: 3000, tools: [PROCESOS_REQ_TOOL], tool_choice: { type: 'tool', name: PROCESOS_REQ_TOOL.name }, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }] })
+  });
+  let resp = await pedir(PROCESOS_STEP2_CHAT_MODEL);
+  if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) resp = await pedir('claude-sonnet-4-5');
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+  const data = await resp.json();
+  const tu = data.content && data.content.find(c => c.type === 'tool_use');
+  if (!tu) throw new Error('La IA no devolvió el análisis de requerimientos.');
+  const refs = new Set(model.cells.map(c => c.ref));
+  return ((tu.input && tu.input.items) || [])
+    .filter(it => it && it.requerimiento && (it.minimo != null || it.maximo != null))
+    .map(it => ({ requerimiento: String(it.requerimiento), celda: it.celda && refs.has(it.celda) ? it.celda : null, minimo: it.minimo != null ? Number(it.minimo) : null, maximo: it.maximo != null ? Number(it.maximo) : null }));
+}
+// Se asegura de que la hoja tenga relacionados los requerimientos (la IA se
+// llama solo si cambió el pliego o la estructura de la hoja, o si se fuerza).
+async function procesosStep2AsegurarChequeoReq(nombre, forzar) {
+  const p = procesosCurrentProyecto;
+  const raw = procesosRequerimientosDisenoRaw(p);
+  const model = procesosStep2State.hojaModels[nombre];
+  if (!raw || !model) return;
+  const h0 = p.diseno_data && p.diseno_data.hojas && p.diseno_data.hojas[nombre];
+  if (!h0 || h0.tipo === 'auxiliar') return;
+  const firma = procesosStep2FirmaReq(nombre, model, raw);
+  if (!forzar && h0.chequeoReq && h0.chequeoReq.firma === firma) return;
+  const clave = p.id + '|' + nombre;
+  if (_procesosReqEnCurso[clave]) return;
+  _procesosReqEnCurso[clave] = true;
+  if (procesosStep2State.hojaAbierta === nombre) procesosStep2RenderHojaPanel();
+  try {
+    const items = await procesosStep2RelacionarRequerimientos(nombre, model, p, raw);
+    const dd = Object.assign({}, p.diseno_data); // se re-lee acá: pudo cambiar mientras esperaba a la IA
+    dd.hojas = Object.assign({}, dd.hojas);
+    dd.hojas[nombre] = Object.assign({}, dd.hojas[nombre], { chequeoReq: { firma, fecha: new Date().toLocaleDateString('es-AR'), items } });
+    await procesosSaveProyecto({ diseno_data: dd }, p);
+  } catch (e) {
+    console.warn('No se pudo relacionar los requerimientos del pliego con la hoja:', e.message);
+  } finally {
+    _procesosReqEnCurso[clave] = false;
+    if (procesosCurrentProyecto === p && procesosStep2State.hojaAbierta === nombre) procesosStep2RenderHojaPanel();
+  }
+}
+function procesosStep2ReqPanelHtml(nombre, model, hf, h, safe, p) {
+  const raw = procesosRequerimientosDisenoRaw(p);
+  if (!raw || h.tipo === 'auxiliar') return '';
+  const enCurso = _procesosReqEnCurso[p.id + '|' + nombre];
+  const chq = h.chequeoReq;
+  let cuerpo;
+  if (!chq) {
+    cuerpo = enCurso ? '<p class="hint">⏳ Relacionando los requerimientos del pliego con esta hoja...</p>' : '<p class="hint">Todavía no se verificó contra los requerimientos del pliego.</p>';
+  } else if (!chq.items.length) {
+    cuerpo = '<p class="hint">Ningún requerimiento numérico del pliego aplica a esta unidad.</p>';
+  } else {
+    const filas = chq.items.map(it => {
+      const r = procesosStep2EvaluarReq(hf, model, it);
+      const pedido = procesosStep2ReqRangoTxt(it);
+      const icono = r.estado === 'cumple' ? '<span style="color:var(--green);font-weight:700">✓</span>' : r.estado === 'no_cumple' ? '<span style="color:var(--red);font-weight:700">✗</span>' : '<span style="color:var(--text2);font-weight:700">?</span>';
+      const det = r.c ? `${esc(r.c.ref)} ${esc(r.c.label)}${r.v != null ? ': <b>' + esc(String(procesosFormatearNumero(r.v))) + (r.c.unidad ? ' ' + esc(r.c.unidad) : '') + '</b>' : ': sin valor'} · pedido ${esc(pedido)}${r.estado === 'no_cumple' ? (r.bajo ? ' — queda por debajo' : ' — se pasa') : ''}` : `pedido ${esc(pedido)} — la hoja no tiene una celda para verificarlo`;
+      return `<div style="display:flex;gap:8px;font-size:13px;padding:3px 0"><span style="width:16px">${icono}</span><span><b>${esc(it.requerimiento)}</b><br><span style="font-size:12px;color:${r.estado === 'no_cumple' ? 'var(--red)' : 'var(--text2)'}">${det}</span></span></div>`;
+    }).join('');
+    const nNo = chq.items.filter(it => procesosStep2EvaluarReq(hf, model, it).estado === 'no_cumple').length;
+    cuerpo = filas + (nNo ? `<p style="font-size:13px;color:var(--red);margin:6px 0 0"><b>${nNo} requerimiento${nNo === 1 ? '' : 's'} del pliego no se cumple${nNo === 1 ? '' : 'n'} con los valores actuales.</b></p>` : '<p style="font-size:13px;color:var(--green);margin:6px 0 0">✓ Se cumplen todos los requerimientos del pliego que se pueden verificar en esta hoja.</p>');
+  }
+  const hayNo = chq && chq.items.some(it => procesosStep2EvaluarReq(hf, model, it).estado === 'no_cumple');
+  return `
+    <div class="card" style="margin-top:10px;${hayNo ? 'border-color:var(--red)' : ''}">
+      <div class="card-label">Requerimientos de diseño del pliego</div>
+      ${cuerpo}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn btn-secondary btn-sm" onclick="procesosStep2AsegurarChequeoReq('${safe}', true)" ${enCurso ? 'disabled' : ''} title="Vuelve a relacionar el pliego con las celdas de esta hoja (el cumplimiento ya se recalcula solo al cambiar cualquier dato)">🔎 Volver a relacionar con el pliego</button>
+        ${hayNo ? `<button class="btn btn-primary btn-sm" onclick="procesosStep2CorregirRequerimientos('${safe}')">🛠 Corregir con IA los que no cumplen</button>` : ''}
+      </div>
+    </div>`;
+}
+async function procesosStep2CorregirRequerimientos(nombre) {
+  const p = procesosCurrentProyecto;
+  const model = procesosStep2State.hojaModels[nombre], hf = procesosStep2GetHF(nombre);
+  const h = p.diseno_data && p.diseno_data.hojas && p.diseno_data.hojas[nombre];
+  if (!model || !hf || !h || !h.chequeoReq) return;
+  const lista = h.chequeoReq.items.map(it => ({ it, r: procesosStep2EvaluarReq(hf, model, it) })).filter(x => x.r.estado === 'no_cumple')
+    .map(({ it, r }) => `- ${it.requerimiento}: ${r.c.ref} ${r.c.label} = ${procesosFormatearNumero(r.v)}${r.c.unidad ? ' ' + r.c.unidad : ''}, pedido ${procesosStep2ReqRangoTxt(it)}`).join('\n');
+  if (!lista) return;
+  const msg = `[Corrección de requerimientos del pliego] Estos requerimientos de diseño del cliente que aplican a esta unidad NO se cumplen con los valores actuales:\n${lista}\n\nAjustá los datos de entrada (con "set" o "buscar_objetivo") para que queden dentro de lo pedido, sin romper los rangos límite ni los demás requerimientos. Si alguno es imposible de cumplir o choca con otro criterio, no lo fuerces: explicalo en "reply" y dejalo como está. Citá el requerimiento en el "motivo" de cada cambio.`;
+  await procesosStep2ChatSend(nombre, msg, true);
+}
+
 function procesosStep2DetectarProblemas(nombre) {
   const p = procesosCurrentProyecto;
   const model = procesosStep2State.hojaModels[nombre];
@@ -11624,6 +11771,11 @@ function procesosStep2RenderHojaPanel() {
     if (enPlantaCompacta) infoLineas.push(`🏭 ${esc(h.plantaCompacta.modelo)}`);
     if (rangoTxt) infoLineas.push(esc(rangoTxt));
     if (c.notaLibre) infoLineas.push('💬 ' + esc(c.notaLibre));
+    (h.chequeoReq && h.chequeoReq.items || []).filter(it => it.celda === c.ref).forEach(it => {
+      const r = procesosStep2EvaluarReq(hf, model, it);
+      if (r.estado === 'cumple') infoLineas.push(`<span style="color:var(--green)" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✓ pliego ${esc(procesosStep2ReqRangoTxt(it))}</span>`);
+      else if (r.estado === 'no_cumple') infoLineas.push(`<span style="color:var(--red);font-weight:600" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✗ pliego pide ${esc(procesosStep2ReqRangoTxt(it))}</span>`);
+    });
     const moCelda = (h.motivos || {})[c.ref];
     if (moCelda) infoLineas.push(`<span title="${esc(moCelda.motivo + ' — ' + moCelda.origen + ', ' + moCelda.fecha)}">📝 ${esc(moCelda.motivo.length > 90 ? moCelda.motivo.slice(0, 88) + '…' : moCelda.motivo)}</span>`);
     return `
@@ -11679,6 +11831,7 @@ function procesosStep2RenderHojaPanel() {
       ${h.libre ? procesosLibreCabeceraHtml(nombre, h) : ''}
       <label>Datos de la hoja${h.libre ? '' : ' (en el orden del Excel)'}</label>
       ${model.cells.length ? `<div class="ps2-grid">${model.cells.map(rowHtml).join('')}</div>` : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
+      ${procesosStep2ReqPanelHtml(nombre, model, hf, h, safe, p)}
       <div id="procesos-step2-pc-selector"></div>
       <div class="gap"></div>
       ${procesosStep2ConexionesDesactualizadas(p, nombre) ? `<div class="card" style="margin-bottom:8px;border-color:var(--red)"><p class="hint" style="color:var(--red)">⚠ El tren cambió y esta unidad ahora recibe su entrada de otro lado que cuando se armaron sus conexiones — actualizalas para que se alimente de la fuente correcta.</p></div>` : ''}
@@ -11991,12 +12144,12 @@ const PROCESOS_STEP2_TOOL = {
 };
 
 const _procesosStep2ChatEnviando = {};
-async function procesosStep2ChatSend(nombre, msgOverride) {
+async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
   const input = document.getElementById('procesos-step2-chat-input');
   const msg = msgOverride != null ? msgOverride.trim() : (input?.value || '').trim();
   if (!msg) return;
   const statusId = 'procesos-step2-chat-status';
-  const esAuto = msgOverride != null; // mensaje armado por el sistema (autocompletado), no escrito por el usuario
+  const esAuto = msgOverride != null && !modoUsuario; // mensaje armado por el sistema (autocompletado), no escrito por el usuario — modoUsuario = pedido del sistema pero que merece razonar como un mensaje del usuario
   // Evita mandar dos mensajes en simultáneo a la misma hoja — si se solapan,
   // el guardado de uno puede pisar al del otro y se pierde un mensaje.
   if (_procesosStep2ChatEnviando[nombre]) { showMsg(statusId, 'error', '✕ Esperá la respuesta anterior antes de mandar otro mensaje.'); return; }
@@ -12251,7 +12404,7 @@ async function procesosStep2ChatSend(nombre, msgOverride) {
     // siempre cae en el proyecto correcto y nunca se mezcla con otro.
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
-    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, motivos: nuevosMotivos, confirmada: false });
+    const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, motivos: nuevosMotivos, chequeoReq: (dd.hojas[nombre] || {}).chequeoReq || hPrev.chequeoReq, confirmada: false });
     h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
@@ -12296,6 +12449,8 @@ function procesosStep2RestaurarFormula(nombre, ref) {
 async function procesosStep2GuardarHoja(nombre) {
   const p = procesosCurrentProyecto;
   try {
+    // Pliego: si todavía no están relacionados los requerimientos con esta hoja, se hace antes de guardar.
+    await procesosStep2AsegurarChequeoReq(nombre);
     const ponderacionesNuevas = procesosStep2PropagarCadena(nombre);
     const model = procesosStep2State.hojaModels[nombre];
     const hf = procesosStep2GetHF(nombre);
@@ -12332,7 +12487,11 @@ async function procesosStep2GuardarHoja(nombre) {
     await procesosSaveProyecto({ diseno_data: dd }, p);
     if (procesosCurrentProyecto === p) {
       renderProcesosStepContent();
-      showMsg('procesos-step2-guardar-status', 'success', '✓ Guardado correctamente.');
+      let avisoReq = '';
+      { const hh = p.diseno_data && p.diseno_data.hojas && p.diseno_data.hojas[nombre], mm = procesosStep2State.hojaModels[nombre], ff = procesosStep2GetHF(nombre);
+        const nNo = (hh && hh.chequeoReq && mm && ff) ? hh.chequeoReq.items.filter(it => procesosStep2EvaluarReq(ff, mm, it).estado === 'no_cumple').length : 0;
+        if (nNo) avisoReq = ` ⚠ Ojo: ${nNo} requerimiento${nNo === 1 ? '' : 's'} de diseño del pliego no se cumple${nNo === 1 ? '' : 'n'} en esta unidad (ver el recuadro "Requerimientos de diseño del pliego").`; }
+      showMsg('procesos-step2-guardar-status', 'success', '✓ Guardado correctamente.' + avisoReq);
     }
   } catch (e) {
     if (procesosCurrentProyecto === p) showMsg('procesos-step2-guardar-status', 'error', '✕ No se pudo guardar: ' + e.message);
@@ -16241,11 +16400,16 @@ function procesosResumenDiseno(p) {
 // definir valores. Acá se arma un bloque aparte, con instrucciones de cómo
 // usarlos según el paso, que se suma a los prompts de diseño (vars *Txt: si el
 // prompt guardado no tiene el placeholder, procesosPromptFill lo agrega solo).
-function procesosRequerimientosDisenoTxt(p, ambito) {
+function procesosRequerimientosDisenoRaw(p) {
   const campos = (p && p.info_cliente && p.info_cliente.campos) || {};
   const k = Object.keys(campos).find(n => { const t = procesosNormTxt(n); return /requerim/.test(t) && /dise/.test(t); });
   const v = k ? String(campos[k] == null ? '' : campos[k]).trim() : '';
-  if (!v) return '';
+  return v ? { campo: k, texto: v } : null;
+}
+function procesosRequerimientosDisenoTxt(p, ambito) {
+  const raw = procesosRequerimientosDisenoRaw(p);
+  if (!raw) return '';
+  const k = raw.campo, v = raw.texto;
   const cab = `REQUERIMIENTOS DE DISEÑO DEL CLIENTE (campo "${k}" del Paso 1, tomados del pliego/especificación — son CRITERIOS DE DISEÑO OBLIGATORIOS del proyecto, no información de contexto):\n${v}\n\n`;
   const uso = {
     unidad: 'Cómo usarlos en ESTA unidad: identificá cuáles aplican a esta unidad (tiempos de retención, F/M, edad del lodo, SSV, TRH, O2 requerido, cargas superficiales, relaciones de volúmenes, tiempos de contacto, etc.) e ignorá los que no tengan que ver con ella. Cada parámetro que figure ahí es el CRITERIO DE DISEÑO de esta unidad y tiene PRIORIDAD sobre el "rango normal" de la planilla: elegí el valor dentro del rango pedido, y si la celda no se puede fijar directo (es un resultado calculado), ajustá los datos de entrada — con "buscar_objetivo" o "set" sobre las celdas de entrada — para que el resultado quede dentro de lo pedido. Solo te podés apartar si es imposible cumplirlo (por ejemplo, choca con un rango límite o con otro requerimiento) o si el usuario lo pide: en ese caso decilo de forma explícita en "reply". Cuando fijes un valor por uno de estos requerimientos, citalo en el "motivo" (ej. "pliego: θc 20–30 días"). Si te preguntan por qué no se respeta un requerimiento que aplica, revisá el estado real de las celdas: si no se cumple, es un error a corregir, no algo para justificar.\n\n',
