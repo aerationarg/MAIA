@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.75</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.76</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.75</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.76</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16658,6 +16658,27 @@ function flowsheetsDimsAValoresConEtiqueta(dims, base) {
   if (dims.acometida != null) v['H acometida (m)'] = dims.acometida;
   return v;
 }
+// Busca un equipo por id o, si no, por tipo + químico (ej. "Tanque cisterna de ácido sulfúrico" = tipo "Tanque cisterna" del grupo "Ácido sulfúrico")
+function flowsheetsBuscarEquipo(ed, etapa, a) {
+  const N = s => procesosNormTxt(s || '');
+  const lista = [];
+  Object.entries((ed && ed.etapas) || {}).forEach(([n, e]) => (e.equipos || []).forEach((eq, i) => lista.push({ etapa: n, idx: i, eq })));
+  if (a.equipoId) { const r = lista.find(x => x.eq.id === a.equipoId || String(a.equipoId).startsWith(x.eq.id + '_')); if (r) return r; }
+  const delaEtapa = etapa ? lista.filter(x => x.etapa === etapa) : [];
+  const pool = delaEtapa.length ? delaEtapa : lista;
+  const objetivo = N(`${a.equipoTipo || ''} ${a.grupo || ''}`);
+  if (!objetivo.trim()) return null;
+  const toks = t => new Set(t.split(/[^a-z0-9]+/).filter(w => w.length >= 3));
+  const tt = toks(objetivo);
+  let mejor = null, ms = 0;
+  pool.forEach(x => {
+    const tx = toks(N(`${x.eq.tipo} ${x.eq.grupo || ''} ${x.eq.especificacion || ''}`));
+    let hit = 0; tt.forEach(w => { if (tx.has(w)) hit++; });
+    const s = hit / Math.max(1, tt.size) + (N(x.eq.tipo).trim() === N(a.equipoTipo || '').trim() ? 0.5 : 0);
+    if (s > ms) { ms = s; mejor = x; }
+  });
+  return ms >= 0.5 ? mejor : null;
+}
 function flowsheetsAplicarAcciones(p, acciones) {
   if (!acciones || !acciones.length) return null;
   const dd = Object.assign({}, p.diseno_data);
@@ -16674,22 +16695,37 @@ function flowsheetsAplicarAcciones(p, acciones) {
         e.equipos = e.equipos.concat([{ id: procesosNuevoId(), tipo: a.equipo.tipo, cantidad: a.equipo.cantidad != null ? Number(a.equipo.cantidad) : 1, especificacion: a.equipo.especificacion || '', grupo: a.equipo.grupo || '' }]);
         ed.etapas[a.etapa] = e;
         cambios = true;
-      } else if (a.tipo === 'editar_equipo' && a.etapa && a.equipoTipo && a.cambios && dd.hojas[a.etapa]) {
-        const e = equiposDe(a.etapa);
-        const n = String(a.equipoTipo).trim().toLowerCase();
-        let tocado = false;
-        e.equipos = e.equipos.map(eq => {
-          if ((eq.tipo || '').trim().toLowerCase() !== n) return eq;
-          tocado = true;
-          return Object.assign({}, eq, a.cambios.tipo != null ? { tipo: a.cambios.tipo } : {}, a.cambios.cantidad != null ? { cantidad: Number(a.cambios.cantidad) } : {});
-        });
-        if (tocado) { ed.etapas[a.etapa] = e; cambios = true; }
-      } else if (a.tipo === 'eliminar_equipo' && a.etapa && a.equipoTipo && dd.hojas[a.etapa]) {
-        const e = equiposDe(a.etapa);
-        const n = String(a.equipoTipo).trim().toLowerCase();
-        const antes = e.equipos.length;
-        e.equipos = e.equipos.filter(eq => (eq.tipo || '').trim().toLowerCase() !== n);
-        if (e.equipos.length !== antes) { ed.etapas[a.etapa] = e; cambios = true; }
+      } else if (a.tipo === 'editar_equipo' && a.cambios && (a.equipoId || a.equipoTipo)) {
+        const r = flowsheetsBuscarEquipo(ed, a.etapa, a);
+        if (r) {
+          const e = equiposDe(r.etapa), c = a.cambios, eq = Object.assign({}, e.equipos[r.idx]);
+          if (c.tipo != null) eq.tipo = c.tipo;
+          if (c.cantidad != null) eq.cantidad = Number(c.cantidad);
+          if (c.especificacion != null) eq.especificacion = String(c.especificacion);
+          if (c.grupo != null) eq.grupo = String(c.grupo);
+          // volumen, orientación y medidas de un tanque: van a los ajustes de las vistas (los usan el diagrama, la planta y el corte)
+          const vol = c.volumen_l != null ? Number(c.volumen_l) : (c.volumen_m3 != null ? Number(c.volumen_m3) * 1000 : null);
+          if (vol != null || c.orientacion != null || ['diametro', 'largo', 'alto', 'ancho'].some(k => c[k] != null)) {
+            ed.vistas = Object.assign({}, ed.vistas); ed.vistas.equipos = Object.assign({}, ed.vistas.equipos);
+            const o = Object.assign({}, ed.vistas.equipos[eq.id]);
+            const hayDims = ['diametro', 'largo', 'alto', 'ancho'].some(k => c[k] != null);
+            if (!hayDims && (vol != null || c.orientacion != null)) { delete o.w; delete o.d; delete o.h; } // que la geometría siga al volumen / la orientación
+            if (vol != null && vol > 0) o.volL = vol;
+            if (c.orientacion != null) o.orient = /horiz/.test(procesosNormTxt(c.orientacion)) ? 'h' : 'v';
+            const clase = pfQuimClase(Object.assign({}, eq, { tipoOriginal: eq.tipo })), txt = `${eq.tipo || ''} ${eq.especificacion || ''}`;
+            const orient = o.orient || pfQuimOrient(procesosNormTxt(txt)) || 'v';
+            const num = v => (Number(v) > 0 ? Number(v) : null);
+            if (clase === 'cisterna' && orient === 'h') { if (num(c.largo)) o.w = num(c.largo); if (num(c.diametro)) { o.d = num(c.diametro); if (!num(c.alto)) o.h = o.d + 0.25; } if (num(c.alto)) o.h = num(c.alto); }
+            else if (clase === 'tanque' || clase === 'cisterna') { if (num(c.diametro)) { o.w = num(c.diametro); o.d = num(c.diametro); } if (num(c.alto)) o.h = num(c.alto); }
+            else { if (num(c.ancho)) o.w = num(c.ancho); if (num(c.largo)) o.d = num(c.largo); if (num(c.alto)) o.h = num(c.alto); }
+            ed.vistas.equipos[eq.id] = o;
+          }
+          e.equipos = e.equipos.map((x, i) => i === r.idx ? eq : x);
+          ed.etapas[r.etapa] = e; cambios = true;
+        }
+      } else if (a.tipo === 'eliminar_equipo' && (a.equipoId || a.equipoTipo)) {
+        const r = flowsheetsBuscarEquipo(ed, a.etapa, a);
+        if (r) { const e = equiposDe(r.etapa); e.equipos = e.equipos.filter((x, i) => i !== r.idx); ed.etapas[r.etapa] = e; cambios = true; }
       } else if (a.tipo === 'agregar_etapa' && a.nombre && !dd.hojas[a.nombre]) {
         dd.hojas[a.nombre] = { tipo: 'etapa', hojaBase: a.nombre, seleccionada: true, confirmada: true, linea: a.linea === 'lodos' ? 'lodos' : 'liquido', origenLodos: a.origenLodos || null, valoresConEtiqueta: flowsheetsDimsAValoresConEtiqueta(a.dimensiones, {}) };
         const idxDespues = a.despues_de ? dd.orden.indexOf(a.despues_de) : -1;
@@ -16743,10 +16779,10 @@ async function flowsheetsChatSend() {
     if (!apiKey) throw new Error('API key no disponible.');
     const resumen = (p.diseno_data?.orden || []).map(nombre => {
       const h = p.diseno_data.hojas[nombre] || {};
-      const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad})`).join(', ') || '(sin equipos)';
+      const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad}) [id:${eq.id}${eq.grupo ? ', grupo: ' + eq.grupo : ''}${eq.especificacion ? ', esp: ' + String(eq.especificacion).slice(0, 80) : ''}]`).join('; ') || '(sin equipos)';
       return `- "${nombre}" — línea ${h.linea || 'liquido'}${h.origenLodos ? `, recibe lodos de "${h.origenLodos}"` : ''} — dimensiones: ${JSON.stringify(h.valoresConEtiqueta || {})} — equipos: ${eqs}`;
     }).join('\n') || '(sin etapas todavía — generá el flowsheet primero con texto/archivos)';
-    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoTipo":"<tipo EXACTO ya cargado>","cambios":{"tipo":"...","cantidad":...}} (poné solo los campos que cambian)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
+    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoId":"<id del equipo, de la lista de arriba — preferido>","equipoTipo":"<tipo ya cargado, si no usás el id>","cambios":{"tipo":"...","cantidad":...,"especificacion":"...","grupo":"...","volumen_l":<litros>,"orientacion":"horizontal"|"vertical" (solo cisternas),"diametro":<m>,"largo":<m>,"alto":<m>,"ancho":<m>}} (poné solo los campos que cambian; para cambiar el volumen, la orientación o las medidas de un tanque usá volumen_l / orientacion / diametro / largo / alto / ancho)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoId":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente, y si el pedido no se puede hacer con las acciones disponibles, decilo en vez de afirmar que lo hiciste.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
@@ -16756,8 +16792,14 @@ async function flowsheetsChatSend() {
     const data = await resp.json();
     const raw = data.content?.find(c => c.type === 'text')?.text || '{}';
     let parsed;
-    try { parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()); }
-    catch (_e) { parsed = { respuesta: raw, acciones: [], acciones_layout: [] }; }
+    const limpio = raw.replace(/```json|```/g, '').trim();
+    try { parsed = JSON.parse(limpio); }
+    catch (_e) {
+      // la IA a veces escribe texto antes o después del JSON: se saca el bloque { ... } y se lo usa
+      const i = limpio.indexOf('{'), j = limpio.lastIndexOf('}');
+      try { parsed = i >= 0 && j > i ? JSON.parse(limpio.slice(i, j + 1)) : null; } catch (_e2) { parsed = null; }
+      if (!parsed) parsed = { respuesta: i > 0 ? limpio.slice(0, i).trim() || raw : raw, acciones: [], acciones_layout: [] };
+    }
     p.chat_historial = p.chat_historial.concat([{ role: 'assistant', content: parsed.respuesta || '(sin respuesta)' }]);
     const fieldsToSave = { chat_historial: p.chat_historial };
     if ((parsed.acciones && parsed.acciones.length) || (parsed.acciones_layout && parsed.acciones_layout.length)) {
@@ -16767,6 +16809,11 @@ async function flowsheetsChatSend() {
     if (nuevo) { p.diseno_data = nuevo.diseno_data; p.equipos_data = nuevo.equipos_data; fieldsToSave.diseno_data = nuevo.diseno_data; fieldsToSave.equipos_data = nuevo.equipos_data; }
     const modeloLayout = { diseno_data: p.diseno_data, equipos_data: fieldsToSave.equipos_data || p.equipos_data };
     const huboLayout = procesosFlowsheetAplicarAccionesLayout(modeloLayout, parsed.acciones_layout);
+    // si la IA pidió cambios y no se aplicó nada, se lo dice (antes quedaba "Listo" sin que cambiara nada)
+    if (((parsed.acciones || []).length && !nuevo) || ((parsed.acciones_layout || []).length && !huboLayout && !nuevo)) {
+      const ult = p.chat_historial[p.chat_historial.length - 1];
+      ult.content += '\n\n⚠ No pude aplicar ese cambio: no encontré el equipo o la etapa a la que se refería, o ese tipo de cambio no está disponible desde el chat. Probá con otro nombre, o hacelo desde las vistas / la tabla de medidas.';
+    }
     if (huboLayout) { p.equipos_data = modeloLayout.equipos_data; fieldsToSave.equipos_data = modeloLayout.equipos_data; }
     await flowsheetsSaveProyecto(fieldsToSave, p);
     if (flowsheetsCurrentProyecto === p) {
