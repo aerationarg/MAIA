@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.70</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.71</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.70</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.71</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -827,7 +827,12 @@
           </div>
           <div id="flowsheets-status" style="margin-top:8px"></div>
         </div>
-        <div class="card">
+        <div id="flowsheets-subtabs" style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" id="flowsheets-subtab-proceso" style="width:auto" onclick="flowsheetsSubtab('proceso')">Diagrama de proceso</button>
+          <button class="btn btn-secondary btn-sm" id="flowsheets-subtab-planta" style="width:auto" onclick="flowsheetsSubtab('planta')">Vista en planta</button>
+          <button class="btn btn-secondary btn-sm" id="flowsheets-subtab-corte" style="width:auto" onclick="flowsheetsSubtab('corte')">Vista en corte</button>
+        </div>
+        <div class="card" id="flowsheets-card-proceso">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
             <div class="card-label" style="margin:0">Flowsheet</div>
             <div style="display:flex;gap:6px;position:relative">
@@ -849,7 +854,17 @@
           <p class="hint" style="margin-top:-4px">Arrastrá equipos o unidades para acomodarlos — se guardan solas.</p>
           <div id="flowsheets-diagrama"></div>
         </div>
-        <div class="card">
+        <div class="card" id="flowsheets-card-planta" style="display:none">
+          <div class="card-label">Vista en planta</div>
+          <p class="hint" style="margin-top:-6px;margin-bottom:8px">Las unidades vistas desde arriba, a escala, con sus medidas. Las medidas salen del diseño; lo que falta se completa con medidas típicas (se marcan en la tabla de abajo) y todo se puede editar. Arrastrá una unidad para acomodarla.</p>
+          <div id="flowsheets-vista-planta"></div>
+        </div>
+        <div class="card" id="flowsheets-card-corte" style="display:none">
+          <div class="card-label">Vista en corte</div>
+          <p class="hint" style="margin-top:-6px;margin-bottom:8px">Corte por el tren de tratamiento: alturas, nivel de agua, parte enterrada y equipos sumergibles de cada unidad. Los equipos son esquemáticos (no van a escala).</p>
+          <div id="flowsheets-vista-corte"></div>
+        </div>
+        <div class="card" id="flowsheets-card-chat">
           <div class="card-label">💬 Modificar el flow charlando</div>
           <p class="hint" style="margin-top:-6px;margin-bottom:10px">Pedile cambios en lenguaje natural — agregar/sacar equipos o etapas, reordenar, o mover/agrandar algo del dibujo (ej. "agregale una bomba de reserva al pozo", "corré el sedimentador más a la derecha").</p>
           <div id="flowsheets-chat-messages" style="max-height:320px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:8px"></div>
@@ -15455,6 +15470,7 @@ async function flowsheetsAbrirProyecto(id) {
   document.getElementById('flowsheets-status').innerHTML = '';
   document.getElementById('flowsheets-chat-status').innerHTML = '';
   flowsheetsArchivosRender();
+  flowsheetsSubtab('proceso');
   renderFlowsheetsDiagrama();
   renderFlowsheetsChat();
 }
@@ -15671,6 +15687,335 @@ async function flowsheetsBorrarTodo() {
   p.equipos_data = { etapas: {}, layout: { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {}, marcas: {} } };
   await flowsheetsSaveProyecto({ diseno_data: p.diseno_data, equipos_data: p.equipos_data }, p);
   if (flowsheetsCurrentProyecto === p) renderFlowsheetsDiagrama();
+}
+
+// ══ Vistas en planta y en corte (solapa Flowsheets) ══
+// Las medidas de cada unidad salen del diseño (largo, ancho, altura, diámetro, volumen — ver procesosFlowsheetDimsDeEtapa); lo que no
+// esté se calcula con el volumen o se completa con una medida típica de ese tipo de unidad, y todo se puede pisar a mano. Lo editado se
+// guarda en equipos_data.vistas = { medidas: { [unidad]: {forma,largo,ancho,diametro,alto,nivelAgua,enterrado} }, planta: { pos: { [unidad]: {x,y} } } }.
+let _pfVista = 'proceso';
+let _pvCorteLodos = false;
+const PV_TIPICAS = {
+  tanque: { forma: 'rect', largo: 6, ancho: 4, alto: 3.5, ratio: 1.5 },
+  pozo: { forma: 'rect', largo: 2.5, ancho: 2.5, alto: 4, enterrado: 'todo', ratio: 1 },
+  sedimentador: { forma: 'circ', diametro: 5, alto: 3.5 },
+  daf: { forma: 'rect', largo: 6, ancho: 2.5, alto: 2, ratio: 2.4 },
+  desinfeccion: { forma: 'rect', largo: 4, ancho: 2, alto: 2, ratio: 2 },
+  maquina: { forma: 'rect', largo: 2, ancho: 1.2, alto: 1.5 },
+  caja: { forma: 'rect', largo: 2, ancho: 2, alto: 2 },
+};
+const PV_MAQUINAS = [
+  [/deshidrat/, { largo: 3.5, ancho: 1.4, alto: 1.8 }], [/centrifug|decanter/, { largo: 3, ancho: 1.2, alto: 1.6 }],
+  [/filtro banda|prensa/, { largo: 3.5, ancho: 1.5, alto: 2 }], [/tamiz/, { largo: 1.6, ancho: 1, alto: 1.3 }],
+  [/desarenad/, { largo: 6, ancho: 1.2, alto: 1.5 }], [/reja/, { largo: 2.5, ancho: 0.8, alto: 1.2 }],
+];
+const PV_CAMPOS = ['largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado'];
+const pvR = v => Math.round(v * 100) / 100;
+const pvNum = v => { const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? n : null; };
+// Medidas finales de una unidad: { forma, largo, ancho, diametro, alto, nivelAgua, enterrado, fuente:{campo:'diseño'|'calculada'|'típica'|'editada'} }
+function pvMedidasUnidad(p, nombre, base) {
+  const fuente = {};
+  const ed = ((p.equipos_data || {}).vistas || {}).medidas && p.equipos_data.vistas.medidas[nombre] || {};
+  const forma = ed.forma || base.forma;
+  const m = { forma };
+  PV_CAMPOS.forEach(c => { if (base[c] != null) { m[c] = base[c]; fuente[c] = (base.fuente && base.fuente[c]) || 'típica'; } });
+  PV_CAMPOS.forEach(c => { const v = pvNum(ed[c]); if (v != null) { m[c] = v; fuente[c] = 'editada'; } else if (ed[c] === 0) { m[c] = 0; fuente[c] = 'editada'; } });
+  if (forma === 'circ' && m.diametro == null) { m.diametro = pvR(Math.sqrt((m.largo || 4) * (m.ancho || 4))); fuente.diametro = 'típica'; }
+  if (forma === 'rect' && (m.largo == null || m.ancho == null)) { const d = m.diametro || 4; if (m.largo == null) { m.largo = d; fuente.largo = 'típica'; } if (m.ancho == null) { m.ancho = d; fuente.ancho = 'típica'; } }
+  if (m.alto == null) { m.alto = 3; fuente.alto = 'típica'; }
+  if (m.nivelAgua == null) { m.nivelAgua = pvR(Math.max(0.3, m.alto - 0.4)); fuente.nivelAgua = 'típica'; }
+  if (m.enterrado == null) { m.enterrado = base.enterradoTodo ? m.alto : 0; fuente.enterrado = 'típica'; }
+  PV_CAMPOS.forEach(c => { if (m[c] != null) m[c] = pvR(m[c]); });
+  m.fuente = fuente;
+  return m;
+}
+function pvBaseUnidad(p, nombre, hojaBase) {
+  const fig = procesosFlowsheetFiguraDeEtapa(nombre, hojaBase).tipoFig;
+  const d = procesosFlowsheetDimsDeEtapa(p, nombre);
+  let tip = Object.assign({}, PV_TIPICAS[fig] || PV_TIPICAS.caja);
+  if (fig === 'maquina') { const n = procesosNormTxt(nombre + ' ' + (hojaBase || '')); const mq = PV_MAQUINAS.find(([re]) => re.test(n)); if (mq) Object.assign(tip, mq[1]); }
+  const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : tip.forma, fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
+  let L = d.largo, A = d.ancho, H = d.alto, D = d.diametro; const V = d.volumen; const RAT = tip.ratio || 1.5;
+  const marca = (c, src) => { b.fuente[c] = src; };
+  if (L) marca('largo', 'diseño'); if (A) marca('ancho', 'diseño'); if (H) marca('alto', 'diseño'); if (D) marca('diametro', 'diseño');
+  if (V) { // completar con el volumen
+    if (b.forma === 'circ') {
+      if (!D && H) { D = 2 * Math.sqrt(V / (Math.PI * H)); marca('diametro', 'calculada'); }
+      else if (!H && D) { H = V / (Math.PI * D * D / 4); marca('alto', 'calculada'); }
+      else if (!D && !H) { H = tip.alto; marca('alto', 'típica'); D = 2 * Math.sqrt(V / (Math.PI * H)); marca('diametro', 'calculada'); }
+    } else {
+      if (L && A && !H) { H = V / (L * A); marca('alto', 'calculada'); }
+      else if (L && H && !A) { A = V / (L * H); marca('ancho', 'calculada'); }
+      else if (A && H && !L) { L = V / (A * H); marca('largo', 'calculada'); }
+      else if (!L && !A && H) { A = Math.sqrt(V / H / RAT); L = RAT * A; marca('largo', 'calculada'); marca('ancho', 'calculada'); }
+      else if (!L && !A && !H) { H = tip.alto; marca('alto', 'típica'); A = Math.sqrt(V / H / RAT); L = RAT * A; marca('largo', 'calculada'); marca('ancho', 'calculada'); }
+      else if (L && !A && !H) { H = tip.alto; marca('alto', 'típica'); A = V / (L * H); marca('ancho', 'calculada'); }
+      else if (A && !L && !H) { H = tip.alto; marca('alto', 'típica'); L = V / (A * H); marca('largo', 'calculada'); }
+    }
+  }
+  if (b.forma === 'circ') { b.diametro = D || tip.diametro || null; b.alto = H || tip.alto; if (!D) marca('diametro', 'típica'); if (!H) marca('alto', 'típica'); }
+  else { b.largo = L || tip.largo; b.ancho = A || tip.ancho; b.alto = H || tip.alto; if (!L) marca('largo', 'típica'); if (!A) marca('ancho', 'típica'); if (!H) marca('alto', 'típica'); }
+  return b;
+}
+// Unidades del tren (con sus medidas) + salas de químicos / soplantes si el proyecto las tiene
+function pvUnidades(p) {
+  const dd = p.diseno_data || {}, hojas = dd.hojas || {}, ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const out = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false).map(n => {
+    const b = pvBaseUnidad(p, n, hojas[n].hojaBase);
+    return { nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false };
+  });
+  // salas: se dimensionan según la cantidad de líneas de químicos / soplantes
+  let nQuim = 0, nSop = 0;
+  Object.values(ed).forEach(e => (e.equipos || []).forEach(q => {
+    const t = procesosNormTxt(`${q.tipo || ''} ${q.especificacion || ''}`);
+    if (/dosific/.test(t)) nQuim += 1;
+    if (/soplante|soplador|blower/.test(t)) nSop += Number(q.cantidad) || 1;
+  }));
+  if (nQuim) { const b = { forma: 'rect', largo: pvR(Math.max(4, 1.8 * nQuim + 1.5)), ancho: 3, alto: 3, fuente: { largo: 'típica', ancho: 'típica', alto: 'típica' } }; out.push({ nombre: 'Sala de químicos', linea: 'sala', fig: 'caja', m: pvMedidasUnidad(p, 'Sala de químicos', b), sala: true }); }
+  if (nSop) { const b = { forma: 'rect', largo: pvR(2.5 + 0.8 * nSop), ancho: 2.5, alto: 2.5, fuente: { largo: 'típica', ancho: 'típica', alto: 'típica' } }; out.push({ nombre: 'Sala de soplantes', linea: 'sala', fig: 'caja', m: pvMedidasUnidad(p, 'Sala de soplantes', b), sala: true }); }
+  return out;
+}
+const pvAnchoX = u => (u.m.forma === 'circ' ? u.m.diametro : u.m.largo);
+const pvAnchoY = u => (u.m.forma === 'circ' ? u.m.diametro : u.m.ancho);
+function pvGuardar(p) { return flowsheetsSaveProyecto({ equipos_data: p.equipos_data }, p); }
+function pvEditarMedida(nombre, campo, valor) {
+  const p = flowsheetsCurrentProyecto; if (!p) return;
+  const eq = p.equipos_data = p.equipos_data || { etapas: {} };
+  eq.vistas = eq.vistas || {}; eq.vistas.medidas = eq.vistas.medidas || {};
+  const ed = eq.vistas.medidas[nombre] = eq.vistas.medidas[nombre] || {};
+  if (campo === 'forma') ed.forma = valor || undefined;
+  else { const v = pvNum(valor); if (v == null) delete ed[campo]; else ed[campo] = v; }
+  if (!Object.keys(ed).length) delete eq.vistas.medidas[nombre];
+  pvGuardar(p); flowsheetsVistasRender();
+}
+function pvRestablecer(nombre) {
+  const p = flowsheetsCurrentProyecto; if (!p || !p.equipos_data || !p.equipos_data.vistas) return;
+  if (p.equipos_data.vistas.medidas) delete p.equipos_data.vistas.medidas[nombre];
+  if (p.equipos_data.vistas.planta && p.equipos_data.vistas.planta.pos) delete p.equipos_data.vistas.planta.pos[nombre];
+  pvGuardar(p); flowsheetsVistasRender();
+}
+// ── Tabla de medidas (editable) ──
+function pvTablaHtml(unidades) {
+  const col = { 'diseño': '', calculada: 'background:#e3f2fd', 'típica': 'background:#fff3cd', editada: 'background:#dcedc8' };
+  const inp = (u, c, w) => {
+    const v = u.m[c]; const f = (u.m.fuente || {})[c];
+    const oculto = (c === 'diametro' && u.m.forma !== 'circ') || ((c === 'largo' || c === 'ancho') && u.m.forma === 'circ');
+    if (oculto) return '<td style="padding:2px;color:var(--text2);text-align:center">—</td>';
+    return `<td style="padding:2px"><input value="${v == null ? '' : v}" title="${esc(f || '')}" style="width:${w}px;text-align:center;padding:4px 2px;${col[f] || ''}" onchange="pvEditarMedida('${esc(u.nombre).replace(/'/g, '&#39;')}','${c}',this.value)" /></td>`;
+  };
+  const th = t => `<th style="text-align:center;padding:4px 4px;color:var(--text2);font-weight:600;font-size:11px">${t}</th>`;
+  const filas = unidades.map(u => `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:4px 6px;font-weight:600;font-size:12px">${esc(u.nombre)}</td>
+      <td style="padding:2px"><select style="padding:4px 2px;font-size:12px" onchange="pvEditarMedida('${esc(u.nombre).replace(/'/g, '&#39;')}','forma',this.value)"><option value="rect" ${u.m.forma === 'rect' ? 'selected' : ''}>Rectangular</option><option value="circ" ${u.m.forma === 'circ' ? 'selected' : ''}>Circular</option></select></td>
+      ${inp(u, 'largo', 56)}${inp(u, 'ancho', 56)}${inp(u, 'diametro', 56)}${inp(u, 'alto', 56)}${inp(u, 'nivelAgua', 56)}${inp(u, 'enterrado', 56)}
+      <td style="padding:2px"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" title="Volver a las medidas del diseño / típicas y a la posición automática" onclick="pvRestablecer('${esc(u.nombre).replace(/'/g, '&#39;')}')">↺</button></td></tr>`).join('');
+  return `<div style="overflow-x:auto;margin-top:12px"><table style="border-collapse:collapse;font-size:12px"><thead><tr style="border-bottom:2px solid var(--border)">
+      ${th('Unidad')}${th('Forma')}${th('Largo (m)')}${th('Ancho (m)')}${th('Ø (m)')}${th('Altura (m)')}${th('Nivel de agua (m)')}${th('Enterrado (m)')}<th></th></tr></thead><tbody>${filas}</tbody></table></div>
+    <p class="hint" style="margin-top:6px">Color de cada medida: <span style="background:#e3f2fd;padding:0 6px">calculada</span> con el volumen del diseño · <span style="background:#fff3cd;padding:0 6px">típica</span> (no figuraba en el diseño: completala) · <span style="background:#dcedc8;padding:0 6px">editada</span> por vos · sin color: tal cual el diseño. Vaciar un casillero vuelve a la medida original.</p>`;
+}
+// ── Dibujo: cotas y utilitarios ──
+const PV_C = { linea: '#1b5e20', relleno: '#eaf4ec', agua: '#bbdefb', texto: '#222', cota: '#555', terreno: '#6d6d6d', proc: '#c2185b', lodos: '#9a6b2f', sala: '#8a6d3b' };
+const pvEsc = s => procesosDiagramaSvgEsc(s);
+function pvCotaH(x1, x2, y, txt) {
+  return `<g stroke="${PV_C.cota}" stroke-width="1" fill="none"><path d="M${x1},${y} H${x2} M${x1},${y - 4} V${y + 4} M${x2},${y - 4} V${y + 4}"/></g><text x="${(x1 + x2) / 2}" y="${y - 4}" text-anchor="middle" font-size="11" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(txt)}</text>`;
+}
+function pvCotaV(y1, y2, x, txt, frac) {
+  return `<g stroke="${PV_C.cota}" stroke-width="1" fill="none"><path d="M${x},${y1} V${y2} M${x - 4},${y1} H${x + 4} M${x - 4},${y2} H${x + 4}"/></g><text transform="translate(${x - 5},${y1 + (y2 - y1) * (frac == null ? 0.5 : frac)}) rotate(-90)" text-anchor="middle" font-size="11" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(txt)}</text>`;
+}
+function pvEscalaGrafica(x, y, s) {
+  const cand = [1, 2, 5, 10, 20, 50]; const m = cand.find(c => c * s >= 70) || 50; const w = m * s;
+  return `<g font-family="Arial,sans-serif" font-size="10" fill="${PV_C.texto}"><rect x="${x}" y="${y}" width="${w / 2}" height="6" fill="#222"/><rect x="${x + w / 2}" y="${y}" width="${w / 2}" height="6" fill="#fff" stroke="#222" stroke-width="1"/><text x="${x}" y="${y + 18}">0</text><text x="${x + w}" y="${y + 18}" text-anchor="middle">${m} m</text><text x="${x}" y="${y - 5}">Escala gráfica</text></g>`;
+}
+function pvNorte(x, y) {
+  return `<g font-family="Arial,sans-serif"><path d="M${x},${y + 34} V${y} M${x - 6},${y + 10} L${x},${y} L${x + 6},${y + 10}" stroke="#222" stroke-width="1.6" fill="none"/><text x="${x}" y="${y - 5}" text-anchor="middle" font-size="13" font-weight="700" fill="#222">N</text></g>`;
+}
+// ── Vista en planta ──
+function pvPlantaLayout(p, unidades) {
+  const GAP = 2.5, pos = {};
+  const vp = ((p.equipos_data || {}).vistas || {}).planta || {}; const off = vp.pos || {};
+  const filas = [unidades.filter(u => u.linea === 'liquido'), unidades.filter(u => u.linea === 'lodos'), unidades.filter(u => u.sala)];
+  let yFila = 0;
+  filas.forEach(fila => {
+    if (!fila.length) return;
+    const hMax = Math.max(...fila.map(pvAnchoY));
+    let x = 0;
+    fila.forEach(u => { pos[u.nombre] = { x, y: yFila + (hMax - pvAnchoY(u)) / 2 }; x += pvAnchoX(u) + GAP; });
+    yFila += hMax + GAP * 1.6;
+  });
+  unidades.forEach(u => { const o = off[u.nombre]; if (o && pos[u.nombre]) { pos[u.nombre].x += Number(o.x) || 0; pos[u.nombre].y += Number(o.y) || 0; } });
+  return pos;
+}
+function pvPlantaSvg(p, unidades) {
+  const pos = pvPlantaLayout(p, unidades);
+  const xs = unidades.flatMap(u => [pos[u.nombre].x, pos[u.nombre].x + pvAnchoX(u)]), ys = unidades.flatMap(u => [pos[u.nombre].y, pos[u.nombre].y + pvAnchoY(u)]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const MARG = 4;
+  const s = Math.max(8, Math.min(46, 1300 / (maxX - minX + 2 * MARG)));
+  const px = x => (x - minX + MARG) * s, py = y => (y - minY + MARG) * s + 20;
+  const W = (maxX - minX + 2 * MARG) * s, Hh = (maxY - minY + 2 * MARG) * s + 90;
+  let sv = `<svg viewBox="0 0 ${W} ${Hh}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vista en planta" style="max-width:100%;height:auto;background:#fff;border:1px solid var(--border)" data-pv-escala="${s}" data-pv-minx="${minX}" data-pv-miny="${minY}"><rect width="${W}" height="${Hh}" fill="#fff"/>`;
+  sv += `<defs><marker id="pv-flecha" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${PV_C.proc}"/></marker><marker id="pv-flecha-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${PV_C.lodos}"/></marker></defs>`;
+  // flechas de proceso (por detrás de las unidades)
+  const cen = u => ({ x: pos[u.nombre].x + pvAnchoX(u) / 2, y: pos[u.nombre].y + pvAnchoY(u) / 2 });
+  const liq = unidades.filter(u => u.linea === 'liquido'), lod = unidades.filter(u => u.linea === 'lodos');
+  const flecha = (a, b, color, marker) => {
+    const ca = cen(a), cb = cen(b);
+    const x1 = pos[a.nombre].x + pvAnchoX(a), x2 = pos[b.nombre].x;
+    if (x2 > x1 + 0.2) return `<path d="M${px(x1)},${py(ca.y)} H${px((x1 + x2) / 2)} V${py(cb.y)} H${px(x2)}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marker})"/>`;
+    return `<path d="M${px(ca.x)},${py(pos[a.nombre].y + pvAnchoY(a))} V${py(pos[b.nombre].y)}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marker})"/>`;
+  };
+  for (let i = 0; i + 1 < liq.length; i++) sv += flecha(liq[i], liq[i + 1], PV_C.proc, 'pv-flecha');
+  for (let i = 0; i + 1 < lod.length; i++) sv += flecha(lod[i], lod[i + 1], PV_C.lodos, 'pv-flecha-l');
+  if (lod.length) {
+    const o = lod[0].origen ? liq.find(u => u.nombre === lod[0].origen) : liq[liq.length - 1];
+    if (o) { const co = cen(o), cl = cen(lod[0]); const l0 = pos[lod[0].nombre], derecha = co.x > l0.x + pvAnchoX(lod[0]); sv += `<path d="M${px(co.x)},${py(pos[o.nombre].y + pvAnchoY(o))} V${py(cl.y)} H${px(derecha ? l0.x + pvAnchoX(lod[0]) : l0.x)}" fill="none" stroke="${PV_C.lodos}" stroke-width="2" marker-end="url(#pv-flecha-l)"/>`; }
+  }
+  // unidades
+  unidades.forEach(u => {
+    const x = pos[u.nombre].x, y = pos[u.nombre].y, w = pvAnchoX(u), hh = pvAnchoY(u);
+    const stroke = u.sala ? PV_C.sala : PV_C.linea, fill = u.sala ? '#fbf6e9' : PV_C.relleno, dash = u.sala ? ' stroke-dasharray="7 4"' : '';
+    let g = '';
+    if (u.m.forma === 'circ') {
+      g += `<circle cx="${px(x + w / 2)}" cy="${py(y + hh / 2)}" r="${w / 2 * s}" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/>`;
+      g += `<circle cx="${px(x + w / 2)}" cy="${py(y + hh / 2)}" r="${Math.max(2, 0.45 * s)}" fill="none" stroke="${stroke}" stroke-width="1.2"/>`;
+      g += `<path d="M${px(x)},${py(y + hh / 2)} H${px(x + w)}" stroke="${PV_C.cota}" stroke-width="1" stroke-dasharray="4 3"/>`;
+      g += `<text x="${px(x + w / 2)}" y="${py(y + hh / 2) - 6}" text-anchor="middle" font-size="11" fill="${PV_C.cota}" font-family="Arial,sans-serif">Ø ${u.m.diametro} m</text>`;
+    } else {
+      g += `<rect x="${px(x)}" y="${py(y)}" width="${w * s}" height="${hh * s}" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/>`;
+      g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${u.m.largo} m`);
+      g += pvCotaV(py(y), py(y + hh), px(x + w) + 18, `${u.m.ancho} m`, 0.2);
+    }
+    g += `<text x="${px(x + w / 2)}" y="${py(y) - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif">${pvEsc(u.nombre)}</text>`;
+    sv += `<g data-pv-unidad="${esc(u.nombre)}" style="cursor:move">${g}</g>`;
+  });
+  sv += pvEscalaGrafica(18, Hh - 34, s) + pvNorte(W - 30, 26);
+  sv += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="12" fill="${PV_C.cota}" font-family="Arial,sans-serif">VISTA EN PLANTA — medidas en metros</text></svg>`;
+  return sv;
+}
+// arrastrar una unidad en la vista en planta
+let _pvDrag = null;
+function pvDragInit(svgEl) {
+  svgEl.addEventListener('pointerdown', ev => {
+    const g = ev.target.closest('[data-pv-unidad]'); if (!g) return;
+    const pt = svgEl.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+    const p0 = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+    _pvDrag = { g, nombre: g.getAttribute('data-pv-unidad'), x0: p0.x, y0: p0.y, dx: 0, dy: 0, svg: svgEl, s: parseFloat(svgEl.getAttribute('data-pv-escala')) || 20 };
+    g.setPointerCapture && g.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  svgEl.addEventListener('pointermove', ev => {
+    if (!_pvDrag) return;
+    const pt = svgEl.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+    const p1 = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+    _pvDrag.dx = p1.x - _pvDrag.x0; _pvDrag.dy = p1.y - _pvDrag.y0;
+    _pvDrag.g.setAttribute('transform', `translate(${_pvDrag.dx},${_pvDrag.dy})`);
+  });
+  const fin = () => {
+    if (!_pvDrag) return;
+    const d = _pvDrag; _pvDrag = null;
+    const dxm = Math.round(d.dx / d.s * 10) / 10, dym = Math.round(d.dy / d.s * 10) / 10;
+    if (!dxm && !dym) { d.g.removeAttribute('transform'); return; }
+    const p = flowsheetsCurrentProyecto; if (!p) return;
+    const eq = p.equipos_data = p.equipos_data || { etapas: {} };
+    eq.vistas = eq.vistas || {}; eq.vistas.planta = eq.vistas.planta || { pos: {} }; eq.vistas.planta.pos = eq.vistas.planta.pos || {};
+    const o = eq.vistas.planta.pos[d.nombre] || { x: 0, y: 0 };
+    eq.vistas.planta.pos[d.nombre] = { x: Math.round(((Number(o.x) || 0) + dxm) * 10) / 10, y: Math.round(((Number(o.y) || 0) + dym) * 10) / 10 };
+    pvGuardar(p); flowsheetsVistasRender();
+  };
+  svgEl.addEventListener('pointerup', fin); svgEl.addEventListener('pointercancel', fin);
+}
+// ── Vista en corte ──
+function pvCorteSvg(p, unidades) {
+  const lista = unidades.filter(u => !u.sala && (_pvCorteLodos || u.linea === 'liquido'));
+  if (!lista.length) return '';
+  const GAP = 2.2; let x = 0;
+  const items = lista.map(u => { const it = { u, x, w: pvAnchoX(u) }; x += it.w + GAP; return it; });
+  const totalM = x - GAP;
+  const sobre = u => Math.max(0.2, u.m.alto - Math.min(u.m.enterrado, u.m.alto)); // altura sobre el terreno
+  const maxSobre = Math.max(...lista.map(sobre)), maxEnt = Math.max(...lista.map(u => Math.min(u.m.enterrado, u.m.alto)));
+  const s = Math.max(8, Math.min(42, 1300 / (totalM + 6), 520 / (maxSobre + maxEnt + 3)));
+  const padL = 60, padT = 60, yT = padT + maxSobre * s;
+  const W = totalM * s + padL * 2, Hh = yT + (maxEnt + 2.5) * s + 80;
+  let sv = `<svg viewBox="0 0 ${W} ${Hh}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vista en corte" style="max-width:100%;height:auto;background:#fff;border:1px solid var(--border)"><rect width="${W}" height="${Hh}" fill="#fff"/>`;
+  // terreno
+  const tx0 = 12, tx1 = W - 12;
+  sv += `<line x1="${tx0}" y1="${yT}" x2="${tx1}" y2="${yT}" stroke="${PV_C.terreno}" stroke-width="1.6"/>`;
+  for (let t = tx0; t < tx1; t += 12) sv += `<line x1="${t}" y1="${yT}" x2="${t - 6}" y2="${yT + 8}" stroke="${PV_C.terreno}" stroke-width="1"/>`;
+  sv += `<text x="${tx1}" y="${yT - 5}" text-anchor="end" font-size="10" font-style="italic" fill="${PV_C.terreno}" font-family="Arial,sans-serif">Nivel de terreno</text>`;
+  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
+  const guias = [];
+  items.forEach(({ u, x: xm, w }) => {
+    const x0 = padL + xm * s, wp = w * s, ent = Math.min(u.m.enterrado, u.m.alto), top = yT - (u.m.alto - ent) * s, bot = yT + ent * s;
+    const nivel = Math.min(u.m.nivelAgua, u.m.alto), yAgua = bot - nivel * s;
+    let g = '';
+    const esSed = u.fig === 'sedimentador';
+    const cono = esSed ? Math.min(u.m.alto * 0.4, w * 0.18) : 0; // el fondo cónico no cuenta como pared
+    const contorno = esSed
+      ? `M${x0},${top} V${bot - cono * s} L${x0 + wp / 2 - 0.25 * s},${bot} H${x0 + wp / 2 + 0.25 * s} L${x0 + wp},${bot - cono * s} V${top}`
+      : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
+    // agua (recortada al contorno)
+    const idc = 'pvclip' + Math.random().toString(36).slice(2, 7);
+    g += `<clipPath id="${idc}"><path d="${contorno} Z"/></clipPath><rect x="${x0}" y="${yAgua}" width="${wp}" height="${bot - yAgua}" fill="${PV_C.agua}" clip-path="url(#${idc})"/>`;
+    g += `<path d="${contorno}" fill="none" stroke="${PV_C.linea}" stroke-width="2.4"/>`;
+    g += `<path d="M${x0},${yAgua} H${x0 + wp}" stroke="#1565c0" stroke-width="1.2" stroke-dasharray="5 3"/>`;
+    // equipos sumergibles (esquemáticos)
+    const sum = []; ((ed[u.nombre] || {}).equipos || []).forEach(q => { const inf = procesosFlowsheetInfoDe(q.tipo, q.especificacion); if (inf && PROCESOS_FLOWSHEET_ICONOS_SUMERGIBLES[inf.icono]) for (let i = 0; i < Math.min(3, Number(q.cantidad) || 1); i++) sum.push(inf.icono); });
+    sum.slice(0, 6).forEach((ic, i) => { const cx = x0 + wp * (i + 1) / (Math.min(6, sum.length) + 1), sz = Math.min(26, wp / 5, (bot - yAgua) * 0.7 + 8); g += procesosFlowsheetIconoSvg(ic, cx, bot - sz / 2 - 3, sz, '#2e7d32'); });
+    // cotas
+    g += pvCotaH(x0, x0 + wp, bot + 22 + (ent > 0 ? 0 : 0), `${esSed || u.m.forma === 'circ' ? 'Ø ' + u.m.diametro : u.m.largo} m`);
+    g += pvCotaV(top, bot, x0 - 12, `H = ${u.m.alto} m`);
+    g += `<text x="${x0 + wp - 4}" y="${yAgua + 13}" text-anchor="end" font-size="10" fill="#1565c0" font-family="Arial,sans-serif">NA ${u.m.nivelAgua} m</text>`;
+    if (ent > 0) g += `<text x="${x0 + wp / 2}" y="${bot + 38}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">enterrado ${ent} m</text>`;
+    g += `<text x="${x0 + wp / 2}" y="${top - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif">${pvEsc(u.nombre)}</text>`;
+    sv += g;
+    guias.push({ x0, x1: x0 + wp, yAgua });
+  });
+  // pases hidráulicos entre unidades consecutivas (a nivel de agua)
+  for (let i = 0; i + 1 < guias.length; i++) {
+    const a = guias[i], b = guias[i + 1], xm = (a.x1 + b.x0) / 2;
+    sv += `<path d="M${a.x1},${a.yAgua} H${xm} V${b.yAgua} H${b.x0}" fill="none" stroke="${PV_C.proc}" stroke-width="2" marker-end="url(#pv-flecha)"/>`;
+  }
+  sv = sv.replace('<rect width=', `<defs><marker id="pv-flecha" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${PV_C.proc}"/></marker></defs><rect width=`);
+  sv += pvEscalaGrafica(18, Hh - 34, s);
+  sv += `<text x="${W / 2}" y="18" text-anchor="middle" font-size="12" fill="${PV_C.cota}" font-family="Arial,sans-serif">VISTA EN CORTE — medidas en metros</text></svg>`;
+  return sv;
+}
+function flowsheetsVistasRender() {
+  const p = flowsheetsCurrentProyecto; if (!p) return;
+  const unidades = pvUnidades(p);
+  const vacio = '<p class="hint">Todavía no hay unidades — generá el flowsheet o agregalas con "+ Unidades" en el diagrama de proceso.</p>';
+  const btn = (modo, texto) => `<button class="btn btn-secondary btn-sm" style="width:auto;margin-top:10px" onclick="flowsheetsVistaDescargar('${modo}')">⬇ Descargar como imagen (PNG)</button>`;
+  const cp = document.getElementById('flowsheets-vista-planta'), cc = document.getElementById('flowsheets-vista-corte');
+  if (!unidades.length) { if (cp) cp.innerHTML = vacio; if (cc) cc.innerHTML = vacio; return; }
+  if (cp) { cp.innerHTML = `<div style="overflow:auto">${pvPlantaSvg(p, unidades)}</div>${btn('planta')}${pvTablaHtml(unidades)}`; const sv = cp.querySelector('svg'); if (sv) pvDragInit(sv); }
+  if (cc) {
+    const hayLodos = unidades.some(u => u.linea === 'lodos');
+    cc.innerHTML = `${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div style="overflow:auto">${pvCorteSvg(p, unidades) || vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala))}`;
+  }
+}
+function flowsheetsSubtab(v) {
+  _pfVista = v;
+  const mostrar = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  mostrar('flowsheets-card-proceso', v === 'proceso'); mostrar('flowsheets-card-chat', v === 'proceso');
+  mostrar('flowsheets-card-planta', v === 'planta'); mostrar('flowsheets-card-corte', v === 'corte');
+  ['proceso', 'planta', 'corte'].forEach(k => { const b = document.getElementById('flowsheets-subtab-' + k); if (b) b.className = 'btn btn-sm ' + (k === v ? 'btn-primary' : 'btn-secondary'); });
+  if (v === 'proceso') renderFlowsheetsDiagrama(); else flowsheetsVistasRender();
+}
+function flowsheetsVistaDescargar(modo) {
+  const svgEl = document.querySelector(modo === 'planta' ? '#flowsheets-vista-planta svg' : '#flowsheets-vista-corte svg');
+  const p = flowsheetsCurrentProyecto;
+  if (!svgEl || !p) return;
+  const vb = svgEl.viewBox.baseVal;
+  const clon = svgEl.cloneNode(true); clon.setAttribute('width', vb.width); clon.setAttribute('height', vb.height); clon.style.border = 'none';
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clon)], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const sc = 2, cv = document.createElement('canvas'); cv.width = vb.width * sc; cv.height = vb.height * sc;
+    const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.scale(sc, sc); cx.drawImage(img, 0, 0, vb.width, vb.height);
+    URL.revokeObjectURL(url);
+    cv.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `${modo === 'planta' ? 'Vista en planta' : 'Vista en corte'} - ${p.nombre || 'Flowsheet'}.png`; a.click(); });
+  };
+  img.src = url;
 }
 
 function renderFlowsheetsDiagrama() {
