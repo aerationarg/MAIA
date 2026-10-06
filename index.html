@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.77</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.78</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.77</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.78</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13692,6 +13692,59 @@ function pfConicoDim(volL, o, dt) {
   const hk = hkDe(D);
   return { w: D, d: D, hc, hk, ds, ang, h: hc + hk + PF_CONICO_PATAS, volCalc: (vcil(D, hc) + vcon(D)) * 1000, cono: true, orient: 'v' };
 }
+// Calculadora geométrica EXACTA (la IA se equivoca en las cuentas: le pide el cálculo a la app con la acción "calcular").
+// figura: tronco_cono | cono | cilindro | tanque_conico | caja. Medidas en m, volumen en litros, ángulo en grados (de la pared respecto de la horizontal).
+function pfGeomCalc(a) {
+  const n = k => { const v = a[k]; const x = typeof v === 'string' ? pfNumAR(v) : Number(v); return x > 0 ? x : null; };
+  const f = (x, d) => { const r = Math.round(x * Math.pow(10, d || 3)) / Math.pow(10, d || 3); return String(r).replace('.', ','); };
+  const R2D = 180 / Math.PI, D2R = Math.PI / 180;
+  const fig = procesosNormTxt(String(a.figura || '')).replace(/[^a-z]+/g, '_');
+  const L = [];
+  let D = n('diametro_mayor') || n('diametro'), ds = n('diametro_menor') || n('diametro_salida'), h = n('altura') || n('alto'), ang = n('angulo');
+  let V = n('volumen_l') != null ? n('volumen_l') / 1000 : (n('volumen_m3') != null ? n('volumen_m3') : null); // m³
+  if (/caja|prisma|rectang|paralelep/.test(fig)) {
+    let l = n('largo'), w = n('ancho');
+    if (l && w && h) V = l * w * h; else if (V && l && w) h = V / (l * w); else if (V && l && h) w = V / (l * h); else if (V && w && h) l = V / (w * h); else return null;
+    L.push(`Caja: largo ${f(l)} m × ancho ${f(w)} m × alto ${f(h)} m → volumen = ${f(V)} m³ (${f(V * 1000, 1)} l)`);
+  } else if (/^cilindro|cilindrico|^tanque_cil/.test(fig)) {
+    if (D && h) V = Math.PI / 4 * D * D * h; else if (V && D) h = V / (Math.PI / 4 * D * D); else if (V && h) D = Math.sqrt(V / (Math.PI / 4 * h)); else return null;
+    L.push(`Cilindro: Ø ${f(D)} m, alto ${f(h)} m → volumen = π/4·Ø²·h = ${f(V)} m³ (${f(V * 1000, 1)} l)`);
+  } else if (/tanque_conico|conico_con_cilindro|cilindro_y_cono|cilindro_cono/.test(fig)) {
+    const hc = n('alto_cilindro');
+    const r = pfConicoDim(V ? V * 1000 : null, { w: D, ds: ds, hc: hc, ang: ang }, null);
+    if (!D && !V) return null;
+    L.push(`Tanque cónico (cilindro arriba + tolva abajo): Ø mayor ${f(r.w)} m, Ø salida ${f(r.ds)} m, ángulo de pared ${f(r.ang, 1)}° (vs. horizontal)`);
+    L.push(`Alto cilindro ${f(r.hc)} m + alto cono ${f(r.hk)} m = ${f(r.hc + r.hk)} m (sin patas)`);
+    L.push(`Volumen total = ${f(r.volCalc / 1000)} m³ (${f(r.volCalc, 1)} l)`);
+  } else { // tronco de cono (o cono entero si no hay Ø menor)
+    const cono = /^cono$|cono_entero|^cono_/.test(fig) || (/cono/.test(fig) && !ds && !/tronco/.test(fig));
+    if (cono) ds = 0;
+    if (ds == null && !cono) { if (D && h && ang) ds = D - 2 * h / Math.tan(ang * D2R); }
+    if (!D && ds != null && h && ang) D = ds + 2 * h / Math.tan(ang * D2R);
+    if (!D && ds != null && h && V) { const K = 12 * V / (Math.PI * h); D = (-ds + Math.sqrt(ds * ds - 4 * (ds * ds - K))) / 2; }
+    if (D && !ds && ds !== 0 && h && V) { const K = 12 * V / (Math.PI * h), t = 4 * K - 3 * D * D; if (t < 0) return null; ds = (-D + Math.sqrt(t)) / 2; }
+    if (!(D > 0) || ds == null || ds < 0 || ds >= D) return null;
+    if (!h && ang) h = (D - ds) / 2 * Math.tan(ang * D2R);
+    if (!h && V) h = 12 * V / (Math.PI * (D * D + D * ds + ds * ds));
+    if (!h) return null;
+    V = Math.PI * h / 12 * (D * D + D * ds + ds * ds);
+    ang = Math.atan2(h, (D - ds) / 2) * R2D;
+    L.push(`${cono ? 'Cono' : 'Tronco de cono'}: Ø mayor ${f(D)} m, Ø menor ${f(ds)} m, altura ${f(h)} m`);
+    L.push(`Volumen = π·h/12·(D² + D·d + d²) = ${f(V)} m³ (${f(V * 1000, 1)} l)`);
+    L.push(`Ángulo de la pared: ${f(ang, 1)}° respecto de la horizontal (semiángulo ${f(90 - ang, 1)}° respecto de la vertical, ángulo incluido ${f(2 * (90 - ang), 1)}°)`);
+  }
+  return L.join('\n');
+}
+// Saca de las acciones las de tipo "calcular" y devuelve el texto de sus resultados (calculados por la app, no por la IA)
+function pfGeomCalcAcciones(acciones) {
+  const out = [];
+  (acciones || []).forEach(a => {
+    if (!a || a.tipo !== 'calcular') return;
+    let t = null; try { t = pfGeomCalc(a); } catch (_e) { t = null; }
+    out.push(t || '⚠ No pude calcular eso: faltan datos (por ejemplo, para un tronco de cono necesito Ø mayor, Ø menor y una de estas: altura, ángulo o volumen).');
+  });
+  return out.length ? '\n\n🧮 Cálculo exacto:\n' + out.join('\n\n') : '';
+}
 const pfQuimCaudal = it => { const m = /(\d+(?:[.,]\d+)?\s*(?:a|-|–)\s*\d+(?:[.,]\d+)?\s*(?:l\/h|lt\/h|kg\/h|l\/min|m3\/h))|(\d+(?:[.,]\d+)?\s*(?:l\/h|lt\/h|kg\/h|l\/min|m3\/h))/i.exec(`${it.tipoOriginal || it.tipo || ''} ${it.especificacion || ''}`); return m ? m[0].replace(/\s+/g, ' ') : ''; };
 // Arma los grupos (por químico) a partir de los equipos de la zona (con su cantidad, sin expandir)
 function pfQuimGrupos(entradas, ov) {
@@ -16502,7 +16555,9 @@ const PV_TOOL_CHAT = {
   input_schema: { type: 'object', properties: {
     respuesta: { type: 'string', description: 'Respuesta breve en español (si hiciste cambios, decí cuáles).' },
     acciones: { type: 'array', description: 'Cambios a aplicar (vacío si solo es una consulta).', items: { type: 'object', properties: {
-      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer'] },
+      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular'] },
+      figura: { type: 'string', enum: ['tronco_cono', 'cono', 'cilindro', 'tanque_conico', 'caja'], description: 'Solo para calcular: la figura a calcular.' },
+      diametro_mayor: { type: 'number' }, diametro_menor: { type: 'number' }, altura: { type: 'number' }, angulo: { type: 'number', description: 'Para calcular: grados de la pared respecto de la horizontal.' }, volumen_l: { type: 'number' }, alto_cilindro: { type: 'number' }, largo: { type: 'number' }, ancho: { type: 'number' },
       unidad: { type: 'string', description: 'Nombre exacto de la unidad.' },
       id: { type: 'string', description: 'Id del equipo (mover_equipo) o de la cota (quitar_cota).' },
       campo: { type: 'string', enum: ['forma', 'largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado', 'angulo', 'volL', 'orient', 'w', 'd', 'h', 'ds', 'hc', 'ang'], description: 'Para medida: forma/largo/ancho/diametro/alto/nivelAgua/enterrado de una unidad. Para configurar_equipo (id_config del tanque): volL (litros), orient ("h" horizontal / "v" vertical, solo cisternas), w/d/h (ancho o largo, fondo y alto en metros); en tanques cónicos: w (Ø mayor), ds (Ø de salida), hc (alto del cilindro) y ang (ángulo de la pared respecto de la horizontal, en grados). Para una unidad (medida): angulo = ángulo del fondo de un sedimentador, en grados respecto de la horizontal.' },
@@ -16555,10 +16610,11 @@ async function pvChatSend(modo) {
   showMsg(sid, 'loading', 'Pensando...');
   try {
     const previo = hist[modo].slice(-9, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (6) En las cuentas geométricas (volúmenes, ángulos, alturas) mostrá la fórmula y el resultado; para un tronco de cono V = π·h/3·(R² + R·r + r²), semiángulo = atan((R − r)/h) respecto de la vertical y ángulo de la pared respecto de la horizontal = 90° − semiángulo.\n\nPEDIDO DEL USUARIO: ${msg}`;
+    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
     const r = await propLlamarForzado(PV_TOOL_CHAT, sistema, 3000);
-    const aplicadas = pvAplicarAcciones(p, modo, r.acciones || []);
-    const texto = (r.respuesta || '(sin respuesta)') + (aplicadas.length ? '\n\n✓ ' + aplicadas.join('\n✓ ') : '');
+    const calcTxt = pfGeomCalcAcciones(r.acciones);
+    const aplicadas = pvAplicarAcciones(p, modo, (r.acciones || []).filter(a => !(a && a.tipo === 'calcular')));
+    const texto = (r.respuesta || '(sin respuesta)') + calcTxt + (aplicadas.length ? '\n\n✓ ' + aplicadas.join('\n✓ ') : '');
     hist[modo].push({ role: 'assistant', content: texto });
     if (aplicadas.length) await pvGuardar(p);
     pvChatRender(modo);
@@ -16864,7 +16920,7 @@ async function flowsheetsChatSend() {
       const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad}) [id:${eq.id}${eq.grupo ? ', grupo: ' + eq.grupo : ''}${eq.especificacion ? ', esp: ' + String(eq.especificacion).slice(0, 80) : ''}]`).join('; ') || '(sin equipos)';
       return `- "${nombre}" — línea ${h.linea || 'liquido'}${h.origenLodos ? `, recibe lodos de "${h.origenLodos}"` : ''} — dimensiones: ${JSON.stringify(h.valoresConEtiqueta || {})} — equipos: ${eqs}`;
     }).join('\n') || '(sin etapas todavía — generá el flowsheet primero con texto/archivos)';
-    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoId":"<id del equipo, de la lista de arriba — preferido>","equipoTipo":"<tipo ya cargado, si no usás el id>","cambios":{"tipo":"...","cantidad":...,"especificacion":"...","grupo":"...","volumen_l":<litros>,"orientacion":"horizontal"|"vertical" (solo cisternas),"diametro":<m>,"largo":<m>,"alto":<m>,"ancho":<m>,"diametro_salida":<m>,"alto_cilindro":<m>,"angulo":<grados de la pared del cono respecto de la horizontal>}} (poné solo los campos que cambian; para cambiar el volumen, la orientación o las medidas de un tanque usá volumen_l / orientacion / diametro / largo / alto / ancho; en un TANQUE CÓNICO (cilindro arriba + tolva abajo) "diametro" es el Ø mayor, "diametro_salida" el Ø de salida y "angulo" el de la pared). Para AGREGAR un tanque cónico usá agregar_equipo con tipo "Tanque cónico" y poné en "especificacion" los datos, ej. "diámetro 1 m, diámetro de salida 0,2 m, ángulo 60°, volumen 500 l", y "grupo" = químico\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoId":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente, y si el pedido no se puede hacer con las acciones disponibles, decilo en vez de afirmar que lo hiciste.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
+    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoId":"<id del equipo, de la lista de arriba — preferido>","equipoTipo":"<tipo ya cargado, si no usás el id>","cambios":{"tipo":"...","cantidad":...,"especificacion":"...","grupo":"...","volumen_l":<litros>,"orientacion":"horizontal"|"vertical" (solo cisternas),"diametro":<m>,"largo":<m>,"alto":<m>,"ancho":<m>,"diametro_salida":<m>,"alto_cilindro":<m>,"angulo":<grados de la pared del cono respecto de la horizontal>}} (poné solo los campos que cambian; para cambiar el volumen, la orientación o las medidas de un tanque usá volumen_l / orientacion / diametro / largo / alto / ancho; en un TANQUE CÓNICO (cilindro arriba + tolva abajo) "diametro" es el Ø mayor, "diametro_salida" el Ø de salida y "angulo" el de la pared). Para AGREGAR un tanque cónico usá agregar_equipo con tipo "Tanque cónico" y poné en "especificacion" los datos, ej. "diámetro 1 m, diámetro de salida 0,2 m, ángulo 60°, volumen 500 l", y "grupo" = químico\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoId":"...","equipoTipo":"..."}\n- "calcular": {"tipo":"calcular","figura":"tronco_cono"|"cono"|"cilindro"|"tanque_conico"|"caja","diametro_mayor":<m>,"diametro_menor":<m>,"altura":<m>,"angulo":<grados de la pared respecto de la horizontal>,"volumen_l":<litros>,"alto_cilindro":<m>,"largo":<m>,"ancho":<m>} — SIEMPRE que el usuario pregunte por un volumen, ángulo, altura o diámetro de una figura (tronco de cono, cono, cilindro, tanque cónico, caja), usá esta acción con los datos que dio (solo los que dio) y NO calcules vos: la app hace la cuenta exacta y la agrega a tu respuesta. En "respuesta" no pongas ningún resultado numérico de la cuenta, solo decí qué vas a calcular (ej. "Te calculo el volumen del tronco de cono:"). Es una consulta: no cambia el flowsheet.\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente, y si el pedido no se puede hacer con las acciones disponibles, decilo en vez de afirmar que lo hiciste.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
@@ -16882,7 +16938,9 @@ async function flowsheetsChatSend() {
       try { parsed = i >= 0 && j > i ? JSON.parse(limpio.slice(i, j + 1)) : null; } catch (_e2) { parsed = null; }
       if (!parsed) parsed = { respuesta: i > 0 ? limpio.slice(0, i).trim() || raw : raw, acciones: [], acciones_layout: [] };
     }
-    p.chat_historial = p.chat_historial.concat([{ role: 'assistant', content: parsed.respuesta || '(sin respuesta)' }]);
+    const calcTxt = pfGeomCalcAcciones(parsed.acciones);
+    parsed.acciones = (parsed.acciones || []).filter(a => !(a && a.tipo === 'calcular'));
+    p.chat_historial = p.chat_historial.concat([{ role: 'assistant', content: (parsed.respuesta || '(sin respuesta)') + calcTxt }]);
     const fieldsToSave = { chat_historial: p.chat_historial };
     if ((parsed.acciones && parsed.acciones.length) || (parsed.acciones_layout && parsed.acciones_layout.length)) {
       procesosFlowsheetUndoPush(p);
