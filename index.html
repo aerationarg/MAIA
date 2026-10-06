@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.69</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.70</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.69</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.70</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13235,7 +13235,7 @@ function procesosFlowsheetDosificaInfo(eq) {
   if (!eq.origenEtapa) return null;
   const texto = procesosNormTxt(`${eq.tipoOriginal || ''} ${eq.especificacion || ''}`);
   const m = PROCESOS_FLOWSHEET_QUIMICO_RE.exec(texto);
-  const quimico = m ? m[0].charAt(0).toUpperCase() + m[0].slice(1) : null;
+  const quimico = m ? procesosFlowsheetQuimicoBonito(m[0].charAt(0).toUpperCase() + m[0].slice(1)) : null;
   return { etapaDestino: eq.origenEtapa, quimico };
 }
 // Muchos proyectos cargan UN solo equipo por químico ("Equipo de
@@ -13571,6 +13571,152 @@ function procesosFlowsheetChips(equiposSinExpandir, x, yTop, anchoDisponible, ic
   });
   return { svg: s, alto: filas * celda, bombas, bombasRecirc };
 }
+// ── Zona de químicos: disposición como en un P&ID real ──
+// Cada químico es un "grupo": su tanque / maxibidón (con tamaño proporcional al volumen) con sus bombas dosificadoras al costado
+// (siempre chicas, todas iguales), una cañería de succión y la línea roja de dosificación que sube a la marca numerada del destino.
+// Todos los grupos van lado a lado apoyados sobre una misma batea de contención, con el nombre del químico y el volumen debajo.
+const PF_QUIM = { PAD: 16, HEADER_H: 40, BOX_MIN_W: 190, PUMP_S: 30, GAP: 30, SUBE: 38, BATEA: 11, ABAJO: 40 };
+// Volumen en litros que figure en el texto ("tanque de 95 L", "maxibidón 1000 lts", "2 m3"); un caudal ("10 L/h") no cuenta
+function procesosFlowsheetQuimicoVolumenL(txt) {
+  const t = procesosNormTxt(txt || '');
+  let m = /(\d+(?:[.,]\d+)?)\s*(?:m3|m³|m\^3)(?!\s*\/)/.exec(t);
+  if (m) return parseFloat(m[1].replace(',', '.')) * 1000;
+  m = /(\d+(?:[.,]\d+)?)\s*(?:l|lt|lts|litros)\b(?!\s*\/)/.exec(t);
+  return m ? parseFloat(m[1].replace(',', '.')) : null;
+}
+// Nombre para mostrar (con tildes y más completo) del químico detectado por palabra clave
+const PF_QUIM_BONITO = { 'cloruro ferrico': 'Cloruro férrico', hipoclorito: 'Hipoclorito de sodio', polimero: 'Polímero', acido: 'Ácido', hidroxido: 'Hidróxido', alumina: 'Alúmina', peroxido: 'Peróxido', soda: 'Soda cáustica', quimic: 'Químico', cloro: 'Cloro', cal: 'Cal', coagulante: 'Coagulante', floculante: 'Floculante', sulfato: 'Sulfato', permanganato: 'Permanganato', metanol: 'Metanol' };
+function procesosFlowsheetQuimicoBonito(q) { return q ? (PF_QUIM_BONITO[String(q).toLowerCase()] || q) : q; }
+function procesosFlowsheetQuimicoNombre(txt) {
+  const m = PROCESOS_FLOWSHEET_QUIMICO_RE.exec(procesosNormTxt(txt || ''));
+  return m ? m[0].charAt(0).toUpperCase() + m[0].slice(1) : null;
+}
+// Tamaño de dibujo de un tanque según su volumen (raíz: el doble de volumen no es el doble de ancho); sin dato, según el tipo
+function procesosFlowsheetQuimicoTanqueS(it) {
+  const L = procesosFlowsheetQuimicoVolumenL(`${it.tipoOriginal || ''} ${it.especificacion || ''}`) || (it.icono === 'maxibidon' ? 1000 : it.icono === 'contenedor' ? 200 : 500);
+  return Math.max(34, Math.min(100, Math.round(24 + 2 * Math.sqrt(L))));
+}
+function procesosFlowsheetQuimicosGrupos(equipos) {
+  const items = procesosFlowsheetExpandirIconos(equipos, 4);
+  const base = id => String(id).replace(/_\d+$/, '');
+  const esTanque = i => i.icono === 'maxibidon' || i.icono === 'contenedor' || i.icono === 'tanque_real';
+  const grupos = [];
+  const porBase = new Map();
+  items.filter(i => i.icono === 'bomba_dosif').forEach(b => {
+    const k = base(b.id);
+    if (!porBase.has(k)) { const g = { key: k, bombas: [], tanque: null, otros: [], quimico: null }; porBase.set(k, g); grupos.push(g); }
+    porBase.get(k).bombas.push(b);
+  });
+  const sueltos = [];
+  items.filter(esTanque).forEach(t => {
+    const sintetico = /__cont$/.test(String(t.id));
+    const g = sintetico ? porBase.get(String(t.id).replace(/__cont$/, '')) : null;
+    if (g && !g.tanque) g.tanque = t; else sueltos.push(t);
+  });
+  // tanques cargados a mano: se juntan con la bomba (sin tanque) del mismo químico, o con la única que quede sin tanque
+  sueltos.slice().forEach(t => {
+    const q = procesosFlowsheetQuimicoNombre(`${t.tipoOriginal || ''} ${t.especificacion || ''}`);
+    const libres = grupos.filter(g => !g.tanque);
+    const g = libres.find(x => q && procesosFlowsheetQuimicoNombre(`${x.bombas[0].tipoOriginal || ''} ${x.bombas[0].especificacion || ''}`) === q) || (libres.length === 1 && sueltos.length === 1 ? libres[0] : null);
+    if (g) { g.tanque = t; sueltos.splice(sueltos.indexOf(t), 1); }
+  });
+  // si quedan tantos tanques sueltos como bombas sin tanque (aunque el químico se nombre distinto, ej. "coagulante" / "cloruro férrico"), van de a uno
+  const libresFinal = grupos.filter(g => !g.tanque && g.bombas.length);
+  if (libresFinal.length && libresFinal.length === sueltos.length) libresFinal.forEach((g, i) => { g.tanque = sueltos[i]; });
+  else sueltos.forEach(t => grupos.push({ key: t.id, bombas: [], tanque: t, otros: [], quimico: null }));
+  if (libresFinal.length && libresFinal.length === sueltos.length) sueltos.length = 0;
+  items.filter(i => i.icono !== 'bomba_dosif' && !esTanque(i)).forEach(o => grupos.push({ key: o.id, bombas: [], tanque: null, otros: [o], quimico: null }));
+  grupos.forEach(g => {
+    const b = g.bombas[0], t = g.tanque, o = g.otros[0];
+    g.quimico = procesosFlowsheetQuimicoBonito((b && (b.dosifQuimico || procesosFlowsheetQuimicoNombre(`${b.tipoOriginal || ''} ${b.especificacion || ''}`))) || (t && procesosFlowsheetQuimicoNombre(`${t.tipoOriginal || ''} ${t.especificacion || ''}`)) || (o && (o.etiqueta || o.tipoOriginal)) || null);
+    g.volumenL = t ? procesosFlowsheetQuimicoVolumenL(`${t.tipoOriginal || ''} ${t.especificacion || ''}`) : null;
+    g.tanqueS = t ? procesosFlowsheetQuimicoTanqueS(t) : 0;
+    g.pumpsW = g.bombas.length * (PF_QUIM.PUMP_S + 8);
+    g.otrosW = g.otros.length * 44;
+    g.w = Math.max(74, g.pumpsW + (g.pumpsW && g.tanqueS ? 18 : 0) + g.tanqueS + g.otrosW);
+    g.h = Math.max(g.tanqueS, g.bombas.length ? PF_QUIM.PUMP_S : 0, g.otros.length ? 40 : 0) + (g.bombas.length ? PF_QUIM.SUBE : 0);
+  });
+  return grupos;
+}
+function procesosFlowsheetQuimicosMedir(equipos) {
+  const grupos = procesosFlowsheetQuimicosGrupos(equipos);
+  const ancho = grupos.reduce((s, g) => s + g.w, 0) + PF_QUIM.GAP * Math.max(0, grupos.length - 1);
+  const hGrupo = grupos.length ? Math.max(...grupos.map(g => g.h)) : 40;
+  const hFigura = PF_QUIM.HEADER_H + hGrupo + 6;
+  return { w: Math.max(PF_QUIM.BOX_MIN_W, ancho + PF_QUIM.PAD * 2), h: hFigura + PF_QUIM.ABAJO, hFigura };
+}
+// Dibuja la zona: x/yTop = esquina de la caja, w = ancho de la caja, yPiso = nivel de terreno (donde apoya la batea)
+function procesosFlowsheetQuimicosSvg(equipos, x, w, yPiso, layout, iconosIA) {
+  const grupos = procesosFlowsheetQuimicosGrupos(equipos);
+  const colorDosif = '#c77500', rojo = '#d32f2f', verde = '#2e7d32', gris = '#7a7a72';
+  const ancho = grupos.reduce((s, g) => s + g.w, 0) + PF_QUIM.GAP * Math.max(0, grupos.length - 1);
+  let cx0 = x + (w - ancho) / 2;
+  let s = '';
+  // batea de contención (una sola, bajo todos los grupos)
+  const bx0 = cx0 - 14, bx1 = cx0 + ancho + 14, by = yPiso;
+  s += `<path d="M${bx0},${by - 2} L${bx0},${by + PF_QUIM.BATEA} L${bx1},${by + PF_QUIM.BATEA} L${bx1},${by - 2}" fill="none" stroke="#3a3a36" stroke-width="1.5"/>`;
+  let labelsY = by + PF_QUIM.BATEA + 14;
+  grupos.forEach(g => {
+    const gx = cx0, yb = yPiso - 2;
+    let cursor = gx + (g.w - (g.pumpsW + (g.pumpsW && g.tanqueS ? 18 : 0) + g.tanqueS + g.otrosW)) / 2;
+    const bombasPos = [];
+    // 1) bombas
+    const pumpsSvg = g.bombas.map((b, i) => {
+      const off = procesosFlowsheetOffset(layout, 'equipos', b.id), esc = procesosFlowsheetEscala(layout, 'equipos', b.id);
+      const S = PF_QUIM.PUMP_S * esc;
+      const ccx = cursor + i * (PF_QUIM.PUMP_S + 8) + (PF_QUIM.PUMP_S + 8) / 2 + off.x, ccy = yb - S / 2 + off.y;
+      bombasPos.push({ x: ccx, top: ccy - S / 2, b });
+      return procesosFlowsheetDragWrap('equipo', b.id, procesosFlowsheetIconoSvg(b.icono, ccx, ccy, S, verde), { x: ccx - S / 2 - 6, y: ccy - S / 2 - 6, w: S + 12, h: S + 12 });
+    });
+    cursor += g.pumpsW + (g.pumpsW && g.tanqueS ? 18 : 0);
+    // 2) tanque / maxibidón, con su tamaño proporcional
+    let tanqueSvg = '', tanqueIzq = null;
+    if (g.tanque) {
+      const t = g.tanque, off = procesosFlowsheetOffset(layout, 'equipos', t.id), esc = procesosFlowsheetEscala(layout, 'equipos', t.id);
+      const S = g.tanqueS * esc;
+      const ccx = cursor + g.tanqueS / 2 + off.x, ccy = yb - S / 2 + off.y;
+      tanqueIzq = ccx - S / 2;
+      tanqueSvg = procesosFlowsheetDragWrap('equipo', t.id, procesosFlowsheetIconoSvg(t.icono, ccx, ccy, S, verde), { x: ccx - S / 2 - 6, y: ccy - S / 2 - 6, w: S + 12, h: S + 12 });
+    }
+    cursor += g.tanqueS;
+    // 3) otros equipos del químico (preparadores, mezcladores...)
+    const otrosSvg = g.otros.map((o, i) => {
+      const off = procesosFlowsheetOffset(layout, 'equipos', o.id), esc = procesosFlowsheetEscala(layout, 'equipos', o.id);
+      const S = 40 * esc;
+      const ccx = cursor + i * 44 + 22 + off.x, ccy = yb - S / 2 + off.y;
+      const iconoIA = o.icono === 'generico' && iconosIA ? iconosIA[procesosNormTxt(o.tipoOriginal)] : null;
+      return procesosFlowsheetDragWrap('equipo', o.id, procesosFlowsheetIconoSvg(o.icono, ccx, ccy, S, verde, iconoIA && iconoIA.path), { x: ccx - S / 2 - 6, y: ccy - S / 2 - 6, w: S + 12, h: S + 12 });
+    });
+    // cañería de succión: del tanque (costado, abajo) por detrás de las bombas
+    if (bombasPos.length && tanqueIzq != null) {
+      s += `<path d="M${tanqueIzq},${yb - 10} H${bombasPos[0].x}" fill="none" stroke="#3a3a36" stroke-width="1.4"/>`;
+    }
+    s += tanqueSvg + pumpsSvg.join('') + otrosSvg.join('');
+    // línea roja de dosificación: de cada bomba hacia arriba, juntas en un colector con la marca numerada
+    if (bombasPos.length) {
+      const topY = Math.min(...bombasPos.map(b => b.top)) - PF_QUIM.SUBE + 14;
+      bombasPos.forEach(b => { s += `<path d="M${b.x},${b.top} V${topY}" fill="none" stroke="${rojo}" stroke-width="1.8"/>`; });
+      if (bombasPos.length > 1) s += `<path d="M${bombasPos[0].x},${topY} H${bombasPos[bombasPos.length - 1].x}" fill="none" stroke="${rojo}" stroke-width="1.8"/>`;
+      const b0 = bombasPos[0].b;
+      if (b0.dosifNumero) {
+        const mx = (bombasPos[0].x + bombasPos[bombasPos.length - 1].x) / 2, my = topY - 9;
+        const numKey = 'n_d_' + b0.dosifNumero;
+        const numTxt = (layout && layout.marcas && layout.marcas[numKey] && layout.marcas[numKey].numero) || b0.dosifNumero;
+        s += `<path d="M${mx},${topY} V${my + 7}" fill="none" stroke="${rojo}" stroke-width="1.8"/>`;
+        s += `<circle cx="${mx}" cy="${my}" r="8" fill="#fff" stroke="${colorDosif}" stroke-width="1.4" data-pf-accion="marca-num" data-pf-a="${procesosFlowsheetAttrEsc(numKey)}" data-pf-b="${procesosFlowsheetAttrEsc(b0.dosifNumero)}"/>`;
+        s += `<text x="${mx}" y="${my + 3}" text-anchor="middle" fill="${colorDosif}" font-weight="700" font-size="10" data-pf-accion="marca-num" data-pf-a="${procesosFlowsheetAttrEsc(numKey)}" data-pf-b="${procesosFlowsheetAttrEsc(b0.dosifNumero)}" style="cursor:pointer">${procesosDiagramaSvgEsc(String(numTxt))}</text>`;
+        if (b0.dosifEtapa) s += `<text x="${mx + 12}" y="${my + 3}" fill="${colorDosif}" font-size="9">→ ${procesosDiagramaSvgEsc(b0.dosifEtapa)}</text>`;
+      }
+    }
+    // rótulos bajo la batea: químico, volumen y tags
+    const gcx = gx + g.w / 2;
+    const tags = [g.bombas.length ? `${g.bombas.length > 1 ? g.bombas.length + '× ' : ''}${g.bombas[0].etiqueta ? String(g.bombas[0].etiqueta).replace(/^\d+×\s*/, '') : 'BD'}` : '', g.tanque ? String(g.tanque.etiqueta || 'TK').replace(/^\d+×\s*/, '') : ''].filter(Boolean).join(' · ');
+    s += `<text x="${gcx}" y="${labelsY}" text-anchor="middle" fill="#3a3a36" font-weight="600" font-size="10">${procesosDiagramaSvgEsc(g.quimico || (g.tanque ? 'Tanque' : 'Equipo'))}</text>`;
+    s += `<text x="${gcx}" y="${labelsY + 11}" text-anchor="middle" fill="${gris}" font-size="9">${procesosDiagramaSvgEsc([g.volumenL ? (g.volumenL >= 1000 && g.volumenL % 1000 === 0 ? g.volumenL / 1000 + ' m³' : Math.round(g.volumenL) + ' L') : '', tags].filter(Boolean).join(' — '))}</text>`;
+    cx0 += g.w + PF_QUIM.GAP;
+  });
+  return { svg: s, bombas: [], bombasRecirc: [] };
+}
 // Misma estructura/flujo que procesosDiagramaFlujoSvg (etapas confirmadas del
 // Paso 2, línea líquida arriba y de lodos abajo), pero cada etapa se dibuja
 // con la figura que le corresponde (tanque/pozo/sedimentador/máquina) y sus
@@ -13667,7 +13813,8 @@ function procesosFlowsheetSvg(p) {
     if (info) { _pfDosifNum++; eq.dosifNumero = _pfDosifNum; eq.dosifEtapa = info.etapaDestino; eq.dosifQuimico = info.quimico; }
     const cont = procesosFlowsheetContenedorDetectado(eq);
     if (cont) {
-      const tipoSint = cont.label + (info && info.quimico ? ` de ${info.quimico}` : '');
+      const volDet = procesosFlowsheetQuimicoVolumenL(`${eq.tipoOriginal || ''} ${eq.especificacion || ''}`);
+      const tipoSint = cont.label + (info && info.quimico ? ` de ${info.quimico}` : '') + (volDet ? ` ${Math.round(volDet)} L` : '');
       contenedoresDetectados.push(Object.assign({ id: eq.id + '__cont', cantidad: 1, tipoOriginal: tipoSint, especificacion: '' }, procesosFlowsheetInfoDe(tipoSint, '')));
     }
   });
@@ -13750,7 +13897,7 @@ function procesosFlowsheetSvg(p) {
   let etapaQuimicos = null;
   if (quimicosGlobal.length) {
     etapaQuimicos = { nombre: 'Zona de químicos', equipos: quimicosGlobal, tipoFig: 'caja', contieneAgua: false, dimsTxt: '', figW: 0, figH: 0, dominante: null, adentro: [], techo: [], afuera: quimicosGlobal, escalaEtapa: procesosFlowsheetEscala(layout, 'etapas', 'Zona de químicos'), profundidad: null };
-    Object.assign(etapaQuimicos, medir(etapaQuimicos));
+    Object.assign(etapaQuimicos, procesosFlowsheetQuimicosMedir(quimicosGlobal));
   }
   let etapaSoplantes = null;
   if (soplantesGlobal.length) {
@@ -13967,7 +14114,9 @@ function procesosFlowsheetSvg(p) {
     // aire marcado con la flecha numerada (ver "entra aire" más abajo),
     // nunca con una cañería física local.
     if (et.afuera.length) {
-      const { svg: chipsSvg, bombas: chipBombas, bombasRecirc: chipBombasRecirc } = procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT, layout, et.tipoFig, p.equipos_data && p.equipos_data.iconosIA);
+      const { svg: chipsSvg, bombas: chipBombas, bombasRecirc: chipBombasRecirc } = et.nombre === 'Zona de químicos'
+        ? procesosFlowsheetQuimicosSvg(et.afuera, x, et.w, y + et.hFigura, layout, p.equipos_data && p.equipos_data.iconosIA)
+        : procesosFlowsheetChips(et.afuera, x + PAD, cy, et.w - PAD * 2, IC_OUT, layout, et.tipoFig, p.equipos_data && p.equipos_data.iconosIA);
       s += chipsSvg;
       bombas.push(...chipBombas);
       bombasRecirc.push(...(chipBombasRecirc || []));
