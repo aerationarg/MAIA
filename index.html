@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.82</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.83</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.82</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.83</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16463,6 +16463,13 @@ function pvPlantaGeom(p, unidades) {
   Object.values(zi).forEach(z => z.items.forEach(i => { xs.push(i.x, i.x + i.w); ys.push(i.y, i.y + i.d); }));
   return { pos, zi, minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
 }
+function pvZItem(p, id) {
+  const cz = p.equipos_data && p.equipos_data.vistas && p.equipos_data.vistas.cortez;
+  if (cz && cz[id] != null) return Number(cz[id]) || 0;
+  const o = procesosFlowsheetOffset(procesosFlowsheetLayoutGet(p), 'equipos', id);
+  return Math.max(0, Math.min(8, Math.round(-o.y / PF_QUIM.PXM * 20) / 20));
+}
+function pvCorteAlturasReset() { const p = pvProy(); if (!p || !p.equipos_data || !p.equipos_data.vistas) return; delete p.equipos_data.vistas.cortez; pvGuardar(p); flowsheetsVistasRender(); }
 function pvCorteDefSvg(p, unidades, c) {
   const M = pvCorteMarco(c), L = M.L;
   if (!(L > 0.05)) return null;
@@ -16496,12 +16503,12 @@ function pvCorteDefSvg(p, unidades, c) {
     if (u.m.forma === 'circ' && !u.sala) addCirc(o, ps.x + w / 2, ps.y + d / 2, w / 2); else addRect(o, ps.x, ps.y, w, d);
   });
   Object.values(G.zi).forEach(z => z.items.forEach(i => {
-    const o = { tipo: 'item', i, h: /bomba/.test(i.kind) ? 0.3 : (i.h || 1) };
+    const o = { tipo: 'item', i, h: /bomba/.test(i.kind) ? 0.3 : (i.h || 1), z: pvZItem(p, i.id) };
     const circ = (i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h';
     if (circ) addCirc(o, i.x + i.w / 2, i.y + i.d / 2, i.w / 2); else addRect(o, i.x, i.y, i.w, i.d);
   }));
   // alturas para la escala
-  const altoDe = o => o.tipo === 'item' ? o.h + (o.i.mixer ? 0.42 : 0) : o.u.m.alto - Math.min(o.u.m.enterrado || 0, o.u.m.alto);
+  const altoDe = o => o.tipo === 'item' ? o.z + o.h + (o.i.mixer ? 0.42 : 0) : o.u.m.alto - Math.min(o.u.m.enterrado || 0, o.u.m.alto);
   const maxSobre = Math.max(0.5, ...els.map(altoDe));
   const maxEnt = Math.max(0, ...els.filter(o => o.tipo === 'unidad').map(o => Math.min(o.u.m.enterrado || 0, o.u.m.alto)));
   const s = Math.max(8, Math.min(42, 1300 / (L + 1), 480 / (maxSobre + maxEnt + 2.5)));
@@ -16539,20 +16546,21 @@ function pvCorteDefSvg(p, unidades, c) {
         g += `<text x="${x0 + wp / 2}" y="${top - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
       }
     } else {
-      const i = o.i, wpx = Math.max(4, wp), hpx = o.h * s, tcx = x0 + wp / 2;
-      if (/bomba/.test(i.kind)) g += `<rect x="${x0}" y="${yT - 0.3 * s}" width="${wpx}" height="${0.3 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/>`;
+      const i = o.i, wpx = Math.max(4, wp), hpx = o.h * s, tcx = x0 + wp / 2, yB = yT - o.z * s;
+      if (o.z > 0.04) g += `<rect x="${x0 + wpx * 0.12}" y="${yB}" width="${wpx * 0.76}" height="${o.z * s}" fill="none" stroke="#9a9a9a" stroke-width="1" stroke-dasharray="3 3"/>`; // soporte / altura sobre el piso
+      if (/bomba/.test(i.kind)) g += `<rect x="${x0}" y="${yB - 0.3 * s}" width="${wpx}" height="${0.3 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/>`;
       else {
         const horiz = i.kind === 'cisterna' && i.orient === 'h';
         const largoEnX = i.w >= i.d, deFrente = horiz && ((largoEnX ? Math.abs(M.rx) : Math.abs(M.ry)) < 0.7); // cisterna horizontal vista desde un extremo → un círculo
         if (deFrente) {
-          const D = Math.min(i.w, i.d) * s, sad = Math.max(4, Math.min(10, hpx * 0.14)), cy = yT - sad - D / 2;
-          g += `<path d="M${tcx - D * 0.42},${yT} L${tcx - D * 0.3},${yT - sad} H${tcx + D * 0.3} L${tcx + D * 0.42},${yT} Z" fill="#fff" stroke="#222" stroke-width="1.3"/><circle cx="${tcx}" cy="${cy}" r="${D / 2}" fill="#fff" stroke="#222" stroke-width="1.6"/><circle cx="${tcx}" cy="${cy - D * 0.22}" r="${Math.max(2.5, D * 0.07)}" fill="#fff" stroke="#222" stroke-width="1.1"/><line x1="${tcx - D * 0.6}" y1="${yT + 1}" x2="${tcx + D * 0.6}" y2="${yT + 1}" stroke="#222" stroke-width="2.2"/>`;
-        } else g += pfQuimTanqueSvg(i.kind, tcx, yT, wpx, hpx, i.orient, i.dim);
-        if (i.mixer) { const my = yT - hpx - 0.42 * s; g += `<rect x="${tcx - 4}" y="${my}" width="8" height="${0.2 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/><line x1="${tcx}" y1="${my + 0.2 * s}" x2="${tcx}" y2="${yT - hpx * 0.16}" stroke="#2e7d32" stroke-width="1.4"/>`; }
+          const D = Math.min(i.w, i.d) * s, sad = Math.max(4, Math.min(10, hpx * 0.14)), cy = yB - sad - D / 2;
+          g += `<path d="M${tcx - D * 0.42},${yB} L${tcx - D * 0.3},${yB - sad} H${tcx + D * 0.3} L${tcx + D * 0.42},${yB} Z" fill="#fff" stroke="#222" stroke-width="1.3"/><circle cx="${tcx}" cy="${cy}" r="${D / 2}" fill="#fff" stroke="#222" stroke-width="1.6"/><circle cx="${tcx}" cy="${cy - D * 0.22}" r="${Math.max(2.5, D * 0.07)}" fill="#fff" stroke="#222" stroke-width="1.1"/><line x1="${tcx - D * 0.6}" y1="${yB + 1}" x2="${tcx + D * 0.6}" y2="${yB + 1}" stroke="#222" stroke-width="2.2"/>`;
+        } else g += pfQuimTanqueSvg(i.kind, tcx, yB, wpx, hpx, i.orient, i.dim);
+        if (i.mixer) { const my = yB - hpx - 0.42 * s; g += `<rect x="${tcx - 4}" y="${my}" width="8" height="${0.2 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/><line x1="${tcx}" y1="${my + 0.2 * s}" x2="${tcx}" y2="${yB - hpx * 0.16}" stroke="#2e7d32" stroke-width="1.4"/>`; }
         if (i.g && i.g.quimico) labels.push({ t: tcx, texto: i.g.quimico, cut: !!o.cut, key: pvGKey(i.g) });
       }
     }
-    body += `<g opacity="${op}">${g}</g>`;
+    body += o.tipo === 'item' ? `<g opacity="${op}" data-pv-itemz="${esc(o.i.id)}" data-pv-z="${o.z}" style="cursor:ns-resize">${g}</g>` : `<g opacity="${op}">${g}</g>`;
   });
   // rótulos de químicos debajo del terreno, en filas para que no se pisen
   const vistos = new Set(), filas = [];
@@ -16702,8 +16710,9 @@ function pvInteraccionInit(svgEl) {
     if (_pvTool === 'corte' && modoSvg === 'planta') { ev.preventDefault(); pvCorteClick(svgEl, ev); return; }
     const cEl = ev.target.closest('[data-pv-cota]');
     if (cEl) { _pvCotaSel = cEl.getAttribute('data-pv-cota'); svgEl.querySelectorAll('[data-pv-cota]').forEach(n => { const sel = n.getAttribute('data-pv-cota') === _pvCotaSel; if (n.tagName === 'text') n.setAttribute('fill', sel ? '#e65100' : PV_C.cota); else { n.setAttribute('stroke', sel ? '#e65100' : PV_C.cota); n.setAttribute('stroke-width', sel ? 1.8 : 1.1); } }); return; }
+    const zEl = ev.target.closest('[data-pv-itemz]');
     const rEl = ev.target.closest('[data-pv-rotulo]'), hEl = ev.target.closest('[data-pv-corteh]'), kEl = ev.target.closest('[data-pv-corte]'), itemEl = ev.target.closest('[data-pv-item]'), uEl = ev.target.closest('[data-pv-unidad]');
-    const el = rEl || hEl || kEl || itemEl || uEl;
+    const el = rEl || hEl || kEl || itemEl || uEl || zEl;
     if (!el) {
       if (_pvCotaSel) { _pvCotaSel = null; flowsheetsVistasRender(); }
       if (_pvSel) { _pvSel = null; pvSelDibujar(svgEl); }
@@ -16713,10 +16722,10 @@ function pvInteraccionInit(svgEl) {
     }
     if (rEl && ev.detail > 1) return; // doble clic en un texto: se renombra
     if (kEl && ev.detail > 1) return; // doble clic en un corte: se renombra
-    const kind = rEl ? 'rotulo' : hEl ? 'corteh' : kEl ? 'corte' : itemEl ? 'item' : 'unidad';
-    const key = rEl ? rEl.getAttribute('data-pv-rotulo') : hEl ? hEl.getAttribute('data-pv-corteh') : kEl ? kEl.getAttribute('data-pv-corte') : itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad');
+    const kind = rEl ? 'rotulo' : hEl ? 'corteh' : kEl ? 'corte' : itemEl ? 'item' : zEl && !uEl ? 'itemz' : 'unidad';
+    const key = rEl ? rEl.getAttribute('data-pv-rotulo') : zEl && kind === 'itemz' ? zEl.getAttribute('data-pv-itemz') : hEl ? hEl.getAttribute('data-pv-corteh') : kEl ? kEl.getAttribute('data-pv-corte') : itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad');
     if (kind === 'corte' || kind === 'corteh') { const idc = kind === 'corteh' ? key.split(':')[0] : key, ck = pvCortesLista(pvProy()).find(q => q.id === idc); _pvSel = { kind: 'corte', key: idc, nombre: 'Corte ' + (ck ? ck.nombre : '') }; pvSelDibujar(svgEl); }
-    else if (kind !== 'rotulo') { _pvSel = { kind, key, nombre: (itemEl || uEl).getAttribute('data-pv-nombre') || key }; pvSelDibujar(svgEl); }
+    else if (kind !== 'rotulo' && kind !== 'itemz') { _pvSel = { kind, key, nombre: (itemEl || uEl).getAttribute('data-pv-nombre') || key }; pvSelDibujar(svgEl); }
     const p0 = pvPunto(svgEl, ev);
     _pvDrag = { el, kind, key, x0: p0.x, y0: p0.y, dx: 0, dy: 0, svg: svgEl, s: parseFloat(svgEl.getAttribute('data-pv-escala')) || 20, modo: modoSvg };
     try { el.setPointerCapture(ev.pointerId); } catch (e) { /* sin captura */ }
@@ -16726,7 +16735,7 @@ function pvInteraccionInit(svgEl) {
     if (_pvPan) { _pvPan.cont.scrollLeft = _pvPan.sl - (ev.clientX - _pvPan.x); _pvPan.cont.scrollTop = _pvPan.st - (ev.clientY - _pvPan.y); return; }
     if (!_pvDrag) return;
     const p1 = pvPunto(svgEl, ev);
-    _pvDrag.dx = p1.x - _pvDrag.x0; _pvDrag.dy = (_pvDrag.modo === 'corte' && _pvDrag.kind !== 'rotulo') ? 0 : p1.y - _pvDrag.y0;
+    _pvDrag.dx = _pvDrag.kind === 'itemz' ? 0 : p1.x - _pvDrag.x0; _pvDrag.dy = (_pvDrag.modo === 'corte' && _pvDrag.kind !== 'rotulo' && _pvDrag.kind !== 'itemz') ? 0 : p1.y - _pvDrag.y0;
     _pvDrag.el.setAttribute('transform', `translate(${_pvDrag.dx},${_pvDrag.dy})`);
     svgEl.querySelectorAll('.pv-sel').forEach(n => n.remove());
   });
@@ -16737,6 +16746,12 @@ function pvInteraccionInit(svgEl) {
     const dxm = Math.round(d.dx / d.s * 20) / 20, dym = Math.round(d.dy / d.s * 20) / 20;
     if (!dxm && !dym) { d.el.removeAttribute('transform'); pvSelDibujar(svgEl); return; }
     const p = pvProy(); if (!p) return;
+    if (d.kind === 'itemz') { // subir / bajar un equipo en el corte: queda como altura sobre el piso
+      const vv = p.equipos_data.vistas = p.equipos_data.vistas || {}; vv.cortez = vv.cortez || {};
+      const z0 = Number(d.el.getAttribute('data-pv-z')) || 0;
+      vv.cortez[d.key] = Math.max(0, Math.min(8, Math.round((z0 - dym) * 20) / 20));
+      pvGuardar(p); flowsheetsVistasRender(); return;
+    }
     if (d.kind === 'corte' || d.kind === 'corteh') {
       const [idc, pt] = d.key.split(':'), ck = pvCortesLista(p).find(q => q.id === idc);
       if (ck) {
@@ -16815,7 +16830,7 @@ function pvReacomodar(modo) {
 // ── Barra de herramientas, cotas del usuario y ocupación de la zona ──
 function pvBarraHtml(modo, derivado) {
   const p = pvProy(), v = pvEstado(p, modo);
-  if (derivado) return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><span style="display:inline-flex;gap:3px;align-items:center"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',0.8)">−</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px;min-width:52px" id="${pvP()}zoom-pct-${modo}" onclick="pvZoomBtn('${modo}',0)">${Math.round((_pvZoom[modo] || 1) * 100)}%</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',1.25)">+</button></span><span class="hint" style="margin:0">Este corte sale de la línea marcada en la Vista en planta: para cambiarlo, movela, giratela o invertí su vista allá (⇄). Ctrl + rueda = zoom.</span></div>`;
+  if (derivado) return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><span style="display:inline-flex;gap:3px;align-items:center"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',0.8)">−</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px;min-width:52px" id="${pvP()}zoom-pct-${modo}" onclick="pvZoomBtn('${modo}',0)">${Math.round((_pvZoom[modo] || 1) * 100)}%</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',1.25)">+</button></span><button class="btn btn-secondary btn-sm" style="width:auto" onclick="pvCorteAlturasReset()" title="Vuelve cada equipo a la altura que tiene en el flowsheet">↺ Alturas automáticas</button><span class="hint" style="margin:0">Arrastrá un equipo hacia arriba o abajo para cambiar a qué altura está (por defecto toma la del flowsheet). Para cambiar el corte en sí: movelo, giralo o invertí su vista en la Vista en planta (⇄). Ctrl + rueda = zoom.</span></div>`;
   const lista = v.cotas.map(c => `<div style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:12px"><span style="color:${c.id === _pvCotaSel ? '#e65100' : 'var(--text2)'};width:90px">${pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1))} m</span><input value="${esc(c.texto || '')}" placeholder="texto (vacío = la medida)" style="flex:1;font-size:12px;padding:3px 6px" onchange="pvCotaTexto('${modo}','${c.id}',this.value)" /><button class="btn btn-secondary btn-sm" style="width:auto;padding:2px 8px" onclick="pvCotaBorrar('${c.id}')" title="Borrar la cota">✕</button></div>`).join('');
   return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <button class="btn ${_pvTool === 'cota' ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto" onclick="pvHerramientaCota(${_pvTool !== 'cota'})" title="Colocar una cota: clic en dos puntos">📏 + Cota</button>
@@ -16886,7 +16901,7 @@ const PV_TOOL_CHAT = {
   input_schema: { type: 'object', properties: {
     respuesta: { type: 'string', description: 'Respuesta breve en español (si hiciste cambios, decí cuáles).' },
     acciones: { type: 'array', description: 'Cambios a aplicar (vacío si solo es una consulta).', items: { type: 'object', properties: {
-      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular', 'rotar', 'agregar_corte', 'quitar_corte', 'invertir_corte'] },
+      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular', 'rotar', 'agregar_corte', 'quitar_corte', 'invertir_corte', 'elevar_equipo'] },
       por: { type: 'string', description: 'Solo para agregar_corte: nombre exacto de la unidad o id del equipo por cuyo centro pasa el corte (junto con direccion).' },
       direccion: { type: 'string', enum: ['horizontal', 'vertical'], description: 'Solo para agregar_corte con por: la línea del corte es horizontal (de izquierda a derecha) o vertical (de arriba hacia abajo) en la planta, y cruza todo el dibujo.' },
       lado: { type: 'number', description: 'Solo para agregar_corte: 1 o -1 = hacia qué lado se mira (1: hacia arriba/norte en un corte horizontal y hacia la derecha/este en uno vertical; -1 al revés).' },
@@ -16912,7 +16927,7 @@ function pvContextoChat(p, modo) {
   const u2 = unidades.map(u => ({ nombre: u.nombre, linea: u.linea, forma: u.m.forma, largo: u.m.largo, ancho: u.m.ancho, diametro: u.m.diametro, alto: u.m.alto, nivelAgua: u.m.nivelAgua, enterrado: u.m.enterrado, origen_medidas: u.m.fuente, planta_x: pvR(pos[u.nombre].x), planta_y: pvR(pos[u.nombre].y), rotacion_planta_grados: pvRotN(p, u.nombre) * 90, es_sala: !!u.sala }));
   const zonas = unidades.filter(u => u.grupos).map(u => {
     const z = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos, vp.rot, pvRotN(p, u.nombre));
-    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, rotacion_planta_grados: (Number(vp.rot[i.id]) || 0) % 4 * 90, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
+    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, elevacion_corte_m: pvZItem(p, i.id), orientacion: i.orient || null, rotacion_planta_grados: (Number(vp.rot[i.id]) || 0) % 4 * 90, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
   });
   const cotas = (modo === 'planta' ? vp : vc).cotas.map(c => ({ id: c.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2, medida_m: pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1)), texto: c.texto || null }));
   return JSON.stringify({ vista: modo, unidades: u2, zonas_de_quimicos: zonas, cotas_de_esta_vista: cotas, cortes: pvCortesLista(p).map(k => ({ nombre: k.nombre, x1: k.x1, y1: k.y1, x2: k.x2, y2: k.y2, lado: k.lado === -1 ? -1 : 1 })) });
@@ -16945,7 +16960,7 @@ async function pvChatSend(modo) {
   showMsg(sid, 'loading', 'Pensando...');
   try {
     const previo = hist[modo].slice(-9, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (5b) Para ROTAR / GIRAR / poner de costado una unidad o un equipo (girarlo 90°, 180°…) usá SIEMPRE la acción "rotar" (unidad = nombre exacto, o id = id del equipo, y grados en sentido horario); la rotación se ve en la vista en planta y NO cambies w/d/h ni orient para girar (orient solo decide si una cisterna es horizontal o vertical). (5c) CORTES: en la vista en planta el usuario puede marcar cortes (línea con letra A, B…) y cada uno genera su propia vista en corte real, mirando hacia donde apuntan las flechas. Para crear uno usá "agregar_corte": con "por" (nombre de la unidad o id del equipo) + "direccion" (horizontal / vertical) y opcionalmente "lado" y "nombre", o con x1,y1,x2,y2 en metros; "quitar_corte" e "invertir_corte" usan "nombre" (la letra). Los cortes existentes están en "cortes" del estado. (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
+    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (5b) Para ROTAR / GIRAR / poner de costado una unidad o un equipo (girarlo 90°, 180°…) usá SIEMPRE la acción "rotar" (unidad = nombre exacto, o id = id del equipo, y grados en sentido horario); la rotación se ve en la vista en planta y NO cambies w/d/h ni orient para girar (orient solo decide si una cisterna es horizontal o vertical). (5c) CORTES: en la vista en planta el usuario puede marcar cortes (línea con letra A, B…) y cada uno genera su propia vista en corte real, mirando hacia donde apuntan las flechas. Para crear uno usá "agregar_corte": con "por" (nombre de la unidad o id del equipo) + "direccion" (horizontal / vertical) y opcionalmente "lado" y "nombre", o con x1,y1,x2,y2 en metros; "quitar_corte" e "invertir_corte" usan "nombre" (la letra). Los cortes existentes están en "cortes" del estado. (5d) En los cortes cada equipo tiene una altura de su base sobre el piso ("elevacion_corte_m" en el estado; por defecto sale de lo alto que está dibujado en el flowsheet): para subirlo o bajarlo (ej. una bomba sobre un tanque, que sería la altura "alto_m" del tanque) usá "elevar_equipo" con id y valor en metros sobre el piso. (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
     const r = await propLlamarForzado(PV_TOOL_CHAT, sistema, 3000);
     const calcTxt = pfGeomCalcAcciones(r.acciones);
     const aplicadas = pvAplicarAcciones(p, modo, (r.acciones || []).filter(a => !(a && a.tipo === 'calcular')));
@@ -16985,6 +17000,10 @@ function pvAplicarAcciones(p, modo, acciones) {
         const nuevo = ((((Number(vpl.rot[key]) || 0) + n) % 4) + 4) % 4;
         if (nuevo) vpl.rot[key] = nuevo; else delete vpl.rot[key];
         hechas.push(`Giré ${a.unidad ? '"' + a.unidad + '"' : 'el equipo'} ${a.grados || 90}° en la vista en planta`);
+      } else if (a.tipo === 'elevar_equipo' && a.id) {
+        const vv = p.equipos_data.vistas = p.equipos_data.vistas || {}; vv.cortez = vv.cortez || {};
+        const z = Number(a.valor); if (!isFinite(z)) return;
+        vv.cortez[a.id] = Math.max(0, Math.min(8, Math.round(z * 20) / 20)); hechas.push(`Equipo a ${vv.cortez[a.id]} m sobre el piso en los cortes`);
       } else if (a.tipo === 'agregar_corte') {
         let x1 = a.x1, y1 = a.y1, x2 = a.x2, y2 = a.y2;
         if (![x1, y1, x2, y2].every(v => typeof v === 'number')) {
