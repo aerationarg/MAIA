@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.76</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.77</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.76</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.77</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13375,7 +13375,7 @@ function procesosFlowsheetEscalar(largo, alto, defW, defH) {
   return { w: Math.round(w), h: Math.round(h) };
 }
 // Contorno de la figura de una etapa (no el ícono de un equipo puntual).
-function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor) {
+function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor, angFrac) {
   switch (tipoFig) {
     case 'pozo':
       return `<path d="M${x},${y} L${x},${y+h} L${x+w},${y+h} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
@@ -13388,7 +13388,7 @@ function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor
       // proyecto en vez de quedar chica en el medio. El bloque es una
       // estructura de hormigón sola, sin el mecanismo — se le suma un
       // barredor esquemático (puente + brazo + motor) por encima.
-      const real = PROCESOS_FLOWSHEET_PATHS.sedimentador_hormigon;
+      const real = angFrac ? null : PROCESOS_FLOWSHEET_PATHS.sedimentador_hormigon; // con un ángulo de fondo editado se usa la geometría paramétrica
       if (real) {
         const d = procesosFlowsheetPathEstirado(real);
         const cx2 = x + w / 2, yPuente = y + h * 0.14, r = Math.max(2.5, Math.min(w, h) * 0.07);
@@ -13398,7 +13398,7 @@ function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor
           `<circle cx="${cx2}" cy="${yPuente}" r="${r}" fill="none" stroke="${color}" stroke-width="1.4"/>` +
           (etiquetaBarredor ? `<text x="${cx2+r+3}" y="${yPuente+3}" fill="${color}" font-size="8" font-weight="600">${procesosDiagramaSvgEsc(etiquetaBarredor)}</text>` : '');
       }
-      const y1 = y + h * 0.6, cx2 = x + w / 2, vTop = y - h * 0.14, r = Math.max(3, w * 0.08);
+      const y1 = y + h * (angFrac ? 1 - angFrac : 0.6), cx2 = x + w / 2, vTop = y - h * 0.14, r = Math.max(3, w * 0.08);
       return `<path d="M${x},${y} L${x},${y1} L${cx2},${y+h} L${x+w},${y1} L${x+w},${y}" fill="none" stroke="${color}" stroke-width="2"/>` +
         `<line x1="${cx2}" y1="${y}" x2="${cx2}" y2="${vTop}" stroke="${color}" stroke-width="1.4"/>` +
         `<circle cx="${cx2}" cy="${vTop - r}" r="${r}" fill="none" stroke="${color}" stroke-width="1.4"/>` +
@@ -13621,6 +13621,7 @@ function pfQuimClase(it) {
   const t = pfQuimTexto(it);
   if (/agitador|mezclador|mixer/.test(t)) return 'mixer';
   if (/\bbomba/.test(t) || String(it.icono || '').startsWith('bomba')) return /neumatic/.test(t) ? 'bomba_neum' : 'bomba';
+  if (/conic/.test(t) || (/tolva/.test(t) && /tanque/.test(t))) return 'conico';
   if (/cisterna/.test(t)) return 'cisterna';
   if (/\bbin\b|maxibid|\bibc\b/.test(t) || it.icono === 'maxibidon') return 'bin';
   if (/tanque|\btk\b|contenedor|deposito|recipiente/.test(t) || it.icono === 'tanque_real' || it.icono === 'contenedor') return 'tanque';
@@ -13641,6 +13642,17 @@ function pfMedTexto(txt, palabras) {
   return v && v > 0 ? v : null;
 }
 function pfQuimDimTexto(txt, clase, orient) {
+  if (clase === 'conico') {
+    const t = String(txt || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const ds = pfMedTexto(t, 'diametro menor|diametro de salida|diametro salida|salida');
+    let D = pfMedTexto(t, 'diametro mayor|diametro del cilindro|diametro|diam|ø|φ');
+    if (D && ds && Math.abs(D - ds) < 1e-9) D = pfMedTexto(t, 'diametro mayor|diametro del cilindro');
+    const hc = pfMedTexto(t, 'alto del cilindro|altura del cilindro|alto cilindro|altura cilindrica|altura cilindro');
+    const am = /angulo[^0-9]{0,18}(\d+(?:[.,]\d+)?)/.exec(t);
+    const o = {};
+    if (D) o.w = D; if (ds) o.ds = ds; if (hc) o.hc = hc; if (am) o.ang = parseFloat(am[1].replace(',', '.'));
+    return o;
+  }
   const D = pfMedTexto(txt, 'diametro|diam|ø|φ'), Hh = pfMedTexto(txt, 'alto|altura'), L = pfMedTexto(txt, 'largo|longitud'), A = pfMedTexto(txt, 'ancho');
   const o = {};
   if (clase === 'cisterna' && orient === 'h') { if (L) o.w = L; if (D) { o.d = D; if (!Hh) o.h = D + 0.25; } if (Hh) o.h = Hh; }
@@ -13657,7 +13669,29 @@ function pfQuimDim(clase, volL, orient) {
   if (clase === 'tanque') { const D = Math.cbrt(V / 0.942); return { w: D, d: D, h: 1.2 * D }; }
   return { w: 1.2, d: 1.2, h: 1.8 };
 }
-const pfQuimTipoTxt = { bin: 'TANQUE MAXIBIDÓN', cisterna: 'TANQUE CISTERNA', tanque: 'TANQUE PLÁSTICO', sistema: 'SISTEMA' };
+const pfQuimTipoTxt = { bin: 'TANQUE MAXIBIDÓN', cisterna: 'TANQUE CISTERNA', tanque: 'TANQUE PLÁSTICO', conico: 'TANQUE CÓNICO', sistema: 'SISTEMA' };
+// Tanque cónico: cilindro arriba + cono (tolva) abajo sobre patas. Parámetros: Ø (cilindro), Ø de salida, ángulo de la pared del cono respecto de la horizontal,
+// alto del cilindro y volumen. Con lo que no se defina se calcula: ángulo 60°, salida 0,20 m, alto del cilindro 0,8 × Ø, y el Ø sale del volumen.
+//   V = π/4·Ø²·Hc + π·Hk/12·(Ø² + Ø·ds + ds²)   con   Hk = (Ø − ds)/2 · tan(ángulo)
+const PF_CONICO_PATAS = 0.35;
+function pfConicoDim(volL, o, dt) {
+  const P = Object.assign({}, dt || {}, o || {});
+  const ang = P.ang > 0 && P.ang < 90 ? Number(P.ang) : 60;
+  let ds = P.ds > 0 ? Number(P.ds) : 0.2;
+  const vol = (P.volL > 0 ? Number(P.volL) : (volL > 0 ? volL : 1000)) / 1000;
+  const rad = Math.PI / 180;
+  const hkDe = D => Math.max(0.05, (D - ds) / 2 * Math.tan(ang * rad));
+  const vcon = D => Math.PI * hkDe(D) / 12 * (D * D + D * ds + ds * ds);
+  const vcil = (D, hc) => Math.PI / 4 * D * D * hc;
+  const biseccion = f => { let lo = 0.25, hi = 8; for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; if (f(m) > 0) hi = m; else lo = m; } return (lo + hi) / 2; };
+  let D = P.w > 0 ? Number(P.w) : null, hc = P.hc > 0 ? Number(P.hc) : null;
+  if (D && ds >= D) ds = D * 0.2;
+  if (!D && hc) D = biseccion(d => vcil(d, hc) + vcon(d) - vol);
+  else if (!D) { D = biseccion(d => vcil(d, 0.8 * d) + vcon(d) - vol); hc = 0.8 * D; }
+  else if (!hc) hc = (P.volL > 0 || volL > 0) ? Math.max(0.05, (vol - vcon(D)) / (Math.PI / 4 * D * D)) : 0.8 * D; // sin volumen definido: cilindro de alto 0,8 × Ø
+  const hk = hkDe(D);
+  return { w: D, d: D, hc, hk, ds, ang, h: hc + hk + PF_CONICO_PATAS, volCalc: (vcil(D, hc) + vcon(D)) * 1000, cono: true, orient: 'v' };
+}
 const pfQuimCaudal = it => { const m = /(\d+(?:[.,]\d+)?\s*(?:a|-|–)\s*\d+(?:[.,]\d+)?\s*(?:l\/h|lt\/h|kg\/h|l\/min|m3\/h))|(\d+(?:[.,]\d+)?\s*(?:l\/h|lt\/h|kg\/h|l\/min|m3\/h))/i.exec(`${it.tipoOriginal || it.tipo || ''} ${it.especificacion || ''}`); return m ? m[0].replace(/\s+/g, ' ') : ''; };
 // Arma los grupos (por químico) a partir de los equipos de la zona (con su cantidad, sin expandir)
 function pfQuimGrupos(entradas, ov) {
@@ -13686,7 +13720,7 @@ function pfQuimGrupos(entradas, ov) {
   grupos.forEach(g => {
     const exp = (lista, cap) => { const o = []; lista.forEach(e => { for (let i = 0; i < Math.min(cap, e.cant); i++) o.push({ e, id: e.cant > 1 ? `${e.it.id}_${i}` : e.it.id }); }); return o; };
     const pisar = (dim, o, dt) => Object.assign(dim, dt || {}, ['w', 'd', 'h'].reduce((r, k) => (o && Number(o[k]) > 0 ? Object.assign(r, { [k]: Number(o[k]) }) : r), {}));
-    g.tanqueInst = exp(g.tanques, 4).map(x => Object.assign(x, { dim: pisar(pfQuimDim(x.e.clase, x.e.volL, x.e.orient), x.e.ov, x.e.dimTexto) }));
+    g.tanqueInst = exp(g.tanques, 4).map(x => { const dim = x.e.clase === 'conico' ? pfConicoDim(x.e.volTexto, x.e.ov, x.e.dimTexto) : pisar(pfQuimDim(x.e.clase, x.e.volL, x.e.orient), x.e.ov, x.e.dimTexto); if (x.e.clase === 'conico') x.e.volL = Math.round(dim.volCalc); return Object.assign(x, { dim }); });
     g.bombaInst = exp(g.bombas, 4); g.mixerInst = exp(g.mixers, 4); g.otroInst = exp(g.otros, 4).map(x => Object.assign(x, { dim: pisar(pfQuimDim('sistema', null), x.e.ov) }));
     // columnas: una por tanque (con su agitador y sus bombas) y una por cada "sistema"
     g.cols = g.tanqueInst.map((t, i) => ({ tanque: t, mixer: g.mixerInst[i] || null, bombas: [], otro: null }));
@@ -13707,9 +13741,11 @@ function pfQuimGrupos(entradas, ov) {
     g.volTxt = [...new Set(g.tanques.map(t => t.volL ? (t.volL >= 3000 ? (t.volL / 1000) + ' m³' : Math.round(t.volL) + ' l') : ''))].filter(Boolean).join(' + ');
     g.tipoTxt = [...new Set(g.tanques.concat(g.otros).map(t => pfQuimTipoTxt[t.clase]))].join(' + ');
     g.cantTanques = g.tanques.concat(g.otros).reduce((s, t) => s + t.cant, 0);
+    const cn = g.tanqueInst.find(t => t.dim && t.dim.cono);
+    g.extraTxt = cn ? `Ø${Math.round(cn.dim.w * 100) / 100} m · salida Ø${Math.round(cn.dim.ds * 100) / 100} m · pared ${Math.round(cn.dim.ang)}°` : '';
     g.bombaTxt = g.bombas.length ? `${g.bombas.reduce((s, b) => s + b.cant, 0)} × ${g.bombas.some(b => b.clase === 'bomba_neum') ? 'bomba neumática' : 'bomba dosificadora'}${pfQuimCaudal(g.bombas[0].it) ? ' · ' + pfQuimCaudal(g.bombas[0].it) : ''}` : '';
     // que los rótulos de un grupo no se pisen con los del vecino
-    const largoMax = Math.max(((g.quimico || 'EQUIPO') + '').length * 1.15, (g.tipoTxt || '').length, (g.volTxt || '').length + 3, (g.bombaTxt || '').length * 0.95);
+    const largoMax = Math.max(((g.quimico || 'EQUIPO') + '').length * 1.15, (g.tipoTxt || '').length, (g.volTxt || '').length + 3, (g.bombaTxt || '').length * 0.95, ((g.extraTxt || '').length) * 0.95);
     g.w = Math.max(g.w, Math.round(largoMax * 4.7 + 10));
   });
   return grupos;
@@ -13722,9 +13758,20 @@ function procesosFlowsheetQuimicosMedir(entradas, conDims, ov) {
   return { w: Math.max(PF_QUIM.BOX_MIN_W, ancho + PF_QUIM.PAD * 2), h: hFigura + PF_QUIM.ABAJO, hFigura };
 }
 // Dibujo de cada tipo de tanque (frente), apoyado en y = base, centrado en cx
-function pfQuimTanqueSvg(clase, cx, base, w, hh, orient) {
+function pfQuimTanqueSvg(clase, cx, base, w, hh, orient, dim) {
   const k = '#222', verde = '#2e7d32', celeste = '#4fc3f7';
   const x0 = cx - w / 2;
+  if (clase === 'conico' && dim && dim.cono) { // cilindro arriba + tolva cónica abajo, sobre patas
+    const esc = hh / dim.h, pata = PF_CONICO_PATAS * esc, hkp = dim.hk * esc, hcp = dim.hc * esc, dsp = Math.max(6, dim.ds * esc);
+    const yBC = base - pata, yJ = yBC - hkp, yT = yJ - hcp;
+    let s = `<path d="M${x0 + w * 0.12},${yJ} L${x0 + w * 0.1},${base} M${x0 + w * 0.88},${yJ} L${x0 + w * 0.9},${base}" fill="none" stroke="${k}" stroke-width="1.6"/>`;
+    s += `<path d="M${x0},${yT} H${x0 + w} V${yJ} L${cx + dsp / 2},${yBC} H${cx - dsp / 2} L${x0},${yJ} Z" fill="#fff" stroke="${k}" stroke-width="1.6"/>`;
+    s += `<line x1="${x0}" y1="${yJ}" x2="${x0 + w}" y2="${yJ}" stroke="${k}" stroke-width="1" stroke-dasharray="4 3"/>`;
+    s += `<rect x="${cx - w * 0.12}" y="${yT - 5}" width="${w * 0.24}" height="6" fill="#fff" stroke="${k}" stroke-width="1.2"/>`;
+    s += `<rect x="${cx - dsp * 0.35}" y="${yBC}" width="${dsp * 0.7}" height="${Math.min(pata * 0.5, 10)}" fill="#fff" stroke="${k}" stroke-width="1.2"/>`;
+    s += `<line x1="${x0 - 5}" y1="${base + 1}" x2="${x0 + w + 5}" y2="${base + 1}" stroke="${k}" stroke-width="2.2"/>`;
+    return s;
+  }
   if (clase === 'bin') { // maxibidón: jaula con el tanque adentro, sobre su pallet
     const pal = 6, top = base - hh;
     let s = `<rect x="${x0}" y="${base - pal}" width="${w}" height="${pal}" fill="#fff" stroke="${verde}" stroke-width="1.3"/>`;
@@ -13795,7 +13842,7 @@ function procesosFlowsheetQuimicosSvg(entradas, x, w, yPiso, layout, iconosIA, o
       if (c.tanque || c.otro) {
         const t = c.tanque || c.otro, off = procesosFlowsheetOffset(layout, 'equipos', t.id), esc = procesosFlowsheetEscala(layout, 'equipos', t.id);
         const tw = c.tw * esc, th = c.th * esc, tcx2 = tcx + off.x, base = yb + off.y;
-        s += procesosFlowsheetDragWrap('equipo', t.id, pfQuimTanqueSvg(c.tanque ? c.tanque.e.clase : 'sistema', tcx2, base, tw, th, c.tanque ? c.tanque.dim.orient : null) + pfQuimTag(tcx2 + tw / 2 + 2, base - th * 0.45, 'TK'), { x: tcx2 - tw / 2 - 8, y: base - th - 10, w: tw + 28, h: th + 14 });
+        s += procesosFlowsheetDragWrap('equipo', t.id, pfQuimTanqueSvg(c.tanque ? c.tanque.e.clase : 'sistema', tcx2, base, tw, th, c.tanque ? c.tanque.dim.orient : null, c.tanque ? c.tanque.dim : null) + pfQuimTag(tcx2 + tw / 2 + 2, base - th * 0.45, 'TK'), { x: tcx2 - tw / 2 - 8, y: base - th - 10, w: tw + 28, h: th + 14 });
         // agitador montado sobre el tanque
         if (c.mixer) {
           const m = c.mixer, mo = procesosFlowsheetOffset(layout, 'equipos', m.id);
@@ -13839,6 +13886,7 @@ function procesosFlowsheetQuimicosSvg(entradas, x, w, yPiso, layout, iconosIA, o
     if (g.tipoTxt) lin.push([g.tipoTxt, 400, 8.5]);
     if (g.volTxt) lin.push([`V: ${g.volTxt}`, 400, 8.5]);
     if (g.cantTanques) lin.push([`Cant: ${g.cantTanques}`, 400, 8.5]);
+    if (g.extraTxt) lin.push([g.extraTxt, 400, 8]);
     if (g.bombaTxt) lin.push([g.bombaTxt, 400, 8]);
     lin.forEach(([t, fw, fs], i) => { s += `<text x="${gcx}" y="${ly + i * 11}" text-anchor="middle" fill="${i === 0 ? '#222' : '#555'}" font-weight="${fw}" font-size="${fs}">${procesosDiagramaSvgEsc(t)}</text>`; });
     cx0 += g.w + PF_QUIM.GAP;
@@ -13934,7 +13982,11 @@ function procesosFlowsheetSvg(p) {
       barredorTags = afuera.filter(eq => eq.icono === 'barredor').map(eq => eq.cantidad > 1 ? `${eq.cantidad}× ${eq.tag}` : eq.tag);
       afuera = afuera.filter(eq => eq.icono !== 'barredor');
     }
-    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, barredorTags, escalaEtapa, profundidad: dims.acometida, zonaQ: esZonaQ, dimsZona: esZonaQ ? dims : null };
+    // sedimentador con ángulo de fondo editado en las vistas: fracción del alto que ocupa el cono
+    let angFrac = null;
+    const angEd = p.equipos_data && p.equipos_data.vistas && p.equipos_data.vistas.medidas && p.equipos_data.vistas.medidas[nombre] && p.equipos_data.vistas.medidas[nombre].angulo;
+    if (tipoFig === 'sedimentador' && angEd > 0) { const mm = pvMedidasUnidad(p, nombre, pvBaseUnidad(p, nombre, hojaBase)); const Dm = mm.forma === 'circ' ? mm.diametro : mm.largo; angFrac = Math.max(0.08, Math.min(0.92, Math.tan(angEd * Math.PI / 180) * (Dm / 2 - 0.25) / mm.alto)); }
+    return { nombre, equipos, tipoFig, contieneAgua, dimsTxt, figW, figH, dominante, adentro: fondo, techo, afuera, barredorTags, escalaEtapa, profundidad: dims.acometida, zonaQ: esZonaQ, dimsZona: esZonaQ ? dims : null, angFrac };
   });
   // Numera las bombas dosificadoras — el destino es la etapa donde está
   // cargado el equipo (ver procesosFlowsheetDosificaInfo), así que se
@@ -14173,7 +14225,7 @@ function procesosFlowsheetSvg(p) {
       cy += icMaqR + 22;
     } else if (et.tipoFig !== 'caja') {
       const fx = x + (et.w - et.figW) / 2, fy = cy;
-      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq, et.barredorTags && et.barredorTags.join(', '));
+      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq, et.barredorTags && et.barredorTags.join(', '), et.angFrac);
       // Sensores de nivel: se ubican a la altura real a la que van (alto,
       // medio o bajo del tanque), no todos arriba — se agrupan por nivel
       // para no superponerlos si hay más de uno al mismo nivel.
@@ -15825,7 +15877,7 @@ let _pvCorteLodos = false;
 const PV_TIPICAS = {
   tanque: { forma: 'rect', largo: 6, ancho: 4, alto: 3.5, ratio: 1.5 },
   pozo: { forma: 'rect', largo: 2.5, ancho: 2.5, alto: 4, enterrado: 'todo', ratio: 1 },
-  sedimentador: { forma: 'circ', diametro: 5, alto: 3.5 },
+  sedimentador: { forma: 'circ', diametro: 5, alto: 3.5, angulo: 22 },
   daf: { forma: 'rect', largo: 6, ancho: 2.5, alto: 2, ratio: 2.4 },
   desinfeccion: { forma: 'rect', largo: 4, ancho: 2, alto: 2, ratio: 2 },
   maquina: { forma: 'rect', largo: 2, ancho: 1.2, alto: 1.5 },
@@ -15836,7 +15888,7 @@ const PV_MAQUINAS = [
   [/filtro banda|prensa/, { largo: 3.5, ancho: 1.5, alto: 2 }], [/tamiz/, { largo: 1.6, ancho: 1, alto: 1.3 }],
   [/desarenad/, { largo: 6, ancho: 1.2, alto: 1.5 }], [/reja/, { largo: 2.5, ancho: 0.8, alto: 1.2 }],
 ];
-const PV_CAMPOS = ['largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado'];
+const PV_CAMPOS = ['largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado', 'angulo'];
 const pvR = v => Math.round(v * 100) / 100;
 const pvNum = v => { const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? n : null; };
 // Medidas finales de una unidad: { forma, largo, ancho, diametro, alto, nivelAgua, enterrado, fuente:{campo:'diseño'|'calculada'|'típica'|'editada'} }
@@ -15862,6 +15914,7 @@ function pvBaseUnidad(p, nombre, hojaBase) {
   let tip = Object.assign({}, PV_TIPICAS[fig] || PV_TIPICAS.caja);
   if (fig === 'maquina') { const n = procesosNormTxt(nombre + ' ' + (hojaBase || '')); const mq = PV_MAQUINAS.find(([re]) => re.test(n)); if (mq) Object.assign(tip, mq[1]); }
   const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : tip.forma, fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
+  if (tip.angulo) { b.angulo = tip.angulo; b.fuente.angulo = 'típica'; }
   let L = d.largo, A = d.ancho, H = d.alto, D = d.diametro; const V = d.volumen; const RAT = tip.ratio || 1.5;
   const marca = (c, src) => { b.fuente[c] = src; };
   if (L) marca('largo', 'diseño'); if (A) marca('ancho', 'diseño'); if (H) marca('alto', 'diseño'); if (D) marca('diametro', 'diseño');
@@ -15952,6 +16005,7 @@ function pvEditarEquipo(id, campo, valor) {
   const o = eq.vistas.equipos[id] = eq.vistas.equipos[id] || {};
   if (campo === 'orient') { if (valor === 'h' || valor === 'v') o.orient = valor; else delete o.orient; }
   else { const v = pvNum(valor); if (v == null) delete o[campo]; else o[campo] = v; }
+  if (campo === 'volL' && o.volL) { delete o.w; delete o.hc; } // si cambia el volumen, el Ø y el alto del cilindro se recalculan
   if (!Object.keys(o).length) delete eq.vistas.equipos[id];
   pvGuardar(p); flowsheetsVistasRender();
 }
@@ -15963,7 +16017,7 @@ function pvEquiposReset(id) {
 function pvEquiposTablaHtml(unidades) {
   const col = { texto: '', 'típico': 'background:#fff3cd', editado: 'background:#dcedc8' };
   const filas = [];
-  unidades.filter(u => u.grupos).forEach(u => u.grupos.forEach(g => g.tanques.concat(g.otros).forEach(e => {
+  unidades.filter(u => u.grupos).forEach(u => u.grupos.forEach(g => g.tanques.concat(g.otros).filter(e => e.clase !== 'conico').forEach(e => {
     const inst = g.tanqueInst.concat(g.otroInst).find(x => x.e === e); if (!inst) return;
     const d = inst.dim, cil = (e.clase === 'tanque' || e.clase === 'cisterna') && d.orient !== 'h';
     const inp = (campo, v, w, f) => `<td style="padding:2px"><input value="${v}" style="width:${w}px;text-align:center;padding:4px 2px;${f || ''}" onchange="pvEditarEquipo('${esc(e.it.id)}','${campo}',this.value)" /></td>`;
@@ -15981,6 +16035,25 @@ function pvEquiposTablaHtml(unidades) {
     <table style="border-collapse:collapse;font-size:12px"><thead><tr style="border-bottom:2px solid var(--border)">${th('Químico')}${th('Tanque')}${th('Volumen (l)')}${th('Cisterna')}${th('Ancho / Largo (m)')}${th('Fondo (m)')}${th('Alto (m)')}${th('')}<th></th></tr></thead><tbody>${filas.join('')}</tbody></table>
     <p class="hint" style="margin-top:6px">Cómo se calculan: <b>tanque plástico</b> = cilindro vertical, alto 1,2 × Ø (500 l → Ø 0,81 × 0,97 m) · <b>maxibidón</b> = 1,0 × 1,2 × 1,16 m para 1.000 l, escalado según el volumen · <b>cisterna vertical</b> = alto 1,6 × Ø · <b>cisterna horizontal</b> = largo 3 × Ø, sobre dos soportes (suma 0,25 m de alto por los soportes). Si el texto no trae volumen se asume 500 l (tanque), 1.000 l (maxibidón) o 5.000 l (cisterna) — en amarillo. Para dibujar una cisterna horizontal elegí "Horizontal" acá, o poné "horizontal" en la especificación del equipo.</p></div>`;
 }
+// Tanques cónicos (cilindro + tolva): todos los parámetros, con el volumen y el ángulo calculados
+function pvConicosTablaHtml(unidades) {
+  const filas = [];
+  unidades.filter(u => u.grupos).forEach(u => u.grupos.forEach(g => g.tanques.filter(e => e.clase === 'conico').forEach(e => {
+    const inst = g.tanqueInst.find(x => x.e === e); if (!inst) return;
+    const d = inst.dim, o = e.ov || {}, id = esc(e.it.id);
+    const inp = (campo, v, ed) => `<td style="padding:2px"><input value="${v}" style="width:60px;text-align:center;padding:4px 2px;${ed ? 'background:#dcedc8' : ''}" onchange="pvEditarEquipo('${id}','${campo}',this.value)" /></td>`;
+    filas.push(`<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 6px;font-size:12px">${esc(g.quimico || '—')}</td>
+      ${inp('volL', Math.round(d.volCalc), o.volL)}${inp('w', pvR(d.w), o.w)}${inp('ds', pvR(d.ds), o.ds)}${inp('ang', pvR(d.ang), o.ang)}${inp('hc', pvR(d.hc), o.hc)}
+      <td style="padding:4px 6px;font-size:12px;text-align:center">${pvR(d.hk)}</td><td style="padding:4px 6px;font-size:12px;text-align:center">${pvR(d.hc + d.hk)}</td>
+      <td style="padding:4px 6px;font-size:11px;color:var(--text2);text-align:center">semiángulo ${pvR(90 - d.ang)}° · ángulo incluido ${pvR(2 * (90 - d.ang))}°</td>
+      <td style="padding:2px"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" title="Volver a las medidas calculadas" onclick="pvEquiposReset('${id}')">↺</button></td></tr>`);
+  })));
+  if (!filas.length) return '';
+  const th = t => `<th style="text-align:center;padding:4px 4px;color:var(--text2);font-weight:600;font-size:11px">${t}</th>`;
+  return `<div style="overflow-x:auto;margin-top:14px"><div class="hint" style="margin:0 0 4px"><b>Tanques cónicos</b> (cilindro arriba + tolva cónica abajo, sobre patas):</div>
+    <table style="border-collapse:collapse;font-size:12px"><thead><tr style="border-bottom:2px solid var(--border)">${th('Químico')}${th('Volumen total (l)')}${th('Ø mayor (m)')}${th('Ø salida (m)')}${th('Ángulo de la pared (°)')}${th('Alto cilindro (m)')}${th('Alto cono (m)')}${th('Alto total (m)')}${th('')}<th></th></tr></thead><tbody>${filas.join('')}</tbody></table>
+    <p class="hint" style="margin-top:6px">El <b>ángulo de la pared</b> se mide respecto de la <b>horizontal</b> (60° por defecto: cuanto mayor, más empinada la tolva). Con el Ø, la salida y el ángulo se calcula el alto del cono; el volumen total es cilindro + cono (V = π/4·Ø²·Hc + π·Hk/12·(Ø² + Ø·ds + ds²)). Si definís el volumen y no el Ø, se calcula el Ø con un cilindro de alto 0,8 × Ø. El alto total suma 0,35 m de patas.</p></div>`;
+}
 // ── Tabla de medidas (editable) ──
 function pvTablaHtml(unidades) {
   const col = { 'diseño': '', calculada: 'background:#e3f2fd', 'típica': 'background:#fff3cd', editada: 'background:#dcedc8' };
@@ -15995,9 +16068,10 @@ function pvTablaHtml(unidades) {
       <td style="padding:4px 6px;font-weight:600;font-size:12px">${esc(u.nombre)}</td>
       <td style="padding:2px"><select style="padding:4px 2px;font-size:12px" onchange="pvEditarMedida('${esc(u.nombre).replace(/'/g, '&#39;')}','forma',this.value)"><option value="rect" ${u.m.forma === 'rect' ? 'selected' : ''}>Rectangular</option><option value="circ" ${u.m.forma === 'circ' ? 'selected' : ''}>Circular</option></select></td>
       ${inp(u, 'largo', 56)}${inp(u, 'ancho', 56)}${inp(u, 'diametro', 56)}${inp(u, 'alto', 56)}${inp(u, 'nivelAgua', 56)}${inp(u, 'enterrado', 56)}
+      ${u.m.angulo != null ? inp(u, 'angulo', 56) : '<td style="padding:2px;color:var(--text2);text-align:center">—</td>'}
       <td style="padding:2px"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" title="Volver a las medidas del diseño / típicas y a la posición automática" onclick="pvRestablecer('${esc(u.nombre).replace(/'/g, '&#39;')}')">↺</button></td></tr>`).join('');
   return `<div style="overflow-x:auto;margin-top:12px"><table style="border-collapse:collapse;font-size:12px"><thead><tr style="border-bottom:2px solid var(--border)">
-      ${th('Unidad')}${th('Forma')}${th('Largo (m)')}${th('Ancho (m)')}${th('Ø (m)')}${th('Altura (m)')}${th('Nivel de agua (m)')}${th('Enterrado (m)')}<th></th></tr></thead><tbody>${filas}</tbody></table></div>
+      ${th('Unidad')}${th('Forma')}${th('Largo (m)')}${th('Ancho (m)')}${th('Ø (m)')}${th('Altura (m)')}${th('Nivel de agua (m)')}${th('Enterrado (m)')}${th('Ángulo del fondo (°)')}<th></th></tr></thead><tbody>${filas}</tbody></table></div>
     <p class="hint" style="margin-top:6px">Color de cada medida: <span style="background:#e3f2fd;padding:0 6px">calculada</span> con el volumen del diseño · <span style="background:#fff3cd;padding:0 6px">típica</span> (no figuraba en el diseño: completala) · <span style="background:#dcedc8;padding:0 6px">editada</span> por vos · sin color: tal cual el diseño. Vaciar un casillero vuelve a la medida original.</p>`;
 }
 // ── Dibujo: cotas y utilitarios ──
@@ -16102,7 +16176,7 @@ function pvQuimPlantaItems(u, ux, uy, eqpos) {
       const cc = ux + rx;
       c.bombas.forEach((b, k) => { const o = pvOff(eqpos, b.id); items.push({ id: b.id, kind: b.e.clase, x: cc + k * 0.4 + o.x, y: uy + it.cy + it.gd / 2 - 0.15 + o.y, w: 0.3, d: 0.3, g: it.g }); });
       const bx = cc + c.bombas.length * 0.4, t = c.tanque || c.otro;
-      if (t) { const o = pvOff(eqpos, t.id); items.push({ id: t.id, cfgId: c.tanque ? c.tanque.e.it.id : null, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: bx + o.x, y: uy + it.cy + it.gd / 2 - t.dim.d / 2 + o.y, w: t.dim.w, d: t.dim.d, h: t.dim.h, orient: t.dim.orient, mixer: !!c.mixer, g: it.g, volL: c.tanque ? c.tanque.e.volL : null }); }
+      if (t) { const o = pvOff(eqpos, t.id); items.push({ id: t.id, cfgId: c.tanque ? c.tanque.e.it.id : null, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: bx + o.x, y: uy + it.cy + it.gd / 2 - t.dim.d / 2 + o.y, w: t.dim.w, d: t.dim.d, h: t.dim.h, orient: t.dim.orient, dim: t.dim, mixer: !!c.mixer, g: it.g, volL: c.tanque ? c.tanque.e.volL : null }); }
     });
     labels.push({ key: pvGKey(it.g), texto: it.g.quimico || 'Equipo', vol: it.g.volTxt, x: ux + it.x + it.gw / 2, y: uy + it.cy + it.gd });
   });
@@ -16162,10 +16236,11 @@ function pvPlantaSvg(p, unidades) {
         let e;
         if (i.kind === 'bomba' || i.kind === 'bomba_neum') e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" fill="#fff" stroke="${col}" stroke-width="1.2"/>`;
         else if (i.kind === 'cisterna' && i.orient === 'h') e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" rx="${i.d / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
+        else if (i.kind === 'conico') e = `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${i.w / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/><circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${Math.max(2, (i.dim ? i.dim.ds : 0.2) / 2 * s)}" fill="none" stroke="${col}" stroke-width="1.2" stroke-dasharray="3 2"/>`;
         else if (i.kind === 'tanque' || i.kind === 'cisterna') e = `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${i.w / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
         else e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
         if (i.mixer) e += `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${Math.max(2, 0.1 * s)}" fill="#2e7d32"/>`;
-        if (_pvMedidasEq && !/bomba/.test(i.kind)) e += `<text x="${px(i.x + i.w / 2)}" y="${py(i.y + i.d / 2) + (i.mixer ? 14 : 3)}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">${((i.kind === 'tanque' || i.kind === 'cisterna') && i.orient !== 'h') ? 'Ø' + pvR(i.w) : pvR(i.w) + '×' + pvR(i.d)}</text>`;
+        if (_pvMedidasEq && !/bomba/.test(i.kind)) e += `<text x="${px(i.x + i.w / 2)}" y="${py(i.y + i.d / 2) + (i.mixer ? 14 : 3)}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">${((i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h') ? 'Ø' + pvR(i.w) : pvR(i.w) + '×' + pvR(i.d)}</text>`;
         sv += `<g data-pv-item="${esc(i.id)}" style="cursor:move">${e}</g>`;
       });
       z.labels.forEach(l => { sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x)}" y="${py(l.y) + 11}" text-anchor="middle" font-size="9" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvRot(p, l.key, l.texto))}${l.vol ? ' · ' + pvEsc(l.vol) : ''}</text>`; });
@@ -16185,7 +16260,7 @@ function pvQuimCorteItems(u, ux, eqpos) {
       const cc = ux + rx;
       c.bombas.forEach((b, k) => { const o = pvOff(eqpos, b.id); items.push({ id: b.id, kind: b.e.clase, x: cc + k * 0.4 + o.x, w: 0.3, h: 0.3, row: it.row, g: it.g }); });
       const bx = cc + c.bombas.length * 0.4, t = c.tanque || c.otro;
-      if (t) { const o = pvOff(eqpos, t.id); items.push({ id: t.id, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: bx + o.x, w: t.dim.w, h: t.dim.h, orient: t.dim.orient, mixer: !!c.mixer, row: it.row, g: it.g }); }
+      if (t) { const o = pvOff(eqpos, t.id); items.push({ id: t.id, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: bx + o.x, w: t.dim.w, h: t.dim.h, orient: t.dim.orient, dim: t.dim, mixer: !!c.mixer, row: it.row, g: it.g }); }
     });
     if (!it.row) labels.push({ key: pvGKey(it.g), texto: it.g.quimico || 'Equipo', x: ux + it.x + it.gw / 2 });
   });
@@ -16236,7 +16311,7 @@ function pvCorteSvg(p, unidades) {
         if (i.kind === 'bomba' || i.kind === 'bomba_neum') e = `<rect x="${bx}" y="${yT - 0.3 * s}" width="${0.3 * s}" height="${0.3 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/>`;
         else {
           const wpx = i.w * s, hpx = i.h * s, tcx = bx + wpx / 2;
-          e = pfQuimTanqueSvg(i.kind, tcx, yT, wpx, hpx, i.orient);
+          e = pfQuimTanqueSvg(i.kind, tcx, yT, wpx, hpx, i.orient, i.dim);
           if (i.mixer) { const my = yT - hpx - 0.42 * s; e += `<rect x="${tcx - 4}" y="${my}" width="8" height="${0.2 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/><line x1="${tcx}" y1="${my + 0.2 * s}" x2="${tcx}" y2="${yT - hpx * 0.16}" stroke="#2e7d32" stroke-width="1.4"/>`; }
           if (_pvMedidasEq) e += `<text x="${tcx}" y="${yT - hpx / 2}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">h ${pvR(i.h)}</text><text x="${tcx}" y="${yT - hpx / 2 + 10}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">${(i.kind === 'tanque' || i.kind === 'cisterna') ? 'Ø' : 'a'} ${pvR(i.w)}</text>`;
         }
@@ -16249,7 +16324,7 @@ function pvCorteSvg(p, unidades) {
     const nivel = Math.min(u.m.nivelAgua, u.m.alto), yAgua = bot - nivel * s;
     let g = '';
     const esSed = u.fig === 'sedimentador';
-    const cono = esSed ? Math.min(u.m.alto * 0.4, w * 0.18) : 0;
+    const cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * (w / 2 - 0.25))) : 0; // el fondo cónico sale del ángulo (pared vs horizontal)
     const contorno = esSed ? `M${x0},${top} V${bot - cono * s} L${x0 + wp / 2 - 0.25 * s},${bot} H${x0 + wp / 2 + 0.25 * s} L${x0 + wp},${bot - cono * s} V${top}` : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
     const idc = 'pvclip' + Math.random().toString(36).slice(2, 7);
     g += `<clipPath id="${idc}"><path d="${contorno} Z"/></clipPath><rect x="${x0}" y="${yAgua}" width="${wp}" height="${bot - yAgua}" fill="${PV_C.agua}" clip-path="url(#${idc})"/>`;
@@ -16394,7 +16469,7 @@ function pvOcupacionHtml(p, zi, pos, unidades) {
   const u = unidades.find(x => x.grupos && zi[x.nombre]); if (!u) return '';
   const ux = pos[u.nombre].x, uy = pos[u.nombre].y, L = u.m.largo, A = u.m.ancho;
   const it = zi[u.nombre].items;
-  const area = i => ((i.kind === 'tanque' || i.kind === 'cisterna') && i.orient !== 'h') ? Math.PI * (i.w / 2) ** 2 : i.w * i.d;
+  const area = i => ((i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h') ? Math.PI * (i.w / 2) ** 2 : i.w * i.d;
   const ocupa = it.reduce((s, i) => s + area(i), 0);
   const fuera = it.filter(i => i.x < ux - 0.01 || i.y < uy - 0.01 || i.x + i.w > ux + L + 0.01 || i.y + i.d > uy + A + 0.01).length;
   const pct = Math.round(ocupa / (L * A) * 100);
@@ -16409,13 +16484,13 @@ function flowsheetsVistasRender() {
   if (!unidades.length) { if (cp) cp.innerHTML = vacio; if (cc) cc.innerHTML = vacio; return; }
   if (_pfVista === 'planta' && cp) {
     const r = pvPlantaSvg(p, unidades);
-    cp.innerHTML = `${pvBarraHtml('planta')}${pvOcupacionHtml(p, r.zi, r.pos, unidades)}<div style="overflow:auto">${r.svg}</div>${btn('planta')}${pvTablaHtml(unidades)}${pvEquiposTablaHtml(unidades)}`;
+    cp.innerHTML = `${pvBarraHtml('planta')}${pvOcupacionHtml(p, r.zi, r.pos, unidades)}<div style="overflow:auto">${r.svg}</div>${btn('planta')}${pvTablaHtml(unidades)}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
     const sv = cp.querySelector('svg'); if (sv) pvInteraccionInit(sv);
   }
   if (_pfVista === 'corte' && cc) {
     const hayLodos = unidades.some(u => u.linea === 'lodos');
     const r = pvCorteSvg(p, unidades);
-    cc.innerHTML = `${pvBarraHtml('corte')}${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}`;
+    cc.innerHTML = `${pvBarraHtml('corte')}${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
     const sv = cc.querySelector('svg'); if (sv) pvInteraccionInit(sv);
   }
   pvChatRender('planta'); pvChatRender('corte');
@@ -16430,7 +16505,7 @@ const PV_TOOL_CHAT = {
       tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer'] },
       unidad: { type: 'string', description: 'Nombre exacto de la unidad.' },
       id: { type: 'string', description: 'Id del equipo (mover_equipo) o de la cota (quitar_cota).' },
-      campo: { type: 'string', enum: ['forma', 'largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado', 'volL', 'orient', 'w', 'd', 'h'], description: 'Para medida: forma/largo/ancho/diametro/alto/nivelAgua/enterrado de una unidad. Para configurar_equipo (id_config del tanque): volL (litros), orient ("h" horizontal / "v" vertical, solo cisternas), w/d/h (ancho o largo, fondo y alto en metros).' },
+      campo: { type: 'string', enum: ['forma', 'largo', 'ancho', 'diametro', 'alto', 'nivelAgua', 'enterrado', 'angulo', 'volL', 'orient', 'w', 'd', 'h', 'ds', 'hc', 'ang'], description: 'Para medida: forma/largo/ancho/diametro/alto/nivelAgua/enterrado de una unidad. Para configurar_equipo (id_config del tanque): volL (litros), orient ("h" horizontal / "v" vertical, solo cisternas), w/d/h (ancho o largo, fondo y alto en metros); en tanques cónicos: w (Ø mayor), ds (Ø de salida), hc (alto del cilindro) y ang (ángulo de la pared respecto de la horizontal, en grados). Para una unidad (medida): angulo = ángulo del fondo de un sedimentador, en grados respecto de la horizontal.' },
       valor: { type: ['number', 'string'], description: 'Nuevo valor (metros; forma: "rect" o "circ").' },
       dx: { type: 'number', description: 'Desplazamiento horizontal en metros (+ derecha).' },
       dy: { type: 'number', description: 'Desplazamiento en planta en metros (+ hacia abajo). Ignorado en el corte.' },
@@ -16447,7 +16522,7 @@ function pvContextoChat(p, modo) {
   const u2 = unidades.map(u => ({ nombre: u.nombre, linea: u.linea, forma: u.m.forma, largo: u.m.largo, ancho: u.m.ancho, diametro: u.m.diametro, alto: u.m.alto, nivelAgua: u.m.nivelAgua, enterrado: u.m.enterrado, origen_medidas: u.m.fuente, planta_x: pvR(pos[u.nombre].x), planta_y: pvR(pos[u.nombre].y), es_sala: !!u.sala }));
   const zonas = unidades.filter(u => u.grupos).map(u => {
     const z = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos);
-    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
+    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
   });
   const cotas = (modo === 'planta' ? vp : vc).cotas.map(c => ({ id: c.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2, medida_m: pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1)), texto: c.texto || null }));
   return JSON.stringify({ vista: modo, unidades: u2, zonas_de_quimicos: zonas, cotas_de_esta_vista: cotas });
@@ -16480,7 +16555,7 @@ async function pvChatSend(modo) {
   showMsg(sid, 'loading', 'Pensando...');
   try {
     const previo = hist[modo].slice(-9, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas.\n\nPEDIDO DEL USUARIO: ${msg}`;
+    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (6) En las cuentas geométricas (volúmenes, ángulos, alturas) mostrá la fórmula y el resultado; para un tronco de cono V = π·h/3·(R² + R·r + r²), semiángulo = atan((R − r)/h) respecto de la vertical y ángulo de la pared respecto de la horizontal = 90° − semiángulo.\n\nPEDIDO DEL USUARIO: ${msg}`;
     const r = await propLlamarForzado(PV_TOOL_CHAT, sistema, 3000);
     const aplicadas = pvAplicarAcciones(p, modo, r.acciones || []);
     const texto = (r.respuesta || '(sin respuesta)') + (aplicadas.length ? '\n\n✓ ' + aplicadas.join('\n✓ ') : '');
@@ -16705,7 +16780,7 @@ function flowsheetsAplicarAcciones(p, acciones) {
           if (c.grupo != null) eq.grupo = String(c.grupo);
           // volumen, orientación y medidas de un tanque: van a los ajustes de las vistas (los usan el diagrama, la planta y el corte)
           const vol = c.volumen_l != null ? Number(c.volumen_l) : (c.volumen_m3 != null ? Number(c.volumen_m3) * 1000 : null);
-          if (vol != null || c.orientacion != null || ['diametro', 'largo', 'alto', 'ancho'].some(k => c[k] != null)) {
+          if (vol != null || c.orientacion != null || ['diametro', 'largo', 'alto', 'ancho', 'diametro_salida', 'alto_cilindro', 'angulo'].some(k => c[k] != null)) {
             ed.vistas = Object.assign({}, ed.vistas); ed.vistas.equipos = Object.assign({}, ed.vistas.equipos);
             const o = Object.assign({}, ed.vistas.equipos[eq.id]);
             const hayDims = ['diametro', 'largo', 'alto', 'ancho'].some(k => c[k] != null);
@@ -16713,12 +16788,19 @@ function flowsheetsAplicarAcciones(p, acciones) {
             if (vol != null && vol > 0) o.volL = vol;
             if (c.orientacion != null) o.orient = /horiz/.test(procesosNormTxt(c.orientacion)) ? 'h' : 'v';
             const clase = pfQuimClase(Object.assign({}, eq, { tipoOriginal: eq.tipo })), txt = `${eq.tipo || ''} ${eq.especificacion || ''}`;
+            if (clase === 'conico') { // cónico: Ø mayor, Ø de salida, alto del cilindro y ángulo de la pared
+              const nn = v => (Number(v) > 0 ? Number(v) : null);
+              if (nn(c.diametro)) o.w = nn(c.diametro); if (nn(c.diametro_salida)) o.ds = nn(c.diametro_salida); if (nn(c.alto_cilindro)) o.hc = nn(c.alto_cilindro); if (nn(c.angulo)) o.ang = nn(c.angulo);
+              if (vol != null && vol > 0 && !nn(c.diametro)) { delete o.w; if (!nn(c.alto_cilindro)) delete o.hc; }
+              ed.vistas.equipos[eq.id] = o;
+            } else {
             const orient = o.orient || pfQuimOrient(procesosNormTxt(txt)) || 'v';
             const num = v => (Number(v) > 0 ? Number(v) : null);
             if (clase === 'cisterna' && orient === 'h') { if (num(c.largo)) o.w = num(c.largo); if (num(c.diametro)) { o.d = num(c.diametro); if (!num(c.alto)) o.h = o.d + 0.25; } if (num(c.alto)) o.h = num(c.alto); }
             else if (clase === 'tanque' || clase === 'cisterna') { if (num(c.diametro)) { o.w = num(c.diametro); o.d = num(c.diametro); } if (num(c.alto)) o.h = num(c.alto); }
             else { if (num(c.ancho)) o.w = num(c.ancho); if (num(c.largo)) o.d = num(c.largo); if (num(c.alto)) o.h = num(c.alto); }
             ed.vistas.equipos[eq.id] = o;
+            }
           }
           e.equipos = e.equipos.map((x, i) => i === r.idx ? eq : x);
           ed.etapas[r.etapa] = e; cambios = true;
@@ -16782,7 +16864,7 @@ async function flowsheetsChatSend() {
       const eqs = (p.equipos_data?.etapas?.[nombre]?.equipos || []).map(eq => `${eq.tipo} (x${eq.cantidad}) [id:${eq.id}${eq.grupo ? ', grupo: ' + eq.grupo : ''}${eq.especificacion ? ', esp: ' + String(eq.especificacion).slice(0, 80) : ''}]`).join('; ') || '(sin equipos)';
       return `- "${nombre}" — línea ${h.linea || 'liquido'}${h.origenLodos ? `, recibe lodos de "${h.origenLodos}"` : ''} — dimensiones: ${JSON.stringify(h.valoresConEtiqueta || {})} — equipos: ${eqs}`;
     }).join('\n') || '(sin etapas todavía — generá el flowsheet primero con texto/archivos)';
-    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoId":"<id del equipo, de la lista de arriba — preferido>","equipoTipo":"<tipo ya cargado, si no usás el id>","cambios":{"tipo":"...","cantidad":...,"especificacion":"...","grupo":"...","volumen_l":<litros>,"orientacion":"horizontal"|"vertical" (solo cisternas),"diametro":<m>,"largo":<m>,"alto":<m>,"ancho":<m>}} (poné solo los campos que cambian; para cambiar el volumen, la orientación o las medidas de un tanque usá volumen_l / orientacion / diametro / largo / alto / ancho)\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoId":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente, y si el pedido no se puede hacer con las acciones disponibles, decilo en vez de afirmar que lo hiciste.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
+    const instrucciones = `Sos el asistente de este flowsheet de tratamiento de efluentes (proyecto "${p.nombre}"). Estado actual de las etapas:\n${resumen}\n\nRespondé SIEMPRE con JSON válido (sin backticks ni texto extra), con esta forma exacta: {"respuesta":"...tu respuesta conversacional en español...","acciones":[],"acciones_layout":[]}.\n\n"acciones" — cambios al DISEÑO (qué etapas/equipos hay), cada una con "tipo":\n- "agregar_equipo": {"tipo":"agregar_equipo","etapa":"<nombre EXACTO>","equipo":{"tipo":"...","cantidad":1}}\n- "editar_equipo": {"tipo":"editar_equipo","etapa":"...","equipoId":"<id del equipo, de la lista de arriba — preferido>","equipoTipo":"<tipo ya cargado, si no usás el id>","cambios":{"tipo":"...","cantidad":...,"especificacion":"...","grupo":"...","volumen_l":<litros>,"orientacion":"horizontal"|"vertical" (solo cisternas),"diametro":<m>,"largo":<m>,"alto":<m>,"ancho":<m>,"diametro_salida":<m>,"alto_cilindro":<m>,"angulo":<grados de la pared del cono respecto de la horizontal>}} (poné solo los campos que cambian; para cambiar el volumen, la orientación o las medidas de un tanque usá volumen_l / orientacion / diametro / largo / alto / ancho; en un TANQUE CÓNICO (cilindro arriba + tolva abajo) "diametro" es el Ø mayor, "diametro_salida" el Ø de salida y "angulo" el de la pared). Para AGREGAR un tanque cónico usá agregar_equipo con tipo "Tanque cónico" y poné en "especificacion" los datos, ej. "diámetro 1 m, diámetro de salida 0,2 m, ángulo 60°, volumen 500 l", y "grupo" = químico\n- "eliminar_equipo": {"tipo":"eliminar_equipo","etapa":"...","equipoId":"...","equipoTipo":"..."}\n- "agregar_etapa": {"tipo":"agregar_etapa","nombre":"<nombre técnico real, ej Digestor aeróbico>","linea":"liquido"|"lodos","origenLodos":"<nombre de otra etapa, solo si linea=lodos y aplica>"|null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":null,"acometida":null},"despues_de":"<nombre de la etapa existente después de la cual va, o null para agregarla al final>","equipos":[{"tipo":"...","cantidad":1}]}\n- "eliminar_etapa": {"tipo":"eliminar_etapa","nombre":"..."}\n- "editar_etapa": {"tipo":"editar_etapa","nombre":"...","cambios":{"linea":...,"origenLodos":...,"dimensiones":{...}}} (poné solo lo que cambia)\nUsá SIEMPRE el nombre EXACTO de la etapa tal como figura arriba (o el nuevo nombre que vos mismo le pusiste en la misma respuesta, para "despues_de"/"origenLodos" de otra acción en la misma tanda). No digas que hiciste algo si no pusiste la acción correspondiente, y si el pedido no se puede hacer con las acciones disponibles, decilo en vez de afirmar que lo hiciste.\n\nIMPORTANTE — tocá SOLO lo que el usuario pidió, nunca rehagas el flowsheet entero: preferí SIEMPRE la acción más chica y puntual posible (editar_equipo/editar_etapa) en vez de eliminar_etapa+agregar_etapa para lograr lo mismo. NO elimines ni recrees ninguna etapa/equipo que el usuario no haya mencionado o que no haga falta tocar para cumplir el pedido — el resto del flowsheet queda exactamente como estaba. Usá eliminar_etapa+agregar_etapa solo cuando el usuario pida explícitamente rehacer/reemplazar esa etapa puntual.\n\n"acciones_layout" — mover/agrandar/achicar el DIBUJO sin tocar el diseño: {"tipo":"mover_etapa","etapa":"...","dx":40,"dy":0} (píxeles, positivo=derecha/abajo), {"tipo":"escalar_etapa","etapa":"...","factor":1.3} (agrandar>1, achicar<1), {"tipo":"mover_equipo","etapa":"...","equipoTipo":"...","dx":...,"dy":...}, {"tipo":"escalar_equipo","etapa":"...","equipoTipo":"...","factor":...}, o {"tipo":"reacomodar_todo"} para resetear todos los movimientos manuales.\n\nContale al usuario en "respuesta" qué cambiaste, en 1-2 líneas. Si el pedido es ambiguo o falta info (ej. no sabés bien qué etapa), preguntá en "respuesta" y dejá "acciones"/"acciones_layout" vacíos en vez de adivinar.`;
     const messages = p.chat_historial.map(m => ({ role: m.role, content: m.content }));
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
