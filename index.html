@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.82</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.81</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.82</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16278,6 +16278,7 @@ function pvPlantaSvg(p, unidades) {
   unidades.forEach(u => { xs.push(pos[u.nombre].x, pos[u.nombre].x + axr(u)); ys.push(pos[u.nombre].y, pos[u.nombre].y + ayr(u)); });
   Object.values(zi).forEach(z => z.items.forEach(i => { xs.push(i.x, i.x + i.w); ys.push(i.y, i.y + i.d + 0.6); }));
   vp.cotas.forEach(c => { xs.push(c.x1, c.x2); ys.push(c.y1, c.y2); });
+  pvCortesLista(p).forEach(c => { xs.push(c.x1, c.x2); ys.push(c.y1, c.y2); });
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
   const MARG = 4;
   const s = Math.max(8, Math.min(46, 1300 / (maxX - minX + 2 * MARG)));
@@ -16333,6 +16334,8 @@ function pvPlantaSvg(p, unidades) {
     }
   });
   vp.cotas.forEach(c => { sv += pvCotaSvg(c, px, py, c.id === _pvCotaSel); });
+  pvCortesLista(p).forEach(c => { sv += pvCortePlantaSvg(c, px, py, s, !!(_pvSel && _pvSel.kind === 'corte' && _pvSel.key === c.id)); });
+  if (_pvCorteP1) sv += `<circle cx="${px(_pvCorteP1.x)}" cy="${py(_pvCorteP1.y)}" r="4" fill="#c62828"/>`;
   if (_pvCotaP1) sv += `<circle cx="${px(_pvCotaP1.x)}" cy="${py(_pvCotaP1.y)}" r="4" fill="#e65100"/>`;
   sv += pvEscalaGrafica(18, Hh - 34, s) + pvNorte(W - 30, 26);
   sv += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="12" fill="${PV_C.cota}" font-family="Arial,sans-serif">VISTA EN PLANTA — medidas en metros</text></svg>`;
@@ -16436,6 +16439,187 @@ function pvCorteSvg(p, unidades) {
   sv += `<text x="${W / 2}" y="18" text-anchor="middle" font-size="12" fill="${PV_C.cota}" font-family="Arial,sans-serif">VISTA EN CORTE — medidas en metros</text></svg>`;
   return { svg: sv, items };
 }
+// ── Cortes definidos sobre la planta ──
+// Un corte es una línea en la vista en planta (x1,y1 → x2,y2, en metros) y un lado desde el que se mira. La sección se arma proyectando lo que está
+// de ese lado: lo que la línea atraviesa se dibuja "cortado" (en primer plano) y lo que queda detrás se ve en elevación, más tenue cuanto más lejos.
+const PV_LETRAS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+let _pvCorteSel = null;       // id del corte que se está mostrando en la pestaña "Vista en corte" (null = esquema del tren completo)
+let _pvCorteP1 = null;        // primer punto del corte en construcción
+function pvCortesLista(p) { const v = p && p.equipos_data && p.equipos_data.vistas; return (v && v.cortes) || []; }
+function pvCortesEstado(p) { pvEstado(p, 'planta'); const v = p.equipos_data.vistas; v.cortes = v.cortes || []; return v.cortes; }
+function pvCorteLetra(p) { const usadas = new Set(pvCortesLista(p).map(c => c.nombre)); return Array.from(PV_LETRAS).find(l => !usadas.has(l)) || String(pvCortesLista(p).length + 1); }
+const pvIdCorte = () => 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+// origen y ejes de la sección: t = hacia la derecha de quien mira, d = profundidad (hacia donde se mira)
+function pvCorteMarco(c) {
+  const dx = c.x2 - c.x1, dy = c.y2 - c.y1, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+  return c.lado === -1 ? { ox: c.x2, oy: c.y2, rx: -ux, ry: -uy, vx: -uy, vy: ux, L } : { ox: c.x1, oy: c.y1, rx: ux, ry: uy, vx: uy, vy: -ux, L };
+}
+// geometría de la planta (posiciones de unidades y equipos, con giros y desplazamientos) — la misma que se dibuja en la vista en planta
+function pvPlantaGeom(p, unidades) {
+  const vp = pvEstado(p, 'planta'), pos = pvPlantaLayout(p, unidades), zi = {};
+  unidades.forEach(u => { if (u.grupos && u.grupos.length) zi[u.nombre] = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos, vp.rot, pvRotN(p, u.nombre)); });
+  const xs = [], ys = [];
+  unidades.forEach(u => { const r = pvRotN(p, u.nombre); xs.push(pos[u.nombre].x, pos[u.nombre].x + pvPAX(u, r)); ys.push(pos[u.nombre].y, pos[u.nombre].y + pvPAY(u, r)); });
+  Object.values(zi).forEach(z => z.items.forEach(i => { xs.push(i.x, i.x + i.w); ys.push(i.y, i.y + i.d); }));
+  return { pos, zi, minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+function pvCorteDefSvg(p, unidades, c) {
+  const M = pvCorteMarco(c), L = M.L;
+  if (!(L > 0.05)) return null;
+  const G = pvPlantaGeom(p, unidades);
+  const rel = (x, y) => ({ t: M.rx * (x - M.ox) + M.ry * (y - M.oy), d: M.vx * (x - M.ox) + M.vy * (y - M.oy) });
+  const chordRect = (x0, y0, x1, y1) => {
+    let ta = -1e9, tb = 1e9;
+    for (const [o, r, lo, hi] of [[M.ox, M.rx, x0, x1], [M.oy, M.ry, y0, y1]]) {
+      if (Math.abs(r) < 1e-9) { if (o < lo || o > hi) return null; } else { let a = (lo - o) / r, b = (hi - o) / r; if (a > b) { const t = a; a = b; b = t; } ta = Math.max(ta, a); tb = Math.min(tb, b); }
+    }
+    return ta < tb ? [ta, tb] : null;
+  };
+  const els = [];
+  const addRect = (o, x, y, w, d) => {
+    const cs = [rel(x, y), rel(x + w, y), rel(x, y + d), rel(x + w, y + d)], ts = cs.map(q => q.t), ds = cs.map(q => q.d);
+    o.dmin = Math.min(...ds); o.dmax = Math.max(...ds); o.cut = o.dmin < 0 && o.dmax > 0 ? chordRect(x, y, x + w, y + d) : null;
+    const rr = o.cut || [Math.min(...ts), Math.max(...ts)]; o.a = rr[0]; o.b = rr[1];
+    if (o.dmax <= 0.001 || o.b <= 0 || o.a >= L || (o.dmin < 0 && !o.cut)) return;
+    els.push(o);
+  };
+  const addCirc = (o, cx, cy, R) => {
+    const q = rel(cx, cy); o.dmin = q.d - R; o.dmax = q.d + R;
+    if (o.dmin < 0 && o.dmax > 0) { const hh = Math.sqrt(Math.max(0, R * R - q.d * q.d)); o.cut = [q.t - hh, q.t + hh]; } else o.cut = null;
+    const rr = o.cut || [q.t - R, q.t + R]; o.a = rr[0]; o.b = rr[1];
+    if (o.dmax <= 0.001 || o.b <= 0 || o.a >= L) return;
+    els.push(o);
+  };
+  unidades.forEach(u => {
+    const r = pvRotN(p, u.nombre), ps = G.pos[u.nombre], w = pvPAX(u, r), d = pvPAY(u, r);
+    const o = { tipo: u.sala ? 'sala' : 'unidad', u };
+    if (u.m.forma === 'circ' && !u.sala) addCirc(o, ps.x + w / 2, ps.y + d / 2, w / 2); else addRect(o, ps.x, ps.y, w, d);
+  });
+  Object.values(G.zi).forEach(z => z.items.forEach(i => {
+    const o = { tipo: 'item', i, h: /bomba/.test(i.kind) ? 0.3 : (i.h || 1) };
+    const circ = (i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h';
+    if (circ) addCirc(o, i.x + i.w / 2, i.y + i.d / 2, i.w / 2); else addRect(o, i.x, i.y, i.w, i.d);
+  }));
+  // alturas para la escala
+  const altoDe = o => o.tipo === 'item' ? o.h + (o.i.mixer ? 0.42 : 0) : o.u.m.alto - Math.min(o.u.m.enterrado || 0, o.u.m.alto);
+  const maxSobre = Math.max(0.5, ...els.map(altoDe));
+  const maxEnt = Math.max(0, ...els.filter(o => o.tipo === 'unidad').map(o => Math.min(o.u.m.enterrado || 0, o.u.m.alto)));
+  const s = Math.max(8, Math.min(42, 1300 / (L + 1), 480 / (maxSobre + maxEnt + 2.5)));
+  const padL = 60, padT = 56, yT = padT + maxSobre * s;
+  const px = t => padL + t * s, fy = e => yT - e * s;
+  const W = L * s + padL * 2;
+  const letras = c.lado === -1 ? [c.nombre + "'", c.nombre] : [c.nombre, c.nombre + "'"];
+  const idc = 'pvcw' + Math.random().toString(36).slice(2, 7);
+  const sorted = els.slice().sort((a, b) => (a.tipo === 'sala') !== (b.tipo === 'sala') ? (a.tipo === 'sala' ? -1 : 1) : (!!a.cut !== !!b.cut) ? (a.cut ? 1 : -1) : b.dmin - a.dmin);
+  const dMax = Math.max(1, ...els.map(o => Math.max(0, o.dmin)));
+  let body = '', labels = [];
+  sorted.forEach(o => {
+    const a = o.a, b = o.b, x0 = px(a), wp = (b - a) * s;
+    const op = o.cut ? 1 : Math.max(0.4, 0.88 - 0.48 * Math.max(0, o.dmin) / dMax);
+    let g = '';
+    if (o.tipo === 'sala') {
+      const alto = o.u.m.alto;
+      g += `<path d="M${x0},${yT} V${fy(alto)} H${x0 + wp} V${yT}" fill="none" stroke="#8a6d3b" stroke-width="1.6" stroke-dasharray="7 4"/><line x1="${x0 - 8}" y1="${fy(alto)}" x2="${x0 + wp + 8}" y2="${fy(alto)}" stroke="#8a6d3b" stroke-width="2.4"/>`;
+      g += `<text x="${x0 + wp / 2}" y="${fy(alto) - 8}" text-anchor="middle" font-size="11.5" font-weight="700" fill="#8a6d3b" font-family="Arial,sans-serif">${pvEsc(pvTitulo(p, o.u.nombre))}</text>`;
+      if (o.cut) g += pvCotaV(fy(alto), yT, x0 - 12, `H = ${alto} m`);
+    } else if (o.tipo === 'unidad') {
+      const u = o.u, ent = Math.min(u.m.enterrado || 0, u.m.alto), top = fy(u.m.alto - ent), bot = yT + ent * s;
+      if (!o.cut) {
+        g += `<path d="M${x0},${top} V${bot} H${x0 + wp} V${top}" fill="#f1f7f2" stroke="${PV_C.linea}" stroke-width="1.8"/><line x1="${x0}" y1="${top}" x2="${x0 + wp}" y2="${top}" stroke="${PV_C.linea}" stroke-width="1.8"/>`;
+        g += `<text x="${x0 + wp / 2}" y="${top - 6}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+      } else {
+        const nivel = Math.min(u.m.nivelAgua || 0, u.m.alto), yAgua = bot - nivel * s, esSed = u.fig === 'sedimentador';
+        const wm = b - a, cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * Math.max(0.05, wm / 2 - 0.25))) : 0;
+        const contorno = esSed ? `M${x0},${top} V${bot - cono * s} L${x0 + wp / 2 - 0.25 * s},${bot} H${x0 + wp / 2 + 0.25 * s} L${x0 + wp},${bot - cono * s} V${top}` : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
+        const idq = 'pvcl' + Math.random().toString(36).slice(2, 7);
+        g += `<clipPath id="${idq}"><path d="${contorno} Z"/></clipPath><rect x="${x0}" y="${yAgua}" width="${wp}" height="${bot - yAgua}" fill="${PV_C.agua}" clip-path="url(#${idq})"/>`;
+        g += `<path d="${contorno}" fill="none" stroke="${PV_C.linea}" stroke-width="2.4"/><path d="M${x0},${yAgua} H${x0 + wp}" stroke="#1565c0" stroke-width="1.2" stroke-dasharray="5 3"/>`;
+        g += pvCotaH(x0, x0 + wp, bot + 22, `${pvR(wm)} m`) + pvCotaV(top, bot, x0 - 12, `H = ${u.m.alto} m`);
+        g += `<text x="${x0 + wp - 4}" y="${yAgua + 13}" text-anchor="end" font-size="10" fill="#1565c0" font-family="Arial,sans-serif">NA ${u.m.nivelAgua} m</text>`;
+        g += `<text x="${x0 + wp / 2}" y="${top - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+      }
+    } else {
+      const i = o.i, wpx = Math.max(4, wp), hpx = o.h * s, tcx = x0 + wp / 2;
+      if (/bomba/.test(i.kind)) g += `<rect x="${x0}" y="${yT - 0.3 * s}" width="${wpx}" height="${0.3 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/>`;
+      else {
+        const horiz = i.kind === 'cisterna' && i.orient === 'h';
+        const largoEnX = i.w >= i.d, deFrente = horiz && ((largoEnX ? Math.abs(M.rx) : Math.abs(M.ry)) < 0.7); // cisterna horizontal vista desde un extremo → un círculo
+        if (deFrente) {
+          const D = Math.min(i.w, i.d) * s, sad = Math.max(4, Math.min(10, hpx * 0.14)), cy = yT - sad - D / 2;
+          g += `<path d="M${tcx - D * 0.42},${yT} L${tcx - D * 0.3},${yT - sad} H${tcx + D * 0.3} L${tcx + D * 0.42},${yT} Z" fill="#fff" stroke="#222" stroke-width="1.3"/><circle cx="${tcx}" cy="${cy}" r="${D / 2}" fill="#fff" stroke="#222" stroke-width="1.6"/><circle cx="${tcx}" cy="${cy - D * 0.22}" r="${Math.max(2.5, D * 0.07)}" fill="#fff" stroke="#222" stroke-width="1.1"/><line x1="${tcx - D * 0.6}" y1="${yT + 1}" x2="${tcx + D * 0.6}" y2="${yT + 1}" stroke="#222" stroke-width="2.2"/>`;
+        } else g += pfQuimTanqueSvg(i.kind, tcx, yT, wpx, hpx, i.orient, i.dim);
+        if (i.mixer) { const my = yT - hpx - 0.42 * s; g += `<rect x="${tcx - 4}" y="${my}" width="8" height="${0.2 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/><line x1="${tcx}" y1="${my + 0.2 * s}" x2="${tcx}" y2="${yT - hpx * 0.16}" stroke="#2e7d32" stroke-width="1.4"/>`; }
+        if (i.g && i.g.quimico) labels.push({ t: tcx, texto: i.g.quimico, cut: !!o.cut, key: pvGKey(i.g) });
+      }
+    }
+    body += `<g opacity="${op}">${g}</g>`;
+  });
+  // rótulos de químicos debajo del terreno, en filas para que no se pisen
+  const vistos = new Set(), filas = [];
+  const rotulos = labels.sort((q, w) => q.t - w.t).filter(l => !vistos.has(l.key + Math.round(l.t / 30)) && vistos.add(l.key + Math.round(l.t / 30)));
+  let txt = '';
+  rotulos.forEach(l => {
+    const nom = pvRot(p, l.key, l.texto), ancho = nom.length * 5.4 + 8;
+    let f = filas.findIndex(fin => l.t - ancho / 2 > fin); if (f < 0) { f = filas.length; filas.push(-1e9); }
+    filas[f] = l.t + ancho / 2;
+    txt += `<text x="${l.t}" y="${yT + 16 + f * 12}" text-anchor="middle" font-size="9.5" fill="${l.cut ? PV_C.texto : PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(nom)}</text>`;
+  });
+  const yCota = yT + Math.max(maxEnt * s + 44, 30 + filas.length * 12);
+  const Hh = yCota + 90;
+  let sv = `<svg viewBox="0 0 ${W} ${Hh}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Corte ${pvEsc(c.nombre)}" style="max-width:100%;height:auto;background:#fff;border:1px solid var(--border);touch-action:none" data-pv-modo="corte" data-pv-escala="${s}" data-pv-kx="0" data-pv-ky="0" data-pv-ysign="-1"><rect width="${W}" height="${Hh}" fill="#fff"/>`;
+  const tx0 = 12, tx1 = W - 12;
+  sv += `<line x1="${tx0}" y1="${yT}" x2="${tx1}" y2="${yT}" stroke="${PV_C.terreno}" stroke-width="1.6"/>`;
+  for (let t = tx0; t < tx1; t += 12) sv += `<line x1="${t}" y1="${yT}" x2="${t - 6}" y2="${yT + 8}" stroke="${PV_C.terreno}" stroke-width="1"/>`;
+  sv += `<text x="${tx1}" y="${yT - 5}" text-anchor="end" font-size="10" font-style="italic" fill="${PV_C.terreno}" font-family="Arial,sans-serif">Nivel de terreno</text>`;
+  sv += `<clipPath id="${idc}"><rect x="${padL - 2}" y="0" width="${L * s + 4}" height="${Hh}"/></clipPath><g clip-path="url(#${idc})">${body}</g>`;
+  // extremos del corte (los mismos rótulos que en la planta)
+  sv += `<line x1="${padL}" y1="${padT - 22}" x2="${padL}" y2="${yT + 4}" stroke="#c62828" stroke-width="1" stroke-dasharray="10 3 2 3"/><line x1="${padL + L * s}" y1="${padT - 22}" x2="${padL + L * s}" y2="${yT + 4}" stroke="#c62828" stroke-width="1" stroke-dasharray="10 3 2 3"/>`;
+  sv += `<text x="${padL}" y="${padT - 28}" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828" font-family="Arial,sans-serif">${pvEsc(letras[0])}</text><text x="${padL + L * s}" y="${padT - 28}" text-anchor="middle" font-size="13" font-weight="700" fill="#c62828" font-family="Arial,sans-serif">${pvEsc(letras[1])}</text>`;
+  sv += txt + pvCotaH(padL, padL + L * s, yCota, `${pvR(L)} m`);
+  sv += pvEscalaGrafica(18, Hh - 34, s);
+  sv += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="12" fill="${PV_C.cota}" font-family="Arial,sans-serif">CORTE ${pvEsc(c.nombre)}–${pvEsc(c.nombre)}' — medidas en metros (lo cortado en primer plano; lo de atrás, más tenue)</text></svg>`;
+  return { svg: sv };
+}
+// marca del corte en la vista en planta: línea de trazos y puntos, flechas hacia donde se mira y letras en los extremos
+function pvCortePlantaSvg(c, px, py, s, sel) {
+  const M = pvCorteMarco(c), col = sel ? '#e65100' : '#c62828', ax = 0.9;
+  const flecha = (x, y) => { const x2 = x + M.vx * ax, y2 = y + M.vy * ax, a = Math.atan2(M.vy, M.vx), sz = 7, p1 = [px(x2), py(y2)]; return `<line x1="${px(x)}" y1="${py(y)}" x2="${p1[0]}" y2="${p1[1]}" stroke="${col}" stroke-width="2"/><polygon points="${p1[0]},${p1[1]} ${p1[0] - sz * Math.cos(a - 0.45)},${p1[1] - sz * Math.sin(a - 0.45)} ${p1[0] - sz * Math.cos(a + 0.45)},${p1[1] - sz * Math.sin(a + 0.45)}" fill="${col}"/>`; };
+  const ux = (c.x2 - c.x1) / M.L, uy = (c.y2 - c.y1) / M.L;
+  const lbl = (x, y, t) => `<text x="${px(x - ux * 0.7)}" y="${py(y - uy * 0.7) + 4}" text-anchor="middle" font-size="13" font-weight="700" fill="${col}" font-family="Arial,sans-serif">${pvEsc(t)}</text>`;
+  let g = `<line x1="${px(c.x1)}" y1="${py(c.y1)}" x2="${px(c.x2)}" y2="${py(c.y2)}" stroke="transparent" stroke-width="14"/><line x1="${px(c.x1)}" y1="${py(c.y1)}" x2="${px(c.x2)}" y2="${py(c.y2)}" stroke="${col}" stroke-width="${sel ? 2.2 : 1.6}" stroke-dasharray="14 4 3 4"/>`;
+  g += flecha(c.x1, c.y1) + flecha(c.x2, c.y2) + lbl(c.x1, c.y1, c.nombre) + lbl(c.x2, c.y2, c.nombre + "'");
+  return `<g data-pv-corte="${esc(c.id)}" data-pv-nombre="${esc('Corte ' + c.nombre)}" style="cursor:move">${g}</g>`
+    + [1, 2].map(k => `<circle data-pv-corteh="${esc(c.id)}:${k}" cx="${px(k === 1 ? c.x1 : c.x2)}" cy="${py(k === 1 ? c.y1 : c.y2)}" r="5.5" fill="#fff" stroke="${col}" stroke-width="1.6" style="cursor:crosshair"/>`).join('');
+}
+// herramienta: dos clics en la planta
+function pvCorteClick(svgEl, ev) {
+  const p = pvProy(); if (!p) return;
+  let m = pvAMetros(svgEl, pvPunto(svgEl, ev));
+  m = { x: Math.round(m.x * 20) / 20, y: Math.round(m.y * 20) / 20 };
+  if (!_pvCorteP1) { _pvCorteP1 = m; flowsheetsVistasRender(); return; }
+  const a = _pvCorteP1; let b = m;
+  if (Math.abs(b.x - a.x) > 3 * Math.abs(b.y - a.y)) b = { x: b.x, y: a.y }; else if (Math.abs(b.y - a.y) > 3 * Math.abs(b.x - a.x)) b = { x: a.x, y: b.y }; // casi horizontal / vertical: se endereza
+  if (Math.hypot(b.x - a.x, b.y - a.y) < 0.3) { _pvCorteP1 = null; _pvTool = null; flowsheetsVistasRender(); return; }
+  const k = { id: pvIdCorte(), nombre: pvCorteLetra(p), x1: a.x, y1: a.y, x2: b.x, y2: b.y, lado: 1 };
+  pvCortesEstado(p).push(k);
+  _pvCorteP1 = null; _pvTool = null; _pvSel = { kind: 'corte', key: k.id, nombre: 'Corte ' + k.nombre };
+  pvGuardar(p); flowsheetsVistasRender();
+}
+function pvHerramientaCorte(on) { _pvTool = on ? 'corte' : null; _pvCorteP1 = null; _pvCotaP1 = null; flowsheetsVistasRender(); }
+function pvCorteInvertir() { const p = pvProy(); if (!p || !_pvSel || _pvSel.kind !== 'corte') return; const c = pvCortesLista(p).find(k => k.id === _pvSel.key); if (!c) return; c.lado = c.lado === -1 ? 1 : -1; pvGuardar(p); flowsheetsVistasRender(); }
+function pvCorteQuitar(id) {
+  const p = pvProy(); if (!p) return; id = id || (_pvSel && _pvSel.kind === 'corte' ? _pvSel.key : null); if (!id) return;
+  const l = pvCortesEstado(p); const i = l.findIndex(k => k.id === id); if (i < 0) return; l.splice(i, 1);
+  if (_pvCorteSel === id) _pvCorteSel = null; if (_pvSel && _pvSel.key === id) _pvSel = null;
+  pvGuardar(p); flowsheetsVistasRender();
+}
+function pvCorteRenombrar(id) {
+  const p = pvProy(); if (!p) return; const c = pvCortesLista(p).find(k => k.id === id); if (!c) return;
+  const n = prompt('Nombre del corte (una letra, ej. A):', c.nombre); if (n == null || !n.trim()) return;
+  c.nombre = n.trim().slice(0, 4); pvGuardar(p); flowsheetsVistasRender();
+}
+function pvVerCorte(id) { _pvCorteSel = id || null; if (pvCtx() === 'procesos') procesosDiagramaCambiarModo('corte'); else flowsheetsSubtab('corte'); }
+function pvElegirCorte(id) { _pvCorteSel = id || null; flowsheetsVistasRender(); }
 // ── Interacción: mover unidades y equipos, renombrar, colocar cotas ──
 let _pvDrag = null;
 function pvPunto(svgEl, ev) { const pt = svgEl.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; return pt.matrixTransform(svgEl.getScreenCTM().inverse()); }
@@ -16465,7 +16649,7 @@ function pvSelDibujar(svgEl) {
   const lbl = document.getElementById(pvP() + 'sel-nombre'), btn = document.getElementById(pvP() + 'rotar-btn');
   let el = null;
   if (_pvSel) {
-    const attr = _pvSel.kind === 'item' ? 'data-pv-item' : 'data-pv-unidad';
+    const attr = _pvSel.kind === 'item' ? 'data-pv-item' : _pvSel.kind === 'corte' ? 'data-pv-corte' : 'data-pv-unidad';
     el = Array.from(svgEl.querySelectorAll('[' + attr + ']')).find(n => n.getAttribute(attr) === _pvSel.key) || null;
   }
   if (el) {
@@ -16478,9 +16662,17 @@ function pvSelDibujar(svgEl) {
   }
   if (lbl) lbl.textContent = el ? 'Seleccionado: ' + (_pvSel.nombre || _pvSel.key) : 'Hacé clic en una unidad o equipo para seleccionarlo';
   if (btn) btn.disabled = !el;
+  const esK = !!el && _pvSel.kind === 'corte';
+  [pvP() + 'corte-inv', pvP() + 'corte-del'].forEach(i => { const b = document.getElementById(i); if (b) b.disabled = !esK; });
 }
 function pvRotarSel(n) {
   const p = pvProy(); if (!p || !_pvSel || !document.querySelector('.pv-sel')) return;
+  if (_pvSel.kind === 'corte') {
+    const c = pvCortesLista(p).find(q => q.id === _pvSel.key); if (!c) return;
+    const cx = (c.x1 + c.x2) / 2, cy = (c.y1 + c.y2) / 2, q = ((n % 4) + 4) % 4, r2 = z => Math.round(z * 100) / 100;
+    for (let i = 0; i < q; i++) { const a = [c.x1 - cx, c.y1 - cy], b = [c.x2 - cx, c.y2 - cy]; c.x1 = r2(cx - a[1]); c.y1 = r2(cy + a[0]); c.x2 = r2(cx - b[1]); c.y2 = r2(cy + b[0]); }
+    pvGuardar(p); flowsheetsVistasRender(); return;
+  }
   const v = pvEstado(p, 'planta'), k = _pvSel.key;
   const nuevo = ((((Number(v.rot[k]) || 0) + n) % 4) + 4) % 4;
   if (nuevo) v.rot[k] = nuevo; else delete v.rot[k];
@@ -16507,10 +16699,11 @@ function pvInteraccionInit(svgEl) {
   const modoSvg = svgEl.getAttribute('data-pv-modo');
   svgEl.addEventListener('pointerdown', ev => {
     if (_pvTool === 'cota') { ev.preventDefault(); pvCotaClick(svgEl, ev); return; }
+    if (_pvTool === 'corte' && modoSvg === 'planta') { ev.preventDefault(); pvCorteClick(svgEl, ev); return; }
     const cEl = ev.target.closest('[data-pv-cota]');
     if (cEl) { _pvCotaSel = cEl.getAttribute('data-pv-cota'); svgEl.querySelectorAll('[data-pv-cota]').forEach(n => { const sel = n.getAttribute('data-pv-cota') === _pvCotaSel; if (n.tagName === 'text') n.setAttribute('fill', sel ? '#e65100' : PV_C.cota); else { n.setAttribute('stroke', sel ? '#e65100' : PV_C.cota); n.setAttribute('stroke-width', sel ? 1.8 : 1.1); } }); return; }
-    const rEl = ev.target.closest('[data-pv-rotulo]'), itemEl = ev.target.closest('[data-pv-item]'), uEl = ev.target.closest('[data-pv-unidad]');
-    const el = rEl || itemEl || uEl;
+    const rEl = ev.target.closest('[data-pv-rotulo]'), hEl = ev.target.closest('[data-pv-corteh]'), kEl = ev.target.closest('[data-pv-corte]'), itemEl = ev.target.closest('[data-pv-item]'), uEl = ev.target.closest('[data-pv-unidad]');
+    const el = rEl || hEl || kEl || itemEl || uEl;
     if (!el) {
       if (_pvCotaSel) { _pvCotaSel = null; flowsheetsVistasRender(); }
       if (_pvSel) { _pvSel = null; pvSelDibujar(svgEl); }
@@ -16519,9 +16712,11 @@ function pvInteraccionInit(svgEl) {
       return;
     }
     if (rEl && ev.detail > 1) return; // doble clic en un texto: se renombra
-    const kind = rEl ? 'rotulo' : itemEl ? 'item' : 'unidad';
-    const key = rEl ? rEl.getAttribute('data-pv-rotulo') : itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad');
-    if (kind !== 'rotulo') { _pvSel = { kind, key, nombre: (itemEl || uEl).getAttribute('data-pv-nombre') || key }; pvSelDibujar(svgEl); }
+    if (kEl && ev.detail > 1) return; // doble clic en un corte: se renombra
+    const kind = rEl ? 'rotulo' : hEl ? 'corteh' : kEl ? 'corte' : itemEl ? 'item' : 'unidad';
+    const key = rEl ? rEl.getAttribute('data-pv-rotulo') : hEl ? hEl.getAttribute('data-pv-corteh') : kEl ? kEl.getAttribute('data-pv-corte') : itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad');
+    if (kind === 'corte' || kind === 'corteh') { const idc = kind === 'corteh' ? key.split(':')[0] : key, ck = pvCortesLista(pvProy()).find(q => q.id === idc); _pvSel = { kind: 'corte', key: idc, nombre: 'Corte ' + (ck ? ck.nombre : '') }; pvSelDibujar(svgEl); }
+    else if (kind !== 'rotulo') { _pvSel = { kind, key, nombre: (itemEl || uEl).getAttribute('data-pv-nombre') || key }; pvSelDibujar(svgEl); }
     const p0 = pvPunto(svgEl, ev);
     _pvDrag = { el, kind, key, x0: p0.x, y0: p0.y, dx: 0, dy: 0, svg: svgEl, s: parseFloat(svgEl.getAttribute('data-pv-escala')) || 20, modo: modoSvg };
     try { el.setPointerCapture(ev.pointerId); } catch (e) { /* sin captura */ }
@@ -16542,6 +16737,16 @@ function pvInteraccionInit(svgEl) {
     const dxm = Math.round(d.dx / d.s * 20) / 20, dym = Math.round(d.dy / d.s * 20) / 20;
     if (!dxm && !dym) { d.el.removeAttribute('transform'); pvSelDibujar(svgEl); return; }
     const p = pvProy(); if (!p) return;
+    if (d.kind === 'corte' || d.kind === 'corteh') {
+      const [idc, pt] = d.key.split(':'), ck = pvCortesLista(p).find(q => q.id === idc);
+      if (ck) {
+        const r2 = z => Math.round(z * 100) / 100;
+        if (d.kind === 'corte') { ck.x1 = r2(ck.x1 + dxm); ck.x2 = r2(ck.x2 + dxm); ck.y1 = r2(ck.y1 + dym); ck.y2 = r2(ck.y2 + dym); }
+        else if (pt === '1') { ck.x1 = r2(ck.x1 + dxm); ck.y1 = r2(ck.y1 + dym); } else { ck.x2 = r2(ck.x2 + dxm); ck.y2 = r2(ck.y2 + dym); }
+        pvGuardar(p);
+      }
+      flowsheetsVistasRender(); return;
+    }
     const v = pvEstado(p, d.modo), tabla = d.kind === 'rotulo' ? v.rotpos : d.kind === 'item' ? v.eqpos : v.pos;
     const o = tabla[d.key] || { x: 0, y: 0 };
     tabla[d.key] = { x: Math.round(((Number(o.x) || 0) + dxm) * 100) / 100, y: Math.round(((Number(o.y) || 0) + dym) * 100) / 100 };
@@ -16568,6 +16773,8 @@ function pvInteraccionInit(svgEl) {
       }
       pvGuardar(p); flowsheetsVistasRender(); return;
     }
+    const kc = ev.target.closest('[data-pv-corte]');
+    if (kc) { pvCorteRenombrar(kc.getAttribute('data-pv-corte')); return; }
     const c = ev.target.closest('[data-pv-cota]');
     if (c) {
       const modo = svgEl.getAttribute('data-pv-modo'), v = pvEstado(p, modo), cota = v.cotas.find(k => k.id === c.getAttribute('data-pv-cota'));
@@ -16581,7 +16788,8 @@ function pvInteraccionInit(svgEl) {
 }
 document.addEventListener('keydown', ev => {
   if (pvModo() !== 'planta' && pvModo() !== 'corte') return;
-  if (ev.key === 'Escape' && (_pvTool || _pvCotaP1)) { _pvTool = null; _pvCotaP1 = null; flowsheetsVistasRender(); return; }
+  if (ev.key === 'Escape' && (_pvTool || _pvCotaP1 || _pvCorteP1)) { _pvTool = null; _pvCotaP1 = null; _pvCorteP1 = null; flowsheetsVistasRender(); return; }
+  if ((ev.key === 'Delete' || ev.key === 'Supr') && _pvSel && _pvSel.kind === 'corte' && pvModo() === 'planta' && !/INPUT|TEXTAREA|SELECT/.test((ev.target || {}).tagName || '')) { pvCorteQuitar(_pvSel.key); return; }
   if ((ev.key === 'r' || ev.key === 'R') && _pvSel && pvModo() === 'planta' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !/INPUT|TEXTAREA|SELECT/.test((ev.target || {}).tagName || '')) { ev.preventDefault(); pvRotarSel(ev.shiftKey ? 3 : 1); return; }
   if ((ev.key === 'Delete' || ev.key === 'Supr') && _pvCotaSel && !/INPUT|TEXTAREA|SELECT/.test((ev.target || {}).tagName || '')) pvCotaBorrar(_pvCotaSel);
 });
@@ -16605,17 +16813,22 @@ function pvReacomodar(modo) {
   pvGuardar(p); flowsheetsVistasRender();
 }
 // ── Barra de herramientas, cotas del usuario y ocupación de la zona ──
-function pvBarraHtml(modo) {
+function pvBarraHtml(modo, derivado) {
   const p = pvProy(), v = pvEstado(p, modo);
+  if (derivado) return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><span style="display:inline-flex;gap:3px;align-items:center"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',0.8)">−</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px;min-width:52px" id="${pvP()}zoom-pct-${modo}" onclick="pvZoomBtn('${modo}',0)">${Math.round((_pvZoom[modo] || 1) * 100)}%</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',1.25)">+</button></span><span class="hint" style="margin:0">Este corte sale de la línea marcada en la Vista en planta: para cambiarlo, movela, giratela o invertí su vista allá (⇄). Ctrl + rueda = zoom.</span></div>`;
   const lista = v.cotas.map(c => `<div style="display:flex;gap:6px;align-items:center;margin-top:4px;font-size:12px"><span style="color:${c.id === _pvCotaSel ? '#e65100' : 'var(--text2)'};width:90px">${pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1))} m</span><input value="${esc(c.texto || '')}" placeholder="texto (vacío = la medida)" style="flex:1;font-size:12px;padding:3px 6px" onchange="pvCotaTexto('${modo}','${c.id}',this.value)" /><button class="btn btn-secondary btn-sm" style="width:auto;padding:2px 8px" onclick="pvCotaBorrar('${c.id}')" title="Borrar la cota">✕</button></div>`).join('');
   return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <button class="btn ${_pvTool === 'cota' ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto" onclick="pvHerramientaCota(${_pvTool !== 'cota'})" title="Colocar una cota: clic en dos puntos">📏 + Cota</button>
       <label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" ${_pvMedidasEq ? 'checked' : ''} style="width:auto" onchange="_pvMedidasEq=this.checked; flowsheetsVistasRender()" /> Mostrar medidas de los equipos</label>
       <button class="btn btn-secondary btn-sm" style="width:auto" onclick="pvReacomodar('${modo}')" title="Vuelve unidades, equipos, nombres y giros a su posición automática (no toca las medidas ni las cotas)">↺ Reacomodar</button>
       <span style="display:inline-flex;gap:3px;align-items:center" title="Zoom (también Ctrl + rueda del mouse); arrastrá el fondo para desplazarte"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',0.8)">−</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px;min-width:52px" id="${pvP()}zoom-pct-${modo}" onclick="pvZoomBtn('${modo}',0)">${Math.round((_pvZoom[modo] || 1) * 100)}%</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',1.25)">+</button></span>
-      ${modo === 'planta' ? `<button class="btn btn-secondary btn-sm" style="width:auto" id="${pvP()}rotar-btn" onclick="pvRotarSel(1)" disabled title="Gira la unidad o equipo seleccionado 90° (también la tecla R; Mayús+R al revés)">⟳ Rotar 90°</button><span class="hint" id="${pvP()}sel-nombre" style="margin:0">Hacé clic en una unidad o equipo para seleccionarlo</span>` : ''}
+      ${modo === 'planta' ? `<button class="btn btn-secondary btn-sm" style="width:auto" id="${pvP()}rotar-btn" onclick="pvRotarSel(1)" disabled title="Gira la unidad, equipo o corte seleccionado 90° (también la tecla R; Mayús+R al revés)">⟳ Rotar 90°</button><span class="hint" id="${pvP()}sel-nombre" style="margin:0">Hacé clic en una unidad, equipo o corte para seleccionarlo</span>
+      <button class="btn ${_pvTool === 'corte' ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto" onclick="pvHerramientaCorte(${_pvTool !== 'corte'})" title="Marcar un corte en la planta: clic en dos puntos (donde empieza y donde termina)">✂ + Corte</button>
+      <button class="btn btn-secondary btn-sm" style="width:auto" id="${pvP()}corte-inv" onclick="pvCorteInvertir()" disabled title="Cambia hacia qué lado se mira el corte seleccionado">⇄ Invertir vista del corte</button>
+      <button class="btn btn-secondary btn-sm" style="width:auto" id="${pvP()}corte-del" onclick="pvCorteQuitar()" disabled title="Borra el corte seleccionado (también Supr)">🗑 Quitar corte</button>` : ''}
+      ${_pvTool === 'corte' ? `<span class="hint" style="margin:0;color:var(--blue)">${_pvCorteP1 ? 'Ahora el punto final del corte…' : 'Hacé clic donde empieza el corte'} (Esc cancela). Las flechas del corte indican hacia dónde se mira.</span>` : ''}
       ${_pvTool === 'cota' ? `<span class="hint" style="margin:0;color:var(--blue)">${_pvCotaP1 ? 'Ahora el segundo punto…' : 'Hacé clic en el primer punto de la cota'} (Esc cancela)</span>` : '<span class="hint" style="margin:0">Arrastrá para mover (también los nombres) · doble clic en un nombre o cota para editarlo · clic en una cota y Supr para borrarla · Ctrl + rueda = zoom</span>'}
-    </div>${lista ? `<div style="margin-bottom:8px"><div class="hint" style="margin:0">Cotas colocadas:</div>${lista}</div>` : ''}`;
+    </div>${modo === 'planta' && pvCortesLista(p).length ? `<div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="hint" style="margin:0">Cortes:</span>${pvCortesLista(p).map(k => `<button class="btn btn-secondary btn-sm" style="width:auto;padding:3px 10px" onclick="pvVerCorte('${k.id}')" title="Ver este corte en la pestaña Vista en corte">Corte ${esc(k.nombre)}–${esc(k.nombre)}' →</button>`).join('')}</div>` : ''}${lista ? `<div style="margin-bottom:8px"><div class="hint" style="margin:0">Cotas colocadas:</div>${lista}</div>` : ''}`;
 }
 // ocupación de la sala de químicos (lo que pidió el usuario: ver si entra o hay que agrandarla)
 function pvOcupacionHtml(p, zi, pos, unidades) {
@@ -16657,8 +16870,11 @@ function flowsheetsVistasRenderRaw() {
   }
   if (pvModo() === 'corte' && cc) {
     const hayLodos = unidades.some(u => u.linea === 'lodos');
-    const r = pvCorteSvg(p, unidades);
-    cc.innerHTML = `${pvBarraHtml('corte')}${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div id="${pvP()}scroll-corte" style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
+    const cortes = pvCortesLista(p), csel = cortes.find(k => k.id === _pvCorteSel) || null;
+    if (!csel) _pvCorteSel = null;
+    const r = csel ? pvCorteDefSvg(p, unidades, csel) : pvCorteSvg(p, unidades);
+    const pills = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><button class="btn ${csel ? 'btn-secondary' : 'btn-primary'} btn-sm" style="width:auto;padding:4px 10px" onclick="pvElegirCorte(null)" title="Corte esquemático del tren completo (las unidades una al lado de la otra)">Esquema del tren</button>${cortes.map(k => `<button class="btn ${csel && csel.id === k.id ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto;padding:4px 10px" onclick="pvElegirCorte('${k.id}')">Corte ${esc(k.nombre)}–${esc(k.nombre)}'</button>`).join('')}${cortes.length ? '' : '<span class="hint" style="margin:0">Para ver un corte real: en la Vista en planta usá "✂ + Corte" y marcá por dónde cortar.</span>'}</div>`;
+    cc.innerHTML = `${pills}${csel ? pvBarraHtml('corte', true) : pvBarraHtml('corte')}${!csel && hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div id="${pvP()}scroll-corte" style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
     const sv = cc.querySelector('svg'); if (sv) { pvInteraccionInit(sv); pvZoomEstilo('corte'); }
   }
   pvChatRender('planta'); pvChatRender('corte');
@@ -16670,7 +16886,10 @@ const PV_TOOL_CHAT = {
   input_schema: { type: 'object', properties: {
     respuesta: { type: 'string', description: 'Respuesta breve en español (si hiciste cambios, decí cuáles).' },
     acciones: { type: 'array', description: 'Cambios a aplicar (vacío si solo es una consulta).', items: { type: 'object', properties: {
-      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular', 'rotar'] },
+      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular', 'rotar', 'agregar_corte', 'quitar_corte', 'invertir_corte'] },
+      por: { type: 'string', description: 'Solo para agregar_corte: nombre exacto de la unidad o id del equipo por cuyo centro pasa el corte (junto con direccion).' },
+      direccion: { type: 'string', enum: ['horizontal', 'vertical'], description: 'Solo para agregar_corte con por: la línea del corte es horizontal (de izquierda a derecha) o vertical (de arriba hacia abajo) en la planta, y cruza todo el dibujo.' },
+      lado: { type: 'number', description: 'Solo para agregar_corte: 1 o -1 = hacia qué lado se mira (1: hacia arriba/norte en un corte horizontal y hacia la derecha/este en uno vertical; -1 al revés).' },
       grados: { type: 'number', description: 'Solo para rotar: grados a girar en sentido horario (90, 180 o 270; negativo = antihorario). Si no se indica, 90.' },
       figura: { type: 'string', enum: ['tronco_cono', 'cono', 'cilindro', 'tanque_conico', 'caja'], description: 'Solo para calcular: la figura a calcular.' },
       diametro_mayor: { type: 'number' }, diametro_menor: { type: 'number' }, altura: { type: 'number' }, angulo: { type: 'number', description: 'Para calcular: grados de la pared respecto de la horizontal.' }, volumen_l: { type: 'number' }, alto_cilindro: { type: 'number' }, largo: { type: 'number' }, ancho: { type: 'number' },
@@ -16696,7 +16915,7 @@ function pvContextoChat(p, modo) {
     return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, rotacion_planta_grados: (Number(vp.rot[i.id]) || 0) % 4 * 90, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
   });
   const cotas = (modo === 'planta' ? vp : vc).cotas.map(c => ({ id: c.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2, medida_m: pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1)), texto: c.texto || null }));
-  return JSON.stringify({ vista: modo, unidades: u2, zonas_de_quimicos: zonas, cotas_de_esta_vista: cotas });
+  return JSON.stringify({ vista: modo, unidades: u2, zonas_de_quimicos: zonas, cotas_de_esta_vista: cotas, cortes: pvCortesLista(p).map(k => ({ nombre: k.nombre, x1: k.x1, y1: k.y1, x2: k.x2, y2: k.y2, lado: k.lado === -1 ? -1 : 1 })) });
 }
 function pvChatRender(modo) {
   const el = document.getElementById(pvPref() + 'vchat-' + modo); if (!el) return;
@@ -16726,7 +16945,7 @@ async function pvChatSend(modo) {
   showMsg(sid, 'loading', 'Pensando...');
   try {
     const previo = hist[modo].slice(-9, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (5b) Para ROTAR / GIRAR / poner de costado una unidad o un equipo (girarlo 90°, 180°…) usá SIEMPRE la acción "rotar" (unidad = nombre exacto, o id = id del equipo, y grados en sentido horario); la rotación se ve en la vista en planta y NO cambies w/d/h ni orient para girar (orient solo decide si una cisterna es horizontal o vertical). (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
+    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (5b) Para ROTAR / GIRAR / poner de costado una unidad o un equipo (girarlo 90°, 180°…) usá SIEMPRE la acción "rotar" (unidad = nombre exacto, o id = id del equipo, y grados en sentido horario); la rotación se ve en la vista en planta y NO cambies w/d/h ni orient para girar (orient solo decide si una cisterna es horizontal o vertical). (5c) CORTES: en la vista en planta el usuario puede marcar cortes (línea con letra A, B…) y cada uno genera su propia vista en corte real, mirando hacia donde apuntan las flechas. Para crear uno usá "agregar_corte": con "por" (nombre de la unidad o id del equipo) + "direccion" (horizontal / vertical) y opcionalmente "lado" y "nombre", o con x1,y1,x2,y2 en metros; "quitar_corte" e "invertir_corte" usan "nombre" (la letra). Los cortes existentes están en "cortes" del estado. (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
     const r = await propLlamarForzado(PV_TOOL_CHAT, sistema, 3000);
     const calcTxt = pfGeomCalcAcciones(r.acciones);
     const aplicadas = pvAplicarAcciones(p, modo, (r.acciones || []).filter(a => !(a && a.tipo === 'calcular')));
@@ -16766,6 +16985,21 @@ function pvAplicarAcciones(p, modo, acciones) {
         const nuevo = ((((Number(vpl.rot[key]) || 0) + n) % 4) + 4) % 4;
         if (nuevo) vpl.rot[key] = nuevo; else delete vpl.rot[key];
         hechas.push(`Giré ${a.unidad ? '"' + a.unidad + '"' : 'el equipo'} ${a.grados || 90}° en la vista en planta`);
+      } else if (a.tipo === 'agregar_corte') {
+        let x1 = a.x1, y1 = a.y1, x2 = a.x2, y2 = a.y2;
+        if (![x1, y1, x2, y2].every(v => typeof v === 'number')) {
+          const G = pvPlantaGeom(p, unidades); let cx = null, cy = null;
+          const it = Object.values(G.zi).flatMap(z => z.items).find(i => i.id === a.por);
+          if (it) { cx = it.x + it.w / 2; cy = it.y + it.d / 2; }
+          else { const u = U(a.por); if (u) { const r = pvRotN(p, u.nombre); cx = G.pos[u.nombre].x + pvPAX(u, r) / 2; cy = G.pos[u.nombre].y + pvPAY(u, r) / 2; } }
+          if (cx == null) return;
+          if (/vert/.test(String(a.direccion || ''))) { x1 = x2 = cx; y1 = G.minY - 1; y2 = G.maxY + 1; } else { y1 = y2 = cy; x1 = G.minX - 1; x2 = G.maxX + 1; }
+        }
+        const k = { id: pvIdCorte(), nombre: (a.nombre && String(a.nombre).trim().slice(0, 4)) || pvCorteLetra(p), x1: pvR(x1), y1: pvR(y1), x2: pvR(x2), y2: pvR(y2), lado: a.lado === -1 ? -1 : 1 };
+        pvCortesEstado(p).push(k); hechas.push(`Marqué el corte ${k.nombre}–${k.nombre}' en la vista en planta`);
+      } else if ((a.tipo === 'quitar_corte' || a.tipo === 'invertir_corte') && a.nombre) {
+        const l = pvCortesEstado(p), i = l.findIndex(k => String(k.nombre).toLowerCase() === String(a.nombre).toLowerCase()); if (i < 0) return;
+        if (a.tipo === 'quitar_corte') { if (_pvCorteSel === l[i].id) _pvCorteSel = null; l.splice(i, 1); hechas.push(`Quité el corte ${a.nombre}`); } else { l[i].lado = l[i].lado === -1 ? 1 : -1; hechas.push(`Invertí hacia dónde se mira el corte ${a.nombre}`); }
       } else if (a.tipo === 'mover_unidad' && U(a.unidad)) {
         const o = vista.pos[a.unidad] || { x: 0, y: 0 };
         vista.pos[a.unidad] = { x: pvR((Number(o.x) || 0) + (Number(a.dx) || 0)), y: pvR((Number(o.y) || 0) + (modo === 'corte' ? 0 : (Number(a.dy) || 0))) };
@@ -16806,7 +17040,7 @@ function pvAplicarAcciones(p, modo, acciones) {
   return hechas;
 }
 function flowsheetsSubtab(v) {
-  _pfVista = v; _pvTool = null; _pvCotaP1 = null; _pvCotaSel = null;
+  _pfVista = v; _pvTool = null; _pvCotaP1 = null; _pvCorteP1 = null; _pvCotaSel = null;
   const mostrar = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
   mostrar('flowsheets-card-proceso', v === 'proceso'); mostrar('flowsheets-card-chat', v === 'proceso');
   mostrar('flowsheets-card-planta', v === 'planta'); mostrar('flowsheets-card-corte', v === 'corte');
