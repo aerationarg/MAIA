@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.79</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.80</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.79</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.80</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16187,9 +16187,14 @@ function pvEstado(p, modo) {
   const eq = p.equipos_data = p.equipos_data || { etapas: {} };
   eq.vistas = eq.vistas || {}; eq.vistas.rotulos = eq.vistas.rotulos || {}; eq.vistas.chat = eq.vistas.chat || {};
   const v = eq.vistas[modo] = eq.vistas[modo] || {};
-  v.pos = v.pos || {}; v.eqpos = v.eqpos || {}; v.cotas = v.cotas || [];
+  v.pos = v.pos || {}; v.eqpos = v.eqpos || {}; v.cotas = v.cotas || []; v.rot = v.rot || {}; v.rotpos = v.rotpos || {};
   return v;
 }
+// rotación en la vista en planta: cantidad de giros de 90° (horario) de una unidad o equipo
+const pvRotN = (p, key) => (((Number(pvEstado(p, 'planta').rot[key]) || 0) % 4) + 4) % 4;
+const pvImpar = n => n % 2 === 1;
+const pvPAX = (u, r) => (pvImpar(r) ? pvAnchoY(u) : pvAnchoX(u));
+const pvPAY = (u, r) => (pvImpar(r) ? pvAnchoX(u) : pvAnchoY(u));
 const pvRot = (p, key, def) => { const r = p.equipos_data && p.equipos_data.vistas && p.equipos_data.vistas.rotulos; return (r && r[key]) || def; };
 const pvTitulo = (p, nombre) => (p.equipos_data && p.equipos_data.etapas && p.equipos_data.etapas[nombre] && p.equipos_data.etapas[nombre].tituloCustom) || nombre;
 const pvGKey = g => 'g:' + procesosNormTxt(g.quimico || '');
@@ -16213,36 +16218,55 @@ function pvPlantaLayout(p, unidades) {
   let yFila = 0;
   filas.forEach(fila => {
     if (!fila.length) return;
-    const hMax = Math.max(...fila.map(pvAnchoY));
+    const hMax = Math.max(...fila.map(u => pvPAY(u, pvRotN(p, u.nombre))));
     let x = 0;
-    fila.forEach(u => { pos[u.nombre] = { x, y: yFila + (hMax - pvAnchoY(u)) / 2 }; x += pvAnchoX(u) + GAP; });
+    fila.forEach(u => { const r = pvRotN(p, u.nombre); pos[u.nombre] = { x, y: yFila + (hMax - pvPAY(u, r)) / 2 }; x += pvPAX(u, r) + GAP; });
     yFila += hMax + GAP * 1.6;
   });
   unidades.forEach(u => { const o = off[u.nombre]; if (o && pos[u.nombre]) { pos[u.nombre].x += Number(o.x) || 0; pos[u.nombre].y += Number(o.y) || 0; } });
   return pos;
 }
 // Equipos de la zona de químicos en planta (posiciones absolutas, metros), con lo que el usuario movió
-function pvQuimPlantaItems(u, ux, uy, eqpos) {
+function pvQuimPlantaItems(u, ux, uy, eqpos, rots, rotSala) {
   const items = [], labels = [];
+  rots = rots || {}; rotSala = ((Number(rotSala) || 0) % 4 + 4) % 4;
+  const L = u.m.largo, A = u.m.ancho;
+  // gira el rectángulo (x, y, w, d: posición absoluta sin girar la sala) con la sala
+  const trSala = (x, y, w, d) => {
+    const lx = x - ux, ly = y - uy;
+    if (rotSala === 1) return { x: ux + (A - (ly + d)), y: uy + lx, w: d, d: w };
+    if (rotSala === 2) return { x: ux + (L - (lx + w)), y: uy + (A - (ly + d)), w, d };
+    if (rotSala === 3) return { x: ux + ly, y: uy + (L - (lx + w)), w: d, d: w };
+    return { x, y, w, d };
+  };
+  // posición final de un equipo: su propio giro (alrededor de su centro), el de la sala y el desplazamiento del usuario
+  const mk = (id, x, y, w, d) => {
+    if ((Number(rots[id]) || 0) % 2 === 1) { const cx = x + w / 2, cy = y + d / 2; x = cx - d / 2; y = cy - w / 2; const t = w; w = d; d = t; }
+    const r = trSala(x, y, w, d), o = pvOff(eqpos, id);
+    return { x: r.x + o.x, y: r.y + o.y, w: r.w, d: r.d };
+  };
   pvQuimDisponer(u.grupos, u.m.largo).forEach(it => {
     it.cols.forEach(({ c, x: rx }) => {
       const cc = ux + rx;
-      c.bombas.forEach((b, k) => { const o = pvOff(eqpos, b.id); items.push({ id: b.id, kind: b.e.clase, x: cc + k * 0.4 + o.x, y: uy + it.cy + it.gd / 2 - 0.15 + o.y, w: 0.3, d: 0.3, g: it.g }); });
+      c.bombas.forEach((b, k) => { const r = mk(b.id, cc + k * 0.4, uy + it.cy + it.gd / 2 - 0.15, 0.3, 0.3); items.push({ id: b.id, kind: b.e.clase, x: r.x, y: r.y, w: r.w, d: r.d, g: it.g }); });
       const bx = cc + c.bombas.length * 0.4, t = c.tanque || c.otro;
-      if (t) { const o = pvOff(eqpos, t.id); items.push({ id: t.id, cfgId: c.tanque ? c.tanque.e.it.id : null, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: bx + o.x, y: uy + it.cy + it.gd / 2 - t.dim.d / 2 + o.y, w: t.dim.w, d: t.dim.d, h: t.dim.h, orient: t.dim.orient, dim: t.dim, mixer: !!c.mixer, g: it.g, volL: c.tanque ? c.tanque.e.volL : null }); }
+      if (t) { const r = mk(t.id, bx, uy + it.cy + it.gd / 2 - t.dim.d / 2, t.dim.w, t.dim.d); items.push({ id: t.id, cfgId: c.tanque ? c.tanque.e.it.id : null, kind: c.tanque ? c.tanque.e.clase : 'sistema', x: r.x, y: r.y, w: r.w, d: r.d, h: t.dim.h, orient: t.dim.orient, dim: t.dim, mixer: !!c.mixer, g: it.g, volL: c.tanque ? c.tanque.e.volL : null }); }
     });
-    labels.push({ key: pvGKey(it.g), texto: it.g.quimico || 'Equipo', vol: it.g.volTxt, x: ux + it.x + it.gw / 2, y: uy + it.cy + it.gd });
+    const lp = trSala(ux + it.x + it.gw / 2, uy + it.cy + it.gd, 0, 0);
+    labels.push({ key: pvGKey(it.g), texto: it.g.quimico || 'Equipo', vol: it.g.volTxt, x: lp.x, y: lp.y });
   });
   return { items, labels };
 }
 function pvPlantaSvg(p, unidades) {
   const vp = pvEstado(p, 'planta');
+  const axr = u => pvPAX(u, pvRotN(p, u.nombre)), ayr = u => pvPAY(u, pvRotN(p, u.nombre));
+  const roff = k => pvOff(vp.rotpos, k);
   const pos = pvPlantaLayout(p, unidades);
   const zi = {};
-  unidades.forEach(u => { if (u.grupos && u.grupos.length) zi[u.nombre] = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos); });
+  unidades.forEach(u => { if (u.grupos && u.grupos.length) zi[u.nombre] = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos, vp.rot, pvRotN(p, u.nombre)); });
   // límites del dibujo: unidades, equipos y cotas
   const xs = [], ys = [];
-  unidades.forEach(u => { xs.push(pos[u.nombre].x, pos[u.nombre].x + pvAnchoX(u)); ys.push(pos[u.nombre].y, pos[u.nombre].y + pvAnchoY(u)); });
+  unidades.forEach(u => { xs.push(pos[u.nombre].x, pos[u.nombre].x + axr(u)); ys.push(pos[u.nombre].y, pos[u.nombre].y + ayr(u)); });
   Object.values(zi).forEach(z => z.items.forEach(i => { xs.push(i.x, i.x + i.w); ys.push(i.y, i.y + i.d + 0.6); }));
   vp.cotas.forEach(c => { xs.push(c.x1, c.x2); ys.push(c.y1, c.y2); });
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -16252,22 +16276,22 @@ function pvPlantaSvg(p, unidades) {
   const W = (maxX - minX + 2 * MARG) * s, Hh = (maxY - minY + 2 * MARG) * s + 90;
   let sv = `<svg viewBox="0 0 ${W} ${Hh}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vista en planta" style="max-width:100%;height:auto;background:#fff;border:1px solid var(--border);touch-action:none" data-pv-modo="planta" data-pv-escala="${s}" data-pv-kx="${MARG - minX}" data-pv-ky="${20 / s - minY + MARG}" data-pv-ysign="1"><rect width="${W}" height="${Hh}" fill="#fff"/>`;
   sv += `<defs><marker id="pv-flecha" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${PV_C.proc}"/></marker><marker id="pv-flecha-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${PV_C.lodos}"/></marker></defs>`;
-  const cen = u => ({ x: pos[u.nombre].x + pvAnchoX(u) / 2, y: pos[u.nombre].y + pvAnchoY(u) / 2 });
+  const cen = u => ({ x: pos[u.nombre].x + axr(u) / 2, y: pos[u.nombre].y + ayr(u) / 2 });
   const liq = unidades.filter(u => u.linea === 'liquido'), lod = unidades.filter(u => u.linea === 'lodos');
   const flecha = (a, b, color, marker) => {
     const ca = cen(a), cb = cen(b);
-    const x1 = pos[a.nombre].x + pvAnchoX(a), x2 = pos[b.nombre].x;
+    const x1 = pos[a.nombre].x + axr(a), x2 = pos[b.nombre].x;
     if (x2 > x1 + 0.2) return `<path d="M${px(x1)},${py(ca.y)} H${px((x1 + x2) / 2)} V${py(cb.y)} H${px(x2)}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marker})"/>`;
-    return `<path d="M${px(ca.x)},${py(pos[a.nombre].y + pvAnchoY(a))} V${py(pos[b.nombre].y)}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marker})"/>`;
+    return `<path d="M${px(ca.x)},${py(pos[a.nombre].y + ayr(a))} V${py(pos[b.nombre].y)}" fill="none" stroke="${color}" stroke-width="2" marker-end="url(#${marker})"/>`;
   };
   for (let i = 0; i + 1 < liq.length; i++) sv += flecha(liq[i], liq[i + 1], PV_C.proc, 'pv-flecha');
   for (let i = 0; i + 1 < lod.length; i++) sv += flecha(lod[i], lod[i + 1], PV_C.lodos, 'pv-flecha-l');
   if (lod.length) {
     const o = lod[0].origen ? liq.find(u => u.nombre === lod[0].origen) : liq[liq.length - 1];
-    if (o) { const co = cen(o), cl = cen(lod[0]); const l0 = pos[lod[0].nombre], derecha = co.x > l0.x + pvAnchoX(lod[0]); sv += `<path d="M${px(co.x)},${py(pos[o.nombre].y + pvAnchoY(o))} V${py(cl.y)} H${px(derecha ? l0.x + pvAnchoX(lod[0]) : l0.x)}" fill="none" stroke="${PV_C.lodos}" stroke-width="2" marker-end="url(#pv-flecha-l)"/>`; }
+    if (o) { const co = cen(o), cl = cen(lod[0]); const l0 = pos[lod[0].nombre], derecha = co.x > l0.x + axr(lod[0]); sv += `<path d="M${px(co.x)},${py(pos[o.nombre].y + ayr(o))} V${py(cl.y)} H${px(derecha ? l0.x + axr(lod[0]) : l0.x)}" fill="none" stroke="${PV_C.lodos}" stroke-width="2" marker-end="url(#pv-flecha-l)"/>`; }
   }
   unidades.forEach(u => {
-    const x = pos[u.nombre].x, y = pos[u.nombre].y, w = pvAnchoX(u), hh = pvAnchoY(u);
+    const x = pos[u.nombre].x, y = pos[u.nombre].y, w = axr(u), hh = ayr(u);
     const stroke = u.sala ? PV_C.sala : PV_C.linea, fill = u.sala ? '#fbf6e9' : PV_C.relleno, dash = u.sala ? ' stroke-dasharray="7 4"' : '';
     let g = '';
     if (u.m.forma === 'circ') {
@@ -16277,26 +16301,26 @@ function pvPlantaSvg(p, unidades) {
       g += `<text x="${px(x + w / 2)}" y="${py(y + hh / 2) - 6}" text-anchor="middle" font-size="11" fill="${PV_C.cota}" font-family="Arial,sans-serif">Ø ${u.m.diametro} m</text>`;
     } else {
       g += `<rect x="${px(x)}" y="${py(y)}" width="${w * s}" height="${hh * s}" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/>`;
-      g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${u.m.largo} m`);
-      g += pvCotaV(py(y), py(y + hh), px(x + w) + 18, `${u.m.ancho} m`, 0.2);
+      g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.ancho : u.m.largo} m`);
+      g += pvCotaV(py(y), py(y + hh), px(x + w) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.largo : u.m.ancho} m`, 0.2);
     }
-    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2)}" y="${py(y) - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
-    sv += `<g data-pv-unidad="${esc(u.nombre)}" style="cursor:move">${g}</g>`;
+    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2) + roff('u:' + u.nombre).x * s}" y="${py(y) - 8 + roff('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+    sv += `<g data-pv-unidad="${esc(u.nombre)}" data-pv-nombre="${esc(pvTitulo(p, u.nombre))}" style="cursor:move">${g}</g>`;
     const z = zi[u.nombre];
     if (z) {
       z.items.forEach(i => {
         const col = i.kind === 'bin' ? '#2e7d32' : (i.kind === 'bomba' || i.kind === 'bomba_neum') ? '#2e7d32' : '#222';
         let e;
         if (i.kind === 'bomba' || i.kind === 'bomba_neum') e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" fill="#fff" stroke="${col}" stroke-width="1.2"/>`;
-        else if (i.kind === 'cisterna' && i.orient === 'h') e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" rx="${i.d / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
+        else if (i.kind === 'cisterna' && i.orient === 'h') e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" rx="${Math.min(i.w, i.d) / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
         else if (i.kind === 'conico') e = `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${i.w / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/><circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${Math.max(2, (i.dim ? i.dim.ds : 0.2) / 2 * s)}" fill="none" stroke="${col}" stroke-width="1.2" stroke-dasharray="3 2"/>`;
         else if (i.kind === 'tanque' || i.kind === 'cisterna') e = `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${i.w / 2 * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
         else e = `<rect x="${px(i.x)}" y="${py(i.y)}" width="${i.w * s}" height="${i.d * s}" fill="#fff" stroke="${col}" stroke-width="1.5"/>`;
         if (i.mixer) e += `<circle cx="${px(i.x + i.w / 2)}" cy="${py(i.y + i.d / 2)}" r="${Math.max(2, 0.1 * s)}" fill="#2e7d32"/>`;
         if (_pvMedidasEq && !/bomba/.test(i.kind)) e += `<text x="${px(i.x + i.w / 2)}" y="${py(i.y + i.d / 2) + (i.mixer ? 14 : 3)}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">${((i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h') ? 'Ø' + pvR(i.w) : pvR(i.w) + '×' + pvR(i.d)}</text>`;
-        sv += `<g data-pv-item="${esc(i.id)}" style="cursor:move">${e}</g>`;
+        sv += `<g data-pv-item="${esc(i.id)}" data-pv-nombre="${esc((i.kind === 'bomba' || i.kind === 'bomba_neum' ? 'bomba' : i.kind) + (i.g && i.g.quimico ? ' · ' + i.g.quimico : ''))}" style="cursor:move">${e}</g>`;
       });
-      z.labels.forEach(l => { sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x)}" y="${py(l.y) + 11}" text-anchor="middle" font-size="9" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvRot(p, l.key, l.texto))}${l.vol ? ' · ' + pvEsc(l.vol) : ''}</text>`; });
+      z.labels.forEach(l => { const lo = roff(l.key); sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x) + lo.x * s}" y="${py(l.y) + 11 + lo.y * s}" text-anchor="middle" font-size="9" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvRot(p, l.key, l.texto))}${l.vol ? ' · ' + pvEsc(l.vol) : ''}</text>`; });
     }
   });
   vp.cotas.forEach(c => { sv += pvCotaSvg(c, px, py, c.id === _pvCotaSel); });
@@ -16321,6 +16345,7 @@ function pvQuimCorteItems(u, ux, eqpos) {
 }
 function pvCorteSvg(p, unidades) {
   const vc = pvEstado(p, 'corte');
+  const ro = k => pvOff(vc.rotpos, k);
   const lista = unidades.filter(u => (!u.sala || u.grupos) && (_pvCorteLodos || u.linea !== 'lodos'));
   if (!lista.length) return null;
   const GAP = 2.2; let x = 0;
@@ -16356,8 +16381,8 @@ function pvCorteSvg(p, unidades) {
       const alto = u.m.alto;
       let g = `<path d="M${x0},${yT} V${fy(alto)} H${x0 + wp} V${yT}" fill="none" stroke="#8a6d3b" stroke-width="1.6" stroke-dasharray="7 4"/><line x1="${x0 - 8}" y1="${fy(alto)}" x2="${x0 + wp + 8}" y2="${fy(alto)}" stroke="#8a6d3b" stroke-width="2.4"/>`;
       g += pvCotaH(x0, x0 + wp, yT + 36, `${u.m.largo} m`) + pvCotaV(fy(alto), yT, x0 - 12, `H = ${alto} m`);
-      g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${x0 + wp / 2}" y="${fy(alto) - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
-      sv += `<g data-pv-unidad="${esc(u.nombre)}" style="cursor:ew-resize">${g}</g>`;
+      g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${x0 + wp / 2 + ro('u:' + u.nombre).x * s}" y="${fy(alto) - 8 + ro('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+      sv += `<g data-pv-unidad="${esc(u.nombre)}" data-pv-nombre="${esc(pvTitulo(p, u.nombre))}" style="cursor:ew-resize">${g}</g>`;
       zona.items.forEach(i => {
         const bx = px(i.x);
         let e;
@@ -16368,9 +16393,9 @@ function pvCorteSvg(p, unidades) {
           if (i.mixer) { const my = yT - hpx - 0.42 * s; e += `<rect x="${tcx - 4}" y="${my}" width="8" height="${0.2 * s}" fill="#fff" stroke="#2e7d32" stroke-width="1.2"/><line x1="${tcx}" y1="${my + 0.2 * s}" x2="${tcx}" y2="${yT - hpx * 0.16}" stroke="#2e7d32" stroke-width="1.4"/>`; }
           if (_pvMedidasEq) e += `<text x="${tcx}" y="${yT - hpx / 2}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">h ${pvR(i.h)}</text><text x="${tcx}" y="${yT - hpx / 2 + 10}" text-anchor="middle" font-size="8.5" fill="${PV_C.cota}" font-family="Arial,sans-serif">${(i.kind === 'tanque' || i.kind === 'cisterna') ? 'Ø' : 'a'} ${pvR(i.w)}</text>`;
         }
-        sv += `<g data-pv-item="${esc(i.id)}" style="cursor:ew-resize" opacity="${i.row ? 0.4 : 1}">${e}</g>`;
+        sv += `<g data-pv-item="${esc(i.id)}" data-pv-nombre="${esc((i.kind === 'bomba' || i.kind === 'bomba_neum' ? 'bomba' : i.kind) + (i.g && i.g.quimico ? ' · ' + i.g.quimico : ''))}" style="cursor:ew-resize" opacity="${i.row ? 0.4 : 1}">${e}</g>`;
       });
-      zona.labels.forEach(l => { sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x)}" y="${yT + 14}" text-anchor="middle" font-size="9.5" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvRot(p, l.key, l.texto))}</text>`; });
+      zona.labels.forEach(l => { const lo = ro(l.key); sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x) + lo.x * s}" y="${yT + 14 + lo.y * s}" text-anchor="middle" font-size="9.5" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvRot(p, l.key, l.texto))}</text>`; });
       return;
     }
     const ent = Math.min(u.m.enterrado, u.m.alto), top = fy(u.m.alto - ent), bot = yT + ent * s;
@@ -16388,8 +16413,8 @@ function pvCorteSvg(p, unidades) {
     g += pvCotaV(top, bot, x0 - 12, `H = ${u.m.alto} m`);
     g += `<text x="${x0 + wp - 4}" y="${yAgua + 13}" text-anchor="end" font-size="10" fill="#1565c0" font-family="Arial,sans-serif">NA ${u.m.nivelAgua} m</text>`;
     if (ent > 0) g += `<text x="${x0 + wp / 2}" y="${bot + 38}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">enterrado ${ent} m</text>`;
-    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${x0 + wp / 2}" y="${top - 8}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:text">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
-    sv += `<g data-pv-unidad="${esc(u.nombre)}" style="cursor:ew-resize">${g}</g>`;
+    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${x0 + wp / 2 + ro('u:' + u.nombre).x * s}" y="${top - 8 + ro('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+    sv += `<g data-pv-unidad="${esc(u.nombre)}" data-pv-nombre="${esc(pvTitulo(p, u.nombre))}" style="cursor:ew-resize">${g}</g>`;
     guias.push({ x0, x1: x0 + wp, yAgua });
   });
   for (let i = 0; i + 1 < guias.length; i++) {
@@ -16422,37 +16447,99 @@ function pvCotaClick(svgEl, ev) {
   _pvCotaP1 = null; _pvTool = null;
   pvGuardar(p); flowsheetsVistasRender();
 }
+let _pvSel = null;            // selección actual {kind:'item'|'unidad', key, nombre} (para rotarla)
+let _pvPan = null;            // paneo del dibujo arrastrando el fondo
+const _pvZoom = { planta: 1, corte: 1 };
+function pvSelDibujar(svgEl) {
+  if (!svgEl) return;
+  svgEl.querySelectorAll('.pv-sel').forEach(n => n.remove());
+  const lbl = document.getElementById('pv-sel-nombre'), btn = document.getElementById('pv-rotar-btn');
+  let el = null;
+  if (_pvSel) {
+    const attr = _pvSel.kind === 'item' ? 'data-pv-item' : 'data-pv-unidad';
+    el = Array.from(svgEl.querySelectorAll('[' + attr + ']')).find(n => n.getAttribute(attr) === _pvSel.key) || null;
+  }
+  if (el) {
+    try {
+      const bb = el.getBBox(), pad = 3, r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      r.setAttribute('class', 'pv-sel'); r.setAttribute('x', bb.x - pad); r.setAttribute('y', bb.y - pad); r.setAttribute('width', bb.width + 2 * pad); r.setAttribute('height', bb.height + 2 * pad);
+      r.setAttribute('fill', 'none'); r.setAttribute('stroke', '#e65100'); r.setAttribute('stroke-width', '1.4'); r.setAttribute('stroke-dasharray', '5 3'); r.setAttribute('pointer-events', 'none');
+      svgEl.appendChild(r);
+    } catch (_e) { /* sin caja */ }
+  }
+  if (lbl) lbl.textContent = el ? 'Seleccionado: ' + (_pvSel.nombre || _pvSel.key) : 'Hacé clic en una unidad o equipo para seleccionarlo';
+  if (btn) btn.disabled = !el;
+}
+function pvRotarSel(n) {
+  const p = flowsheetsCurrentProyecto; if (!p || !_pvSel) return;
+  const v = pvEstado(p, 'planta'), k = _pvSel.key;
+  const nuevo = ((((Number(v.rot[k]) || 0) + n) % 4) + 4) % 4;
+  if (nuevo) v.rot[k] = nuevo; else delete v.rot[k];
+  pvGuardar(p); flowsheetsVistasRender();
+}
+function pvZoomEstilo(modo) {
+  const cont = document.getElementById('pv-scroll-' + modo), svg = cont && cont.querySelector('svg'); if (!svg) return;
+  const z = _pvZoom[modo] || 1;
+  svg.style.width = z === 1 ? '' : (z * 100) + '%'; svg.style.maxWidth = z > 1 ? 'none' : '100%';
+  cont.style.maxHeight = z > 1 ? '80vh' : '';
+  const t = document.getElementById('pv-zoom-pct-' + modo); if (t) t.textContent = Math.round(z * 100) + '%';
+}
+function pvZoomSet(modo, z, ev) {
+  z = Math.max(0.4, Math.min(8, z));
+  const cont = document.getElementById('pv-scroll-' + modo), svg = cont && cont.querySelector('svg'); if (!svg) return;
+  const r = cont.getBoundingClientRect(), ax = ev ? ev.clientX - r.left : r.width / 2, ay = ev ? ev.clientY - r.top : r.height / 2;
+  const b0 = svg.getBoundingClientRect(), fx = (cont.scrollLeft + ax) / Math.max(1, b0.width), fy = (cont.scrollTop + ay) / Math.max(1, b0.height);
+  _pvZoom[modo] = z; pvZoomEstilo(modo);
+  const b1 = svg.getBoundingClientRect();
+  cont.scrollLeft = fx * b1.width - ax; cont.scrollTop = fy * b1.height - ay;
+}
+const pvZoomBtn = (modo, f) => pvZoomSet(modo, f === 0 ? 1 : (_pvZoom[modo] || 1) * f);
 function pvInteraccionInit(svgEl) {
+  const modoSvg = svgEl.getAttribute('data-pv-modo');
   svgEl.addEventListener('pointerdown', ev => {
     if (_pvTool === 'cota') { ev.preventDefault(); pvCotaClick(svgEl, ev); return; }
     const cEl = ev.target.closest('[data-pv-cota]');
     if (cEl) { _pvCotaSel = cEl.getAttribute('data-pv-cota'); svgEl.querySelectorAll('[data-pv-cota]').forEach(n => { const sel = n.getAttribute('data-pv-cota') === _pvCotaSel; if (n.tagName === 'text') n.setAttribute('fill', sel ? '#e65100' : PV_C.cota); else { n.setAttribute('stroke', sel ? '#e65100' : PV_C.cota); n.setAttribute('stroke-width', sel ? 1.8 : 1.1); } }); return; }
-    const itemEl = ev.target.closest('[data-pv-item]'), uEl = ev.target.closest('[data-pv-unidad]');
-    const el = itemEl || uEl; if (!el) { if (_pvCotaSel) { _pvCotaSel = null; flowsheetsVistasRender(); } return; }
-    if (ev.target.closest('[data-pv-rotulo]') && ev.detail > 1) return; // doble clic en un texto: se renombra
+    const rEl = ev.target.closest('[data-pv-rotulo]'), itemEl = ev.target.closest('[data-pv-item]'), uEl = ev.target.closest('[data-pv-unidad]');
+    const el = rEl || itemEl || uEl;
+    if (!el) {
+      if (_pvCotaSel) { _pvCotaSel = null; flowsheetsVistasRender(); }
+      if (_pvSel) { _pvSel = null; pvSelDibujar(svgEl); }
+      const cont = svgEl.parentElement;
+      if (cont && (cont.scrollWidth > cont.clientWidth + 2 || cont.scrollHeight > cont.clientHeight + 2)) { _pvPan = { cont, x: ev.clientX, y: ev.clientY, sl: cont.scrollLeft, st: cont.scrollTop }; try { svgEl.setPointerCapture(ev.pointerId); } catch (e) { /* sin captura */ } svgEl.style.cursor = 'grabbing'; }
+      return;
+    }
+    if (rEl && ev.detail > 1) return; // doble clic en un texto: se renombra
+    const kind = rEl ? 'rotulo' : itemEl ? 'item' : 'unidad';
+    const key = rEl ? rEl.getAttribute('data-pv-rotulo') : itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad');
+    if (kind !== 'rotulo') { _pvSel = { kind, key, nombre: (itemEl || uEl).getAttribute('data-pv-nombre') || key }; pvSelDibujar(svgEl); }
     const p0 = pvPunto(svgEl, ev);
-    _pvDrag = { el, kind: itemEl ? 'item' : 'unidad', key: itemEl ? itemEl.getAttribute('data-pv-item') : uEl.getAttribute('data-pv-unidad'), x0: p0.x, y0: p0.y, dx: 0, dy: 0, svg: svgEl, s: parseFloat(svgEl.getAttribute('data-pv-escala')) || 20, modo: svgEl.getAttribute('data-pv-modo') };
+    _pvDrag = { el, kind, key, x0: p0.x, y0: p0.y, dx: 0, dy: 0, svg: svgEl, s: parseFloat(svgEl.getAttribute('data-pv-escala')) || 20, modo: modoSvg };
     try { el.setPointerCapture(ev.pointerId); } catch (e) { /* sin captura */ }
     ev.preventDefault();
   });
   svgEl.addEventListener('pointermove', ev => {
+    if (_pvPan) { _pvPan.cont.scrollLeft = _pvPan.sl - (ev.clientX - _pvPan.x); _pvPan.cont.scrollTop = _pvPan.st - (ev.clientY - _pvPan.y); return; }
     if (!_pvDrag) return;
     const p1 = pvPunto(svgEl, ev);
-    _pvDrag.dx = p1.x - _pvDrag.x0; _pvDrag.dy = _pvDrag.modo === 'corte' ? 0 : p1.y - _pvDrag.y0;
+    _pvDrag.dx = p1.x - _pvDrag.x0; _pvDrag.dy = (_pvDrag.modo === 'corte' && _pvDrag.kind !== 'rotulo') ? 0 : p1.y - _pvDrag.y0;
     _pvDrag.el.setAttribute('transform', `translate(${_pvDrag.dx},${_pvDrag.dy})`);
+    svgEl.querySelectorAll('.pv-sel').forEach(n => n.remove());
   });
   const fin = () => {
+    if (_pvPan) { _pvPan = null; svgEl.style.cursor = ''; return; }
     if (!_pvDrag) return;
     const d = _pvDrag; _pvDrag = null;
     const dxm = Math.round(d.dx / d.s * 20) / 20, dym = Math.round(d.dy / d.s * 20) / 20;
-    if (!dxm && !dym) { d.el.removeAttribute('transform'); return; }
+    if (!dxm && !dym) { d.el.removeAttribute('transform'); pvSelDibujar(svgEl); return; }
     const p = flowsheetsCurrentProyecto; if (!p) return;
-    const v = pvEstado(p, d.modo), tabla = d.kind === 'item' ? v.eqpos : v.pos;
+    const v = pvEstado(p, d.modo), tabla = d.kind === 'rotulo' ? v.rotpos : d.kind === 'item' ? v.eqpos : v.pos;
     const o = tabla[d.key] || { x: 0, y: 0 };
     tabla[d.key] = { x: Math.round(((Number(o.x) || 0) + dxm) * 100) / 100, y: Math.round(((Number(o.y) || 0) + dym) * 100) / 100 };
     pvGuardar(p); flowsheetsVistasRender();
   };
   svgEl.addEventListener('pointerup', fin); svgEl.addEventListener('pointercancel', fin);
+  if (svgEl.parentElement) svgEl.parentElement.addEventListener('wheel', ev => { if (!ev.ctrlKey) return; ev.preventDefault(); pvZoomSet(modoSvg, (_pvZoom[modoSvg] || 1) * (ev.deltaY < 0 ? 1.15 : 1 / 1.15), ev); }, { passive: false });
   svgEl.addEventListener('dblclick', ev => {
     const p = flowsheetsCurrentProyecto; if (!p) return;
     const r = ev.target.closest('[data-pv-rotulo]');
@@ -16486,6 +16573,7 @@ function pvInteraccionInit(svgEl) {
 document.addEventListener('keydown', ev => {
   if (_pfVista === 'proceso') return;
   if (ev.key === 'Escape' && (_pvTool || _pvCotaP1)) { _pvTool = null; _pvCotaP1 = null; flowsheetsVistasRender(); return; }
+  if ((ev.key === 'r' || ev.key === 'R') && _pvSel && _pfVista === 'planta' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !/INPUT|TEXTAREA|SELECT/.test((ev.target || {}).tagName || '')) { ev.preventDefault(); pvRotarSel(ev.shiftKey ? 3 : 1); return; }
   if ((ev.key === 'Delete' || ev.key === 'Supr') && _pvCotaSel && !/INPUT|TEXTAREA|SELECT/.test((ev.target || {}).tagName || '')) pvCotaBorrar(_pvCotaSel);
 });
 function pvCotaBorrar(id) {
@@ -16503,7 +16591,8 @@ function pvCotaTexto(modo, id, valor) {
 function pvHerramientaCota(on) { _pvTool = on ? 'cota' : null; _pvCotaP1 = null; flowsheetsVistasRender(); }
 function pvReacomodar(modo) {
   const p = flowsheetsCurrentProyecto; if (!p) return;
-  const v = pvEstado(p, modo); v.pos = {}; v.eqpos = {};
+  const v = pvEstado(p, modo); v.pos = {}; v.eqpos = {}; v.rotpos = {};
+  if (modo === 'planta') v.rot = {};
   pvGuardar(p); flowsheetsVistasRender();
 }
 // ── Barra de herramientas, cotas del usuario y ocupación de la zona ──
@@ -16513,14 +16602,16 @@ function pvBarraHtml(modo) {
   return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <button class="btn ${_pvTool === 'cota' ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto" onclick="pvHerramientaCota(${_pvTool !== 'cota'})" title="Colocar una cota: clic en dos puntos">📏 + Cota</button>
       <label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" ${_pvMedidasEq ? 'checked' : ''} style="width:auto" onchange="_pvMedidasEq=this.checked; flowsheetsVistasRender()" /> Mostrar medidas de los equipos</label>
-      <button class="btn btn-secondary btn-sm" style="width:auto" onclick="pvReacomodar('${modo}')" title="Vuelve unidades y equipos a su posición automática (no toca las medidas ni las cotas)">↺ Reacomodar</button>
-      ${_pvTool === 'cota' ? `<span class="hint" style="margin:0;color:var(--blue)">${_pvCotaP1 ? 'Ahora el segundo punto…' : 'Hacé clic en el primer punto de la cota'} (Esc cancela)</span>` : '<span class="hint" style="margin:0">Arrastrá para mover · doble clic en un nombre o cota para editarlo · clic en una cota y Supr para borrarla</span>'}
+      <button class="btn btn-secondary btn-sm" style="width:auto" onclick="pvReacomodar('${modo}')" title="Vuelve unidades, equipos, nombres y giros a su posición automática (no toca las medidas ni las cotas)">↺ Reacomodar</button>
+      <span style="display:inline-flex;gap:3px;align-items:center" title="Zoom (también Ctrl + rueda del mouse); arrastrá el fondo para desplazarte"><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',0.8)">−</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px;min-width:52px" id="pv-zoom-pct-${modo}" onclick="pvZoomBtn('${modo}',0)">${Math.round((_pvZoom[modo] || 1) * 100)}%</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 10px" onclick="pvZoomBtn('${modo}',1.25)">+</button></span>
+      ${modo === 'planta' ? `<button class="btn btn-secondary btn-sm" style="width:auto" id="pv-rotar-btn" onclick="pvRotarSel(1)" disabled title="Gira la unidad o equipo seleccionado 90° (también la tecla R; Mayús+R al revés)">⟳ Rotar 90°</button><span class="hint" id="pv-sel-nombre" style="margin:0">Hacé clic en una unidad o equipo para seleccionarlo</span>` : ''}
+      ${_pvTool === 'cota' ? `<span class="hint" style="margin:0;color:var(--blue)">${_pvCotaP1 ? 'Ahora el segundo punto…' : 'Hacé clic en el primer punto de la cota'} (Esc cancela)</span>` : '<span class="hint" style="margin:0">Arrastrá para mover (también los nombres) · doble clic en un nombre o cota para editarlo · clic en una cota y Supr para borrarla · Ctrl + rueda = zoom</span>'}
     </div>${lista ? `<div style="margin-bottom:8px"><div class="hint" style="margin:0">Cotas colocadas:</div>${lista}</div>` : ''}`;
 }
 // ocupación de la sala de químicos (lo que pidió el usuario: ver si entra o hay que agrandarla)
 function pvOcupacionHtml(p, zi, pos, unidades) {
   const u = unidades.find(x => x.grupos && zi[x.nombre]); if (!u) return '';
-  const ux = pos[u.nombre].x, uy = pos[u.nombre].y, L = u.m.largo, A = u.m.ancho;
+  const ux = pos[u.nombre].x, uy = pos[u.nombre].y, giro = pvImpar(pvRotN(p, u.nombre)), L = giro ? u.m.ancho : u.m.largo, A = giro ? u.m.largo : u.m.ancho;
   const it = zi[u.nombre].items;
   const area = i => ((i.kind === 'tanque' || i.kind === 'cisterna' || i.kind === 'conico') && i.orient !== 'h') ? Math.PI * (i.w / 2) ** 2 : i.w * i.d;
   const ocupa = it.reduce((s, i) => s + area(i), 0);
@@ -16528,7 +16619,22 @@ function pvOcupacionHtml(p, zi, pos, unidades) {
   const pct = Math.round(ocupa / (L * A) * 100);
   return `<p style="margin:8px 0;font-size:13px;padding:8px 10px;border-radius:6px;background:${fuera ? '#fdecea' : 'var(--surface2)'}"><b>${esc(pvTitulo(p, u.nombre))}</b>: sala de ${L} × ${A} m = ${pvR(L * A)} m² · los equipos ocupan ${pvR(ocupa)} m² (${pct}% de la sala)${fuera ? ` · <span style="color:#c62828;font-weight:600">⚠ ${fuera} equipo(s) quedan fuera de la sala — hay que acomodarlos o agrandarla</span>` : ' · todo adentro de la sala'}.</p>`;
 }
+// Al volver a dibujar la vista (después de mover algo, rotar, etc.) se conserva el desplazamiento de la página y del dibujo, para que nada "salte".
 function flowsheetsVistasRender() {
+  const modo = _pfVista === 'corte' ? 'corte' : 'planta';
+  const host = document.getElementById('flowsheets-vista-' + modo), cont = document.getElementById('pv-scroll-' + modo);
+  const wy = window.scrollY, wx = window.scrollX, sc = cont ? { l: cont.scrollLeft, t: cont.scrollTop } : null;
+  if (host && host.offsetHeight) host.style.minHeight = host.offsetHeight + 'px';
+  flowsheetsVistasRenderRaw();
+  const restaurar = () => {
+    const c2 = document.getElementById('pv-scroll-' + modo);
+    if (c2 && sc) { c2.scrollLeft = sc.l; c2.scrollTop = sc.t; }
+    window.scrollTo(wx, wy);
+  };
+  restaurar();
+  if (host) requestAnimationFrame(() => { restaurar(); host.style.minHeight = ''; });
+}
+function flowsheetsVistasRenderRaw() {
   const p = flowsheetsCurrentProyecto; if (!p) return;
   const unidades = pvUnidades(p);
   const vacio = '<p class="hint">Todavía no hay unidades — generá el flowsheet o agregalas con "+ Unidades" en el diagrama de proceso.</p>';
@@ -16537,14 +16643,14 @@ function flowsheetsVistasRender() {
   if (!unidades.length) { if (cp) cp.innerHTML = vacio; if (cc) cc.innerHTML = vacio; return; }
   if (_pfVista === 'planta' && cp) {
     const r = pvPlantaSvg(p, unidades);
-    cp.innerHTML = `${pvBarraHtml('planta')}${pvOcupacionHtml(p, r.zi, r.pos, unidades)}<div style="overflow:auto">${r.svg}</div>${btn('planta')}${pvTablaHtml(unidades)}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
-    const sv = cp.querySelector('svg'); if (sv) pvInteraccionInit(sv);
+    cp.innerHTML = `${pvBarraHtml('planta')}${pvOcupacionHtml(p, r.zi, r.pos, unidades)}<div id="pv-scroll-planta" style="overflow:auto">${r.svg}</div>${btn('planta')}${pvTablaHtml(unidades)}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
+    const sv = cp.querySelector('svg'); if (sv) { pvInteraccionInit(sv); pvZoomEstilo('planta'); pvSelDibujar(sv); }
   }
   if (_pfVista === 'corte' && cc) {
     const hayLodos = unidades.some(u => u.linea === 'lodos');
     const r = pvCorteSvg(p, unidades);
-    cc.innerHTML = `${pvBarraHtml('corte')}${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
-    const sv = cc.querySelector('svg'); if (sv) pvInteraccionInit(sv);
+    cc.innerHTML = `${pvBarraHtml('corte')}${hayLodos ? `<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px;cursor:pointer"><input type="checkbox" ${_pvCorteLodos ? 'checked' : ''} style="width:auto" onchange="_pvCorteLodos=this.checked; flowsheetsVistasRender()" /> Incluir las unidades de la línea de lodos</label>` : ''}<div id="pv-scroll-corte" style="overflow:auto">${r ? r.svg : vacio}</div>${btn('corte')}${pvTablaHtml(unidades.filter(u => !u.sala || u.grupos))}${pvEquiposTablaHtml(unidades)}${pvConicosTablaHtml(unidades)}`;
+    const sv = cc.querySelector('svg'); if (sv) { pvInteraccionInit(sv); pvZoomEstilo('corte'); }
   }
   pvChatRender('planta'); pvChatRender('corte');
 }
@@ -16555,7 +16661,8 @@ const PV_TOOL_CHAT = {
   input_schema: { type: 'object', properties: {
     respuesta: { type: 'string', description: 'Respuesta breve en español (si hiciste cambios, decí cuáles).' },
     acciones: { type: 'array', description: 'Cambios a aplicar (vacío si solo es una consulta).', items: { type: 'object', properties: {
-      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular'] },
+      tipo: { type: 'string', enum: ['medida', 'mover_unidad', 'mover_equipo', 'configurar_equipo', 'agregar_cota', 'cota_unidad', 'quitar_cota', 'renombrar', 'restablecer', 'calcular', 'rotar'] },
+      grados: { type: 'number', description: 'Solo para rotar: grados a girar en sentido horario (90, 180 o 270; negativo = antihorario). Si no se indica, 90.' },
       figura: { type: 'string', enum: ['tronco_cono', 'cono', 'cilindro', 'tanque_conico', 'caja'], description: 'Solo para calcular: la figura a calcular.' },
       diametro_mayor: { type: 'number' }, diametro_menor: { type: 'number' }, altura: { type: 'number' }, angulo: { type: 'number', description: 'Para calcular: grados de la pared respecto de la horizontal.' }, volumen_l: { type: 'number' }, alto_cilindro: { type: 'number' }, largo: { type: 'number' }, ancho: { type: 'number' },
       unidad: { type: 'string', description: 'Nombre exacto de la unidad.' },
@@ -16574,10 +16681,10 @@ function pvContextoChat(p, modo) {
   const unidades = pvUnidades(p);
   const vp = pvEstado(p, 'planta'), vc = pvEstado(p, 'corte');
   const pos = pvPlantaLayout(p, unidades);
-  const u2 = unidades.map(u => ({ nombre: u.nombre, linea: u.linea, forma: u.m.forma, largo: u.m.largo, ancho: u.m.ancho, diametro: u.m.diametro, alto: u.m.alto, nivelAgua: u.m.nivelAgua, enterrado: u.m.enterrado, origen_medidas: u.m.fuente, planta_x: pvR(pos[u.nombre].x), planta_y: pvR(pos[u.nombre].y), es_sala: !!u.sala }));
+  const u2 = unidades.map(u => ({ nombre: u.nombre, linea: u.linea, forma: u.m.forma, largo: u.m.largo, ancho: u.m.ancho, diametro: u.m.diametro, alto: u.m.alto, nivelAgua: u.m.nivelAgua, enterrado: u.m.enterrado, origen_medidas: u.m.fuente, planta_x: pvR(pos[u.nombre].x), planta_y: pvR(pos[u.nombre].y), rotacion_planta_grados: pvRotN(p, u.nombre) * 90, es_sala: !!u.sala }));
   const zonas = unidades.filter(u => u.grupos).map(u => {
-    const z = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos);
-    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
+    const z = pvQuimPlantaItems(u, pos[u.nombre].x, pos[u.nombre].y, vp.eqpos, vp.rot, pvRotN(p, u.nombre));
+    return { sala: u.nombre, equipos: z.items.map(i => ({ id: i.id, id_config: i.cfgId || null, quimico: i.g.quimico, tipo: i.kind, orientacion: i.orient || null, rotacion_planta_grados: (Number(vp.rot[i.id]) || 0) % 4 * 90, conico: i.dim && i.dim.cono ? { diametro_mayor_m: pvR(i.dim.w), diametro_salida_m: pvR(i.dim.ds), alto_cilindro_m: pvR(i.dim.hc), alto_cono_m: pvR(i.dim.hk), angulo_pared_vs_horizontal_grados: pvR(i.dim.ang), volumen_total_l: Math.round(i.dim.volCalc) } : null, ancho_m: pvR(i.w), fondo_m: pvR(i.d), alto_m: i.h ? pvR(i.h) : null, volumen_l: i.volL || null, x: pvR(i.x), y: pvR(i.y) })) };
   });
   const cotas = (modo === 'planta' ? vp : vc).cotas.map(c => ({ id: c.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2, medida_m: pvR(Math.hypot(c.x2 - c.x1, c.y2 - c.y1)), texto: c.texto || null }));
   return JSON.stringify({ vista: modo, unidades: u2, zonas_de_quimicos: zonas, cotas_de_esta_vista: cotas });
@@ -16610,7 +16717,7 @@ async function pvChatSend(modo) {
   showMsg(sid, 'loading', 'Pensando...');
   try {
     const previo = hist[modo].slice(-9, -1).map(m => `${m.role === 'user' ? 'Usuario' : 'Asistente'}: ${m.content}`).join('\n');
-    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
+    const sistema = `Sos el asistente de la ${modo === 'planta' ? 'VISTA EN PLANTA' : 'VISTA EN CORTE'} de un flowsheet de tratamiento de efluentes (proyecto "${p.nombre || ''}"). Tenés el estado actual en JSON: unidades con sus medidas (en metros; "origen_medidas" dice si cada una viene del diseño, calculada, típica o editada por el usuario), las zonas de químicos con sus equipos (id, tamaño físico en metros y posición x/y en planta, con x hacia la derecha e y hacia abajo) y las cotas de esta vista.\n\nESTADO:\n${pvContextoChat(p, modo)}\n\n${previo ? 'CONVERSACIÓN PREVIA:\n' + previo + '\n\n' : ''}Usá la herramienta para responder. Reglas: (1) Si el usuario solo consulta (¿entra? ¿cuánto mide? ¿cuánto ocupa?), contestá con números concretos calculados del estado y dejá "acciones" vacío. (2) Si pide un cambio, devolvé las acciones ("configurar_equipo": id_config del tanque + campo volL / orient / w / d / h para cambiar su volumen, ponerlo horizontal o vertical o pisar sus medidas): "medida" (unidad + campo + valor en metros), "mover_unidad" (unidad + dx/dy), "mover_equipo" (id del equipo + dx/dy), "cota_unidad" (unidad + eje largo/ancho/alto: pone una cota sobre esa medida), "agregar_cota" (x1,y1,x2,y2 en metros, mismo sistema de coordenadas que el estado), "quitar_cota" (id), "renombrar" (unidad + nombre), "restablecer" (unidad). (3) Usá los nombres de unidad e ids EXACTOS. (4) No inventes datos: si falta información para hacer lo pedido, preguntá. (5) Cuando algo no entre en una sala, proponé opciones concretas (agrandar la sala, reacomodar, etc.) con medidas. (5b) Para ROTAR / GIRAR / poner de costado una unidad o un equipo (girarlo 90°, 180°…) usá SIEMPRE la acción "rotar" (unidad = nombre exacto, o id = id del equipo, y grados en sentido horario); la rotación se ve en la vista en planta y NO cambies w/d/h ni orient para girar (orient solo decide si una cisterna es horizontal o vertical). (6) En las cuentas geométricas (volúmenes, ángulos, alturas, diámetros de tronco de cono, cono, cilindro, tanque cónico o caja) NO calcules vos: usá la acción "calcular" (figura + los datos que dio el usuario, en metros / litros / grados de la pared respecto de la horizontal) y la app agrega el resultado exacto con la fórmula a tu respuesta. En "respuesta" no pongas el resultado numérico, solo decí qué calculás.\n\nPEDIDO DEL USUARIO: ${msg}`;
     const r = await propLlamarForzado(PV_TOOL_CHAT, sistema, 3000);
     const calcTxt = pfGeomCalcAcciones(r.acciones);
     const aplicadas = pvAplicarAcciones(p, modo, (r.acciones || []).filter(a => !(a && a.tipo === 'calcular')));
@@ -16644,6 +16751,12 @@ function pvAplicarAcciones(p, modo, acciones) {
         const o = eq.vistas.equipos[a.id] = eq.vistas.equipos[a.id] || {};
         if (a.campo === 'orient') o.orient = a.valor === 'h' ? 'h' : 'v'; else { const v = pvNum(a.valor); if (v == null) return; o[a.campo] = v; }
         hechas.push(`Equipo ${a.campo} = ${a.valor}`);
+      } else if (a.tipo === 'rotar' && ((a.unidad && U(a.unidad)) || a.id)) {
+        const vpl = pvEstado(p, 'planta'), key = a.id || a.unidad;
+        const n = Math.round((Number(a.grados) || 90) / 90);
+        const nuevo = ((((Number(vpl.rot[key]) || 0) + n) % 4) + 4) % 4;
+        if (nuevo) vpl.rot[key] = nuevo; else delete vpl.rot[key];
+        hechas.push(`Giré ${a.unidad ? '"' + a.unidad + '"' : 'el equipo'} ${a.grados || 90}° en la vista en planta`);
       } else if (a.tipo === 'mover_unidad' && U(a.unidad)) {
         const o = vista.pos[a.unidad] || { x: 0, y: 0 };
         vista.pos[a.unidad] = { x: pvR((Number(o.x) || 0) + (Number(a.dx) || 0)), y: pvR((Number(o.y) || 0) + (modo === 'corte' ? 0 : (Number(a.dy) || 0))) };
@@ -16659,8 +16772,8 @@ function pvAplicarAcciones(p, modo, acciones) {
         const u = U(a.unidad);
         if (modo === 'planta') {
           const pos = pvPlantaLayout(p, unidades)[u.nombre];
-          if (a.eje === 'largo') vista.cotas.push({ id: pvIdCota(), x1: pos.x, y1: pos.y - 0.6, x2: pos.x + pvAnchoX(u), y2: pos.y - 0.6 });
-          else vista.cotas.push({ id: pvIdCota(), x1: pos.x - 0.6, y1: pos.y, x2: pos.x - 0.6, y2: pos.y + pvAnchoY(u) });
+          if (a.eje === 'largo') vista.cotas.push({ id: pvIdCota(), x1: pos.x, y1: pos.y - 0.6, x2: pos.x + pvPAX(u, pvRotN(p, u.nombre)), y2: pos.y - 0.6 });
+          else vista.cotas.push({ id: pvIdCota(), x1: pos.x - 0.6, y1: pos.y, x2: pos.x - 0.6, y2: pos.y + pvPAY(u, pvRotN(p, u.nombre)) });
         } else {
           const vc = vista, off = pvOff(vc.pos, u.nombre).x; let x0 = 0;
           for (const k of unidades.filter(q => (!q.sala || q.grupos) && (_pvCorteLodos || q.linea !== 'lodos'))) { if (k.nombre === u.nombre) break; const ext = k.grupos ? Math.max(pvAnchoX(k), Math.max(...pvQuimDisponer(k.grupos, pvAnchoX(k)).map(i => i.x + i.gw)) + 0.4) : pvAnchoX(k); x0 += ext + 2.2; }
@@ -16697,7 +16810,7 @@ function flowsheetsVistaDescargar(modo) {
   const p = flowsheetsCurrentProyecto;
   if (!svgEl || !p) return;
   const vb = svgEl.viewBox.baseVal;
-  const clon = svgEl.cloneNode(true); clon.setAttribute('width', vb.width); clon.setAttribute('height', vb.height); clon.style.border = 'none';
+  const clon = svgEl.cloneNode(true); clon.setAttribute('width', vb.width); clon.setAttribute('height', vb.height); clon.style.border = 'none'; clon.style.width = ''; clon.style.maxWidth = ''; clon.querySelectorAll('.pv-sel').forEach(n => n.remove());
   const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clon)], { type: 'image/svg+xml;charset=utf-8' }));
   const img = new Image();
   img.onload = () => {
