@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.68</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.69</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.68</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.69</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -24307,6 +24307,7 @@ const COTIZ_TOOL_EXTRAER = {
     telefono: { type: 'string' }, celular: { type: 'string' }, email: { type: 'string' },
     referencia: { type: 'string', description: 'Referencia / asunto / número de pedido del cliente.' },
     moneda: { type: 'string', enum: ['Dólar', 'Peso', ''], description: 'Moneda pedida ("" si no se aclara).' },
+    sucursal: { type: 'string', description: 'Sucursal / planta / sede del cliente a la que va dirigida, si figura ("" si no).' },
     forma_pago: { type: 'string' }, forma_cancelacion: { type: 'string' }, plazo_entrega: { type: 'string' }, lugar_entrega: { type: 'string' }, validez_oferta: { type: 'string' },
     observaciones: { type: 'string', description: 'Condiciones o aclaraciones particulares que pida el cliente ("" si no hay).' },
     items: { type: 'array', description: 'Cada producto o servicio a cotizar, en el orden en que figura.', items: { type: 'object', properties: {
@@ -24322,18 +24323,33 @@ const COTIZ_TOOL_EXTRAER = {
 function cotizIaArchivosAgregar(fileList) { _cotizIa.archivos.push(...Array.from(fileList || [])); cotizArmadoRender(); }
 function cotizIaArchivoQuitar(i) { _cotizIa.archivos.splice(i, 1); cotizArmadoRender(); }
 // Busca el ítem pedido en Stock y después en lo vendido. Devuelve { origen:'cat'|'hist', row } o null.
+const COTIZ_TOOL_ELEGIR_PRODUCTO = {
+  name: 'elegir_producto',
+  description: 'Elige, de la lista, el producto que es el mismo que el pedido (o ninguno).',
+  input_schema: { type: 'object', properties: {
+    id: { type: 'string', description: 'Id del producto de la lista que es el MISMO que el pedido; "" si ninguno lo es con seguridad.' },
+    motivo: { type: 'string' },
+  }, required: ['id'] },
+};
+// Busca el ítem pedido en Stock y después en lo vendido. Devuelve { origen:'cat'|'hist', row } o null.
+// Se arma un conjunto de candidatos (por código, por modelo —con o sin guiones/puntos—, por palabras); si uno coincide con claridad se usa,
+// y si hay candidatos parecidos pero no tan claros (ej. "TSU" por "Tsurumi") la IA elige entre ellos o dice que ninguno.
 async function cotizIaBuscarCoincidencia(ex) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const H = {headers:{Authorization:'Bearer '+session.token}};
   const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const compacto = s => norm(s).replace(/[^a-z0-9]/g, '');
   const toks = s => norm(s).split(/[^a-z0-9]+/).filter(t => t.length >= 2);
-  const limpio = s => encodeURIComponent(String(s || '').replace(/["\\*%&#+]/g, '').trim());
+  const limpio = s => String(s || '').replace(/["\\*%&#+]/g, '').trim();
   const tEx = new Set(toks([ex.marca, ex.modelo, ex.codigo, ex.descripcion].join(' ')));
-  const nMod = norm(ex.modelo).replace(/\s+/g, ''), nCod = norm(ex.codigo).replace(/\s+/g, '');
+  // códigos / números de parte del texto pedido (ej. "801-021803229", "150B47-5L-54"): tramos con dígitos de 5+ caracteres
+  const idsEx = [...new Set((String([ex.modelo, ex.codigo, ex.descripcion].join(' ')).match(/[A-Za-z0-9]*\d[A-Za-z0-9]*(?:[-./][A-Za-z0-9]+)*/g) || []).map(s => s.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')).filter(s => compacto(s).length >= 5))].slice(0, 4);
+  const nMod = compacto(ex.modelo), nCod = compacto(ex.codigo);
   const puntaje = r => {
-    const rMod = norm(r.modelo).replace(/\s+/g, ''), rCod = norm(r.codigo).replace(/\s+/g, '');
+    const rMod = compacto(r.modelo), rCod = compacto(r.codigo), rDesc = compacto(r.descripcion);
     if (nCod.length >= 3 && rCod && rCod === nCod) return 1;
     if (nMod.length >= 3 && rMod && (rMod === nMod || (rMod.length >= 4 && nMod.includes(rMod)) || (nMod.length >= 4 && rMod.includes(nMod)))) return 0.95;
+    for (const id of idsEx) { const c = compacto(id); if (c.length >= 6 && ((rMod.length >= 5 && (rMod.includes(c) || c.includes(rMod))) || (rCod.length >= 5 && (rCod.includes(c) || c.includes(rCod))) || rDesc.includes(c))) return 0.92; }
     const tr = new Set(toks([r.marca, r.modelo, r.codigo, r.descripcion].join(' ')));
     if (!tr.size || !tEx.size) return 0;
     let hit = 0; tEx.forEach(t => { if (tr.has(t)) hit++; });
@@ -24343,24 +24359,140 @@ async function cotizIaBuscarCoincidencia(ex) {
   const conTilde = w => /[áéíóúüñ]/.test(w);
   const palabras = [...new Set(String([ex.marca, ex.modelo, ex.codigo, ex.descripcion].join(' ').toLowerCase()).split(/[^a-z0-9áéíóúüñ]+/).filter(w => w.length >= 3))].sort((a, b) => (conTilde(a) - conTilde(b)) || b.length - a.length);
   const q = (tabla, filtro) => supaFetch(`/rest/v1/${tabla}?select=*&empresa=eq.${currentEmpresa}&${filtro}&limit=40`, H).then(r => r.ok ? r.json() : []).catch(() => []);
+  const orIlike = (campos, pat) => `or=(${campos.map(c => `${c}.ilike."*${encodeURIComponent(pat)}*"`).join(',')})`;
   const buscarEn = async tabla => {
     const esCat = tabla === 'cotizaciones_catalogo';
     const campos = esCat ? ['marca', 'modelo', 'codigo', 'descripcion'] : ['marca', 'modelo', 'descripcion'];
     const lotes = [];
-    if (esCat && ex.codigo && limpio(ex.codigo)) lotes.push(q(tabla, `codigo=ilike."*${limpio(ex.codigo)}*"`));
-    if (ex.modelo && limpio(ex.modelo)) lotes.push(q(tabla, `modelo=ilike."*${limpio(ex.modelo)}*"`));
+    if (esCat && ex.codigo && limpio(ex.codigo)) lotes.push(q(tabla, `codigo=ilike."*${encodeURIComponent(limpio(ex.codigo))}*"`));
+    if (ex.modelo && limpio(ex.modelo)) lotes.push(q(tabla, `modelo=ilike."*${encodeURIComponent(limpio(ex.modelo))}*"`));
+    // cada código del pedido, tal cual / con los tramos separados por comodín (801-021803229 → 801*021803229) / compacto (801021803229)
+    idsEx.forEach(id => {
+      const segs = limpio(id).split(/[-./]+/).filter(Boolean);
+      const pats = new Set([limpio(id), segs.join('*'), segs.join('')]);
+      pats.forEach(pt => { if (pt.length >= 5) lotes.push(q(tabla, orIlike(['modelo', ...(esCat ? ['codigo'] : []), 'descripcion'], pt))); });
+    });
     if (palabras.length) lotes.push(q(tabla, cotizFiltroPalabras(palabras.slice(0, 2).join(' '), campos)));
     if (palabras.length > 1) lotes.push(q(tabla, cotizFiltroPalabras(palabras[0], campos)));
     const vistos = new Map();
     (await Promise.all(lotes)).forEach(rows => (Array.isArray(rows) ? rows : []).forEach(r => vistos.set(r.id, r)));
-    let mejor = null, mp = 0;
-    vistos.forEach(r => { const s = puntaje(r); if (s > mp) { mp = s; mejor = r; } });
-    return mp >= 0.45 ? mejor : null;
+    const ranking = [...vistos.values()].map(r => ({ r, s: puntaje(r) })).sort((x, y) => y.s - x.s);
+    if (!ranking.length) return null;
+    if (ranking[0].s >= 0.9) return ranking[0].r;
+    // sin una coincidencia clara: la IA elige entre los candidatos más parecidos (o ninguno)
+    const cand = ranking.filter(x => x.s >= 0.15).slice(0, 8);
+    if (!cand.length) return null;
+    try {
+      const lista = cand.map(x => `${x.r.id} | marca: ${x.r.marca || ''} | modelo: ${x.r.modelo || ''}${esCat ? ' | código: ' + (x.r.codigo || '') : ''} | ${String(x.r.descripcion || '').slice(0, 160)}`).join('\n');
+      const r = await propLlamarForzado(COTIZ_TOOL_ELEGIR_PRODUCTO, `Un cliente pidió este producto:\nmarca: ${ex.marca || ''} | modelo: ${ex.modelo || ''} | código: ${ex.codigo || ''} | descripción: ${ex.descripcion || ''}\n\nProductos ${esCat ? 'del catálogo' : 'vendidos antes'}:\n${lista}\n\nElegí el id del que es EL MISMO producto (misma marca —puede venir abreviada, ej. "TSU" = Tsurumi—, mismo modelo / número de parte). Si ninguno lo es con seguridad, devolvé id vacío; no elijas uno solo porque se parezca.`, 400);
+      const hit = cand.find(x => x.r.id === r.id);
+      return hit ? hit.r : null;
+    } catch (e) { return ranking[0].s >= 0.45 ? ranking[0].r : null; }
   };
   const cat = await buscarEn('cotizaciones_catalogo');
   if (cat) return { origen: 'cat', row: cat };
   const hist = await buscarEn('cotizaciones_historial_ventas');
   return hist ? { origen: 'hist', row: hist } : null;
+}
+
+// ── Cliente, contacto, sucursal y lugar de entrega: se buscan entre los ya cargados (con IA si hay dudas) ──
+const COTIZ_TOOL_ELEGIR_CLIENTE = {
+  name: 'elegir_cliente',
+  description: 'Elige, de la lista de clientes cargados, el que es la misma empresa que la del pedido (o ninguno).',
+  input_schema: { type: 'object', properties: {
+    id: { type: 'string', description: 'Id del cliente que es la MISMA empresa; "" si ninguno lo es con seguridad.' },
+    motivo: { type: 'string' },
+  }, required: ['id'] },
+};
+const COTIZ_NOMBRE_STOP = new Set(['sa', 'srl', 'sas', 'sacif', 'saic', 'sacifia', 'sh', 'ltda', 'cia', 'de', 'del', 'la', 'el', 'los', 'las', 'y', 'e', 'en', 'argentina']);
+async function cotizIaBuscarCliente(ex) {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  const H = {headers:{Authorization:'Bearer '+session.token}};
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const nombre = String(ex.cliente || '').trim();
+  const toks = s => norm(s).split(/[^a-z0-9]+/).filter(t => t.length >= 2 && !COTIZ_NOMBRE_STOP.has(t));
+  const tEx = new Set(toks(nombre));
+  // palabras significativas del nombre (con la tilde original, que el filtro convierte en comodín)
+  const palabras = [...new Set(nombre.toLowerCase().split(/[^a-z0-9áéíóúüñ]+/).filter(w => w.length >= 3 && !COTIZ_NOMBRE_STOP.has(norm(w))))];
+  if (!palabras.length) return { elegido: null, candidatos: [] };
+  const sel = 'id,nombre_empresa,rubro,clientes_contactos(nombre,apellido,email)';
+  const q = filtro => supaFetch(`/rest/v1/clientes?select=${sel}&${filtro}&order=nombre_empresa&limit=15`, H).then(r => r.ok ? r.json() : []).catch(() => []);
+  const lotes = [q(cotizFiltroPalabras(palabras.join(' '), ['nombre_empresa']))];
+  if (palabras.length > 1) palabras.slice().sort((a, b) => b.length - a.length).slice(0, 2).forEach(w => lotes.push(q(cotizFiltroPalabras(w, ['nombre_empresa']))));
+  const vistos = new Map();
+  (await Promise.all(lotes)).forEach(rows => (Array.isArray(rows) ? rows : []).forEach(r => vistos.set(r.id, r)));
+  const cands = [...vistos.values()];
+  if (!cands.length) return { elegido: null, candidatos: [] };
+  const exacto = cands.find(c => norm(c.nombre_empresa).trim() === norm(nombre).trim());
+  if (exacto) return { elegido: exacto, candidatos: cands };
+  const dice = c => { const tc = new Set(toks(c.nombre_empresa)); if (!tc.size || !tEx.size) return 0; let hit = 0; tEx.forEach(t => { if (tc.has(t)) hit++; }); return 2 * hit / (tEx.size + tc.size); };
+  if (cands.length === 1 && dice(cands[0]) >= 0.5) return { elegido: cands[0], candidatos: cands };
+  // varios parecidos (o uno dudoso): la IA elige usando también el contacto que figure en el pedido
+  try {
+    const lista = cands.map(c => `${c.id} | ${c.nombre_empresa}${c.rubro ? ' (' + c.rubro + ')' : ''} | contactos: ${(c.clientes_contactos || []).map(ct => [ct.nombre, ct.apellido].filter(Boolean).join(' ') + (ct.email ? ' <' + ct.email + '>' : '')).join('; ') || '—'}`).join('\n');
+    const r = await propLlamarForzado(COTIZ_TOOL_ELEGIR_CLIENTE, `Un pedido de cotización viene de esta empresa: "${nombre}"${ex.atencion ? ', contacto: ' + ex.atencion : ''}${ex.email ? ', e-mail: ' + ex.email : ''}${ex.telefono ? ', tel.: ' + ex.telefono : ''}${ex.lugar_entrega ? ', lugar: ' + ex.lugar_entrega : ''}.\n\nClientes ya cargados que se le parecen:\n${lista}\n\nElegí el id del que es LA MISMA empresa (el nombre en el pedido puede estar abreviado o incompleto, ej. "La Anónima" = "Frigorífico La Anonima"; ayudate con el contacto y el e-mail si coinciden). Si ninguno lo es con seguridad, devolvé id vacío.`, 400);
+    const hit = cands.find(c => c.id === r.id);
+    return { elegido: hit || null, candidatos: cands };
+  } catch (e) { return { elegido: null, candidatos: cands }; }
+}
+// Mejor coincidencia ÚNICA de un texto contra una lista (por palabras en común); null si no hay o hay empate
+function cotizIaMejorUnico(texto, lista, getTxt) {
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const toks = s => new Set(norm(s).split(/[^a-z0-9]+/).filter(t => t.length >= 2));
+  const te = toks(texto);
+  if (!te.size) return null;
+  const pts = lista.map(x => { const tx = toks(getTxt(x)); if (!tx.size) return { x, s: 0 }; let hit = 0; te.forEach(t => { if (tx.has(t)) hit++; }); return { x, s: hit / Math.min(te.size, tx.size) }; }).sort((a, b) => b.s - a.s);
+  if (!pts.length || pts[0].s < 0.6) return null;
+  if (pts[1] && pts[1].s >= pts[0].s) return null;
+  return pts[0].x;
+}
+async function cotizIaAplicarCliente(ex, sid) {
+  const st = cotizArmadoInit();
+  const resumen = [];
+  const nombreCli = String(ex.cliente || '').trim();
+  let elegido = null, candidatos = [];
+  if (nombreCli) {
+    showMsg(sid, 'loading', 'Buscando el cliente entre los cargados...');
+    try { ({ elegido, candidatos } = await cotizIaBuscarCliente(ex)); } catch (e) { elegido = null; }
+    if (elegido) {
+      showMsg(sid, 'loading', 'Cargando el cliente...');
+      _cotizArmadoClienteSugerencias = [elegido];
+      await cotizArmadoClienteSeleccionar(elegido.id); // carga contactos, sucursales, lugares de entrega y condiciones de su última venta
+      resumen.push(`cliente "${elegido.nombre_empresa}"` + (elegido.nombre_empresa.trim().toLowerCase() !== nombreCli.toLowerCase() ? ` (el pedido decía "${nombreCli}")` : ''));
+    } else { st.cliente = nombreCli; st.cliente_id = null; resumen.push(candidatos.length ? `cliente "${nombreCli}" — hay ${candidatos.length} parecidos en Clientes y no pude elegir con seguridad: elegí el correcto` : `cliente "${nombreCli}" (no está en Clientes)`); }
+  }
+  // Contacto: por e-mail, o por nombre entre los contactos del cliente
+  const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  let ct = null;
+  if (st.cliente_id && (st._contactos || []).length) {
+    const emailEx = norm(ex.email);
+    if (emailEx) ct = st._contactos.find(c => norm(c.email) === emailEx) || null;
+    if (!ct && String(ex.atencion || '').trim()) ct = cotizIaMejorUnico(ex.atencion, st._contactos, c => [c.nombre, c.apellido].filter(Boolean).join(' '));
+  }
+  if (ct) {
+    cotizArmadoAplicarContacto(ct);
+    resumen.push('contacto "' + st.atencion + '" (ya cargado del cliente)');
+  } else {
+    // sin coincidencia: queda lo que figura en el pedido (y si el cliente es uno ya cargado, se avisa)
+    if (String(ex.atencion || '').trim()) { st.atencion = ex.atencion.trim(); st.contacto_id = null; if (st.cliente_id) resumen.push(`contacto "${st.atencion}" no figura entre los del cliente`); }
+    if (String(ex.celular || '').trim()) st.celular = ex.celular.trim();
+    if (String(ex.email || '').trim()) st.email = ex.email.trim();
+  }
+  if (String(ex.telefono || '').trim() && (!ct || !st.telefono)) st.telefono = ex.telefono.trim();
+  // Sucursal y lugar de entrega: los del cliente si coinciden
+  const sucEx = String(ex.sucursal || '').trim();
+  if (sucEx) {
+    const suc = cotizIaMejorUnico(sucEx, st._sucursales || [], s => s.nombre);
+    if (suc) { st.sucursal_id = suc.id; st.sucursal = suc.nombre || ''; resumen.push('sucursal "' + st.sucursal + '"'); }
+    else { st.sucursal_id = null; st.sucursal = sucEx; }
+  }
+  const lugEx = String(ex.lugar_entrega || '').trim();
+  if (lugEx) {
+    const lug = cotizIaMejorUnico(lugEx, st._lugares || [], l => l.texto);
+    if (lug) { st.lugar_entrega = lug.texto || ''; resumen.push('lugar de entrega ya cargado'); }
+    else st.lugar_entrega = lugEx;
+  }
+  return resumen;
 }
 async function cotizArmadoDesdeArchivos() {
   if (_cotizIa.ocupado) return;
@@ -24376,20 +24508,9 @@ async function cotizArmadoDesdeArchivos() {
     const prompt = `Vas a armar una cotización de Aeration a partir de lo que mandó el usuario (el pedido de un cliente, un mail, una planilla, una cotización de otro proveedor, fotos...). Sacá SOLO lo que figura — no inventes datos; lo que no esté, dejalo vacío (y precio_unitario en null). Cada producto o servicio a cotizar es un ítem, en el orden en que aparece, con su cantidad (1 si no se indica), marca, modelo y código si figuran. Si un mismo producto aparece repetido, sumá las cantidades.${texto ? '\n\nTEXTO / INSTRUCCIONES DEL USUARIO:\n' + texto : ''}`;
     showMsg(sid, 'loading', 'La IA está leyendo el pedido...');
     const ex = await propLlamarForzado(COTIZ_TOOL_EXTRAER, [...bloques, { type: 'text', text: prompt }], 6000);
-    const resumen = [];
-    // Cliente: se busca en Clientes (así se cargan también contactos, lugares de entrega y condiciones de la última venta)
-    const nombreCli = String(ex.cliente || '').trim();
-    if (nombreCli) {
-      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-      const buscarCli = async t => { const r = await supaFetch(`/rest/v1/clientes?select=id,nombre_empresa,rubro&nombre_empresa=ilike."*${encodeURIComponent(t.replace(/["\\*%&#+]/g, ''))}*"&order=nombre_empresa&limit=8`, {headers:{Authorization:'Bearer '+session.token}}); return r.ok ? await r.json() : []; };
-      let rows = await buscarCli(nombreCli);
-      if (!rows.length) { const pal = nombreCli.split(/\s+/).filter(w => w.length >= 4); if (pal.length) rows = await buscarCli(pal[0]); }
-      const exacto = rows.find(c => c.nombre_empresa.trim().toLowerCase() === nombreCli.toLowerCase());
-      const elegido = exacto || (rows.length === 1 ? rows[0] : null);
-      if (elegido) { showMsg(sid, 'loading', 'Cargando el cliente...'); _cotizArmadoClienteSugerencias = [elegido]; await cotizArmadoClienteSeleccionar(elegido.id); resumen.push('cliente "' + elegido.nombre_empresa + '" (de Clientes)'); }
-      else { st.cliente = nombreCli; st.cliente_id = null; resumen.push(rows.length ? `cliente "${nombreCli}" — hay ${rows.length} parecidos en Clientes, elegí el correcto` : `cliente "${nombreCli}" (no está en Clientes)`); }
-    }
-    ['atencion', 'telefono', 'celular', 'email', 'referencia', 'forma_pago', 'forma_cancelacion', 'plazo_entrega', 'lugar_entrega', 'validez_oferta'].forEach(k => { const v = String(ex[k] || '').trim(); if (v) st[k] = v; });
+    // Cliente / contacto / sucursal / lugar de entrega (se buscan entre los ya cargados)
+    const resumen = await cotizIaAplicarCliente(ex, sid);
+    ['referencia', 'forma_pago', 'forma_cancelacion', 'plazo_entrega', 'validez_oferta'].forEach(k => { const v = String(ex[k] || '').trim(); if (v) st[k] = v; });
     if (ex.moneda) st.moneda = ex.moneda;
     const obs = String(ex.observaciones || '').trim();
     if (obs && !(st.observaciones || '').includes(obs)) st.observaciones = ((st.observaciones || '').trim() + '\n' + obs).trim();
@@ -24410,7 +24531,12 @@ async function cotizArmadoDesdeArchivos() {
         item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(m.row), cantidad, precio_unitario: m.row.precio_lista != null ? Number(m.row.precio_lista) : precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.id, origen_ia: 'stock', lista_vacia: m.row.precio_lista == null || Number(m.row.precio_lista) === 0 };
       } else if (m) {
         cuentas.hist++;
-        item = { id: procesosNuevoId(), descripcion: m.row.descripcion || cotizDescripcionItem(m.row), cantidad, precio_unitario: Number(m.row.precio_unitario) || precioArchivo, marca: m.row.marca || null, modelo: m.row.modelo || null, catalogo_id: m.row.catalogo_id || null, origen_ia: 'vendido' };
+        // si lo vendido es un producto de Stock, marca / modelo / descripción salen del Stock (el precio es el de la última venta)
+        let stock = null;
+        if (m.row.catalogo_id) {
+          try { const session = JSON.parse(localStorage.getItem('daia_session')||'null'); const rs = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=*&id=eq.${m.row.catalogo_id}`, {headers:{Authorization:'Bearer '+session.token}}); stock = rs.ok ? (await rs.json())[0] || null : null; } catch (e) { stock = null; }
+        }
+        item = { id: procesosNuevoId(), descripcion: stock ? cotizDescripcionItem(stock) : (m.row.descripcion || cotizDescripcionItem(m.row)), cantidad, precio_unitario: Number(m.row.precio_unitario) || (stock && stock.precio_lista != null ? Number(stock.precio_lista) : 0) || precioArchivo, marca: (stock || m.row).marca || null, modelo: (stock || m.row).modelo || null, catalogo_id: m.row.catalogo_id || null, origen_ia: 'vendido' };
       } else {
         cuentas.nada++;
         item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(x), cantidad, precio_unitario: precioArchivo, marca: x.marca || null, modelo: x.modelo || null, catalogo_id: null, origen_ia: 'sin coincidencia' };
