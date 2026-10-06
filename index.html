@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.83</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.84</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.83</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.84</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -530,6 +530,7 @@
       <button class="btn btn-primary" id="analyzeBtn" onclick="analyzeAll()" disabled>✦ Analizar con IA</button>
       <div class="gap"></div>
       <div id="rendResultsArea"></div>
+      <div id="rendHistorialArea"></div>
     </div>
 
     <!-- ═══ PANEL: Viajes ═══ -->
@@ -2389,14 +2390,34 @@ function today() { const d=new Date(); return String(d.getDate()).padStart(2,'0'
 // se resuelve al revés (queda invertido día/mes, ej. "8 de noviembre" en vez de
 // "11 de agosto"), y con el día >12 a veces ni siquiera lo convierte y lo deja
 // como texto plano. Mandando ya el número de serie no hay nada que adivinar.
+const REND_MESES = { ene: 1, enero: 1, jan: 1, january: 1, feb: 2, febrero: 2, february: 2, mar: 3, marzo: 3, march: 3, abr: 4, abril: 4, apr: 4, april: 4, may: 5, mayo: 5, jun: 6, junio: 6, june: 6, jul: 7, julio: 7, july: 7, ago: 8, agosto: 8, aug: 8, august: 8, sep: 9, set: 9, sept: 9, septiembre: 9, setiembre: 9, september: 9, oct: 10, octubre: 10, october: 10, nov: 11, noviembre: 11, november: 11, dic: 12, diciembre: 12, dec: 12, december: 12 };
+// Interpreta una fecha en cualquier formato razonable y devuelve {d, m, y}. Los comprobantes argentinos van DÍA/MES/AÑO: con las dos
+// primeras partes ≤ 12 se asume día primero; solo se invierte si la segunda parte es > 12 (ahí es imposible que sea el mes).
+function rendFechaPartes(v) {
+  if (v == null || v === '') return null;
+  const ok = (d, m, y) => (m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2100 && new Date(Date.UTC(y, m - 1, d)).getUTCDate() === d) ? { d, m, y } : null;
+  if (v instanceof Date) return isNaN(v) ? null : ok(v.getDate(), v.getMonth() + 1, v.getFullYear());
+  const s = String(v).trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  let m = /^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?:[t\s].*)?$/.exec(s);                        // 2026-03-05 (ISO)
+  if (m) return ok(+m[3], +m[2], +m[1]);
+  m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?:\s.*)?$/.exec(s);                              // 05/03/2026, 5-3-26
+  if (m) { const a = +m[1], b = +m[2]; let y = +m[3]; if (y < 100) y += 2000; return (b > 12 && a <= 12) ? ok(b, a, y) : ok(a, b, y); }
+  m = /^(\d{1,2})[\s\-\/.]*(?:de\s+)?([a-z]{3,10})\.?[\s\-\/,.]*(?:de\s+|del\s+)?(\d{2,4})$/.exec(s); // 5 de marzo de 2026, 05-mar-26
+  if (m && REND_MESES[m[2]]) { let y = +m[3]; if (y < 100) y += 2000; return ok(+m[1], REND_MESES[m[2]], y); }
+  m = /^([a-z]{3,10})\.?\s+(\d{1,2}),?\s+(\d{2,4})$/.exec(s);                                      // Mar 5, 2026
+  if (m && REND_MESES[m[1]]) { let y = +m[3]; if (y < 100) y += 2000; return ok(+m[2], REND_MESES[m[1]], y); }
+  return null;
+}
+function rendNormalizarFecha(v) {
+  const f = rendFechaPartes(v); if (!f) return null;
+  return String(f.d).padStart(2, '0') + '/' + String(f.m).padStart(2, '0') + '/' + f.y;
+}
+const rendEsCampoFecha = nombre => { const t = String(nombre || '').toLowerCase(); return t.includes('fecha') && !t.includes('anal'); };
 function rendFechaASerial(str) {
   if (typeof str !== 'string') return null;
-  const m = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/.exec(str.trim());
-  if (!m) return null;
-  let d = Number(m[1]), mo = Number(m[2]), y = Number(m[3]);
-  if (y < 100) y += 2000;
-  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  return Math.round((Date.UTC(y, mo - 1, d) - Date.UTC(1899, 11, 30)) / 86400000);
+  const f = rendFechaPartes(str);
+  if (!f) return null;
+  return Math.round((Date.UTC(f.y, f.m - 1, f.d) - Date.UTC(1899, 11, 30)) / 86400000);
 }
 // Post-procesa una fila ya armada para escribir en Excel: convierte las
 // columnas cuyo encabezado dice "fecha" (pero no "fecha de análisis", que es
@@ -2853,12 +2874,62 @@ function rendChequearConsistenciaProveedor(extracted, otrosResultados) {
   const texto = `⚠ El CUIT (${cuit.valor}) no coincide con el de otro${plural?'s '+sugerido.count:''} comprobante${plural?'s':''} del mismo proveedor "${proveedor.valor}" (dice${plural?'n':''} ${sugerido.valorOriginal}) — revisá cuál está bien.`;
   rendAgregarAdvertenciaConSugerencia(extracted, texto, cuit.nombre, sugerido.valorOriginal, `Coincide con ${plural?'otros '+sugerido.count+' comprobantes':'otro comprobante'} de "${proveedor.valor}"`);
 }
+// ── Percepciones de IIBB por jurisdicción ──
+// La IA devuelve además la lista de percepciones tal como figuran ("jurisdiccion" en texto literal + monto) y acá se las clasifica con reglas fijas
+// (no con la IA): CABA/CF/Capital/AGIP → CABA (que NO es la provincia de Buenos Aires), Buenos Aires/Bs.As./PBA/ARBA → Buenos Aires, cualquier otra → otras jurisdicciones.
+const REND_PROVINCIAS_OTRAS = /\b(cordoba|santa fe|mendoza|neuquen|rio negro|chubut|tucuman|salta|entre rios|misiones|corrientes|chaco|jujuy|la pampa|san juan|san luis|santa cruz|tierra del fuego|catamarca|la rioja|formosa|santiago del estero)\b/;
+const rendNormJur = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[.,;:_()\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+function rendJurisdiccionGrupo(txt) {
+  const t = rendNormJur(txt); if (!t) return null;
+  if (REND_PROVINCIAS_OTRAS.test(t)) return 'otras';
+  if (/\b(caba|c a b a|capital federal|capital|ciudad autonoma|ciudad de buenos aires|c f|cf|agip|gcba)\b/.test(t)) return 'caba';
+  if (/\b(buenos aires|bs as|bsas|pba|arba|provincia|prov)\b/.test(t)) return 'bsas';
+  return 'otras';
+}
+function rendGrupoDeCampo(nombre) {
+  const t = rendNormJur(nombre);
+  if (!/(iibb|ingresos brutos|perc|iibb)/.test(t)) return null;
+  if (/\b(caba|c a b a|capital|ciudad|c f|cf|agip)\b/.test(t)) return 'caba';
+  if (/\b(buenos aires|bs as|bsas|pba|arba|provincia)\b/.test(t)) return 'bsas';
+  if (/\b(otra|otras|resto|demas|otro|otros)\b/.test(t)) return 'otras';
+  return null;
+}
+function rendAplicarPercepcionesIIBB(extracted, activeFields) {
+  const lista = extracted['__percepciones_iibb__'];
+  if (!Array.isArray(lista) || !lista.length) return;
+  const sumas = {};
+  lista.forEach(q => { const g = rendJurisdiccionGrupo(q && q.jurisdiccion), m = rendParseMonto(q && q.monto); if (g && m != null) sumas[g] = (sumas[g] || 0) + m; });
+  const NOM = { caba: 'CABA', bsas: 'Bs As', otras: 'otras jurisdicciones' };
+  const cambios = [];
+  activeFields.forEach(f => {
+    const g = rendGrupoDeCampo(f.name); if (!g) return;
+    const nuevo = sumas[g] != null ? Math.round(sumas[g] * 100) / 100 : null;
+    const actual = rendParseMonto(extracted[f.name]);
+    if ((nuevo == null ? null : nuevo) !== (actual == null ? null : actual)) cambios.push(`${f.name}: ${actual == null ? '—' : actual} → ${nuevo == null ? '—' : nuevo}`);
+    extracted[f.name] = nuevo;
+  });
+  if (cambios.length) extracted['__conv_note__'] = (extracted['__conv_note__'] ? extracted['__conv_note__'] + ' · ' : '') + 'Percepciones IIBB reasignadas por jurisdicción (' + Object.entries(sumas).map(([g, v]) => NOM[g] + ' ' + v).join(', ') + '): ' + cambios.join('; ');
+}
 // Chequeo 2: autocontrol aritmético — neto + IVA debería dar el total. Si la
 // extracción de cada campo fue independiente (sin que la IA haga la cuenta),
 // esto detecta un campo mal leído aunque los tres valores "parezcan" válidos
 // por separado. Sugiere corregir el Total (es el único de los tres que se
 // puede recalcular sin ambigüedad — no hay forma de saber si en cambio es el
 // neto o el IVA el que está mal, así que esos quedan para revisión manual).
+const REND_RE_IMPUESTO = /perc|impuesto|\bimp\b|otros? imp|iibb|ingresos brutos|retenc|\btasa|interno|no gravado|exent|sellos|propina|redondeo|otros? trib|iva ?\d/;
+// Campos (configurados en Cfg Rendiciones) que son impuestos / percepciones / conceptos que suman al total, además del neto y el IVA
+function rendCamposImpuestos(extracted) {
+  const roles = new Set([].concat(REND_ROLE_NAMES.neto, REND_ROLE_NAMES.iva, REND_ROLE_NAMES.total, REND_ROLE_NAMES.cuit, REND_ROLE_NAMES.proveedor).map(rendNormJur));
+  const out = [];
+  getRendFields().filter(f => f.name.trim()).forEach(f => {
+    const t = rendNormJur(f.name);
+    if (roles.has(t) || /moneda|fecha|cuit|nro|numero|tipo|concepto|detalle|proveedor/.test(t)) return;
+    if (!REND_RE_IMPUESTO.test(t)) return;
+    const n = rendParseMonto(extracted[f.name]);
+    if (n != null && n !== 0) out.push({ nombre: f.name, valor: n });
+  });
+  return out;
+}
 function rendChequearAritmetica(extracted) {
   const neto = rendValorPorRol(extracted, 'neto');
   const iva = rendValorPorRol(extracted, 'iva');
@@ -2866,12 +2937,14 @@ function rendChequearAritmetica(extracted) {
   if (!neto || !iva || !total) return;
   const netoNum = rendParseMonto(neto.valor), ivaNum = rendParseMonto(iva.valor), totalNum = rendParseMonto(total.valor);
   if (netoNum == null || ivaNum == null || totalNum == null) return;
-  const esperado = Math.round((netoNum + ivaNum) * 100) / 100;
+  const extras = rendCamposImpuestos(extracted), sumaExtras = extras.reduce((s, e) => s + e.valor, 0);
+  const base = Math.round((netoNum + ivaNum) * 100) / 100, esperado = Math.round((netoNum + ivaNum + sumaExtras) * 100) / 100;
   const tolerancia = Math.max(1, Math.abs(totalNum) * 0.005); // redondeo, hasta 0.5%
-  if (Math.abs(esperado - totalNum) > tolerancia) {
-    const texto = `⚠ "${neto.nombre}" (${netoNum}) + "${iva.nombre}" (${ivaNum}) = ${esperado}, pero "${total.nombre}" dice ${totalNum} — revisá los montos.`;
-    rendAgregarAdvertenciaConSugerencia(extracted, texto, total.nombre, esperado, `${neto.nombre} + ${iva.nombre}`);
-  }
+  if (Math.abs(esperado - totalNum) <= tolerancia) return;
+  if (extras.length && Math.abs(base - totalNum) <= tolerancia) return; // el total ya cierra solo con neto + IVA (los otros importes ya estarían dentro del neto)
+  const partes = [`"${neto.nombre}" (${netoNum})`, `"${iva.nombre}" (${ivaNum})`].concat(extras.map(e => `"${e.nombre}" (${e.valor})`));
+  const texto = `⚠ ${partes.join(' + ')} = ${esperado}, pero "${total.nombre}" dice ${totalNum} — revisá los montos${extras.length ? '' : ' (y si el comprobante tiene percepciones o impuestos, que estén cargados)'}.`;
+  rendAgregarAdvertenciaConSugerencia(extracted, texto, total.nombre, esperado, [neto.nombre, iva.nombre].concat(extras.map(e => e.nombre)).join(' + '));
 }
 // Clave "natural" de un comprobante argentino, para detectar duplicados — CUIT
 // del emisor + número de comprobante. Si el usuario renombró esos campos en
@@ -2904,10 +2977,10 @@ async function rendBuscarDuplicadosCompartidos(cuits) {
 // Insertar en última), no al analizar, para no contar comprobantes que se
 // analizaron pero nunca se terminaron de cargar. Ignora los que ya estaban
 // (mismo empresa+cuit+número), gracias al índice único de la tabla.
-async function rendRegistrarHistorialCompartido() {
+async function rendRegistrarHistorialCompartido(lista) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token) return;
-  const filas = results.map(r => {
+  const filas = (lista || results).map(r => {
     const cuit = String(r['CUIT emisor'] ?? '').replace(/\D/g,'').trim();
     const nro = String(r['Nro. comprobante'] ?? '').trim().toLowerCase();
     if (!cuit || !nro) return null;
@@ -2956,7 +3029,7 @@ async function analyzeAll() {
         headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-5', max_tokens: 2000,
-          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__". Si no encontrás un valor usá null. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si no aparece ninguna de las dos razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
+          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__", "__percepciones_iibb__". Si no encontrás un valor usá null. FECHAS: todas las fechas van en formato DD/MM/AAAA (día/mes/año, formato argentino): en un comprobante argentino la fecha es SIEMPRE día/mes/año, nunca la interpretes como mes/día. IMPUESTOS Y PERCEPCIONES: no mezcles jurisdicciones. "CABA", "C.F.", "CF", "Capital Federal", "Ciudad Autónoma de Buenos Aires" y "AGIP" son la Ciudad de Buenos Aires (CABA), que NO es la provincia de Buenos Aires; "Buenos Aires", "Bs. As.", "PBA", "ARBA" y "Provincia de Buenos Aires" son la provincia de Buenos Aires; cualquier otra provincia (Neuquén, Córdoba, Santa Fe, Mendoza, Río Negro, etc.) es "otras jurisdicciones" y nunca va en el campo de Buenos Aires ni en el de CABA. Para "__percepciones_iibb__": array con TODAS las percepciones o retenciones de Ingresos Brutos (IIBB) que figuren en el comprobante, cada una como {"jurisdiccion":"<texto literal tal como figura, ej. 'Perc. IIBB C.F.', 'IIBB Bs.As.', 'Neuquén'>","monto":<número>}; [] si no hay ninguna. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si no aparece ninguna de las dos razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
           messages: [{ role:'user', content:[
             isPdf ? {type:'document',source:{type:'base64',media_type:mediaType,data:b64}} : {type:'image',source:{type:'base64',media_type:mediaType,data:b64}},
             {type:'text',text:`Extraé estos campos para cada comprobante distinto que encuentres en el archivo:\n${fieldPrompt}\nRespondé solo con el array JSON.`}
@@ -2972,6 +3045,8 @@ async function analyzeAll() {
       extractedList.forEach(extracted => {
         extracted['__archivo__'] = item.file.name;
         extracted['__fecha_analisis__'] = new Date().toLocaleString('es-AR');
+        activeFields.forEach(f => { if (rendEsCampoFecha(f.name)) { const n = rendNormalizarFecha(extracted[f.name]); if (n) extracted[f.name] = n; } }); // siempre DD/MM/AAAA
+        rendAplicarPercepcionesIIBB(extracted, activeFields);
         rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNames);
       });
       if (extractedList.length > 1) {
@@ -3064,6 +3139,7 @@ function rendManualKey(name) { return '__manual_' + name; }
 
 function renderRendResults() {
   const area = document.getElementById('rendResultsArea');
+  rendHistorialRender(); if (!_rendHistorialRemotoCargado) rendHistorialCargarRemoto();
   if (!results.length) { area.innerHTML = ''; return; }
   // Render manual fields section — split by effective mode (fixed 'global', or session choice for 'custom' fields)
   const allManualFields = getRendManualFields();
@@ -3545,6 +3621,8 @@ async function rendResolveDestFolder(token) {
 }
 
 // Escribe results[] en el Excel indicado, respetando la fila "Total" (inserta arriba y extiende el SUM)
+const rendColLetra = i => { let s = '', n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+// Escribe las filas en el Excel. Devuelve qué filas se escribieron (con su número de fila y archivo de origen) y cuáles fallaron.
 async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   const excelBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
   const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
@@ -3556,6 +3634,10 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   const manualFields = getRendManualFields().filter(f=>f.name.trim());
   const savedMapping = getMapping(REND_MAPPING_KEY());
   const useMapping = Object.keys(savedMapping).length > 0 && hdrs.length > 0;
+  // columna donde va el nombre del archivo (la del mapeo "Archivo", o la que diga "archivo" en el encabezado)
+  let archivoCol = -1;
+  if (useMapping) { const e = Object.entries(savedMapping).find(([, f]) => f === '__archivo__'); if (e) archivoCol = parseInt(e[0]); }
+  if (archivoCol < 0) archivoCol = hdrs.findIndex(x => { const hl = String(x || '').toLowerCase(); return hl.includes('archivo') && !hl.includes('fecha'); });
 
   let firstEmptyRow = 2;
   for (let i=1; i<rows.length; i++) {
@@ -3569,6 +3651,7 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   // o rendición con filas de sobra sin usar todavía), se llena esa directamente en vez
   // de insertar una nueva arriba del Total y dejarla vacía para siempre.
   let nextBlankRow = (totalRowNum && firstEmptyRow < totalRowNum) ? firstEmptyRow : null;
+  const filas = [], fallidas = [];
 
   for (let ri=0; ri<results.length; ri++) {
     const r = results[ri];
@@ -3577,17 +3660,19 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
       newRow = buildRowFromMapping(savedMapping, hdrs, r, rendManualValues, manualFields, fields);
     } else {
       newRow = new Array(Math.max(hdrs.length, fields.length + 2 + manualFields.length)).fill('');
-      hdrs.forEach((h, i) => {
-        if (!h) return;
-        const hl = String(h).toLowerCase();
+      hdrs.forEach((x, i) => {
+        if (!x) return;
+        const hl = String(x).toLowerCase();
         if (hl.includes('archivo')) { newRow[i] = r['__archivo__'] || ''; return; }
         if (hl.includes('fecha anal')) { newRow[i] = r['__fecha_analisis__'] || ''; return; }
-        const mf = manualFields.find(f=>strSimilarity(f.name,String(h))>0.5);
+        const mf = manualFields.find(f=>strSimilarity(f.name,String(x))>0.5);
         if (mf) { newRow[i] = rendManualValueFor(mf, r); return; }
-        const ia = fields.find(f=>strSimilarity(f.name,String(h))>0.5);
+        const ia = fields.find(f=>strSimilarity(f.name,String(x))>0.5);
         if (ia) newRow[i] = r[ia.name] != null ? r[ia.name] : '';
       });
     }
+    // las fechas van como número de serie (nada que Excel interprete solo: antes salían con el día y el mes cambiados) y con formato fijo dd/mm/yyyy
+    const colsFecha = rendConvertirFechasEnFila(newRow, hdrs);
     let rowNum, usedInsert = false;
     if (nextBlankRow) {
       rowNum = nextBlankRow;
@@ -3600,14 +3685,143 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
     } else {
       rowNum = firstEmptyRow + ri;
     }
-    const lastCol = String.fromCharCode(64 + Math.max(newRow.length, 1));
-    await fetch(excelBase + `range(address='A${rowNum}:${lastCol}${rowNum}')`, {
+    const lastCol = rendColLetra(Math.max(newRow.length, 1) - 1);
+    const patchResp = await fetch(excelBase + `range(address='A${rowNum}:${lastCol}${rowNum}')`, {
       method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]})
     });
+    if (!patchResp.ok) {
+      const errBody = await patchResp.json().catch(()=>({}));
+      fallidas.push({ ri, archivo: r['__archivo__'] || `fila ${rowNum}`, motivo: errBody.error?.message || `HTTP ${patchResp.status}` });
+    } else {
+      filas.push({ ri, rowNum, archivo: r['__archivo__'] || '' });
+      for (const ci of colsFecha) {
+        const cl = rendColLetra(ci);
+        await fetch(excelBase + `range(address='${cl}${rowNum}:${cl}${rowNum}')`, {
+          method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({ numberFormat: [['dd/mm/yyyy']] })
+        }).catch(()=>{}); // el formato es cosmético
+      }
+    }
     if (usedInsert && totalOrigFormulas) {
       await spUpdateTotalFormulas(token, excelBase, totalRowNum, totalRowWidth, totalOrigFormulas, rowNum);
     }
   }
+  return { filas, fallidas, archivoCol, excelBase };
+}
+
+// Sube los comprobantes a la carpeta de la rendición con la fila del Excel en el nombre ("Fila 12 - factura.pdf") — así, desde el archivo se sabe a
+// qué fila corresponde, y no se pisan archivos con el mismo nombre (conflictBehavior=rename). Devuelve por archivo original: { nombre, webUrl } o { error }.
+async function rendSubirComprobantesConFila(token, siteId, folderId, doneFiles, filaPorArchivo) {
+  const out = {};
+  for (const it of doneFiles) {
+    const orig = it.file.name, fila = filaPorArchivo[orig];
+    if (fila == null) continue; // ningún comprobante de este archivo llegó al Excel: no se sube
+    const nombre = `Fila ${fila} - ${orig}`;
+    try {
+      const b64 = await fileToBase64(it.file);
+      const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}:/${encodeURIComponent(nombre)}:/content?@microsoft.graph.conflictBehavior=rename`;
+      const resp = await fetch(url, { method:'PUT', headers:{Authorization:'Bearer '+token}, body: Uint8Array.from(atob(b64), c => c.charCodeAt(0)) });
+      if (!resp.ok) { out[orig] = { error: `HTTP ${resp.status}` }; continue; }
+      const d = await resp.json().catch(() => ({}));
+      out[orig] = { nombre: d.name || nombre, webUrl: d.webUrl || null };
+    } catch (e) { out[orig] = { error: e.message }; }
+  }
+  return out;
+}
+// En la celda "Archivo" de cada fila: enlace clickeable al comprobante subido
+async function rendEnlazarArchivos(token, w, subidos) {
+  if (w.archivoCol < 0) return;
+  const cl = rendColLetra(w.archivoCol);
+  for (const f of w.filas) {
+    const s = subidos[f.archivo]; if (!s || !s.webUrl) continue;
+    const q = x => String(x).replace(/"/g, '""');
+    await fetch(w.excelBase + `range(address='${cl}${f.rowNum}:${cl}${f.rowNum}')`, {
+      method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({ formulas: [[`=HYPERLINK("${q(s.webUrl)}","${q(s.nombre)}")`]] })
+    }).catch(()=>{});
+  }
+}
+
+// ── Historial de rendiciones enviadas ──
+// Al generar / insertar una rendición, lo enviado sale de la pantalla (así no se vuelve a analizar ni a insertar lo mismo) y queda guardado acá.
+const REND_HIST_MAX = 25;
+const REND_HIST_KEY = () => 'rend_historial_' + currentEmpresa;
+let _rendHistorial = null, _rendHistorialRemotoCargado = false;
+function rendHistorialGet() {
+  if (!_rendHistorial) { try { _rendHistorial = JSON.parse(localStorage.getItem(REND_HIST_KEY()) || '[]'); } catch (e) { _rendHistorial = []; } if (!Array.isArray(_rendHistorial)) _rendHistorial = []; }
+  return _rendHistorial;
+}
+function rendHistorialGuardar() {
+  const hist = rendHistorialGet().slice(0, REND_HIST_MAX); _rendHistorial = hist;
+  try { localStorage.setItem(REND_HIST_KEY(), JSON.stringify(hist)); } catch (e) { /* sin espacio */ }
+  const uid = (typeof currentUser !== 'undefined' && currentUser && (currentUser.id || currentUser.email)) || 'u';
+  supaConfigSet(REND_HIST_KEY() + '_' + uid, JSON.stringify(hist)).catch(() => {}); // copia en la nube (para verlo desde otro dispositivo)
+}
+async function rendHistorialCargarRemoto() {
+  _rendHistorialRemotoCargado = true;
+  try {
+    const uid = (typeof currentUser !== 'undefined' && currentUser && (currentUser.id || currentUser.email)) || 'u';
+    const raw = await supaConfigGet(REND_HIST_KEY() + '_' + uid);
+    if (raw) {
+      const rem = JSON.parse(raw), loc = rendHistorialGet(), ids = new Set(loc.map(x => x.id));
+      rem.forEach(x => { if (x && !ids.has(x.id)) loc.push(x); });
+      loc.sort((x, y) => String(y.fecha).localeCompare(String(x.fecha)));
+      _rendHistorial = loc.slice(0, REND_HIST_MAX);
+      try { localStorage.setItem(REND_HIST_KEY(), JSON.stringify(_rendHistorial)); } catch (e) { /* sin espacio */ }
+    }
+  } catch (e) { /* queda el local */ }
+  rendHistorialRender();
+}
+function rendHistorialAgregar(lote, excelNombre, modo) {
+  const limpios = lote.map(r => { const c = Object.assign({}, r); delete c.__archivo_b64__; delete c.__archivo_mime__; return c; });
+  rendHistorialGet().unshift({ id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), fecha: new Date().toISOString(), excel: excelNombre || '', modo, usuario: (typeof currentUser !== 'undefined' && currentUser && (currentUser.nombre || currentUser.email)) || '', comprobantes: limpios });
+  rendHistorialGuardar();
+}
+function rendHistorialRender() {
+  const el = document.getElementById('rendHistorialArea'); if (!el) return;
+  const hist = rendHistorialGet();
+  if (!hist.length) { el.innerHTML = ''; return; }
+  const campoFecha = r => { const k = Object.keys(r).find(x => rendEsCampoFecha(x)); return k ? r[k] : ''; };
+  el.innerHTML = `<details class="card" style="margin-top:12px"><summary style="cursor:pointer;font-size:13px;font-weight:600">🕘 Historial de rendiciones enviadas (${hist.length})</summary>
+    <div class="hint" style="margin:6px 0 8px">Lo que ya se envió sale de la pantalla y queda acá, para consultarlo.</div>
+    ${hist.map(x => `<details style="border-top:1px solid var(--border);padding:6px 0">
+      <summary style="cursor:pointer;font-size:13px">${esc(new Date(x.fecha).toLocaleString('es-AR'))} — ${esc(x.excel || 'Excel')} · ${x.comprobantes.length} comprobante(s)${x.usuario ? ' · ' + esc(x.usuario) : ''}</summary>
+      <div style="margin:6px 0;font-size:12px">${x.comprobantes.map(r => { const pv = rendValorPorRol(r, 'proveedor'), tt = rendValorPorRol(r, 'total'); return `<div style="padding:2px 0">• ${esc(r.__archivo__ || '')} — ${esc(String(campoFecha(r) || ''))} — ${esc(String(pv ? pv.valor : ''))} — ${esc(String(tt ? tt.valor : ''))}</div>`; }).join('')}</div>
+      <button class="btn btn-secondary btn-sm" style="width:auto" onclick="rendHistorialRestaurar('${x.id}')" title="Vuelve a poner estos comprobantes en pantalla (sin los archivos)">↩ Restaurar en pantalla</button>
+      <button class="btn btn-secondary btn-sm" style="width:auto" onclick="rendHistorialBorrar('${x.id}')">🗑 Borrar del historial</button>
+    </details>`).join('')}</details>`;
+}
+function rendHistorialRestaurar(id) {
+  const x = rendHistorialGet().find(q => q.id === id); if (!x) return;
+  if (!confirm(`¿Volver a poner en pantalla los ${x.comprobantes.length} comprobante(s)? Si ya están en el Excel, al insertarlos de nuevo quedarían duplicados.`)) return;
+  results = results.concat(x.comprobantes.map(r => Object.assign({}, r)));
+  saveResults(); renderRendResults();
+}
+function rendHistorialBorrar(id) {
+  if (!confirm('¿Borrar esta rendición del historial?')) return;
+  _rendHistorial = rendHistorialGet().filter(q => q.id !== id); rendHistorialGuardar(); rendHistorialRender();
+}
+
+// Escribe las filas, sube los comprobantes (con la fila en el nombre y enlace en el Excel), registra el historial y deja la pantalla limpia.
+async function rendFinalizarLote(token, siteId, folderId, excelId, sheetName, doneFiles, excelNombre, statusId, modo) {
+  const w = await rendWriteRows(token, siteId, excelId, sheetName);
+  showMsg(statusId, 'loading', 'Subiendo comprobantes...');
+  const filaPorArchivo = {};
+  w.filas.forEach(f => { if (f.archivo && !(f.archivo in filaPorArchivo)) filaPorArchivo[f.archivo] = f.rowNum; });
+  const subidos = await rendSubirComprobantesConFila(token, siteId, folderId, doneFiles, filaPorArchivo);
+  await rendEnlazarArchivos(token, w, subidos);
+  const escritos = new Set(w.filas.map(f => f.ri));
+  const lote = results.filter((_, i) => escritos.has(i));
+  await rendRegistrarHistorialCompartido(lote);
+  if (lote.length) rendHistorialAgregar(lote, excelNombre, modo);
+  // lo enviado sale de la pantalla; lo que falló se queda para reintentarlo
+  results = results.filter((_, i) => !escritos.has(i));
+  files = files.filter(f => f.status !== 'done' || results.some(r => r['__archivo__'] === f.file.name));
+  if (!w.fallidas.length) { rendManualValues = {}; rendPersonaOverrideEnabled = false; rendPersonaOverrideValue = ''; }
+  saveResults(); renderFileList(); renderRendResults();
+  const sinSubir = Object.entries(subidos).filter(([, v]) => v.error).map(([k]) => k);
+  const avisos = [];
+  if (w.fallidas.length) avisos.push(`${w.fallidas.length} fila(s) NO se pudieron escribir en el Excel y quedaron en pantalla para reintentar: ${w.fallidas.map(f => `${f.archivo} (${f.motivo})`).join('; ')}`);
+  if (sinSubir.length) avisos.push(`no se pudo subir el comprobante de: ${sinSubir.join(', ')}`);
+  return { ok: !avisos.length, cantidad: lote.length, mensaje: avisos.length ? `⚠ ${lote.length} comprobante(s) enviados, pero ${avisos.join(' · ')}` : null };
 }
 
 async function rendInsertarUltima() {
@@ -3645,17 +3859,8 @@ async function rendInsertarUltima() {
     const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
 
     showMsg(statusId,'loading','Insertando filas...');
-    await rendWriteRows(token, siteId, excelItem.id, sheetName);
-
-    showMsg(statusId,'loading','Subiendo comprobantes...');
-    await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
-    await rendRegistrarHistorialCompartido();
-
-    rendManualValues = {};
-    rendPersonaOverrideEnabled = false;
-    rendPersonaOverrideValue = '';
-    renderRendResults();
-    showMsg(statusId,'success',`✓ ${doneFiles.length} comprobante(s) guardados en "${excelItem.name}".`);
+    const fin = await rendFinalizarLote(token, siteId, folderId, excelItem.id, sheetName, doneFiles, excelItem.name, statusId, 'insertar');
+    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ ${fin.cantidad} comprobante(s) guardados en "${excelItem.name}" y movidos al historial.` : fin.mensaje);
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
   }
@@ -3744,17 +3949,8 @@ async function rendGenerarNueva() {
     const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiedItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
     const sheetsData = await sheetsResp.json();
     const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
-    await rendWriteRows(token, siteId, copiedItem.id, sheetName);
-
-    showMsg(statusId,'loading','Subiendo comprobantes...');
-    await spUploadComprobantes(token, siteId, folderId, doneFiles, null);
-    await rendRegistrarHistorialCompartido();
-
-    rendManualValues = {};
-    rendPersonaOverrideEnabled = false;
-    rendPersonaOverrideValue = '';
-    renderRendResults();
-    showMsg(statusId,'success',`✓ Rendición "${newFileName}" generada con ${doneFiles.length} comprobante(s).`);
+    const fin = await rendFinalizarLote(token, siteId, folderId, copiedItem.id, sheetName, doneFiles, newFileName, statusId, 'nueva');
+    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ Rendición "${newFileName}" generada con ${fin.cantidad} comprobante(s) y movida al historial.` : fin.mensaje);
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
   }
