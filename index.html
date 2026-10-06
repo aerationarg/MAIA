@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.74</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.75</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.74</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.75</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13630,6 +13630,24 @@ function pfQuimClase(it) {
 // Medidas físicas (m) de un tanque según tipo, volumen y orientación (cisterna horizontal o vertical)
 //   tanque plástico: cilindro vertical, alto = 1,2 × Ø · maxibidón (IBC): 1,0 × 1,2 × 1,16 m para 1000 l (escalado por volumen)
 //   cisterna vertical: alto = 1,6 × Ø · cisterna horizontal: largo = 3 × Ø, sobre dos soportes · sin dato de volumen: 500 l / 1000 l / 5000 l
+// Medidas escritas en el texto del equipo ("cisterna vertical de 2 m de diámetro y 5 m de alto", "largo 4,5 m"): tienen prioridad sobre las calculadas
+function pfMedTexto(txt, palabras) {
+  const t = String(txt || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const U = '(mm|cm|mts|metros?|m)?(?![\\w³])';
+  const conv = (n, u) => { const v = parseFloat(String(n).replace(',', '.')); return u === 'mm' ? v / 1000 : u === 'cm' ? v / 100 : v; };
+  let m = new RegExp('(?:' + palabras + ')\\s*(?:de|=|:)?\\s*(\\d+(?:[.,]\\d+)?)\\s*' + U).exec(t);
+  if (!m) m = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*' + U.replace('(?![\\w³])', '') + '\\s*(?:de\\s*)?(?:' + palabras + ')\\b').exec(t);
+  const v = m ? conv(m[1], m[2]) : null;
+  return v && v > 0 ? v : null;
+}
+function pfQuimDimTexto(txt, clase, orient) {
+  const D = pfMedTexto(txt, 'diametro|diam|ø|φ'), Hh = pfMedTexto(txt, 'alto|altura'), L = pfMedTexto(txt, 'largo|longitud'), A = pfMedTexto(txt, 'ancho');
+  const o = {};
+  if (clase === 'cisterna' && orient === 'h') { if (L) o.w = L; if (D) { o.d = D; if (!Hh) o.h = D + 0.25; } if (Hh) o.h = Hh; }
+  else if (clase === 'tanque' || clase === 'cisterna') { if (D) { o.w = D; o.d = D; } if (Hh) o.h = Hh; }
+  else { if (A || L) { o.w = A || L; o.d = (A && L) ? L : (A || L); } if (Hh) o.h = Hh; }
+  return o;
+}
 function pfQuimOrient(txt) { return /horizontal/.test(txt) ? 'h' : /vertical/.test(txt) ? 'v' : null; }
 function pfQuimDim(clase, volL, orient) {
   const V = (volL || (clase === 'bin' ? 1000 : clase === 'cisterna' ? 5000 : 500)) / 1000;
@@ -13652,6 +13670,7 @@ function pfQuimGrupos(entradas, ov) {
     const q = it.grupo ? String(it.grupo).trim() : procesosFlowsheetQuimicoBonito(procesosFlowsheetQuimicoNombre(txt) || '');
     const o = ov[it.id] || {}, volTexto = procesosFlowsheetQuimicoVolumenL(`${it.tipoOriginal || it.tipo || ''} ${it.especificacion || ''}`);
     const e = { it, clase, cant: Math.max(1, Number(it.cantidad) || 1), volTexto, volL: o.volL || volTexto, volOrigen: o.volL ? 'editado' : volTexto ? 'texto' : 'típico', orient: o.orient || pfQuimOrient(txt) || 'v', ov: o };
+    e.dimTexto = pfQuimDimTexto(`${it.tipoOriginal || it.tipo || ''} ${it.especificacion || ''}`, clase, e.orient);
     if (!q) { huerf.push(e); return; }
     const k = procesosNormTxt(q);
     if (!mapa.has(k)) { const g = nuevoGrupo(q); mapa.set(k, g); grupos.push(g); }
@@ -13666,8 +13685,8 @@ function pfQuimGrupos(entradas, ov) {
   });
   grupos.forEach(g => {
     const exp = (lista, cap) => { const o = []; lista.forEach(e => { for (let i = 0; i < Math.min(cap, e.cant); i++) o.push({ e, id: e.cant > 1 ? `${e.it.id}_${i}` : e.it.id }); }); return o; };
-    const pisar = (dim, o) => Object.assign(dim, ['w', 'd', 'h'].reduce((r, k) => (o && Number(o[k]) > 0 ? Object.assign(r, { [k]: Number(o[k]) }) : r), {}));
-    g.tanqueInst = exp(g.tanques, 4).map(x => Object.assign(x, { dim: pisar(pfQuimDim(x.e.clase, x.e.volL, x.e.orient), x.e.ov) }));
+    const pisar = (dim, o, dt) => Object.assign(dim, dt || {}, ['w', 'd', 'h'].reduce((r, k) => (o && Number(o[k]) > 0 ? Object.assign(r, { [k]: Number(o[k]) }) : r), {}));
+    g.tanqueInst = exp(g.tanques, 4).map(x => Object.assign(x, { dim: pisar(pfQuimDim(x.e.clase, x.e.volL, x.e.orient), x.e.ov, x.e.dimTexto) }));
     g.bombaInst = exp(g.bombas, 4); g.mixerInst = exp(g.mixers, 4); g.otroInst = exp(g.otros, 4).map(x => Object.assign(x, { dim: pisar(pfQuimDim('sistema', null), x.e.ov) }));
     // columnas: una por tanque (con su agitador y sus bombas) y una por cada "sistema"
     g.cols = g.tanqueInst.map((t, i) => ({ tanque: t, mixer: g.mixerInst[i] || null, bombas: [], otro: null }));
@@ -15714,7 +15733,7 @@ async function flowsheetsGenerarCore(p) {
   showMsg(statusId, 'loading', 'Generando flowsheet con IA...');
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('API key no disponible.');
-  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3,"acometida":null},"equipos":[{"tipo":"Bomba sumergible","cantidad":2,"especificacion":"","grupo":""}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores. "acometida" es la profundidad (m) a la que entra el caño de ingreso respecto del nivel de terreno (típico en un pozo de bombeo enterrado) — solo si el texto la menciona explícitamente (ej. "H acometida", "cota de ingreso", "profundidad de entrada"), si no dejala en null.\n- "equipos": equipos de esa unidad con su cantidad y su "especificacion" (texto con los datos que se den: volumen en litros o m3 de un tanque, caudal o rango de caudal de una bomba, potencia, marca/modelo, material; "" si no hay datos), tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- ZONA / SALA DE QUÍMICOS: si el texto describe una zona o sala de químicos (tanques de químicos, bins/maxibidones, cisternas, bombas dosificadoras o neumáticas, agitadores, sistemas de dosificación), armala como UNA etapa llamada "Zona de químicos" ("linea":"liquido", con sus dimensiones largo/ancho en metros si se dan) con TODOS esos equipos adentro. Cada equipo lleva "grupo" = el nombre del químico al que pertenece (ej. "Floculante", "Cloruro férrico", "Coagulante", "Antiespumante", "Ácido sulfúrico", "Cal", "Urea"): el tanque / bin / cisterna, su agitador y su bomba del mismo químico comparten el mismo "grupo". Un tanque o bin es un equipo ("tipo":"Tanque" / "Bin (maxibidón)" / "Tanque cisterna") con el volumen en su especificación (ej. "500 litros", "10 m3") y su cantidad; una bomba es otro equipo ("Bomba dosificadora" / "Bomba neumática") con su caudal en la especificación; un agitador es otro ("Agitador") con su cantidad. En el resto de las etapas "grupo" va vacío.
+  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3,"acometida":null},"equipos":[{"tipo":"Bomba sumergible","cantidad":2,"especificacion":"","grupo":""}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores. "acometida" es la profundidad (m) a la que entra el caño de ingreso respecto del nivel de terreno (típico en un pozo de bombeo enterrado) — solo si el texto la menciona explícitamente (ej. "H acometida", "cota de ingreso", "profundidad de entrada"), si no dejala en null.\n- "equipos": equipos de esa unidad con su cantidad y su "especificacion" (texto con los datos que se den: volumen en litros o m3 de un tanque, sus medidas si las dan (diámetro, alto, largo, ancho en metros) y si una cisterna es horizontal o vertical, caudal o rango de caudal de una bomba, potencia, marca/modelo, material; "" si no hay datos), tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- ZONA / SALA DE QUÍMICOS: si el texto describe una zona o sala de químicos (tanques de químicos, bins/maxibidones, cisternas, bombas dosificadoras o neumáticas, agitadores, sistemas de dosificación), armala como UNA etapa llamada "Zona de químicos" ("linea":"liquido", con sus dimensiones largo/ancho en metros si se dan) con TODOS esos equipos adentro. Cada equipo lleva "grupo" = el nombre del químico al que pertenece (ej. "Floculante", "Cloruro férrico", "Coagulante", "Antiespumante", "Ácido sulfúrico", "Cal", "Urea"): el tanque / bin / cisterna, su agitador y su bomba del mismo químico comparten el mismo "grupo". Un tanque o bin es un equipo ("tipo":"Tanque" / "Bin (maxibidón)" / "Tanque cisterna") con el volumen en su especificación (ej. "500 litros", "10 m3") y su cantidad; una bomba es otro equipo ("Bomba dosificadora" / "Bomba neumática") con su caudal en la especificación; un agitador es otro ("Agitador") con su cantidad. En el resto de las etapas "grupo" va vacío.
 - Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
   // Timeout propio (AbortController) — sin esto, si el pedido queda colgado
   // (extensión del navegador, red rara, etc.) el botón se queda "Generando..."
