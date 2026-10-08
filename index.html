@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.85</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.86</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.85</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.86</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -25690,13 +25690,30 @@ async function cotizArmadoObtenerProximoQNumero() {
     const token = await getMsToken();
     const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
     if (!rows || rows.length < 2) return null;
-    let max = 0;
+    // El siguiente al mayor Nº de Q de las filas que tienen algo cargado (Fecha, Recibido por, Cliente, Referencia): así no cuentan los
+    // números de Q que alguien dejó escritos de antemano en filas todavía vacías.
+    const a = cotizQAnalizarHoja(rows);
+    if (a.maxQ > 0) return String(a.maxQ + 1);
+    let max = 0; // sin ninguna fila cargada: se usa el mayor número que haya en la columna E
     rows.slice(1).forEach(r => {
       const m = String(r[4] ?? '').trim().match(/\d+/);
       if (m) { const n = parseInt(m[0], 10); if (n > max) max = n; }
     });
     return max > 0 ? String(max + 1) : null;
   } catch(e) { console.warn('No se pudo calcular el próximo Nº de Q:', e.message); return null; }
+}
+// Analiza la hoja "Q-" (la fila 1 es el título y la 2 el encabezado): última fila con datos en A–D y mayor Nº de Q entre las filas con datos.
+function cotizQAnalizarHoja(rows) {
+  const lleno = v => String(v == null ? '' : v).trim() !== '';
+  let ultimaFila = 0, maxQ = 0;
+  for (let i = 2; i < (rows || []).length; i++) {
+    const r = rows[i] || [];
+    if (!r.slice(0, 4).some(lleno)) continue;
+    ultimaFila = i + 1; // número de fila de Excel
+    const m = String(r[4] == null ? '' : r[4]).match(/\d+/);
+    if (m) { const n = parseInt(m[0], 10); if (n > maxQ) maxQ = n; }
+  }
+  return { ultimaFila, maxQ };
 }
 
 function cotizArmadoRender() {
@@ -26889,10 +26906,13 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   const ref = JSON.parse(raw);
   const token = await getMsToken();
   const rows = (await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-')) || [];
-  const vacia = r => !(r || []).slice(0, 5).some(v => String(v == null ? '' : v).trim() !== '');
-  let ultima = rows.length;
-  while (ultima > 2 && vacia(rows[ultima - 1])) ultima--;
-  const nextRow = Math.max(ultima, 1) + 1;
+  // La fila nueva va justo debajo de la última que tiene datos en A–D (Fecha, Recibido por, Cliente, Referencia): las filas de más abajo pueden
+  // tener ya el Nº de Q escrito de antemano (columna E), y eso no cuenta como fila usada.
+  const ultima = Math.max(cotizQAnalizarHoja(rows).ultimaFila, 2);
+  const nextRow = ultima + 1;
+  const filaExiste = rows.length >= nextRow; // la fila ya está dentro de lo usado de la hoja (con su Nº de Q puesto): se completa, no se agrega otra
+  const digitosQ = v => String(v == null ? '' : v).replace(/\D/g, '');
+  const mismoQ = filaExiste && digitosQ((rows[nextRow - 1] || [])[4]) === digitosQ(qNumeroCompleto);
   // fila modelo: la última fila, por encima de la nueva, con al menos 4 de las 5 columnas cargadas
   let filaModelo = nextRow - 1;
   for (let r = nextRow - 1; r >= 3; r--) {
@@ -26902,7 +26922,7 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
   const valores = [cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre || currentUser?.email || ''), st.cliente || '', st.referencia || '', qNumeroCompleto];
   let viaTabla = false;
-  if (nextRow > 2) {
+  if (nextRow > 2 && !filaExiste) {
     const tabla = await cotizExcelTablaDelRegistro(token, excelBase, nextRow - 1).catch(() => null);
     if (tabla && tabla.columnCount >= valores.length) {
       const fila = valores.concat(Array(tabla.columnCount - valores.length).fill(''));
@@ -26911,11 +26931,12 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
     }
   }
   if (!viaTabla) {
-    const resp = await fetch(excelBase + `range(address='A${nextRow}:E${nextRow}')`, { method: 'PATCH', headers: H, body: JSON.stringify({ values: [valores] }) });
+    // si el Nº de Q de esa fila ya es el mismo, no se toca la columna E (puede ser una fórmula)
+    const resp = await fetch(excelBase + `range(address='A${nextRow}:${mismoQ ? 'D' : 'E'}${nextRow}')`, { method: 'PATCH', headers: H, body: JSON.stringify({ values: [mismoQ ? valores.slice(0, 4) : valores] }) });
     if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
   }
   // La fila modelo tiene que ser una fila de datos (la 1 es el título y la 2 el encabezado).
-  if (filaModelo >= 3 && filaModelo < nextRow) {
+  if (!filaExiste && filaModelo >= 3 && filaModelo < nextRow) {
     try { await cotizExcelCopiarFormatoFila(token, excelBase, filaModelo, nextRow); }
     catch (eF) {
       console.warn('[Excel de Q] no se pudo copiar el formato', { filaModelo, nextRow, viaTabla }, eF.message);
