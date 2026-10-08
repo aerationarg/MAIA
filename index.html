@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.93</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.94</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.93</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.94</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -33656,7 +33656,7 @@ function simSedParams(p, g) {
   return { A, Q, Qp, Qr, QrP, prop, X, H: simPos(p.profundidad), ivl: simPos(p.ivl), ves: simVesilind(p.ivl, p) };
 }
 // Simulación dinámica del sedimentador: modelo de capas 1-D (10 capas), con flujo límite entre capas. Alimentación MLSS constante.
-function simSedDin(p, g, ev) {
+function simSedDin(p, g, ev, qfun) {
   const s = simSedParams(p, g), N = 10, m = 5, dz = s.H / N, Xf = s.X, ves = s.ves, fns = simPos(p.fns) != null ? Number(p.fns) : 0.00228, Xmin = fns * Xf, rp = 2.86, Xt = 3.0, vmax = ves.v0;
   const vs = X => { const d = X - Xmin; if (d <= 0) return 0; return Math.max(0, Math.min(vmax, ves.v0 * Math.exp(-ves.n * d) * (1 - Math.exp(-rp * d)))); };
   const patron = simPatron(g), dt = Math.min(0.25 / 60, 0.4 * dz / Math.max(vmax, 1, (s.Qp + s.QrP) / s.A));
@@ -33674,13 +33674,13 @@ function simSedDin(p, g, ev) {
     for (let i = 0; i < N; i++) X[i] = Math.max(0, X[i] + dX[i] * dt);
   };
   const warm = Math.round(14 / dt); for (let k = 0; k < warm; k++) step(simPos(g.q_med));
-  const total = Math.round(24 / dt), every = Math.round(5 / 60 / dt), out = { t: [], manto: [], tssEfl: [], xu: [], q: [] };
+  const total = Math.round(24 / dt), every = Math.round(5 / 60 / dt), out = { t: [], manto: [], tssEfl: [], xu: [], q: [], perf: [] };
   let mantoMax = 0, tssMax = 0, falla = false;
   const manto = () => { let i = N; while (i > 0 && X[i - 1] > 1.0) i--; return (N - i) * dz + (i > 0 ? dz * Math.min(1, X[i - 1] / 1.0) : 0); };
   for (let k = 0; k < total; k++) {
-    const t = k * dt, Q = simQ(g, patron, t, ev); step(Q);
+    const t = k * dt, Q = qfun ? qfun(t) : simQ(g, patron, t, ev); step(Q);
     const mt = manto(), tss = X[0] * 1000; if (mt > mantoMax) mantoMax = mt; if (tss > tssMax) tssMax = tss; if (mt >= (N - m) * dz) falla = true;
-    if (k % every === 0) { out.t.push(t); out.manto.push(mt); out.tssEfl.push(tss); out.xu.push(X[N - 1]); out.q.push(Q); }
+    if (k % every === 0) { out.t.push(t); out.manto.push(mt); out.tssEfl.push(tss); out.xu.push(X[N - 1]); out.q.push(Q); out.perf.push(X.slice()); }
   }
   out.mantoMax = mantoMax; out.tssMax = tssMax; out.falla = falla; out.H = s.H; out.capas = X.slice();
   return out;
@@ -33848,20 +33848,20 @@ const SIM_MODELOS = {
   sbr: { nombre: 'SBR', det: /\bsbr\b|secuencial/, verificar: simVerificarSBR, params: [
     { k: 'volumen', l: 'Volumen del reactor (a nivel máximo)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen/] }, { k: 'ciclos_dia', l: 'Ciclos por día', u: '1/d', req: 1, alias: [/ciclos/] },
     { k: 't_sed', l: 'Tiempo de sedimentación', u: 'h', dim: 'horas', req: 1, alias: [/tiempo.*sedimenta|sedimentacion.*tiempo/] }, { k: 'altura_decant', l: 'Altura a decantar (nivel máx. − nivel de decantador)', u: 'm', dim: 'len', req: 1, alias: [/altura.*decant|carrera/] },
-    { k: 'mlss', l: 'MLSS', u: 'mg/L', req: 1, alias: [/mlss|ssla/] }, { k: 'ivl', l: 'IVL', u: 'mL/g', req: 1, tipico: 120, alias: [/ivl|svi/] }] },
+    { k: 'mlss', l: 'MLSS', u: 'mg/L', req: 1, alias: [/mlss|ssla/] }, { k: 'ivl', l: 'IVL', u: 'mL/g', req: 1, tipico: 120, alias: [/ivl|svi/] }, { k: 'edad_lodos', l: 'Edad de lodos', u: 'd', dim: 'dias', tipico: 20, alias: [/edad.*lodos|srt/] }] },
   mbr: { nombre: 'MBR', det: /\bmbr\b|membrana/, verificar: simVerificarMBR, params: [
     { k: 'area_membrana', l: 'Área total de membrana', u: 'm2', dim: 'area', req: 1, alias: [/area.*membrana|superficie.*membrana|membrana.*area/] }, { k: 'mlss', l: 'MLSS', u: 'mg/L', alias: [/mlss|ssla/] },
     { k: 'aire_limpieza', l: 'Caudal de aire de limpieza (scouring)', u: 'm3/h', dim: 'flow', alias: [/aire.*(limpieza|scouring|burbuj)/] }] },
   daf: { nombre: 'DAF (flotación por aire disuelto)', det: /\bdaf\b|flotacion|flotador/, verificar: simVerificarDAF, params: [
     { k: 'area', l: 'Área superficial de flotación', u: 'm2', dim: 'area', req: 1, alias: [/area|superficie/] }, { k: 'recirculacion', l: 'Caudal de recirculación presurizada', u: 'm3/h', dim: 'flow', alias: [/recirc/] },
-    { k: 'presion', l: 'Presión de saturación (absoluta)', u: 'atm', alias: [/presion/] }] },
+    { k: 'presion', l: 'Presión de saturación (absoluta)', u: 'atm', alias: [/presion/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 50, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo flotado', u: '%', tipico: 3, alias: [] }] },
   fisicoquimico: { nombre: 'Fisicoquímico (coagulación-floculación)', det: /fisicoquimic|coagul|floc|mezcla rapida/, verificar: simVerificarFQ, params: [
     { k: 'vol_mezcla', l: 'Volumen de mezcla rápida', u: 'm3', dim: 'vol', req: 1, alias: [/volumen.*(mezcla|coagul)/] }, { k: 'vol_floc', l: 'Volumen de floculación', u: 'm3', dim: 'vol', req: 1, alias: [/volumen.*floc/] },
     { k: 'potencia_mezcla', l: 'Potencia de mezcla rápida', u: 'kW', alias: [/potencia.*(mezcla|coagul)/] }, { k: 'potencia_floc', l: 'Potencia de floculación', u: 'kW', alias: [/potencia.*floc/] },
-    { k: 'area_decant', l: 'Área del decantador', u: 'm2', dim: 'area', alias: [/area.*decant/] }, { k: 'lamelas', l: '¿Con lamelas? (1 = sí)', u: '', alias: [/lamel/] }] },
+    { k: 'area_decant', l: 'Área del decantador', u: 'm2', dim: 'area', alias: [/area.*decant/] }, { k: 'lamelas', l: '¿Con lamelas? (1 = sí)', u: '', alias: [/lamel/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 45, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo', u: '%', tipico: 2, alias: [] }] },
   tamiz: { nombre: 'Tamiz / reja', det: /tamiz|reja|desbaste|cribado/, verificar: simVerificarTamiz, params: [
     { k: 'ancho_canal', l: 'Ancho del canal', u: 'm', dim: 'len', req: 1, alias: [/ancho.*canal/] }, { k: 'tirante', l: 'Tirante con caudal pico', u: 'm', dim: 'len', req: 1, alias: [/tirante|altura.*liquido/] },
-    { k: 'tirante_min', l: 'Tirante con caudal medio', u: 'm', dim: 'len', alias: [] }, { k: 'capacidad', l: 'Capacidad del tamiz', u: 'm3/h', dim: 'flow', alias: [/capacidad/] }] }
+    { k: 'tirante_min', l: 'Tirante con caudal medio', u: 'm', dim: 'len', alias: [] }, { k: 'capacidad', l: 'Capacidad del tamiz', u: 'm3/h', dim: 'flow', alias: [/capacidad/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 10, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 5, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 5, alias: [] }] }
 };
 // valores por defecto de los datos generales
 const SIM_GLOBAL_PARAMS = [
@@ -33870,7 +33870,7 @@ const SIM_GLOBAL_PARAMS = [
   { k: 'q_min', l: 'Caudal mínimo', u: 'm3/h', dim: 'flow', alias: [/caudal.*minimo/] },
   { k: 'dbo', l: 'DBO del afluente', u: 'mg/L', alias: [/\bdbo\b|dbo5/] }, { k: 'dqo', l: 'DQO del afluente', u: 'mg/L', alias: [/\bdqo\b/] },
   { k: 'sst', l: 'SST del afluente', u: 'mg/L', alias: [/\bsst\b|solidos suspendidos/] }, { k: 'ntk', l: 'NTK del afluente', u: 'mg/L', alias: [/\bntk\b|nitrogeno.*kjeldahl|nitrogeno total/] },
-  { k: 'temp', l: 'Temperatura del efluente', u: '°C', tipico: 20, alias: [/temperatura/] }, { k: 'sst_vuelco', l: 'Límite de SST en el vuelco', u: 'mg/L', tipico: 30, alias: [] }
+  { k: 'temp', l: 'Temperatura del efluente', u: '°C', tipico: 20, alias: [/temperatura/] }, { k: 'sst_vuelco', l: 'Límite de SST en el vuelco', u: 'mg/L', tipico: 30, alias: [] }, { k: 'lim_dbo', l: 'Límite de DBO en el vuelco', u: 'mg/L', alias: [] }, { k: 'lim_dqo', l: 'Límite de DQO en el vuelco', u: 'mg/L', alias: [] }, { k: 'lim_ntk', l: 'Límite de NTK en el vuelco', u: 'mg/L', alias: [] }
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -33885,7 +33885,7 @@ const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
 
 function simNormalizar(d) {
   d = d && typeof d === 'object' ? d : {};
-  const o = Object.assign({ global: {}, global_fuente: {}, patron_tipo: 'tipico', patron: null, unidades: [], fuente: null, avisos: [] }, d);
+  const o = Object.assign({ global: {}, global_fuente: {}, patron_tipo: 'tipico', patron: null, unidades: [], fuente: null, avisos: [], evento: { mult: 0, inicio: 8, dur: 4 }, vistaVar: 'dbo' }, d);
   o.unidades = (Array.isArray(o.unidades) ? o.unidades : []).map(u => Object.assign({ id: mantId(), tipo: 'sedimentador', nombre: '', params: {}, fuentes: {}, crudo: null, escenario: { mult: 0, inicio: 8, dur: 4 }, nota_ia: '' }, u, { escenario: Object.assign({ mult: 0, inicio: 8, dur: 4 }, u && u.escenario) }));
   return o;
 }
@@ -33949,6 +33949,15 @@ function simGlobalDesdeCorrientes(info) {
       if (d.dim === 'flow') suma += val; else { const w = f.q || 1; suma += val * w; peso += w; }
     });
     if (hay) { out[d.k] = d.dim === 'flow' ? suma : suma / peso; fu[d.k] = 'proyecto'; }
+  });
+  // límites de vuelco que figuran en el Paso 1 (valor máximo)
+  Object.entries({ dbo: 'lim_dbo', dqo: 'lim_dqo', sst: 'sst_vuelco', ntk: 'lim_ntk' }).forEach(([k, lk]) => {
+    const def = SIM_GLOBAL_PARAMS.find(x => x.k === k);
+    for (const c of cs) for (const [nombre, v] of Object.entries(c.campos || {})) {
+      if (!v || typeof v !== 'object' || v.limite_normativo == null || v.limite_normativo === '' || !def.alias.some(re => re.test(procesosNormTxt(nombre)))) continue;
+      const pl = procesosParsearLimiteNormativo(v.limite_normativo); const val = pl ? (pl.tipo === 'max' ? pl.valor : pl.tipo === 'rango' ? pl.max : null) : null;
+      if (val != null) { out[lk] = val; fu[lk] = 'proyecto'; return; }
+    }
   });
   void acum; void qTot; return { global: out, fuente: fu };
 }
@@ -34256,6 +34265,8 @@ function simResultadosHtml(u) {
     if (u.tipo === 'sedimentador' && res.rangoR) h += `<div class="hint" style="margin:6px 0 0">Con el caudal pico, la relación de recirculación que respeta el flujo límite está entre <b>${res.rangoR[0].toFixed(2)}</b> y <b>${res.rangoR[1].toFixed(2)}</b>.</div>`;
     if (u.tipo === 'sedimentador' && res.s && !res.rangoR) h += `<div class="hint" style="margin:6px 0 0;color:var(--red)">Con el caudal pico no hay ninguna relación de recirculación que respete el flujo límite con ese MLSS e IVL: hay que aumentar el área, bajar el MLSS o mejorar el IVL.</div>`;
   }
+  if (u.tipo === 'pozo' && res.sim) h += `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:2px">Vista animada del pozo (usá el reproductor de arriba)</div>${simVistaPozo(u, res.sim)}</div>`;
+  if (u.tipo === 'sedimentador' && res.din && res.din.perf) h += `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:2px">Vista animada del sedimentador: concentración de sólidos por capa (usá el reproductor de arriba)</div>${simVistaSedimentador(u, null, res.din, res.s)}</div>`;
   const g = simGraficosUnidad(u, res); if (g) h += `<div style="margin-top:10px">${g}</div>`;
   return h;
 }
@@ -34291,12 +34302,14 @@ function simUnidadHtml(u, i, n) {
 }
 function simRender() {
   const el = document.getElementById('sim-doc-view'); if (!el || !_simDoc) return;
+  _simVistas = {};
   const d = _simDoc.datos, g = d.global, fu = d.global_fuente || {}, ocup = _simIa.ocupado ? 'disabled' : '';
   const resumen = d.unidades.map(u => { const r = simCorrer(u); const peor = r.faltan.length ? 'info' : (r.ind.some(i => i.estado === 'mal') ? 'mal' : r.ind.some(i => i.estado === 'justo') ? 'justo' : r.ind.length ? 'ok' : 'info'); return `<span class="badge" style="background:${SIM_ESTADO[peor][1]};color:#fff;margin:0 6px 6px 0">${esc(u.nombre)}: ${r.faltan.length ? 'faltan datos' : SIM_ESTADO[peor][0]}</span>`; }).join('');
   const gfila = x => { const v = g[x.k], t = SIM_FUENTE_TAG[fu[x.k] || (v != null && v !== '' ? 'manual' : '')]; return `<div><label style="font-size:11.5px">${esc(x.l)} [${esc(x.u)}] ${t ? `<span title="${esc(t[1])}">${t[0]}</span>` : ''}${x.req ? ' <span style="color:var(--red)">*</span>' : ''}</label><input type="number" step="any" value="${esc(v == null ? '' : v)}" style="${x.req && (v == null || v === '') ? 'border-color:var(--red);background:#fdeeee' : ''}" onchange="simGlobal('${x.k}',this.value)" /></div>`; };
   el.innerHTML = `
     <button class="btn btn-secondary btn-sm" onclick="simVolver()" style="margin-bottom:12px">← Volver a Simulaciones</button>
     <input value="${esc(_simDoc.nombre)}" style="font-weight:700;font-size:18px;margin-bottom:12px" onchange="simSetNombre(this.value)" />
+    ${d.unidades.length ? simPlayerHtml() : ''}
     <div class="card" style="border-color:var(--blue)">
       <div class="card-label">🧪 Cargar los datos de la planta</div>
       <p class="hint" style="margin-bottom:8px">Importá desde un <b>proyecto de Procesos IA</b> (usa las unidades confirmadas en el Paso 2 y las corrientes del Paso 1), desde <b>archivos o un Excel cualquiera</b> (la IA lee y arma el modelo; después revisás), desde la <b>plantilla Excel de MAIA</b> (carga directa, sin IA), o armá todo a mano. Lo que falta se marca en rojo.</p>
@@ -34321,11 +34334,289 @@ function simRender() {
       ${d.patron_tipo === 'manual' ? `<div style="display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;margin-top:6px">${Array.from({ length: 24 }, (_, h) => `<div><label style="font-size:10px;margin:0">${h} h</label><input type="number" step="any" value="${(d.patron && d.patron[h] != null) ? d.patron[h] : 1}" style="padding:3px" onchange="simPatronHora(${h},this.value)" /></div>`).join('')}</div><p class="hint" style="margin:4px 0 0">Factores relativos al caudal medio (1 = caudal medio).</p>` : ''}
       <div style="margin-top:10px">${simGrafico({ titulo: 'Caudal en el día (m3/h)', h: 150, w: 520, series: [{ c: '#0056a1', pts: (() => { const g2 = simGlobalNum(), pt = simPatron(g2); return Array.from({ length: 49 }, (_, i) => [i / 2, simQ(g2, pt, i / 2, null)]); })() }], xl: 'Hora del día', yl: 'm3/h', xmin: 0, xmax: 24, ymin: 0 })}</div>
       <p class="hint" style="margin:6px 0 0">≈ = valor típico asumido (no es un dato de la planta). Cambialo si lo conocés.</p></div>
-    ${d.unidades.length ? `<div class="card"><div class="card-label">Resumen</div>${resumen}</div>` : ''}
+    ${simPlantaCardHtml(d)}
+    ${d.unidades.length ? `<div class="card"><div class="card-label">Resumen por unidad</div>${resumen}</div>` : ''}
     ${d.unidades.map((u, i) => simUnidadHtml(u, i, d.unidades.length)).join('')}
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px"><span class="hint" style="margin:0">Agregar unidad:</span>${Object.entries(SIM_MODELOS).map(([k, x]) => `<button class="btn btn-secondary btn-sm" onclick="simUAgregar('${k}')">+ ${esc(x.nombre)}</button>`).join('')}</div>
     <div class="card"><p class="hint" style="margin:0"><b>Cómo leer esto:</b> es una verificación de <b>diseño teórico</b> con criterios típicos de la bibliografía (Metcalf &amp; Eddy y práctica habitual) y simulaciones simples. Vale tanto como los datos cargados: el IVL, la velocidad de sedimentación y las eficiencias reales de una planta pueden ser distintas. Úsalo para comparar alternativas y detectar problemas, no como garantía de funcionamiento.</p></div>`;
+  simVistasActualizar();
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Simulador — BALANCE DE PLANTA (caudales y cargas en el tiempo, de unidad en unidad) y VISTAS ANIMADAS
+// El cálculo recorre las unidades en el orden de la planta: cada una recibe las series de caudal y concentración de la anterior.
+// Eficiencias típicas editables para las unidades sin modelo mecanístico; reactor de lodos activados + sedimentador acoplados
+// (recirculación y purga). Todo teórico: ver aviso en pantalla.
+// ═══════════════════════════════════════════════════════════════════════
+const SIM_NT = 288, SIM_DTH = 5 / 60;
+const simPct = (v, def) => { const n = simNum(v); return Math.min(100, Math.max(0, n == null ? def : n)) / 100; };
+const simMedia = (a, w) => { let s = 0, sw = 0; a.forEach((x, i) => { const p = w ? w[i] : 1; s += x * p; sw += p; }); return sw ? s / sw : 0; };
+// Soluble BOD en un reactor de mezcla completa con cinética de Monod (el consumo es mucho más rápido que el flujo: se resuelve en equilibrio)
+function simSolubleReactor(Qd, V, S0, Xv, T) {
+  const mu = 6 * Math.pow(1.07, (T == null ? 20 : T) - 20), Y = 0.6, q = mu / Y, Ks = 20, D = Qd / V;
+  let lo = 0.01, hi = Math.max(0.02, S0);
+  const f = S => D * (S0 - S) * (Ks + S) - q * Xv * S;
+  for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (f(m) > 0) lo = m; else hi = m; }
+  return Math.min(S0, Math.max(2, (lo + hi) / 2)); // piso: DBO soluble residual difícil de degradar
+}
+function simPlantaDin(d) {
+  const g = simGlobalNum(), T = Array.from({ length: SIM_NT }, (_, i) => i * SIM_DTH), pat = simPatron(g), temp = g.temp != null ? g.temp : 20;
+  const ev = d.evento && Number(d.evento.mult) > 0 ? { mult: Number(d.evento.mult), inicio: Number(d.evento.inicio) || 0, dur: Number(d.evento.dur) || 0 } : null;
+  const fill = v => Array(SIM_NT).fill(v == null ? 0 : v), Qin = T.map(t => simQ(g, pat, t, ev));
+  const clone = s => ({ Q: s.Q.slice(), dbo: s.dbo.slice(), dqo: s.dqo.slice(), sst: s.sst.slice(), ntk: s.ntk.slice() });
+  let cur = { Q: Qin, dbo: fill(g.dbo), dqo: fill(g.dqo != null ? g.dqo : (g.dbo ? g.dbo * 2 : 0)), sst: fill(g.sst), ntk: fill(g.ntk) };
+  const nodos = [{ id: 'entrada', nombre: 'Afluente', tipo: 'entrada', sal: clone(cur) }], avisos = [], lodos = [], us = d.unidades;
+  let recirc = null, purga = null;
+  const resamp = arr => T.map((t, k) => { const a = Math.floor(t * 30), b = Math.min(arr.length - 1, Math.max(a, Math.floor((t + SIM_DTH) * 30) - 1)); let s = 0; for (let i = a; i <= b; i++) s += arr[Math.min(i, arr.length - 1)]; return s / (b - a + 1); });
+  const pasa = (u, ent, extra) => nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent, sal: clone(cur), extra: extra || {} });
+  for (let i = 0; i < us.length; i++) {
+    const u = us[i], p = simParamsNum(u), m = SIM_MODELOS[u.tipo], ent = clone(cur);
+    let res; try { res = m.verificar(p, g, ev, false); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
+    if (res.faltan && res.faltan.length) { avisos.push(`"${u.nombre}": faltan datos (${res.faltan.join(', ')}); no se tiene en cuenta en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
+    if (res.error) { avisos.push(`"${u.nombre}": ${res.error}`); pasa(u, ent, { incompleta: true }); continue; }
+    const aplicar = (efSst, efDbo, efDqo, efNtk) => { cur.sst = cur.sst.map(x => x * (1 - efSst)); cur.dbo = cur.dbo.map(x => x * (1 - efDbo)); cur.dqo = cur.dqo.map(x => x * (1 - efDqo)); cur.ntk = cur.ntk.map(x => x * (1 - efNtk)); };
+    if (u.tipo === 'pozo') {
+      const r = res.sim; cur.Q = resamp(r.qout);
+      pasa(u, ent, { nivel: resamp(r.nivel), bombas: resamp(r.bombas), qin: resamp(r.qin), hs: r.hs, h1: r.h1, hmax: r.hmax, nd: r.nd, qb: r.qb, nivelMax: r.nivelMax, rebalse: r.rebalse });
+    } else if (u.tipo === 'tamiz') {
+      const e = [simPct(p.ef_sst, 10), simPct(p.ef_dbo, 5), simPct(p.ef_dqo, 5), 0];
+      lodos.push({ nombre: u.nombre, kg_d: simMedia(cur.Q.map((q, k) => q * cur.sst[k] * e[0]), null) * 24 / 1000, q_m3d: null, sequedad: null, nota: 'Sólidos retenidos (residuos de rejas/tamiz)' });
+      aplicar(e[0], e[1], e[2], e[3]); pasa(u, ent);
+    } else if (u.tipo === 'daf' || u.tipo === 'fisicoquimico') {
+      const def = u.tipo === 'daf' ? [85, 50, 45, 5, 3] : [85, 45, 45, 5, 2], e = [simPct(p.ef_sst, def[0]), simPct(p.ef_dbo, def[1]), simPct(p.ef_dqo, def[2]), simPct(p.ef_ntk, def[3])], seq = simNum(p.sequedad_lodo) > 0 ? Number(p.sequedad_lodo) : def[4];
+      const kg = simMedia(cur.Q.map((q, k) => q * cur.sst[k] * e[0]), null) * 24 / 1000 * (u.tipo === 'fisicoquimico' ? 1.25 : 1.0);
+      lodos.push({ nombre: u.nombre, kg_d: kg, q_m3d: kg / (seq * 10), sequedad: seq, nota: u.tipo === 'daf' ? 'Lodo flotado' : 'Lodo fisicoquímico (incluye ~25% de precipitado químico)' });
+      aplicar(e[0], e[1], e[2], e[3]); pasa(u, ent);
+    } else if (u.tipo === 'lodos_activados') {
+      const calc = res.calc, V = p.volumen, X = p.mlss, fv = p.fraccion_volatil || 0.75, Xv = X * fv, cap = simPos(p.capacidad_o2), ntk0 = simMedia(cur.ntk, cur.Q);
+      const loads = cur.Q.map((q, k) => q * cur.dbo[k]), loadM = simMedia(loads, null) || 1;
+      const Sk = cur.Q.map((q, k) => simSolubleReactor(q * 24, V, cur.dbo[k], Xv, temp));
+      const aor = loads.map(l => calc.AOR * l / loadM), def = aor.map(a => cap ? Math.max(0, 1 - cap / a) : 0);
+      const S = Sk.map((s, k) => s + def[k] * Math.max(0, cur.dbo[k] - s));
+      const dqoNb = cur.dqo.map(x => 0.06 * x);
+      // nitrógeno
+      const nitr = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s'), assim = 0.12 * calc.PxBio * 1000 / (simMedia(cur.Q, null) * 24 || 1);
+      const frac = nitr && isFinite(calc.SRTmin) ? Math.min(1, Math.max(0, (calc.SRT / calc.SRTmin - 1) / 0.5)) : (nitr ? 1 : 0);
+      const ntkEf = Math.max(0, ntk0 - assim - frac * Math.max(0, ntk0 - assim - 3));
+      cur = { Q: cur.Q, dbo: S, dqo: cur.dqo.map((x, k) => dqoNb[k] + S[k] / 0.68), sst: fill(X), ntk: fill(ntkEf) };
+      pasa(u, ent, { mlss: X, aor, cap, deficit: def, nivel: 1 });
+      const sed = us[i + 1] && us[i + 1].tipo === 'sedimentador' ? us[i + 1] : null; let ps = null, rs = null;
+      if (sed) { ps = simParamsNum(sed); rs = SIM_MODELOS.sedimentador.verificar(ps, g, ev, false); if (rs.faltan && rs.faltan.length) { avisos.push(`"${sed.nombre}": faltan datos (${rs.faltan.join(', ')}); el balance sigue sin sedimentador.`); rs = null; } }
+      if (sed && rs) {
+        const Qcur = cur.Q, din = simSedDin(ps, g, null, t => Qcur[Math.min(SIM_NT - 1, Math.max(0, Math.round(t / SIM_DTH)))]);
+        const tss = din.tssEfl, Qr = rs.s.QrP ? (rs.s.prop ? null : rs.s.Qr) : rs.s.Qr, xu = din.xu;
+        const Sef = cur.dbo.slice(), dbo = Sef.map((s, k) => s + 0.3 * fv * tss[k]), dqo = cur.dqo.map((q, k) => q + 1.2 * fv * tss[k]);
+        cur = { Q: cur.Q.slice(), dbo, dqo, sst: tss.slice(), ntk: cur.ntk.slice() };
+        const QrSerie = cur.Q.map(q => rs.s.prop ? rs.s.Qr / rs.s.Q * q : rs.s.Qr), XrM = simMedia(xu, null) || (rs.flujo.Xu);
+        recirc = { Q: QrSerie, X: xu.map(x => x * 1000), desde: sed.id, hasta: u.id };
+        const mDia = Qcur.length ? simMedia(Qcur, null) : 0, SRT = calc.SRT, masa = V * X / SRT / 1000; // kg SS/d a purgar
+        purga = { nombre: 'Purga de lodo en exceso', kg_d: masa, q_m3d: masa / (XrM || 1), X_gL: XrM, SRT, desde: u.id };
+        lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: masa, q_m3d: masa / (XrM || 1), sequedad: XrM / 10, nota: 'Purga con la concentración del lodo recirculado' });
+        pasa(sed, clone(nodos[nodos.length - 1].sal), { perf: din.perf, H: din.H, manto: din.manto, tssEfl: tss, xu, mantoMax: din.mantoMax, tssMax: din.tssMax, falla: din.falla, Qr: QrSerie, N: 10, mlss: X });
+        void Qr; void mDia; i++;
+      } else { avisos.push(`"${u.nombre}" no tiene sedimentador a continuación: el efluente sale con el licor mezcla.`); }
+    } else if (u.tipo === 'sedimentador') {
+      const A = simPos(p.area) || (simPos(p.diametro) ? Math.PI * p.diametro * p.diametro / 4 : null);
+      if (!A) { avisos.push(`"${u.nombre}": falta el área.`); pasa(u, ent, { incompleta: true }); continue; }
+      const sor = cur.Q.map(q => q / A), eta = sor.map(s => Math.min(0.92, Math.max(0.4, 0.92 - 0.2 * s)));
+      const tssO = cur.sst.map((x, k) => Math.max(Math.min(x, 8), x * (1 - eta[k]))), rem = cur.Q.map((q, k) => q * (cur.sst[k] - tssO[k]));
+      const kg = simMedia(rem, null) * 24 / 1000; lodos.push({ nombre: u.nombre, kg_d: kg, q_m3d: kg / 20, sequedad: 2, nota: 'Clarificador sin recirculación (lodo al 2%)' });
+      cur.sst = tssO; cur.dbo = cur.dbo.map((x, k) => x * (1 - 0.35 * eta[k])); cur.dqo = cur.dqo.map((x, k) => x * (1 - 0.3 * eta[k])); pasa(u, ent);
+    } else if (u.tipo === 'mbbr') {
+      const area = p.volumen * p.llenado / 100 * p.sup_especifica, nit = String(p.nitrifica || 'no').toLowerCase().startsWith('s');
+      const salr = cur.Q.map((q, k) => q * 24 * cur.dbo[k] / area), eta = salr.map(s => Math.min(0.95, Math.max(0.3, 0.95 - 0.02 * Math.max(0, s - 2))));
+      const dboO = cur.dbo.map((x, k) => x * (1 - eta[k]));
+      cur = { Q: cur.Q, dbo: dboO, dqo: cur.dqo.map((x, k) => Math.max(0.06 * x, x - (cur.dbo[k] - dboO[k]) / 0.68)), sst: cur.sst.map((x, k) => x * 0.3 + 0.35 * (cur.dbo[k] - dboO[k])), ntk: cur.ntk.map(x => nit ? x * 0.25 + 2 : x * 0.9) };
+      pasa(u, ent, { salr });
+    } else if (u.tipo === 'sbr') {
+      const V = p.volumen, X = p.mlss, fv = 0.75, SRT = simNum(p.edad_lodos) > 0 ? Number(p.edad_lodos) : 20, Xv = X * fv;
+      const S = cur.Q.map((q, k) => simSolubleReactor(q * 24, V * 0.8, cur.dbo[k], Xv, temp)), malSed = (res.ind.find(x => /interfaz/.test(x.nombre)) || {}).estado === 'mal', tss = 15 * (malSed ? 5 : 1);
+      cur = { Q: cur.Q, dbo: S.map(s => s + 0.3 * fv * tss), dqo: cur.dqo.map((x, k) => 0.06 * x + S[k] / 0.68 + 1.2 * fv * tss), sst: fill(tss), ntk: cur.ntk.map(x => x * 0.3 + 2) };
+      const masa = V * X / SRT / 1000; lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: masa, q_m3d: masa / 8, sequedad: 0.8, nota: 'Estimado al 0,8% de sólidos' });
+      pasa(u, ent, { sedMal: malSed });
+    } else if (u.tipo === 'mbr') {
+      const nit = true; cur = { Q: cur.Q, dbo: cur.dbo.map(x => Math.max(2, 0.015 * x)), dqo: cur.dqo.map(x => 0.06 * x + 12), sst: fill(1), ntk: cur.ntk.map(x => nit ? Math.min(x, 3) : x * 0.9) };
+      pasa(u, ent);
+    } else pasa(u, ent);
+  }
+  // efluente final y comparación con los límites
+  const ef = cur, st = arr => ({ media: simMedia(arr, ef.Q), max: Math.max(...arr) });
+  const lim = { dbo: simPos(g.lim_dbo), dqo: simPos(g.lim_dqo), sst: simPos(g.sst_vuelco), ntk: simPos(g.lim_ntk) };
+  const cumpl = ['dbo', 'dqo', 'sst', 'ntk'].filter(k => lim[k] != null || (ef[k] && ef[k].some(x => x > 0))).map(k => { const s = st(ef[k]); const estado = lim[k] == null ? 'info' : (s.media > lim[k] ? 'mal' : (s.max > lim[k] ? 'justo' : 'ok')); return { k, nombre: { dbo: 'DBO', dqo: 'DQO', sst: 'SST', ntk: 'NTK' }[k], media: s.media, max: s.max, limite: lim[k], estado }; });
+  return { t: T, nodos, efluente: ef, recirc, purga, lodos, avisos, cumpl, Qin, ev };
+}
+// ── Colores: concentración (claro → marrón) ──
+function simColorConc(v, vmax) {
+  const x = Math.min(1, Math.max(0, vmax > 0 ? v / vmax : 0)), a = [214, 234, 250], m = [196, 170, 112], b = [74, 48, 26];
+  const mix = (c1, c2, f) => c1.map((c, i) => Math.round(c + (c2[i] - c) * f));
+  const c = x < 0.45 ? mix(a, m, x / 0.45) : mix(m, b, (x - 0.45) / 0.55); return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+const simHora = h => { const t = Math.round(((h % 24) + 24) % 24 * 60); return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0'); };
+// ── Reproductor compartido por todas las vistas animadas ──
+let _simVistas = {}, _simPlay = { t: 0, play: false, seg: 6, raf: 0, ult: 0 };
+function simIdx() { return Math.min(SIM_NT - 1, Math.max(0, Math.round(_simPlay.t / SIM_DTH))); }
+function simVistasActualizar() {
+  const k = simIdx(), rel = document.getElementById('sim-reloj'), sl = document.getElementById('sim-slider-t');
+  if (rel) rel.textContent = simHora(_simPlay.t); if (sl && document.activeElement !== sl) sl.value = _simPlay.t;
+  Object.values(_simVistas).forEach(f => { try { f(k, _simPlay.t); } catch (e) { /* vista ya no está en pantalla */ } });
+}
+function simPlayLoop(ts) {
+  if (!_simPlay.play) return;
+  const dt = _simPlay.ult ? (ts - _simPlay.ult) / 1000 : 0; _simPlay.ult = ts;
+  _simPlay.t += dt / _simPlay.seg; if (_simPlay.t >= 24) _simPlay.t -= 24;
+  simVistasActualizar(); _simPlay.raf = requestAnimationFrame(simPlayLoop);
+}
+function simPlayToggle() {
+  _simPlay.play = !_simPlay.play; _simPlay.ult = 0; const b = document.getElementById('sim-play-btn'); if (b) b.textContent = _simPlay.play ? '⏸ Pausa' : '▶ Reproducir';
+  if (_simPlay.play) _simPlay.raf = requestAnimationFrame(simPlayLoop); else cancelAnimationFrame(_simPlay.raf);
+}
+function simPlaySeek(v) { _simPlay.t = Number(v); simVistasActualizar(); }
+function simPlayVel(v) { _simPlay.seg = Number(v); }
+function simPlayerHtml() {
+  return `<div id="sim-player" style="position:sticky;top:0;z-index:6;background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:8px 12px;margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;box-shadow:0 2px 8px rgba(0,0,0,.06)">
+    <button class="btn btn-primary btn-sm" id="sim-play-btn" onclick="simPlayToggle()">${_simPlay.play ? '⏸ Pausa' : '▶ Reproducir'}</button>
+    <span style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;min-width:62px" id="sim-reloj">${simHora(_simPlay.t)}</span>
+    <input type="range" id="sim-slider-t" class="sim-rng" min="0" max="23.99" step="0.0833" value="${_simPlay.t}" style="flex:1;min-width:160px" oninput="simPlaySeek(this.value)" />
+    <label style="font-size:12px;margin:0">Velocidad</label><select style="width:auto" onchange="simPlayVel(this.value)"><option value="20" ${_simPlay.seg === 20 ? 'selected' : ''}>1 h = 20 s</option><option value="10" ${_simPlay.seg === 10 ? 'selected' : ''}>1 h = 10 s</option><option value="6" ${_simPlay.seg === 6 ? 'selected' : ''}>1 h = 6 s</option><option value="3" ${_simPlay.seg === 3 ? 'selected' : ''}>1 h = 3 s</option><option value="1" ${_simPlay.seg === 1 ? 'selected' : ''}>1 h = 1 s</option></select></div>`;
+}
+// ── Vista animada de TODA la planta ──
+function simPlantaVista(plant, d) {
+  const nodos = plant.nodos.filter(n => n.tipo !== 'entrada' || true), n = nodos.length, VAR = d.vistaVar || 'dbo';
+  const W = Math.max(900, 150 * n + 220), H = 300, bw = 100, x0 = 30, yT = 70, bh = 110, gap = n > 1 ? (W - x0 - 150 - bw * n) / (n - 1) : 0;
+  const posX = i => x0 + i * (bw + gap);
+  void gap;
+  const maxV = Math.max(1, ...nodos.map(nd => Math.max(...(nd.sal[VAR] || [0])))), varNombre = { dbo: 'DBO', dqo: 'DQO', sst: 'SST', ntk: 'NTK', Q: 'Caudal' }[VAR];
+  const Qmax = Math.max(1, ...nodos.map(nd => Math.max(...nd.sal.Q)));
+  let defs = '<defs>', cuerpo = '';
+  nodos.forEach((nd, i) => {
+    const x = posX(i), id = nd.id;
+    if (nd.tipo === 'entrada') { cuerpo += `<g><circle cx="${x + 20}" cy="${yT + bh * 0.5}" r="16" fill="#e8f1fb" stroke="#0056a1" stroke-width="2"/><text x="${x + 20}" y="${yT + bh * 0.5 + 4}" text-anchor="middle" font-size="11" fill="#0056a1" font-weight="700">IN</text><text x="${x + 20}" y="${yT + bh + 18}" text-anchor="middle" font-size="11" font-weight="600">Afluente</text><text id="pv-v-${id}" x="${x + 20}" y="${yT + bh + 32}" text-anchor="middle" font-size="10" fill="#555"></text></g>`; return; }
+    const sed = nd.tipo === 'sedimentador', pozo = nd.tipo === 'pozo', hop = sed ? 28 : 0;
+    const clip = sed ? `M${x},${yT} L${x},${yT + bh - hop} L${x + bw / 2},${yT + bh} L${x + bw},${yT + bh - hop} L${x + bw},${yT} Z` : `M${x},${yT} L${x},${yT + bh} L${x + bw},${yT + bh} L${x + bw},${yT} Z`;
+    defs += `<clipPath id="pv-clip-${id}"><path d="${clip}"/></clipPath>`;
+    let agua = '';
+    if (sed && nd.extra && nd.extra.perf) { const N = 10, hh = (bh - 4) / N; for (let j = 0; j < N; j++) agua += `<rect id="pv-s-${id}-${j}" x="${x}" y="${yT + 4 + j * hh}" width="${bw}" height="${hh + 0.6}" fill="#d6eafa"/>`; agua += `<rect id="pv-sh-${id}" x="${x}" y="${yT + bh - hop}" width="${bw}" height="${hop}" fill="#d6eafa"/>`; }
+    else agua = `<rect id="pv-w-${id}" x="${x}" y="${yT + 4}" width="${bw}" height="${bh - 4}" fill="#d6eafa"/>`;
+    const bomb = pozo ? `<circle id="pv-b1-${id}" cx="${x + bw - 14}" cy="${yT + bh - 12}" r="6" fill="#bbb" stroke="#555"/><circle id="pv-b2-${id}" cx="${x + bw - 32}" cy="${yT + bh - 12}" r="6" fill="#bbb" stroke="#555"/>` : '';
+    const burb = nd.tipo === 'lodos_activados' ? Array.from({ length: 7 }, (_, j) => `<circle class="pv-bub-${id}" cx="${x + 10 + j * 13}" cy="${yT + bh - 6}" r="2.2" fill="#fff" fill-opacity=".8"/>`).join('') : '';
+    const tipoTxt = nd.incompleta || (nd.extra && nd.extra.incompleta) ? '<text x="' + (x + bw / 2) + '" y="' + (yT + bh / 2) + '" text-anchor="middle" font-size="10" fill="#c0392b">faltan datos</text>' : '';
+    cuerpo += `<g><g clip-path="url(#pv-clip-${id})">${agua}${burb}</g><path d="${clip}" fill="none" stroke="#1b1b1b" stroke-width="2"/>${sed ? `<line id="pv-man-${id}" x1="${x}" x2="${x + bw}" y1="${yT + bh}" y2="${yT + bh}" stroke="#8a5a1a" stroke-width="1.5" stroke-dasharray="4 3" clip-path="url(#pv-clip-${id})"/>` : ''}${bomb}${tipoTxt}
+      <text x="${x + bw / 2}" y="${yT + bh + 18}" text-anchor="middle" font-size="11" font-weight="600">${esc(nd.nombre.length > 18 ? nd.nombre.slice(0, 17) + '…' : nd.nombre)}</text><text id="pv-v-${id}" x="${x + bw / 2}" y="${yT + bh + 32}" text-anchor="middle" font-size="10" fill="#555"></text>${pozo ? `<text id="pv-n-${id}" x="${x + bw / 2}" y="${yT - 6}" text-anchor="middle" font-size="10" fill="#555"></text>` : ''}</g>`;
+  });
+  // flechas entre nodos (el flujo sale del borde derecho de uno y entra al izquierdo del siguiente)
+  let flechas = '';
+  for (let i = 0; i < n - 1; i++) { const xa = posX(i) + (i === 0 ? 40 : bw), xb = posX(i + 1), y = yT + bh * 0.35; flechas += `<line class="pv-fl" id="pv-f-${i}" x1="${xa}" x2="${xb - 4}" y1="${y}" y2="${y}" stroke="#0056a1" stroke-width="4" stroke-dasharray="9 6"/><polygon points="${xb - 4},${y - 5} ${xb + 2},${y} ${xb - 4},${y + 5}" id="pv-fh-${i}" fill="#0056a1"/>`; }
+  // efluente
+  const last = nodos[n - 1], xl = posX(n - 1) + bw;
+  flechas += `<line class="pv-fl" id="pv-f-out" x1="${xl}" x2="${xl + 50}" y1="${yT + bh * 0.35}" y2="${yT + bh * 0.35}" stroke="#0056a1" stroke-width="4" stroke-dasharray="9 6"/><polygon id="pv-fh-out" points="${xl + 50},${yT + bh * 0.35 - 5} ${xl + 56},${yT + bh * 0.35} ${xl + 50},${yT + bh * 0.35 + 5}" fill="#0056a1"/><text x="${xl + 28}" y="${yT + bh * 0.35 - 12}" text-anchor="middle" font-size="11" font-weight="700">Efluente</text><text id="pv-v-out" x="${xl + 28}" y="${yT + bh * 0.35 + 24}" text-anchor="middle" font-size="9.5" fill="#555"></text>`;
+  void last;
+  // recirculación y purga
+  let rec = '';
+  if (plant.recirc) { const iS = nodos.findIndex(x => x.id === plant.recirc.desde), iR = nodos.findIndex(x => x.id === plant.recirc.hasta); if (iS > 0 && iR > 0) { const xs = posX(iS) + bw / 2, xr = posX(iR) + bw / 2, yb = yT + bh + 52; rec = `<path class="pv-fl" id="pv-rec" d="M${xs},${yT + bh} L${xs},${yb} L${xr},${yb} L${xr},${yT + bh + 2}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text x="${(xs + xr) / 2}" y="${yb + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a" id="pv-v-rec"></text>`; const xp = xs + 24; rec += `<path class="pv-fl" id="pv-purga" d="M${xs + 8},${yT + bh - 6} L${xs + 8},${yb + 30}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xs + 14}" y="${yb + 36}" font-size="10" fill="#5a3a10">Purga</text>`; void xp; } }
+  const svg = `<svg id="sim-planta-svg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;font-family:inherit;color:var(--text)" role="img">${defs}</defs>${cuerpo}${flechas}${rec}</svg>`;
+  const flujoSeg = x => 6 + 8 * (x / Qmax), colorDe = (nd, k) => simColorConc(nd.sal[VAR][k], maxV);
+  const fmt = v => v == null ? '—' : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+  let fase = 0;
+  _simVistas.planta = (k, t) => {
+    fase += 1.2;
+    nodos.forEach((nd, i) => {
+      const set = (id, a, v) => { const el = document.getElementById(id); if (el) el.setAttribute(a, v); }, txt = (id, s) => { const el = document.getElementById(id); if (el) el.textContent = s; };
+      if (nd.tipo === 'entrada') { txt('pv-v-' + nd.id, `${fmt(nd.sal.Q[k])} m3/h`); return; }
+      const col = colorDe(nd, k);
+      if (nd.tipo === 'sedimentador' && nd.extra && nd.extra.perf) { const pf = nd.extra.perf[Math.min(k, nd.extra.perf.length - 1)]; pf.forEach((x, j) => set(`pv-s-${nd.id}-${j}`, 'fill', simColorConc(x, 8))); set('pv-sh-' + nd.id, 'fill', simColorConc(pf[pf.length - 1], 8)); const mH = nd.extra.manto[Math.min(k, nd.extra.manto.length - 1)] / nd.extra.H; set('pv-man-' + nd.id, 'y1', yT + 4 + (bh - 4 - hopDe()) * (1 - Math.min(1, mH))); set('pv-man-' + nd.id, 'y2', yT + 4 + (bh - 4 - hopDe()) * (1 - Math.min(1, mH))); }
+      else if (nd.tipo === 'pozo' && nd.extra && nd.extra.nivel) { const e = nd.extra, fr = Math.min(1, e.nivel[k] / (e.hmax * 1.05)), hh = (bh - 4) * fr; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', col); set('pv-b1-' + nd.id, 'fill', e.bombas[k] >= 0.5 ? '#2ecc71' : '#bbb'); set('pv-b2-' + nd.id, 'fill', e.bombas[k] >= 1.5 ? '#2ecc71' : '#bbb'); txt('pv-n-' + nd.id, `nivel ${e.nivel[k].toFixed(2)} m`); }
+      else set('pv-w-' + nd.id, 'fill', col);
+      if (nd.tipo === 'lodos_activados' && nd.extra) { const dem = nd.extra.aor[k] / (nd.extra.aor.reduce((a, b) => a + b, 0) / nd.extra.aor.length || 1); document.querySelectorAll('.pv-bub-' + nd.id).forEach((c, j) => { const y0 = yT + bh - 6, ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', y0 - ciclo * (bh - 14)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); }); }
+      txt('pv-v-' + nd.id, `${fmt(nd.sal.Q[k])} m3/h · ${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`);
+    });
+    for (let i = 0; i < n - 1; i++) { const nd = nodos[i], q = nd.sal.Q[k], c = colorDe(nd, k), ln = document.getElementById('pv-f-' + i), hd = document.getElementById('pv-fh-' + i); if (ln) { ln.setAttribute('stroke-width', flujoSeg(q)); ln.setAttribute('stroke', c); ln.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } if (hd) hd.setAttribute('fill', c); }
+    const lo = nodos[n - 1], lq = lo.sal.Q[k], lc = colorDe(lo, k), l1 = document.getElementById('pv-f-out'); if (l1) { l1.setAttribute('stroke-width', flujoSeg(lq)); l1.setAttribute('stroke', lc); l1.setAttribute('stroke-dashoffset', -fase * (0.5 + lq / Qmax * 2)); } const h1 = document.getElementById('pv-fh-out'); if (h1) h1.setAttribute('fill', lc);
+    const vo = document.getElementById('pv-v-out'); if (vo) vo.textContent = `${fmt(lq)} m3/h · ${varNombre} ${fmt(lo.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`;
+    if (plant.recirc) { const r = document.getElementById('pv-rec'), q = plant.recirc.Q[k]; if (r) { r.setAttribute('stroke-width', 2 + 6 * q / Qmax); r.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } const tv = document.getElementById('pv-v-rec'); if (tv) tv.textContent = `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`; const pu = document.getElementById('pv-purga'); if (pu) pu.setAttribute('stroke-dashoffset', -fase); }
+  };
+  function hopDe() { return 28; }
+  return svg;
+}
+// ── Vistas animadas por unidad (corte) ──
+function simVistaSedimentador(u, plantNodo, din, s) {
+  const id = u.id, W = 440, H = 270, x0 = 70, x1 = 350, yAgua = 58, yRect = 190, xc = (x0 + x1) / 2, N = 10, hh = (yRect - yAgua) / N, m = 5;
+  const tank = `M${x0},40 L${x0},${yRect} L${xc - 18},${H - 28} L${xc + 18},${H - 28} L${x1},${yRect} L${x1},40`, clip = `M${x0},${yAgua} L${x0},${yRect} L${xc - 18},${H - 28} L${xc + 18},${H - 28} L${x1},${yRect} L${x1},${yAgua} Z`;
+  let capas = ''; for (let j = 0; j < N; j++) capas += `<rect id="sv-${id}-${j}" x="${x0}" y="${yAgua + j * hh}" width="${x1 - x0}" height="${hh + 0.6}" fill="#d6eafa"/><text id="svt-${id}-${j}" x="${x1 + 6}" y="${yAgua + j * hh + hh * 0.7}" font-size="9.5" fill="#555"></text>`;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:auto;font-family:inherit;color:var(--text)"><defs><clipPath id="sc-${id}"><path d="${clip}"/></clipPath></defs>
+    <g clip-path="url(#sc-${id})">${capas}<rect id="sv-${id}-h" x="${x0}" y="${yRect}" width="${x1 - x0}" height="${H - 28 - yRect}" fill="#d6eafa"/></g><path d="${tank}" fill="none" stroke="#1b1b1b" stroke-width="2.4"/>
+    <line x1="${x0 - 8}" x2="${x1 + 8}" y1="${yAgua}" y2="${yAgua}" stroke="#0056a1" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <rect x="${xc - 16}" y="${yAgua + m * hh - hh * 1.5}" width="32" height="${hh * 3}" fill="none" stroke="#555" stroke-dasharray="3 2"/><text x="${xc}" y="${yAgua + m * hh - hh * 1.7}" text-anchor="middle" font-size="9" fill="#555">alimentación</text>
+    <line id="sv-man-${id}" x1="${x0}" x2="${x1}" y1="${yRect}" y2="${yRect}" stroke="#8a5a1a" stroke-width="2" stroke-dasharray="5 3"/><text id="sv-mant-${id}" x="${x0 - 6}" y="${yRect}" text-anchor="end" font-size="10" fill="#8a5a1a"></text>
+    <line class="sv-fl" id="sv-fin-${id}" x1="10" x2="${xc - 18}" y1="${yAgua + m * hh}" y2="${yAgua + m * hh}" stroke="#0056a1" stroke-width="6" stroke-dasharray="8 5"/><text x="12" y="${yAgua + m * hh - 16}" font-size="10" id="sv-tin-${id}"></text>
+    <line class="sv-fl" id="sv-fef-${id}" x1="${x1}" x2="${W - 10}" y1="46" y2="46" stroke="#4b9fe1" stroke-width="3" stroke-dasharray="8 5"/><text id="sv-tef-${id}" x="${W - 12}" y="36" text-anchor="end" font-size="10"></text>
+    <line class="sv-fl" id="sv-fun-${id}" x1="${xc}" x2="${xc}" y1="${H - 28}" y2="${H - 4}" stroke="#8a5a1a" stroke-width="5" stroke-dasharray="6 4"/><text id="sv-tun-${id}" x="${xc + 10}" y="${H - 8}" font-size="10" fill="#8a5a1a"></text>
+    </svg>`;
+  let fase = 0; const Qmax = Math.max(1, ...din.q);
+  _simVistas['sed' + id] = (k) => {
+    fase += 1.2; const set = (i, a, v) => { const e = document.getElementById(i); if (e) e.setAttribute(a, v); }, txt = (i, v) => { const e = document.getElementById(i); if (e) e.textContent = v; };
+    const kk = Math.min(k, din.perf.length - 1), pf = din.perf[kk];
+    pf.forEach((x, j) => { set(`sv-${id}-${j}`, 'fill', simColorConc(x, 8)); txt(`svt-${id}-${j}`, x >= 0.05 ? x.toFixed(1) + ' g/L' : ''); }); set(`sv-${id}-h`, 'fill', simColorConc(pf[N - 1], 8));
+    const mt = din.manto[kk], yM = yRect - Math.min(1, mt / din.H) * (yRect - yAgua); set('sv-man-' + id, 'y1', yM); set('sv-man-' + id, 'y2', yM); txt('sv-mant-' + id, `manto ${mt.toFixed(1)} m`);
+    const q = din.q[kk]; const qr = plantNodo && plantNodo.extra && plantNodo.extra.Qr ? plantNodo.extra.Qr[kk] : (s.Qr || 0);
+    set('sv-fin-' + id, 'stroke-width', 3 + 8 * (q + qr) / (Qmax + (s.Qr || 0))); set('sv-fin-' + id, 'stroke-dashoffset', -fase * 1.5); txt('sv-tin-' + id, `Q ${q.toFixed(0)} + Qr ${qr.toFixed(0)} m3/h`);
+    set('sv-fef-' + id, 'stroke-width', 2 + 6 * q / Qmax); set('sv-fef-' + id, 'stroke-dashoffset', -fase * 1.2); set('sv-fef-' + id, 'stroke', din.tssEfl[kk] > 30 ? '#c0392b' : '#4b9fe1'); txt('sv-tef-' + id, `SST ${din.tssEfl[kk].toFixed(0)} mg/L`);
+    set('sv-fun-' + id, 'stroke-width', 2 + 6 * qr / Math.max(1, s.Qr || qr)); set('sv-fun-' + id, 'stroke-dashoffset', -fase * 1.2); txt('sv-tun-' + id, `${(din.xu[kk]).toFixed(1)} g/L`);
+  };
+  return svg;
+}
+function simVistaPozo(u, r) {
+  const id = u.id, W = 420, H = 250, x0 = 90, x1 = 270, yT = 30, yB = 210, nP = r.nd;
+  let bombas = ''; for (let j = 0; j < nP; j++) bombas += `<circle id="pz-b${j}-${id}" cx="${x0 + 22 + j * 34}" cy="${yB - 14}" r="11" fill="#bbb" stroke="#333" stroke-width="1.5"/><text x="${x0 + 22 + j * 34}" y="${yB - 10}" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">B${j + 1}</text>`;
+  const yN = v => yB - (v / (r.hmax * 1.1)) * (yB - yT);
+  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;height:auto;font-family:inherit;color:var(--text)"><defs><clipPath id="pzc-${id}"><rect x="${x0}" y="${yT}" width="${x1 - x0}" height="${yB - yT}"/></clipPath></defs>
+    <g clip-path="url(#pzc-${id})"><rect id="pz-w-${id}" x="${x0}" y="${yB}" width="${x1 - x0}" height="0" fill="#9cc9ee"/></g>
+    <path d="M${x0},${yT} L${x0},${yB} L${x1},${yB} L${x1},${yT}" fill="none" stroke="#1b1b1b" stroke-width="2.4"/>
+    ${[[r.hs, '#888', 'paro'], [r.h1, '#1a8f4d', 'arranque'], [r.h2, '#d98a00', '2ª bomba'], [r.hmax, '#c0392b', 'alarma']].map(([v, c, t]) => `<line x1="${x0 - 6}" x2="${x1 + 6}" y1="${yN(v)}" y2="${yN(v)}" stroke="${c}" stroke-width="1" stroke-dasharray="4 3"/><text x="${x1 + 10}" y="${yN(v) + 3}" font-size="9.5" fill="${c}">${t} ${v.toFixed(2)} m</text>`).join('')}
+    ${bombas}<line class="pz-fl" id="pz-in-${id}" x1="10" x2="${x0 + 40}" y1="${yT + 14}" y2="${yT + 14}" stroke="#0056a1" stroke-width="6" stroke-dasharray="8 5"/><text x="12" y="${yT + 2}" font-size="10" id="pz-tin-${id}"></text>
+    <line class="pz-fl" id="pz-out-${id}" x1="${x0 + 12}" x2="${W - 8}" y1="${yB + 18}" y2="${yB + 18}" stroke="#1a8f4d" stroke-width="4" stroke-dasharray="8 5"/><text x="${W - 10}" y="${yB + 12}" text-anchor="end" font-size="10" id="pz-tout-${id}"></text><text x="${(x0 + x1) / 2}" y="${yT - 8}" text-anchor="middle" font-size="11" font-weight="600" id="pz-tn-${id}"></text></svg>`;
+  let fase = 0; const qmx = Math.max(1, ...r.qin, ...r.qout);
+  _simVistas['poz' + id] = (k, t) => {
+    fase += 1.2; const j = Math.min(r.t.length - 1, Math.round(t * 30)); const set = (i, a, v) => { const e = document.getElementById(i); if (e) e.setAttribute(a, v); }, txt = (i, v) => { const e = document.getElementById(i); if (e) e.textContent = v; };
+    const y = yN(r.nivel[j]); set('pz-w-' + id, 'y', y); set('pz-w-' + id, 'height', yB - y);
+    for (let b = 0; b < nP; b++) set(`pz-b${b}-${id}`, 'fill', r.bombas[j] > b ? '#2ecc71' : '#bbb');
+    set('pz-in-' + id, 'stroke-width', 2 + 8 * r.qin[j] / qmx); set('pz-in-' + id, 'stroke-dashoffset', -fase * 1.5); txt('pz-tin-' + id, `entra ${r.qin[j].toFixed(0)} m3/h`);
+    set('pz-out-' + id, 'stroke-width', r.qout[j] > 0 ? 2 + 8 * r.qout[j] / qmx : 0.5); set('pz-out-' + id, 'stroke-dashoffset', -fase * 1.5); txt('pz-tout-' + id, `bombean ${r.qout[j].toFixed(0)} m3/h`); txt('pz-tn-' + id, `Nivel ${r.nivel[j].toFixed(2)} m · ${r.bombas[j]} bomba(s) en marcha`);
+  };
+  return svg;
+}
+
+// ── Tarjeta "Planta completa": cumplimiento, balance, lodos, gráficos y vista animada ──
+let _simPlanta = null;
+function simPlantaInnerHtml(d) {
+  let plant; try { plant = simPlantaDin(d); } catch (e) { return `<div class="card-label">Planta completa</div><p class="hint" style="color:var(--red)">No se pudo calcular el balance: ${esc(e.message)}</p>`; }
+  _simPlanta = plant; const f1 = v => v == null || !isFinite(v) ? '—' : simFmt(v), est = SIM_ESTADO, ev = d.evento || {};
+  const TH = PROCESOS_EQ_TH, TD = PROCESOS_EQ_TD;
+  const filas = plant.nodos.map(nd => { const s = nd.sal, w = s.Q; return `<tr><td style="${TD}">${esc(nd.nombre)}${nd.extra && nd.extra.incompleta ? ' <span class="badge" style="background:#fbe9e7;color:#c0392b">sin datos</span>' : ''}</td><td style="${TD};text-align:right">${f1(simMedia(w))}</td><td style="${TD};text-align:right">${f1(simMedia(s.dbo, w))}</td><td style="${TD};text-align:right">${f1(simMedia(s.dqo, w))}</td><td style="${TD};text-align:right">${f1(simMedia(s.sst, w))}</td><td style="${TD};text-align:right">${f1(simMedia(s.ntk, w))}</td></tr>`; }).join('');
+  const cumpl = plant.cumpl.length ? `<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px"><tr><th style="${TH}"></th><th style="${TH}">Efluente final</th><th style="${TH};text-align:right">Promedio 24 h</th><th style="${TH};text-align:right">Máximo</th><th style="${TH};text-align:right">Límite</th></tr>${plant.cumpl.map(c => `<tr><td style="${TD}"><span class="badge" style="background:${est[c.estado][1]};color:#fff">${c.estado === 'ok' ? 'Cumple' : c.estado === 'justo' ? 'Cumple en promedio, el pico no' : c.estado === 'mal' ? 'No cumple' : 'Sin límite'}</span></td><td style="${TD}">${c.nombre}</td><td style="${TD};text-align:right;font-weight:600">${f1(c.media)} mg/L</td><td style="${TD};text-align:right">${f1(c.max)} mg/L</td><td style="${TD};text-align:right">${c.limite != null ? '≤ ' + c.limite + ' mg/L' : '—'}</td></tr>`).join('')}</table>` : '';
+  const lodos = plant.lodos.length ? `<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px"><tr><th style="${TH}">Lodos generados</th><th style="${TH};text-align:right">kg SS/d</th><th style="${TH};text-align:right">m3/d</th><th style="${TH};text-align:right">% sólidos</th><th style="${TH}">Nota</th></tr>${plant.lodos.map(l => `<tr><td style="${TD}">${esc(l.nombre)}</td><td style="${TD};text-align:right">${f1(l.kg_d)}</td><td style="${TD};text-align:right">${f1(l.q_m3d)}</td><td style="${TD};text-align:right">${f1(l.sequedad)}</td><td style="${TD};color:var(--text2)">${esc(l.nota || '')}</td></tr>`).join('')}</table>` : '';
+  const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b' }, ef = plant.efluente, lim = k => plant.cumpl.find(c => c.k === k && c.limite != null);
+  const chart = (k, tit, c) => simGrafico({ titulo: tit, h: 170, w: 560, series: [{ c, pts: plant.t.map((t, i) => [t, ef[k][i]]) }], hl: lim(k) ? [{ y: lim(k).limite, c: C.rojo, t: 'límite ' + lim(k).limite }] : [], xl: 'Hora del día', yl: 'mg/L', xmin: 0, xmax: 24, ymin: 0 });
+  const sel = `<select style="width:auto" onchange="simVistaVar(this.value)">${[['dbo', 'DBO'], ['dqo', 'DQO'], ['sst', 'SST'], ['ntk', 'NTK'], ['Q', 'Caudal']].map(([k, t]) => `<option value="${k}" ${(d.vistaVar || 'dbo') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  return `<div class="card-label">🏭 Planta completa</div>
+    ${plant.avisos.map(a => `<p class="hint" style="margin:0 0 4px;color:#8a6d00">⚠ ${esc(a)}</p>`).join('')}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 10px;font-size:12.5px"><b>Evento en el afluente:</b> caudal ×<input type="number" step="any" value="${ev.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEvento('mult',this.value)" /> desde las <input type="number" value="${ev.inicio == null ? 8 : ev.inicio}" style="width:60px" onchange="simEvento('inicio',this.value)" /> h durante <input type="number" step="any" value="${ev.dur == null ? 4 : ev.dur}" style="width:60px" onchange="simEvento('dur',this.value)" /> h
+      <button class="btn btn-secondary btn-sm" onclick="simEvento('preset',2.5)">Pico ×2,5 (4 h)</button><button class="btn btn-secondary btn-sm" onclick="simEvento('preset',0)">Sin evento</button></div>
+    ${cumpl}
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0 4px;flex-wrap:wrap"><b style="font-size:12.5px">Vista animada de la planta</b><label style="font-size:12px;margin:0">Color según</label>${sel}<span class="hint" style="margin:0">Ancho de la flecha = caudal; color = concentración (más oscuro = más cargado). Usá el reproductor de arriba.</span></div>
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;padding:6px;background:var(--surface,#fff)">${simPlantaVista(plant, d)}</div>
+    <details style="margin-top:10px" open><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Balance por etapa (promedio de 24 h a la salida de cada una; concentraciones ponderadas por caudal)</summary>
+      <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr><th style="${TH}">Etapa</th><th style="${TH};text-align:right">Q (m3/h)</th><th style="${TH};text-align:right">DBO</th><th style="${TH};text-align:right">DQO</th><th style="${TH};text-align:right">SST</th><th style="${TH};text-align:right">NTK</th></tr>${filas}</table></div>${lodos}</details>
+    <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">${chart('sst', 'SST del efluente final (mg/L)', C.rojo)}${chart('dbo', 'DBO del efluente final (mg/L)', C.azul)}</div>
+    <p class="hint" style="margin:8px 0 0">Balance teórico: el reactor biológico usa cinética de Monod con valores típicos, las demás etapas usan eficiencias típicas editables (parámetros de cada unidad) y el sedimentador se simula por capas con el caudal que le llega. La planta se evalúa con un día de caudal repetido (sin dinámica de la biomasa todavía).</p>`;
+}
+function simPlantaCardHtml(d) { return d.unidades.length ? `<div class="card" id="sim-planta-card">${simPlantaInnerHtml(d)}</div>` : ''; }
+function simPlantaRefrescar() { const el = document.getElementById('sim-planta-card'); if (!el || !_simDoc) return; delete _simVistas.planta; el.innerHTML = simPlantaInnerHtml(_simDoc.datos); simVistasActualizar(); }
+function simVistaVar(v) { _simDoc.datos.vistaVar = v; simGuardar(); simPlantaRefrescar(); }
+function simEvento(k, v) {
+  const d = _simDoc.datos; d.evento = d.evento || { mult: 0, inicio: 8, dur: 4 };
+  if (k === 'preset') { d.evento.mult = Number(v); if (!d.evento.dur) d.evento.dur = 4; if (d.evento.inicio == null) d.evento.inicio = 8; } else d.evento[k] = Number(v) || 0;
+  simGuardar(); simRender();
+}
+
 // ── Edición ──
 function simGlobal(k, v) { const d = _simDoc.datos; d.global[k] = v === '' ? null : Number(v); d.global_fuente[k] = 'manual'; simGuardar(); simRender(); }
 function simPatronTipo(t) { const d = _simDoc.datos; d.patron_tipo = t; if (t === 'manual' && !d.patron) d.patron = Array(24).fill(1); simGuardar(); simRender(); }
@@ -34337,9 +34628,9 @@ function simParam(id, k, v) {
 function simSlider(id, k, v) {
   const u = simU(id); u.params[k] = Number(v); u.fuentes[k] = 'manual';
   const inp = document.getElementById(`sim-p-${id}-${k}`); if (inp) inp.value = (+Number(v).toPrecision(4));
-  clearTimeout(simSlider._t); simSlider._t = setTimeout(() => { const el = document.getElementById('sim-res-' + id); if (el) el.innerHTML = simResultadosHtml(u); simGuardar(); }, 120);
+  clearTimeout(simSlider._t); simSlider._t = setTimeout(() => { const el = document.getElementById('sim-res-' + id); if (el) el.innerHTML = simResultadosHtml(u); simGuardar(); simVistasActualizar(); simPlantaRefrescar(); }, 150);
 }
-function simEsc(id, k, v) { const u = simU(id); u.escenario[k] = Number(v) || 0; simGuardar(); const el = document.getElementById('sim-res-' + id); if (el) el.innerHTML = simResultadosHtml(u); }
+function simEsc(id, k, v) { const u = simU(id); u.escenario[k] = Number(v) || 0; simGuardar(); const el = document.getElementById('sim-res-' + id); if (el) el.innerHTML = simResultadosHtml(u); simVistasActualizar(); }
 function simEscPreset(id, mult, dur) { const u = simU(id); u.escenario.mult = mult; u.escenario.dur = dur; if (!u.escenario.inicio) u.escenario.inicio = 8; simGuardar(); simRender(); }
 function simUCampo(id, k, v) { simU(id)[k] = v; simGuardar(); }
 function simUAbierta(id, ab) { const u = simU(id); if (u) u.abierta = ab; }
