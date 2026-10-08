@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.93</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.92</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.93</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -33879,8 +33879,8 @@ const SIM_GLOBAL_PARAMS = [
 // ═══════════════════════════════════════════════════════════════════════
 const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'sedimentador', 'pozo', 'tamiz', 'fisicoquimico', 'lodos_activados'];
 const SIM_SLIDERS = { sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
-const SIM_FUENTE_TAG = { proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'] };
-let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simGuardarT = null;
+const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'] };
+let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
 const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
 
 function simNormalizar(d) {
@@ -33987,38 +33987,86 @@ function simVolver(silencioso) {
 }
 async function simCargarProyectos() {
   try { if (!_simProyectos.length) _simProyectos = await mantFetchAll(`/rest/v1/procesos_proyectos?select=id,nombre,cliente&empresa=eq.${currentEmpresa}&order=created_at.desc`); } catch (e) { /* queda vacío */ }
+  try { if (!_simFlowsheets.length) _simFlowsheets = await mantFetchAll(`/rest/v1/flowsheet_proyectos?select=id,nombre&empresa=eq.${currentEmpresa}&order=created_at.desc`); } catch (e) { /* queda vacío */ }
   if (_simDoc) simRender();
 }
 function simSetNombre(v) { if (_simDoc && v.trim()) { _simDoc.nombre = v.trim(); simGuardar(); } }
 
 // ── Importar desde Procesos IA ──
-async function simImportarProcesos(id) {
-  const st = 'sim-status'; if (!id) return;
+const SIM_FIG_A_TIPO = { sedimentador: 'sedimentador', pozo: 'pozo', daf: 'daf' };
+// Dimensiones que el Flowsheet ya tiene de la unidad (de la planilla, calculadas o típicas) → datos del simulador
+function simGeoParams(tipo, m) {
+  const params = {}, fuentes = {}; if (!m) return { params, fuentes };
+  const f = m.fuente || {}, circ = m.forma === 'circ', H = m.nivelAgua || m.alto;
+  const area = circ ? (m.diametro ? Math.PI * m.diametro * m.diametro / 4 : null) : (m.largo && m.ancho ? m.largo * m.ancho : null);
+  const tip = (circ ? ['diametro'] : ['largo', 'ancho']).some(c => f[c] === 'típica'), tagA = tip ? 'tipico' : 'geometria';
+  const tagH = (f.alto === 'típica' && (!m.nivelAgua || f.nivelAgua === 'típica')) ? 'tipico' : 'geometria', tagV = (tip || tagH === 'tipico') ? 'tipico' : 'geometria';
+  const put = (k, v, t) => { if (v != null && isFinite(v) && v > 0) { params[k] = +Number(v).toFixed(3); fuentes[k] = t; } };
+  if (tipo === 'pozo') {
+    put('area', area, tagA); if (H) { put('nivel_alarma', H, tagH); const arr = Math.max(0.5, H - 1.0); put('nivel_arranque', arr, 'tipico'); put('nivel_paro', Math.max(0.25, arr - 1.0), 'tipico'); }
+  } else if (tipo === 'sedimentador') {
+    put('area', area, tagA); put('profundidad', H, tagH); put('long_vertedero', circ ? (m.diametro ? Math.PI * m.diametro : null) : (m.ancho ? 2 * m.ancho : null), tagA);
+  } else if (['lodos_activados', 'mbbr', 'sbr'].includes(tipo)) put('volumen', area && H ? area * H : null, tagV);
+  else if (tipo === 'daf') put('area', area, tagA);
+  return { params, fuentes };
+}
+const SIM_TOOL_MAPEO_VARIAS = {
+  name: 'mapear_unidades',
+  description: 'Asigna a los parámetros del simulador de cada unidad los valores de su planilla.',
+  input_schema: { type: 'object', properties: { unidades: { type: 'array', items: { type: 'object', properties: {
+    nombre: { type: 'string', description: 'Nombre EXACTO de la unidad.' },
+    mapeo: { type: 'array', items: { type: 'object', properties: { clave: { type: 'string' }, valor: { type: ['number', 'string'] }, etiqueta: { type: 'string' } }, required: ['clave', 'valor', 'etiqueta'] } } }, required: ['nombre', 'mapeo'] } } }, required: ['unidades'] }
+};
+// Un solo pedido a la IA para todas las unidades que todavía tienen datos obligatorios sin resolver
+async function simAutoCompletarIA(unidades) {
+  const pend = unidades.filter(u => u.crudo && SIM_MODELOS[u.tipo].params.some(d => d.req && (u.params[d.k] == null || u.params[d.k] === '')));
+  if (!pend.length) return 0;
+  const bloques = pend.map(u => { const falt = SIM_MODELOS[u.tipo].params.filter(d => u.params[d.k] == null || u.params[d.k] === '' || u.fuentes[d.k] === 'tipico'); return `### Unidad "${u.nombre}" (modelo: ${SIM_MODELOS[u.tipo].nombre})\nPLANILLA (etiqueta: valor):\n${Object.entries(u.crudo).map(([k, v]) => `- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('\n')}\nPARÁMETROS A COMPLETAR (clave — descripción [unidad]):\n${falt.map(d => `- ${d.k} — ${d.l} [${d.u || (d.texto ? 'texto' : '-')}]`).join('\n')}`; }).join('\n\n');
+  const prompt = `Estás cargando los datos de unidades de una planta de tratamiento en un simulador. Para cada unidad se muestra su planilla de diseño y los parámetros que faltan. Asigná a cada parámetro el dato de la planilla que le corresponde, convertido a la unidad indicada (m3/d → m3/h, mm → m, etc.). Podés calcular un valor si se deriva directo de otros de la planilla (área = largo × ancho o π·D²/4; volumen = área × profundidad; etc.). Si no hay un dato claro, NO lo incluyas (no inventes ni uses valores típicos).\n\n${bloques}`;
+  const r = await dfsLlamar([{ type: 'text', text: prompt }], SIM_TOOL_MAPEO_VARIAS, 4000); let n = 0;
+  (r.unidades || []).forEach(x => { const u = pend.find(y => y.nombre === x.nombre); if (!u) return; (x.mapeo || []).forEach(m => { const df = SIM_MODELOS[u.tipo].params.find(y => y.k === m.clave); if (!df || m.valor === '' || m.valor == null) return; if (u.fuentes[df.k] && u.fuentes[df.k] !== 'tipico' && u.fuentes[df.k] !== 'geometria') return; const v = df.texto ? String(m.valor) : Number(m.valor); if (!df.texto && !isFinite(v)) return; u.params[df.k] = v; u.fuentes[df.k] = 'ia'; n++; }); });
+  return n;
+}
+async function simImportarProcesos(id, origen) {
+  const st = 'sim-status'; if (!id) return; origen = origen || 'procesos';
   try {
     if (_simDoc.datos.unidades.length && !confirm('Ya hay unidades cargadas. ¿Reemplazarlas por las del proyecto elegido?')) return;
     showMsg(st, 'loading', 'Leyendo el proyecto...');
-    const r = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${id}&select=*`, { headers: mantH() });
+    const r = await supaFetch(`/rest/v1/${origen === 'flowsheet' ? 'flowsheet_proyectos' : 'procesos_proyectos'}?id=eq.${id}&select=*`, { headers: mantH() });
     const p = ((await r.json().catch(() => [])) || [])[0]; if (!p) throw new Error('No se pudo leer el proyecto.');
-    const dd = p.diseno_data || {}, hojas = dd.hojas || {}, orden = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false);
+    const dd = p.diseno_data || {}, hojas = dd.hojas || {}, orden = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false && hojas[n].tipo !== 'auxiliar');
+    let pv = []; try { pv = pvUnidades(p).filter(u => !u.sala); } catch (e) { pv = []; }
     const d = _simDoc.datos, gl = simGlobalDesdeCorrientes(p.info_cliente), unidades = [], sinDatos = [], sinModelo = [];
     orden.forEach(n => {
-      const h = hojas[n], tipo = simTipoDe(n + ' ' + (h.hojaBase || ''));
+      const hh = hojas[n], v = pv.find(x => x.nombre === n), nn = procesosNormTxt(n + ' ' + (hh.hojaBase || ''));
+      let tipo = simTipoDe(n + ' ' + (hh.hojaBase || '')); if (!tipo && v && !/primari|lamel/.test(nn)) tipo = SIM_FIG_A_TIPO[v.fig] || null;
       if (!tipo) { sinModelo.push(n); return; }
-      const crudo = h.valoresConEtiqueta && Object.keys(h.valoresConEtiqueta).length ? h.valoresConEtiqueta : null;
+      const crudo = hh.valoresConEtiqueta && Object.keys(hh.valoresConEtiqueta).length ? hh.valoresConEtiqueta : null;
       if (!crudo) sinDatos.push(n);
       const u = simUnidadNueva(tipo, n); u.crudo = crudo; u.origen = n;
       if (crudo) { const m = simMapearCrudo(tipo, crudo); Object.assign(u.params, m.params); Object.assign(u.fuentes, m.fuentes); }
+      const geo = simGeoParams(tipo, v && v.m);
+      Object.entries(geo.params).forEach(([k, val]) => { if (!u.fuentes[k] || u.fuentes[k] === 'tipico') { u.params[k] = val; u.fuentes[k] = geo.fuentes[k]; } });
       unidades.push(u);
     });
     d.unidades = unidades; d.global = Object.assign({}, gl.global); d.global_fuente = Object.assign({}, gl.fuente);
     SIM_GLOBAL_PARAMS.forEach(x => { if (d.global[x.k] == null && x.tipico != null) { d.global[x.k] = x.tipico; d.global_fuente[x.k] = 'tipico'; } });
-    d.fuente = { tipo: 'procesos', id, nombre: 'Procesos IA: ' + p.nombre }; d.avisos = [];
-    if (sinDatos.length) d.avisos.push('Sin datos leídos (confirmalas en el Paso 2 de Procesos IA para poder importarlas): ' + sinDatos.join(', ') + '.');
+    d.fuente = { tipo: origen, id, nombre: (origen === 'flowsheet' ? 'Flowsheet: ' : 'Procesos IA: ') + p.nombre }; d.avisos = [];
+    let nIA = 0; try { showMsg(st, 'loading', 'Buscando con IA los datos que faltan en las planillas...'); nIA = await simAutoCompletarIA(unidades); } catch (e) { d.avisos.push('No se pudo completar con IA: ' + e.message); }
+    if (sinDatos.length) d.avisos.push('Sin planilla leída (confirmalas en el Paso 2 de Procesos IA para poder importarlas): ' + sinDatos.join(', ') + '.');
     if (sinModelo.length) d.avisos.push('Sin modelo en el simulador (todavía): ' + sinModelo.join(', ') + '.');
+    if (unidades.some(u => u.fuentes.nivel_arranque === 'tipico')) d.avisos.push('Los niveles de arranque y paro del pozo no suelen estar en el diseño: se supusieron a partir de la altura de agua (marcados ≈). Cargá los reales.');
     if (_simDoc.nombre === 'Simulación nueva') _simDoc.nombre = 'Simulación — ' + p.nombre;
     await simGuardar(true); simRender();
-    showMsg(st, 'success', `✓ Importadas ${unidades.length} unidad(es) de "${p.nombre}". Revisá los datos marcados en rojo (faltan) y completalos a mano o con "Completar con IA".`);
+    showMsg(st, 'success', `✓ Importadas ${unidades.length} unidad(es) de "${p.nombre}"${nIA ? ` (la IA completó ${nIA} dato(s))` : ''}. Los datos tienen una marca de origen; lo que falta está en rojo. Si algún dato no se detectó, elegilo de la planilla con el selector de cada parámetro.`);
   } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+function simTomar(id, k, etq) {
+  const u = simU(id), df = SIM_MODELOS[u.tipo].params.find(x => x.k === k); if (!etq || !u.crudo) return;
+  const par = Object.entries(u.crudo).find(([x]) => x === etq); if (!par) return;
+  const s = simSepararEtiqueta(par[0]), val = df.texto ? String(par[1]) : simConv(par[1], s.unidad, df.dim);
+  if (val == null || (!df.texto && !isFinite(val))) { alert('Ese dato no es un número.'); return; }
+  u.params[k] = val; u.fuentes[k] = 'proyecto'; simGuardar(); simRender();
 }
 // ── Importar desde archivos / Excel con IA ──
 const SIM_TOOL_PLANTA = {
@@ -34215,7 +34263,8 @@ function simUnidadHtml(u, i, n) {
   const m = SIM_MODELOS[u.tipo], d = _simDoc.datos, e = u.escenario || {};
   const fila = df => {
     const v = u.params[df.k], f = u.fuentes[df.k] || '', tag = SIM_FUENTE_TAG[f], falta = df.req && (v == null || v === ''), num = !df.texto, sl = num && simNum(v) > 0 && (SIM_SLIDERS[u.tipo] || []).includes(df.k) ? [simNum(v) * 0.4, simNum(v) * 1.8] : null;
-    return `<tr><td style="${PROCESOS_EQ_TD}">${esc(df.l)}${df.req ? ' <span style="color:var(--red)">*</span>' : ''}${df.ayuda ? `<div class="hint" style="margin:0;font-size:11px">${esc(df.ayuda)}</div>` : ''}</td>
+    const opciones = u.crudo ? Object.entries(u.crudo).filter(([, x]) => x != null && x !== '' && typeof x !== 'object' && (df.texto || isFinite(parseFloat(String(x).replace(',', '.'))))).map(([k2, x]) => `<option value="${esc(k2)}">${esc(k2)} = ${esc(String(x).slice(0, 14))}</option>`).join('') : '';
+    return `<tr><td style="${PROCESOS_EQ_TD}">${esc(df.l)}${df.req ? ' <span style="color:var(--red)">*</span>' : ''}${df.ayuda ? `<div class="hint" style="margin:0;font-size:11px">${esc(df.ayuda)}</div>` : ''}${opciones ? `<select style="font-size:11px;padding:2px 4px;margin-top:3px;max-width:100%;width:auto" onchange="simTomar('${u.id}','${df.k}',this.value);this.value=''"><option value="">↙ tomar de la planilla…</option>${opciones}</select>` : ''}</td>
       <td style="${PROCESOS_EQ_TD};width:130px"><input ${num ? 'type="number" step="any"' : ''} value="${esc(v == null ? '' : v)}" id="sim-p-${u.id}-${df.k}" style="width:100%;text-align:right;padding:5px 8px;font-size:13px;${falta ? 'border-color:var(--red);background:#fdeeee' : ''}" onchange="simParam('${u.id}','${df.k}',this.value)" /></td>
       <td style="${PROCESOS_EQ_TD};width:62px;color:var(--text2)">${esc(df.u || '')}</td>
       <td style="${PROCESOS_EQ_TD};width:170px">${sl ? `<input type="range" class="sim-rng" min="${sl[0]}" max="${sl[1]}" step="${(sl[1] - sl[0]) / 200}" value="${simNum(v)}" oninput="simSlider('${u.id}','${df.k}',this.value)" title="Mover para ver cómo cambian los resultados" />` : ''}</td>
@@ -34230,6 +34279,7 @@ function simUnidadHtml(u, i, n) {
       <button class="btn btn-secondary btn-sm" onclick="simUMover('${u.id}',-1)" ${i ? '' : 'disabled'}>↑</button><button class="btn btn-secondary btn-sm" onclick="simUMover('${u.id}',1)" ${i < n - 1 ? '' : 'disabled'}>↓</button><button class="remove-btn" onclick="simUQuitar('${u.id}')">&#x2715;</button></div>
     <details ${u.abierta === false ? '' : 'open'} ontoggle="simUAbierta('${u.id}',this.open)"><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Datos de la unidad</summary>
       <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px">${m.params.map(fila).join('')}</table></div>
+      ${u.crudo ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--text2)">Ver los datos de la planilla del proyecto (${Object.keys(u.crudo).length})</summary><div style="columns:2;font-size:11.5px;margin-top:4px">${Object.entries(u.crudo).map(([k2, x]) => `<div>${esc(k2)}: <b>${esc(typeof x === 'object' ? '' : x)}</b></div>`).join('')}</div></details>` : ''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><button class="btn btn-secondary btn-sm" onclick="simCompletarIA('${u.id}')" ${u.crudo ? '' : 'disabled'} title="${u.crudo ? 'Busca en la planilla del proyecto los datos que faltan' : 'Solo para unidades importadas de Procesos IA'}">✨ Completar con IA desde la planilla</button></div>
     </details>
     ${evHtml}
@@ -34251,7 +34301,7 @@ function simRender() {
       <div class="card-label">🧪 Cargar los datos de la planta</div>
       <p class="hint" style="margin-bottom:8px">Importá desde un <b>proyecto de Procesos IA</b> (usa las unidades confirmadas en el Paso 2 y las corrientes del Paso 1), desde <b>archivos o un Excel cualquiera</b> (la IA lee y arma el modelo; después revisás), desde la <b>plantilla Excel de MAIA</b> (carga directa, sin IA), o armá todo a mano. Lo que falta se marca en rojo.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-        <select onchange="simImportarProcesos(this.value);this.value=''" style="max-width:300px"><option value="">📥 Importar de Procesos IA…</option>${_simProyectos.map(x => `<option value="${x.id}">${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</select>
+        <select onchange="const a=this.value.split(':');simImportarProcesos(a[1],a[0]);this.value=''" style="max-width:320px"><option value="">📥 Importar de un proyecto…</option><optgroup label="Procesos IA">${_simProyectos.map(x => `<option value="procesos:${x.id}">${esc(x.nombre)}${x.cliente ? ' — ' + esc(x.cliente) : ''}</option>`).join('')}</optgroup><optgroup label="Flowsheets">${_simFlowsheets.map(x => `<option value="flowsheet:${x.id}">${esc(x.nombre)}</option>`).join('')}</optgroup></select>
         <input type="file" id="sim-file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.jpg,.jpeg,.png" style="display:none" onchange="simAdjuntar(this)" />
         <button class="btn btn-secondary btn-sm" onclick="document.getElementById('sim-file').click()">📎 Adjuntar archivos / Excel</button>
         <button class="btn btn-primary btn-sm" onclick="simImportarArchivos()" ${ocup} ${(_simIa.archivos || []).length ? '' : 'disabled'}>✨ Leer con IA</button>
