@@ -374,7 +374,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.87</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -431,7 +431,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.86</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.87</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -25865,7 +25865,23 @@ function cotizArmadoSetCampo(campo, val) {
   if (campo === 'subtotal') { st.subtotal = val===''?0:Number(val); st._subtotalManual = true; cotizArmadoRecalcularTotales(); return; }
   if (campo === 'total') { st.total = val===''?0:Number(val); st._totalManual = true; return; }
   st[campo] = val;
+  if (campo === 'q_numero') st._qManual = true; // editado a mano: al generar no se reemplaza por el siguiente del Excel
   if (campo === 'iva') cotizArmadoRecalcularTotales();
+}
+// ¿El Nº de Q ya figura en el Excel de Q en una fila con datos (A–D)? Devuelve { cliente } o null.
+async function cotizQYaUsado(qNumero) {
+  const buscado = String(qNumero == null ? '' : qNumero).replace(/\D/g, '');
+  if (!buscado) return null;
+  const raw = await supaConfigGet('rend_q_excel');
+  if (!raw) return null;
+  const ref = JSON.parse(raw);
+  const rows = await rendFetchExcelUsedRange(await getMsToken(), ref.siteId, ref.id, 'Q-');
+  for (let i = 2; i < (rows || []).length; i++) {
+    const r = rows[i] || [];
+    if (String(r[4] == null ? '' : r[4]).replace(/\D/g, '') !== buscado) continue;
+    if (r.slice(0, 4).some(v => String(v == null ? '' : v).trim() !== '')) return { cliente: String(r[2] || '').trim() };
+  }
+  return null;
 }
 // Subtotal = suma de los ítems (a menos que se haya pisado a mano). Total =
 // Subtotal + IVA% (a menos que se haya pisado a mano). Se llama cada vez que
@@ -26988,11 +27004,19 @@ async function cotizArmadoGenerar() {
   // Se refresca siempre justo antes de generar — si alguien cargó una
   // cotización directo en el Excel mientras tanto, no queremos pisarla. No
   // aplica al editar una ya existente: el Nº de Q no cambia.
-  if (!editando) {
+  // Si el usuario escribió el Nº de Q a mano en el campo, se respeta tal cual (antes se pisaba con el siguiente del Excel).
+  const qManual = !!st._qManual && String(st.q_numero || '').trim() !== '';
+  if (!editando && !qManual) {
     try {
       const proximoQ = await cotizArmadoObtenerProximoQNumero();
       if (proximoQ && proximoQ !== st.q_numero) { st.q_numero = proximoQ; cotizArmadoRender(); }
     } catch(e) { /* si falla, se sigue con el número que ya estaba cargado */ }
+  } else if (!editando && qManual) {
+    // número puesto a mano: solo se avisa si ya figura en el Excel con datos (evita duplicar una cotización sin querer)
+    const usado = await cotizQYaUsado(st.q_numero).catch(() => null);
+    if (usado && !confirm(`El Q-${String(st.q_numero).replace(/^q-?\s*/i, '')} ya figura en el Excel de Q${usado.cliente ? ' (cliente: ' + usado.cliente + ')' : ''}. ¿Usarlo igual?`)) {
+      _cotizArmadoGenerando = false; cotizArmadoRender(); return;
+    }
   }
   const mantenerVersion = editando && !!st._mantenerVersion;
   const revision = editando ? (mantenerVersion ? (st._revisionAnterior||0) : (st._revisionAnterior||0) + 1) : 0;
