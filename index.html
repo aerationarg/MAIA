@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.96</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.97</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.96</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.97</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -34311,6 +34311,7 @@ async function simImportarProcesos(id, origen) {
       const u = simUnidadNueva(tipo, n); u.crudo = crudo; u.origen = n;
       if (crudo) { const m = simMapearCrudo(tipo, crudo); Object.assign(u.params, m.params); Object.assign(u.fuentes, m.fuentes); }
       if (tipo === 'ecualizador' && crudo) { const s = simDetectarSerie24(crudo); if (s.in) { u.params.perfil_in = s.in; u.fuentes.perfil_in = 'proyecto'; } if (s.out) { u.params.perfil_out = s.out; u.fuentes.perfil_out = 'proyecto'; } }
+      if (v) u.geo = simGeoDeProyecto(p, v);
       const geo = simGeoParams(tipo, v && v.m);
       Object.entries(geo.params).forEach(([k, val]) => { if (!u.fuentes[k] || u.fuentes[k] === 'tipico') { u.params[k] = val; u.fuentes[k] = geo.fuentes[k]; } });
       unidades.push(u);
@@ -34835,6 +34836,148 @@ function simPlantaVista(plant, d) {
   function hopDe() { return 28; }
   return svg;
 }
+// ═══ Vista de la planta en CORTE A ESCALA: mismas formas y medidas que la vista en corte del Flowsheet (pvCorteSvg), con animación ═══
+// Cada unidad se dibuja con sus dimensiones reales (ancho, alto, parte enterrada, fondo cónico del sedimentador, equipos sumergidos).
+// Si la simulación vino de un proyecto, las medidas salen de pvUnidades (guardadas en u.geo); si no, de los parámetros y de formas típicas.
+const SIM_GEO_FREE = 0.4;
+function simGeoDeProyecto(p, v) {
+  const m = v.m, ed = ((p.equipos_data || {}).etapas || {})[v.nombre] || {}, eqs = [];
+  (ed.equipos || []).forEach(q => { const inf = procesosFlowsheetInfoDe(q.tipo, q.especificacion); if (inf && PROCESOS_FLOWSHEET_ICONOS_SUMERGIBLES[inf.icono]) eqs.push({ icono: inf.icono, n: Math.min(3, Number(q.cantidad) || 1) }); });
+  return { forma: m.forma, largo: m.largo, ancho: m.ancho, diametro: m.diametro, alto: m.alto, nivelAgua: m.nivelAgua, enterrado: m.enterrado, angulo: m.angulo, fig: v.fig, equipos: eqs };
+}
+// Medidas de dibujo de una unidad (m): w = ancho en el corte, alto total, ent = parte enterrada, col = altura de agua de diseño
+function simGeoUnidad(u) {
+  const g = u.geo || {}, p = simParamsNum(u), t = u.tipo, ratio = g.largo && g.ancho ? Math.min(4, Math.max(0.5, g.largo / g.ancho)) : 1.5;
+  const free = g.alto && g.nivelAgua ? Math.max(0.2, g.alto - g.nivelAgua) : SIM_GEO_FREE, colGeo = g.nivelAgua || (g.alto ? g.alto - SIM_GEO_FREE : null);
+  let col, w, ent, alto, circ = g.forma === 'circ', ang = 0;
+  const porVol = (V, H) => circ ? 2 * Math.sqrt(V / (Math.PI * H)) : Math.sqrt(V / H * ratio);
+  if (t === 'pozo') {
+    const A = p.area || (g.largo && g.ancho ? g.largo * g.ancho : 6.25); w = circ ? Math.sqrt(4 * A / Math.PI) : Math.sqrt(A * (g.largo && g.ancho ? ratio : 1));
+    col = Math.max(1.2, p.nivel_alarma || colGeo || 3); alto = Math.max(g.alto || 0, col + 0.4);
+    ent = g.enterrado == null || g.enterrado >= (g.alto || 0) - 0.01 ? alto : Math.min(g.enterrado, alto);
+  } else if (t === 'sedimentador') {
+    circ = g.forma !== 'rect'; const A = p.area || (p.diametro ? Math.PI * p.diametro * p.diametro / 4 : 78); col = p.profundidad || colGeo || 3.5;
+    w = circ ? (p.diametro && !p.area ? p.diametro : Math.sqrt(4 * A / Math.PI)) : Math.sqrt(A * ratio); alto = col + free; ang = g.angulo || 22; ent = Math.min(g.enterrado || 0, alto);
+  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador'].includes(t)) {
+    col = t === 'sbr' ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
+    w = porVol(V, col); alto = col + free; ent = Math.min(g.enterrado || 0, alto);
+  } else {
+    const def = { daf: [6, 2], tamiz: [1.6, 1.3], mbr: [5, 3.5], fisicoquimico: [4, 2.5] }[t] || [4, 2.5];
+    w = circ ? (g.diametro || def[0]) : (g.largo || def[0]); alto = g.alto || def[1]; col = g.nivelAgua || Math.max(0.3, alto - SIM_GEO_FREE); ent = Math.min(g.enterrado || 0, alto);
+  }
+  return { w: Math.max(0.6, w), alto, col: Math.min(col, alto), ent, ang, equipos: g.equipos || [], tipo: t };
+}
+function simPlantaCorte(plant, d) {
+  const nodos = plant.nodos.filter(n => n.tipo !== 'entrada'), n = nodos.length, VAR = d.vistaVar || 'dbo', varNombre = { dbo: 'DBO', dqo: 'DQO', sst: 'SST', ntk: 'NTK', Q: 'Caudal' }[VAR];
+  if (!n) return '<p class="hint">Todavía no hay unidades.</p>';
+  const us = nodos.map(nd => simU(nd.id)), geos = nodos.map((nd, i) => simGeoUnidad(us[i] || { tipo: nd.tipo, params: {}, geo: null }));
+  const GAP = 2.4; let xm = 0; const xs = geos.map(g => { const x = xm; xm += g.w + GAP; return x; }), totalM = xm - GAP;
+  const maxSobre = Math.max(0.5, ...geos.map(g => g.alto - g.ent)), maxEnt = Math.max(0, ...geos.map(g => g.ent));
+  const padL = 96, padR = 190, padT = 50, s = Math.max(6, Math.min(38, (1100 - padL - padR) / totalM, 340 / (maxSobre + maxEnt + 3)));
+  const yT = padT + (maxSobre + 1.4) * s, px = m => padL + m * s, fy = e => yT - e * s, W = padL + totalM * s + padR, yBase = yT + maxEnt * s, Hh = yBase + 150;
+  const maxV = Math.max(1, ...nodos.map(nd => Math.max(...(nd.sal[VAR] || [0])))), Qmax = Math.max(1, ...nodos.map(nd => Math.max(...nd.sal.Q)), ...plant.nodos[0].sal.Q);
+  const pos = geos.map((g, i) => { const x0 = px(xs[i]), wp = g.w * s, bot = yT + g.ent * s; return { x0, wp, x1: x0 + wp, top: fy(g.alto - g.ent), bot, colPx: g.col * s, yS: bot - g.col * s, cx: x0 + wp / 2 }; });
+  let sv = `<svg id="sim-planta-svg" viewBox="0 0 ${W} ${Hh}" style="width:100%;min-width:${Math.round(W)}px;height:auto;font-family:inherit;color:var(--text)" role="img" aria-label="Corte de la planta a escala">`;
+  let cuerpo = '';
+  // terreno
+  cuerpo += `<line x1="8" y1="${yT}" x2="${W - 8}" y2="${yT}" stroke="#6d6d6d" stroke-width="1.6"/>`; for (let t = 8; t < W - 8; t += 12) cuerpo += `<line x1="${t}" y1="${yT}" x2="${t - 6}" y2="${yT + 8}" stroke="#6d6d6d" stroke-width="1"/>`;
+  cuerpo += `<text x="${W - 10}" y="${yT + 20}" text-anchor="end" font-size="10" font-style="italic" fill="#6d6d6d">Nivel de terreno</text>`;
+  let defs = '';
+  nodos.forEach((nd, i) => {
+    const g = geos[i], P = pos[i], id = nd.id, t = nd.tipo, ws = P.wp;
+    const cono = t === 'sedimentador' ? Math.min(g.alto * 0.9, Math.max(0.05, Math.tan((g.ang || 22) * Math.PI / 180) * (g.w / 2 - 0.25))) : 0;
+    const contorno = cono ? `M${P.x0},${P.top} V${P.bot - cono * s} L${P.x0 + ws / 2 - 0.25 * s},${P.bot} H${P.x0 + ws / 2 + 0.25 * s} L${P.x1},${P.bot - cono * s} V${P.top}` : `M${P.x0},${P.top} V${P.bot} H${P.x1} V${P.top}`;
+    defs += `<clipPath id="cp-clip-${id}"><path d="${contorno} Z"/></clipPath>`;
+    let agua = '';
+    if (t === 'sedimentador' && nd.extra && nd.extra.perf) { const hh = P.colPx / 10; for (let j = 0; j < 10; j++) agua += `<rect id="cp-s-${id}-${j}" x="${P.x0}" y="${P.yS + j * hh}" width="${ws}" height="${hh + 0.6}" fill="#d6eafa"/>`; }
+    else agua += `<rect id="cp-w-${id}" x="${P.x0}" y="${P.yS}" width="${ws}" height="${P.colPx}" fill="#d6eafa"/>`;
+    if (t === 'sbr') agua += `<rect id="cp-u-${id}" x="${P.x0}" y="${P.bot}" width="${ws}" height="0" fill="#8a6a3a"/>`;
+    if (t === 'mbbr') { const nc = Math.min(50, Math.max(12, Math.round(ws * P.colPx / 900))), rr = Math.max(2.5, Math.min(5, ws / 18)); for (let j = 0; j < nc; j++) { const cx = P.x0 + 6 + ((j * 53) % Math.max(10, ws - 12)), cy = P.yS + 8 + ((j * 37) % Math.max(10, P.colPx - 16)); agua += `<circle class="cp-c-${id}" cx="${cx}" cy="${cy}" r="${rr}" fill="#d9a441" stroke="#8a6d00" stroke-width=".8" data-cx="${cx}" data-cy="${cy}" data-ph="${j * 0.7}"/>`; } }
+    if (['lodos_activados', 'sbr', 'mbbr'].includes(t)) { const nb = Math.max(5, Math.floor(ws / 16)); for (let j = 0; j < nb; j++) agua += `<circle class="cp-b-${id}" cx="${P.x0 + ws * (j + 0.5) / nb}" cy="${P.bot - 4}" r="2.2" fill="#fff" fill-opacity="0"/>`; }
+    let eq = '';
+    if (t === 'pozo') {
+      const nTot = Math.max(1, (nd.extra && nd.extra.nd) || 1, simNum((us[i] || { params: {} }).params.n_bombas) || 0), sz = Math.min(26, ws / (nTot + 0.6));
+      for (let j = 0; j < nTot; j++) { const cx = P.x0 + ws * (j + 1) / (nTot + 1); eq += `<g id="cp-pb-${id}-${j}-off">${procesosFlowsheetIconoSvg('bomba_sumerg', cx, P.bot - sz / 2 - 3, sz, '#9a9a9a')}</g><g id="cp-pb-${id}-${j}-on" style="display:none">${procesosFlowsheetIconoSvg('bomba_sumerg', cx, P.bot - sz / 2 - 3, sz, '#1a8f4d')}</g>`; }
+      const e = nd.extra || {}; if (e.hs != null) [[e.hs, '#888', 'paro'], [e.h1, '#1a8f4d', 'arr.'], [e.hmax, '#c0392b', 'alarma']].forEach(([v, c, tx]) => { const y = P.bot - Math.min(g.alto, v) * s; eq += `<line x1="${P.x0}" x2="${P.x1}" y1="${y}" y2="${y}" stroke="${c}" stroke-width="1" stroke-dasharray="4 3"/><text x="${P.x1 - 3}" y="${y - 2}" text-anchor="end" font-size="8.5" fill="${c}">${tx}</text>`; });
+    } else {
+      const lista = []; g.equipos.forEach(q => { for (let j = 0; j < q.n; j++) lista.push(q.icono); });
+      lista.slice(0, 6).forEach((ic, j) => { const cx = P.x0 + ws * (j + 1) / (Math.min(6, lista.length) + 1), sz = Math.min(26, ws / 5, P.colPx * 0.7 + 8); eq += procesosFlowsheetIconoSvg(ic, cx, P.bot - sz / 2 - 3, sz, '#2e7d32'); });
+    }
+    const nombre = nd.nombre.length > 22 ? nd.nombre.slice(0, 21) + '…' : nd.nombre, esp = t === 'lodos_activados' ? `<rect id="cp-foam-${id}" x="${P.x0}" y="${P.yS}" width="${ws}" height="0" fill="#f1e6d0" stroke="#c9b48a"/>` : '';
+    const incompleta = nd.extra && nd.extra.incompleta ? `<text x="${P.cx}" y="${P.yS + P.colPx / 2}" text-anchor="middle" font-size="10" fill="#c0392b">faltan datos</text>` : '';
+    const dec = t === 'sbr' ? `<path id="cp-d-${id}" d="" fill="none" stroke="#1a8f4d" stroke-width="3"/>` : '';
+    cuerpo += `<g><g clip-path="url(#cp-clip-${id})">${agua}</g>${esp}<path d="${contorno}" fill="none" stroke="#1b5e20" stroke-width="2.4"/>${t === 'sedimentador' ? `<line id="cp-m-${id}" x1="${P.x0}" x2="${P.x1}" y1="${P.bot}" y2="${P.bot}" stroke="#8a5a1a" stroke-width="1.5" stroke-dasharray="4 3" clip-path="url(#cp-clip-${id})"/>` : ''}${eq}${dec}${incompleta}
+      <text x="${P.cx}" y="${P.top - 8}" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">${esc(nombre)}</text>
+      <text id="cp-n-${id}" x="${P.cx}" y="${P.top - 21}" text-anchor="middle" font-size="10" fill="#c0392b" font-weight="700"></text>
+      <text x="${P.cx}" y="${P.bot + 14}" text-anchor="middle" font-size="9.5" fill="#6b7b8b">${g.w >= 10 ? g.w.toFixed(0) : g.w.toFixed(1)} m × ${(g.alto).toFixed(1)} m${g.ent > 0 ? ' · enterrado ' + g.ent.toFixed(1) : ''}</text>
+      <text id="cp-t1-${id}" x="${P.cx}" y="${P.bot + 27}" text-anchor="middle" font-size="10" fill="currentColor"></text><text id="cp-t2-${id}" x="${P.cx}" y="${P.bot + 39}" text-anchor="middle" font-size="10" fill="#555"></text><text id="cp-t3-${id}" x="${P.cx}" y="${P.bot + 51}" text-anchor="middle" font-size="9.5" fill="#555"></text></g>`;
+  });
+  // tuberías entre unidades (salen y entran por la superficie del agua de diseño)
+  const yO = i => pos[i].yS + Math.min(8, pos[i].colPx * 0.15);
+  let tub = '';
+  const y0 = yO(0), xIn = 34;
+  tub += `<circle cx="${xIn}" cy="${y0}" r="16" fill="#e8f1fb" stroke="#0056a1" stroke-width="2"/><text x="${xIn}" y="${y0 + 4}" text-anchor="middle" font-size="11" fill="#0056a1" font-weight="700">IN</text><text x="${xIn}" y="${y0 + 32}" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">Afluente</text><text id="cp-v-in" x="${xIn}" y="${y0 + 45}" text-anchor="middle" font-size="9.5" fill="#555"></text>`;
+  tub += `<line class="cp-fl" id="cp-f-in" x1="${xIn + 16}" x2="${pos[0].x0 - 6}" y1="${y0}" y2="${y0}" stroke="#0056a1" stroke-width="4" stroke-dasharray="9 6"/><polygon id="cp-fh-in" points="${pos[0].x0 - 6},${y0 - 5} ${pos[0].x0},${y0} ${pos[0].x0 - 6},${y0 + 5}" fill="#0056a1"/>`;
+  for (let i = 0; i < n - 1; i++) { const a = pos[i], b = pos[i + 1], ya = yO(i), yb = yO(i + 1), xm2 = (a.x1 + b.x0) / 2; tub += `<path class="cp-fl" id="cp-f-${i}" d="M${a.x1},${ya} H${xm2} V${yb} H${b.x0 - 6}" fill="none" stroke="#0056a1" stroke-width="4" stroke-dasharray="9 6"/><polygon id="cp-fh-${i}" points="${b.x0 - 6},${yb - 5} ${b.x0},${yb} ${b.x0 - 6},${yb + 5}" fill="#0056a1"/>`; }
+  const L = pos[n - 1], yL = yO(n - 1), xo = L.x1 + 58;
+  tub += `<path class="cp-fl" id="cp-f-out" d="M${L.x1},${yL} H${xo}" fill="none" stroke="#0056a1" stroke-width="4" stroke-dasharray="9 6"/><polygon id="cp-fh-out" points="${xo},${yL - 5} ${xo + 7},${yL} ${xo},${yL + 5}" fill="#0056a1"/><text x="${xo + 12}" y="${yL - 8}" font-size="12" font-weight="700" fill="currentColor">Efluente</text><text id="cp-v-out" x="${xo + 12}" y="${yL + 6}" font-size="9.5" fill="#555"></text><text id="cp-v-out2" x="${xo + 12}" y="${yL + 18}" font-size="9.5" fill="#555"></text>`;
+  let rec = '';
+  if (plant.recirc) {
+    const iS = nodos.findIndex(x => x.id === plant.recirc.desde), iR = nodos.findIndex(x => x.id === plant.recirc.hasta);
+    if (iS >= 0 && iR >= 0) { const yR = yBase + 74, xS = pos[iS].cx, xR = pos[iR].cx; rec = `<path class="cp-fl" id="cp-rec" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec" x="${(xS + xR) / 2}" y="${yR + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a"></text>`; const xp = xR - pos[iR].wp * 0.3; rec += `<path class="cp-fl" id="cp-purga" d="M${xp},${pos[iR].bot} V${yR + 32}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xp - 6}" y="${yR + 40}" text-anchor="end" font-size="10" fill="#5a3a10">Purga</text>`; }
+  }
+  sv += `<defs>${defs}</defs>` + cuerpo + tub + rec + `<text x="${W - 10}" y="${Hh - 8}" text-anchor="end" font-size="10" fill="#6b7b8b">Corte a escala · medidas en metros</text></svg>`;
+  const fmt = v => v == null ? '—' : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)), colorDe = (nd, k) => simColorConc(nd.sal[VAR][k], maxV), flujoSeg = x => 3 + 8 * (x / Qmax);
+  let fase = 0;
+  _simVistas.planta = (k, t) => {
+    fase += 1.2; const set = (i, a, v) => { const e = document.getElementById(i); if (e) e.setAttribute(a, v); }, txt = (i, v) => { const e = document.getElementById(i); if (e) e.textContent = v; };
+    nodos.forEach((nd, i) => {
+      const id = nd.id, P = pos[i], g = geos[i], t0 = nd.tipo, ex = nd.extra || {}, col = colorDe(nd, k); let top = '', t3 = '';
+      if (t0 === 'sedimentador' && ex.perf) { const pf = ex.perf[Math.min(k, ex.perf.length - 1)]; pf.forEach((x, j) => set(`cp-s-${id}-${j}`, 'fill', simColorConc(x, 8))); const mt = ex.manto[Math.min(k, ex.manto.length - 1)], yM = P.bot - Math.min(1, mt / ex.H) * P.colPx; set('cp-m-' + id, 'y1', yM); set('cp-m-' + id, 'y2', yM); t3 = `manto ${mt.toFixed(1)} m`; }
+      else if (t0 === 'pozo' && ex.nivel) { const h = Math.min(g.alto, ex.nivel[k]), sobre = (ex.rebalseSerie && ex.rebalseSerie[k] > 0) || ex.nivel[k] >= ex.hmax - 1e-6; set('cp-w-' + id, 'y', P.bot - h * s); set('cp-w-' + id, 'height', h * s); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; t3 = `nivel ${ex.nivel[k].toFixed(2)} m`; for (let j = 0; j < 8; j++) { const on = ex.bombas[k] > j, a = document.getElementById(`cp-pb-${id}-${j}-on`), b = document.getElementById(`cp-pb-${id}-${j}-off`); if (a && b) { a.style.display = on ? '' : 'none'; b.style.display = on ? 'none' : ''; } } }
+      else if (t0 === 'ecualizador' && ex.vol) { const fr = Math.min(1, ex.vol[k] / ex.V), sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; t3 = `nivel ${(fr * 100).toFixed(0)}% · ${ex.vol[k].toFixed(0)} m3`; }
+      else if (t0 === 'sbr' && ex.sbr) {
+        const sb = ex.sbr, q = sb.tanque, hw = Math.max(0, Math.min(1, q.hw[k] / sb.Hmax)), hs = Math.max(0, Math.min(q.hw[k], q.hint[k])) / sb.Hmax, f = q.fase[k];
+        set('cp-w-' + id, 'y', P.bot - P.colPx * hw); set('cp-w-' + id, 'height', P.colPx * hw); set('cp-w-' + id, 'fill', '#d6eafa');
+        set('cp-u-' + id, 'y', P.bot - P.colPx * hs); set('cp-u-' + id, 'height', P.colPx * hs); set('cp-u-' + id, 'fill', simColorConc(Math.min(14, q.MLSS[k] * (q.hw[k] / Math.max(0.3, Math.min(q.hw[k], q.hint[k]))) / 1000), 10));
+        const ys = P.bot - P.colPx * hw; set('cp-d-' + id, 'd', f === 3 ? `M${P.x0 + P.wp * 0.2},${ys} H${P.x0 + P.wp * 0.8}` : '');
+        top = SIM_FASES_SBR[f].split(' ')[0]; t3 = `OD ${q.DO[k].toFixed(1)} · NH4 ${q.NH[k].toFixed(1)}`;
+        document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + q.aire[k]) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * Math.max(4, P.colPx * hw - 8)); c.setAttribute('fill-opacity', q.aire[k] < 0.02 ? 0 : (0.9 - ciclo * 0.7).toFixed(2)); });
+      } else if (t0 === 'mbbr' && ex.mbbr) {
+        const sm = ex.sim, aire = sm.aire[k], mov = 0.5 + 4 * Math.min(1, aire), ag = Math.min(1, aire * 1.6 + 0.1);
+        set('cp-w-' + id, 'fill', col); t3 = `OD ${sm.DO[k].toFixed(1)} · NH4 ${sm.NH[k].toFixed(1)}`; if (sm.DO[k] < 0.3) top = '⚠ SIN OXÍGENO';
+        document.querySelectorAll('.cp-c-' + id).forEach(c => { const cx = +c.dataset.cx, cy = +c.dataset.cy, ph = +c.dataset.ph; c.setAttribute('cx', cx + Math.sin(fase * 0.05 * mov + ph) * 6 * ag); c.setAttribute('cy', cy + Math.cos(fase * 0.04 * mov + ph * 1.3) * 5 * ag); c.setAttribute('fill', `rgba(190,130,40,${(0.3 + 0.7 * sm.film[k]).toFixed(2)})`); });
+        document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + aire * 2) + j * 19) % 100) / 100; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', aire < 0.02 ? 0 : (0.9 - ciclo * 0.7).toFixed(2)); });
+      } else if (t0 === 'lodos_activados' && ex.do) {
+        const fh = Math.min(22, 0.9 * s) * Math.min(1, ex.foam[k]); set('cp-foam-' + id, 'height', fh); set('cp-foam-' + id, 'y', P.yS - fh); set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000));
+        t3 = `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`; if (ex.do[k] < 0.3) top = '⚠ SIN OXÍGENO';
+        const dem = ex.aire ? Math.max(0.05, ex.aire[k] * 2.2) : 1; document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); });
+      } else set('cp-w-' + id, 'fill', col);
+      txt('cp-n-' + id, top); txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`); txt('cp-t3-' + id, t3);
+    });
+    { const ban = document.getElementById('pv-evento'); if (ban) { const oc = d.examen && d.examen.activo && !d.examen.respondido, act = oc ? [] : (plant.eventos || []).filter(e => t >= e.inicio && t < e.inicio + (e.dur || 0)); ban.textContent = act.length ? act.map(e => ((SIM_ESC_TIPOS[e.tipo] || {}).icono || '⚠') + ' ' + simEvNombre(e.tipo)).join('   ·   ') : (oc && plant.eventos.some(e => t >= e.inicio && t < e.inicio + Math.max(2, e.dur || 0)) ? '⚠ Algo no anda bien en la planta: mirá el tablero' : ''); } }
+    const pipe = (idL, idH, q, c) => { set(idL, 'stroke-width', flujoSeg(q)); set(idL, 'stroke', c); set(idL, 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); set(idH, 'fill', c); };
+    const ent0 = plant.nodos[0]; pipe('cp-f-in', 'cp-fh-in', ent0.sal.Q[k], colorDe(ent0, k)); txt('cp-v-in', `${fmt(ent0.sal.Q[k])} m3/h`);
+    for (let i = 0; i < n - 1; i++) pipe('cp-f-' + i, 'cp-fh-' + i, nodos[i].sal.Q[k], colorDe(nodos[i], k));
+    const lo = nodos[n - 1]; pipe('cp-f-out', 'cp-fh-out', lo.sal.Q[k], colorDe(lo, k)); txt('cp-v-out', `${fmt(lo.sal.Q[k])} m3/h`); txt('cp-v-out2', `${varNombre} ${fmt(lo.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`);
+    if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`); set('cp-purga', 'stroke-dashoffset', -fase); }
+  };
+  return sv;
+}
+function simVistaPlanta(v) { _simDoc.datos.vistaPlanta = v; simGuardar(); simPlantaRefrescar(); }
+async function simGeoRefrescar() {
+  const d = _simDoc.datos, f = d.fuente, st = 'sim-status';
+  if (!f || !f.id || !['procesos', 'flowsheet'].includes(f.tipo)) { showMsg(st, 'error', '✕ Esta simulación no viene de un proyecto de Procesos IA / Flowsheet.'); return; }
+  try {
+    showMsg(st, 'loading', 'Leyendo las medidas del proyecto...');
+    const r = await supaFetch(`/rest/v1/${f.tipo === 'flowsheet' ? 'flowsheet_proyectos' : 'procesos_proyectos'}?id=eq.${f.id}&select=*`, { headers: mantH() });
+    const p = ((await r.json().catch(() => [])) || [])[0]; if (!p) throw new Error('No se pudo leer el proyecto.');
+    const pv = pvUnidades(p).filter(x => !x.sala); let n = 0;
+    d.unidades.forEach(u => { const v = pv.find(x => x.nombre === u.origen); if (v) { u.geo = simGeoDeProyecto(p, v); n++; } });
+    await simGuardar(true); simRender(); showMsg(st, n ? 'success' : 'error', n ? `✓ Medidas y formas actualizadas de ${n} unidad(es) desde el proyecto.` : '✕ Ninguna unidad de la simulación coincide con las del proyecto (se importaron a mano).');
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
 // ── Vistas animadas por unidad (corte) ──
 function simVistaSedimentador(u, plantNodo, din, s) {
   const id = u.id, W = 440, H = 270, x0 = 70, x1 = 350, yAgua = 58, yRect = 190, xc = (x0 + x1) / 2, N = 10, hh = (yRect - yAgua) / N, m = 5;
@@ -35065,8 +35208,8 @@ function simPlantaInnerHtml(d) {
     ${plant.avisos.map(a => `<p class="hint" style="margin:0 0 4px;color:#8a6d00">⚠ ${esc(a)}</p>`).join('')}
     <p class="hint" style="margin:2px 0 8px">Para simular problemas (cortes de energía, bulking, picos de caudal…) usá la tarjeta "Escenarios y capacitación" de arriba.</p>
     ${cumpl}
-    <div style="display:flex;gap:10px;align-items:center;margin:8px 0 4px;flex-wrap:wrap"><b style="font-size:12.5px">Vista animada de la planta</b><label style="font-size:12px;margin:0">Color según</label>${sel}<span class="hint" style="margin:0">Ancho de la flecha = caudal; color = concentración (más oscuro = más cargado). Usá el reproductor de arriba.</span></div>
-    <div id="pv-evento" style="min-height:20px;font-size:12.5px;font-weight:700;color:#c0392b;margin:2px 0"></div><div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;padding:6px;background:var(--surface,#fff)">${simPlantaVista(plant, d)}</div>
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0 4px;flex-wrap:wrap"><b style="font-size:12.5px">Vista animada de la planta</b><select style="width:auto" onchange="simVistaPlanta(this.value)"><option value="corte" ${d.vistaPlanta === 'esquema' ? '' : 'selected'}>Corte a escala (como el Flowsheet)</option><option value="esquema" ${d.vistaPlanta === 'esquema' ? 'selected' : ''}>Esquema simple</option></select><label style="font-size:12px;margin:0">Color según</label>${sel}${d.fuente && ['procesos', 'flowsheet'].includes(d.fuente.tipo) ? '<button class="btn btn-secondary btn-sm" onclick="simGeoRefrescar()" title="Vuelve a leer las medidas, formas y equipos del proyecto">↻ Actualizar medidas del proyecto</button>' : ''}<span class="hint" style="margin:0">Ancho de la flecha = caudal; color = concentración (más oscuro = más cargado). El corte está a escala con las medidas de cada unidad. Usá el reproductor de arriba.</span></div>
+    <div id="pv-evento" style="min-height:20px;font-size:12.5px;font-weight:700;color:#c0392b;margin:2px 0"></div><div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;padding:6px;background:var(--surface,#fff)">${d.vistaPlanta === 'esquema' ? simPlantaVista(plant, d) : simPlantaCorte(plant, d)}</div>
     <details style="margin-top:10px" open><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Balance por etapa (promedio de 24 h a la salida de cada una; concentraciones ponderadas por caudal)</summary>
       <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr><th style="${TH}">Etapa</th><th style="${TH};text-align:right">Q (m3/h)</th><th style="${TH};text-align:right">DBO</th><th style="${TH};text-align:right">DQO</th><th style="${TH};text-align:right">SST</th><th style="${TH};text-align:right">NTK</th></tr>${filas}</table></div>${lodos}</details>
     <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">${chart('sst', 'SST del efluente final (mg/L)', C.rojo)}${chart('dbo', 'DBO del efluente final (mg/L)', C.azul)}</div>
