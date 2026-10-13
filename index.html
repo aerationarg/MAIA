@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -9852,6 +9852,7 @@ function procesosStep2Html(p) {
     </div>
     ${(ordenadas.length && st.balanceTrenVisible && st.balance) ? `<div class="card" style="margin:6px 0 12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><div class="card-label">Balance de parámetros del tren</div><div style="display:flex;gap:6px"><button class="btn btn-secondary btn-sm" onclick="procesosStep2BalanceRefrescar()">↻ Actualizar</button><button class="btn btn-secondary btn-sm" onclick="procesosStep2ToggleBalanceTren()">✕ Cerrar</button></div></div>${procesosStep2BalanceTrenHtml(st.balance)}</div>` : ''}
     ${ordenadas.length ? `<div class="card" style="margin:6px 0 12px"><div class="card-label">Diagrama del tren</div>${procesosStep2TrenDiagramaHtml(gruposActuales, { confirmadas: confirmadasMap })}</div>` : ''}
+    ${procesosPCModuloCardHtml(p)}
     ${ordenadas.map((nombre, i) => filaHoja(nombre, { reorder: true, numero: i+1, esPrimera: i===0, esUltima: i===ordenadas.length-1 })).join('')}
     ${Object.keys(ponderaciones).length ? `
     <div class="gap"></div>
@@ -12502,6 +12503,145 @@ async function renderProcesosPlantasCompactas() {
     <textarea rows="5" onchange="procesosPCSetNotas(this.value)">${esc(cfg.notas || '')}</textarea>`;
 }
 
+// ═══ Módulo compacto ═══
+// Las unidades marcadas como "planta compacta" (material) forman UN módulo: un tanque con compartimentos (digestor, anóxica, reactor aeróbico,
+// sedimentador, cámara de cloración...) que comparten ancho y altura. Si se le agrega una unidad (ej. un anóxico) el módulo se agranda; si se
+// le saca volumen a una unidad para dárselo a otra, el módulo no cambia de tamaño. Largo total = suma de los largos de los compartimentos.
+// diseno_data.moduloCompacto = { modeloId, etiqueta, ancho, alto, nivelUtil } se guarda al aplicar un modelo de la tabla.
+const procesosPCEsMiembro = h => !!h && h.material === 'planta_compacta' && h.tipo !== 'auxiliar' && h.seleccionada !== false;
+function procesosPCModulo(p, dimsDe) {
+  const dd = p.diseno_data || {}, hojas = dd.hojas || {};
+  const nombres = (dd.orden || []).filter(n => procesosPCEsMiembro(hojas[n]) && !procesosFlowsheetEsZonaQuimicos(n));
+  if (!nombres.length) return null;
+  const info = dd.moduloCompacto || {};
+  const dimsF = dimsDe || (n => procesosFlowsheetDimsDeEtapa(p, n));
+  const raw = nombres.map(n => ({ nombre: n, d: dimsF(n) || {} }));
+  const ancho = info.ancho || Math.max(0, ...raw.map(r => r.d.ancho || 0)) || null;
+  const alto = info.alto || Math.max(0, ...raw.map(r => r.d.alto || 0)) || null;
+  const nivel = info.nivelUtil || (alto ? alto * 0.87 : null);
+  const r2 = x => Math.round(x * 100) / 100;
+  const miembros = raw.map(r => {
+    let L = r.d.largo || null;
+    if (!L && r.d.volumen && ancho && nivel) L = r.d.volumen / (ancho * nivel);
+    return { nombre: r.nombre, volumen: r.d.volumen || null, largo: L ? r2(L) : null, ancho: r.d.ancho || null, alto: r.d.alto || null };
+  });
+  return { etiqueta: info.etiqueta || '', modeloId: info.modeloId || null, ancho, alto, nivelUtil: nivel, miembros, largoTotal: r2(miembros.reduce((a, m) => a + (m.largo || 0), 0)) };
+}
+const procesosPCModuloTxt = m => m ? `${m.largoTotal ? 'Largo ' + procesosFormatearNumero(m.largoTotal) + ' m' : ''}${m.ancho ? ' · Ancho ' + procesosFormatearNumero(m.ancho) + ' m' : ''}${m.alto ? ' · Alto ' + procesosFormatearNumero(m.alto) + ' m' : ''}`.replace(/^ · /, '') : '';
+// Dimensiones de una unidad leídas de las celdas de su hoja (valores actuales, aunque la hoja todavía no esté confirmada)
+function procesosPCDimsVivas(nombre) {
+  try {
+    const hf = procesosStep2GetHF(nombre), model = procesosStep2State.hojaModels[nombre];
+    if (!hf || !model) return {};
+    const g = dim => { const c = procesosStep2MatchCelda(model, dim); if (!c) return null; const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); return typeof v === 'number' && isFinite(v) && v > 0 ? v : null; };
+    return { largo: g('largo'), ancho: g('ancho'), alto: g('altura'), volumen: g('volumen') };
+  } catch (e) { return {}; }
+}
+// Escribe dimensiones en las celdas de una hoja (y en sus valores guardados). dd = copia de diseno_data que se va a guardar.
+function procesosPCEscribirDims(dd, nombre, dims) {
+  const model = procesosStep2State.hojaModels[nombre], hf = procesosStep2GetHF(nombre);
+  if (!model || !hf) return 0;
+  const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
+  const vals = Object.assign({}, h.valores); let n = 0;
+  Object.entries({ largo: dims.largo, ancho: dims.ancho, altura: dims.alto, volumen: dims.volumen }).forEach(([dim, v]) => {
+    if (v == null || !isFinite(v)) return;
+    const c = procesosStep2MatchCelda(model, dim); if (!c) return;
+    const num = Math.round(Number(v) * 100) / 100;
+    hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[num]]); vals[c.ref] = num; n++;
+  });
+  h.valores = vals; h.confirmada = false;
+  dd.hojas[nombre] = h;
+  return n;
+}
+// Transfiere volumen de una unidad del módulo a otra (m3): el módulo no cambia de tamaño (se conserva el volumen total); la que recibe puede ser nueva
+async function procesosPCModuloTransferir(desde, hacia, m3, sinAviso) {
+  const p = procesosCurrentProyecto;
+  m3 = Number(m3);
+  if (!desde || !hacia || desde === hacia) { alert('Elegí dos unidades distintas.'); return false; }
+  const dv = procesosPCDimsVivas(desde), hv = procesosPCDimsVivas(hacia);
+  if (!(dv.volumen > 0)) { alert(`No encontré el volumen de "${desde}" en su hoja (celda de volumen editable): cargalo primero.`); return false; }
+  if (!(m3 > 0) || m3 >= dv.volumen) { alert(`El volumen a transferir tiene que ser mayor que 0 y menor que el de "${desde}" (${procesosFormatearNumero(dv.volumen)} m³).`); return false; }
+  const dd = Object.assign({}, p.diseno_data); dd.hojas = Object.assign({}, dd.hojas);
+  const info = dd.moduloCompacto || {}, W = info.ancho || null, nivel = info.nivelUtil || (info.alto ? info.alto * 0.87 : null);
+  const largoPara = (dimsAct, vNuevo) => dimsAct.largo && dimsAct.volumen ? dimsAct.largo * vNuevo / dimsAct.volumen : (W && nivel ? vNuevo / (W * nivel) : null);
+  const vD = dv.volumen - m3, vH = (hv.volumen || 0) + m3;
+  procesosPCEscribirDims(dd, desde, { volumen: vD, largo: largoPara(dv, vD) });
+  procesosPCEscribirDims(dd, hacia, { volumen: vH, largo: largoPara(hv, vH), ancho: hv.ancho || W, alto: hv.alto || info.alto });
+  [desde, hacia].forEach(n => { if (dd.hojas[n].plantaCompacta) dd.hojas[n].plantaCompacta = Object.assign({}, dd.hojas[n].plantaCompacta, { modificada: true }); });
+  if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
+  p.diseno_data = dd;
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  if (!sinAviso) renderProcesosStepContent();
+  return true;
+}
+async function procesosPCModuloAgregar(nombre, donante, m3) {
+  const p = procesosCurrentProyecto;
+  if (!nombre) { alert('Elegí la unidad que querés sumar al módulo.'); return; }
+  const dd = Object.assign({}, p.diseno_data); dd.hojas = Object.assign({}, dd.hojas);
+  dd.hojas[nombre] = Object.assign({}, dd.hojas[nombre], { material: 'planta_compacta' });
+  if (!dd.moduloCompacto) { const mod = procesosPCModulo(p, procesosPCDimsVivas); if (mod && (mod.ancho || mod.alto)) dd.moduloCompacto = { ancho: mod.ancho, alto: mod.alto, nivelUtil: mod.nivelUtil }; }
+  p.diseno_data = dd;
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  m3 = Number(m3);
+  if (donante && m3 > 0) { if (!(await procesosPCModuloTransferir(donante, nombre, m3, true))) { renderProcesosStepContent(); return; } }
+  else {
+    // sin donante: la unidad suma su propio volumen y el módulo se agranda
+    const d2 = Object.assign({}, p.diseno_data); d2.hojas = Object.assign({}, d2.hojas);
+    const v = procesosPCDimsVivas(nombre), info = d2.moduloCompacto || {}, W = info.ancho, nivel = info.nivelUtil || (info.alto ? info.alto * 0.87 : null);
+    procesosPCEscribirDims(d2, nombre, { largo: v.largo || (v.volumen && W && nivel ? v.volumen / (W * nivel) : null), ancho: v.ancho || W, alto: v.alto || info.alto });
+    if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
+    p.diseno_data = d2; await procesosSaveProyecto({ diseno_data: d2 }, p);
+  }
+  renderProcesosStepContent();
+}
+async function procesosPCModuloSacar(nombre) {
+  const p = procesosCurrentProyecto;
+  if (!confirm(`¿Sacar "${nombre}" del módulo compacto? Sus valores no cambian (si le habías dado volumen a esta unidad, el módulo queda más chico).`)) return;
+  const dd = Object.assign({}, p.diseno_data); dd.hojas = Object.assign({}, dd.hojas);
+  const h = Object.assign({}, dd.hojas[nombre]); delete h.material; delete h.plantaCompacta; dd.hojas[nombre] = h;
+  p.diseno_data = dd; await procesosSaveProyecto({ diseno_data: dd }, p);
+  renderProcesosStepContent();
+}
+function procesosPCModuloUI() {
+  const v = id => (document.getElementById(id) || {}).value;
+  procesosPCModuloAgregar(v('pc-mod-nueva'), v('pc-mod-donante'), v('pc-mod-m3a'));
+}
+function procesosPCModuloTransferirUI() {
+  const v = id => (document.getElementById(id) || {}).value;
+  procesosPCModuloTransferir(v('pc-mod-desde'), v('pc-mod-hacia'), v('pc-mod-m3t'));
+}
+// Tarjeta del Paso 2: compartimentos del módulo, totales y cómo agrandarlo / repartir volumen
+function procesosPCModuloCardHtml(p) {
+  const mod = procesosPCModulo(p, procesosPCDimsVivas);
+  if (!mod) return '';
+  const dd = p.diseno_data || {}, hojas = dd.hojas || {};
+  const TD = 'padding:3px 8px;border:1px solid var(--border);font-size:12px', fmt = v => v != null ? procesosFormatearNumero(v) : '—';
+  const miembrosN = mod.miembros.map(m => m.nombre);
+  const candidatas = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada && hojas[n].tipo !== 'auxiliar' && !procesosPCEsMiembro(hojas[n]));
+  const opt = arr => arr.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  return `<div class="card" style="margin:6px 0 12px;border-color:#1f4e9c">
+    <div class="card-label">🏭 Módulo compacto${mod.etiqueta ? ' — ' + esc(mod.etiqueta) : ''}</div>
+    <p class="hint" style="margin:0 0 6px">Las unidades de planta compacta forman un solo módulo (un tanque con compartimentos que comparten ancho y altura). Si le sumás una unidad el módulo se agranda; si le sacás volumen a una para dárselo a otra, no cambia de tamaño. El flowsheet y las vistas lo dibujan como un módulo.</p>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse"><tr><th style="${TD};background:var(--surface2)">Compartimento</th><th style="${TD};background:var(--surface2)">Volumen (m³)</th><th style="${TD};background:var(--surface2)">Largo (m)</th><th style="${TD};background:var(--surface2)"></th></tr>
+      ${mod.miembros.map(m => `<tr><td style="${TD}">${esc(m.nombre)}</td><td style="${TD};text-align:right">${fmt(m.volumen)}</td><td style="${TD};text-align:right">${fmt(m.largo)}</td><td style="${TD}"><button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:11px" onclick="procesosPCModuloSacar('${esc(m.nombre).replace(/'/g, "\\'")}')" title="Sacar esta unidad del módulo">✕</button></td></tr>`).join('')}
+      <tr><td style="${TD};font-weight:700">Módulo completo</td><td style="${TD};text-align:right;font-weight:700">${fmt(mod.miembros.reduce((a, m) => a + (m.volumen || 0), 0) || null)}</td><td style="${TD};text-align:right;font-weight:700">${fmt(mod.largoTotal)}</td><td style="${TD}">${esc(procesosPCModuloTxt(mod))}</td></tr></table></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px">
+      <b>Agregar unidad al módulo:</b>
+      <select id="pc-mod-nueva" style="width:auto">${candidatas.length ? opt(candidatas) : '<option value="">(no hay otras unidades)</option>'}</select>
+      tomando volumen de <select id="pc-mod-donante" style="width:auto"><option value="">— nadie (el módulo se agranda) —</option>${opt(miembrosN)}</select>
+      <input id="pc-mod-m3a" type="number" step="any" placeholder="m³" style="width:80px" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosPCModuloUI()">➕ Agregar</button>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px">
+      <b>Pasar volumen de una a otra:</b>
+      <select id="pc-mod-desde" style="width:auto">${opt(miembrosN)}</select> →
+      <select id="pc-mod-hacia" style="width:auto">${opt(miembrosN)}</select>
+      <input id="pc-mod-m3t" type="number" step="any" placeholder="m³" style="width:80px" />
+      <button class="btn btn-secondary btn-sm" onclick="procesosPCModuloTransferirUI()">⇄ Transferir</button>
+    </div>
+  </div>`;
+}
+
 // Modelos de planta compacta disponibles (documentos de referencia,
 // categoría plantas_compactas) con dimensiones ya extraídas — cacheado por
 // proyecto, igual criterio que _procesosBibliografiaCache.
@@ -12623,7 +12763,12 @@ async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre, silencio
   h.valores = nuevosValores;
   h.confirmada = false;
   h.plantaCompacta = { modelo: etiqueta, celdas: celdasAplicadas };
-  if (cfgId) { h.plantaCompacta.cfgId = cfgId; h.plantaCompacta.tipo = tipo; h.plantaCompacta.campos = campos; dd.pcModeloId = cfgId; } // el mismo modelo para todas las unidades de la planta
+  if (cfgId) {
+    h.plantaCompacta.cfgId = cfgId; h.plantaCompacta.tipo = tipo; h.plantaCompacta.campos = campos; dd.pcModeloId = cfgId; // el mismo modelo para todas las unidades de la planta
+    const mm = (await procesosPCCargar()).modelos.find(x => x.id === cfgId);
+    if (mm) dd.moduloCompacto = { modeloId: cfgId, etiqueta: procesosPCEtiqueta(mm), ancho: Number(mm.at) || Number(mm.ra) || null, alto: Number(mm.rh) || null, nivelUtil: (mm.vr && mm.rl && mm.ra) ? Math.round(mm.vr / (mm.rl * mm.ra) * 100) / 100 : null };
+    h.material = 'planta_compacta'; // aplicar un modelo = la unidad pasa a ser parte del módulo
+  }
   dd.hojas[nombre] = h;
   p.diseno_data = dd;
   await procesosSaveProyecto({ diseno_data: dd }, p);
@@ -12649,9 +12794,10 @@ async function procesosPCPromptTxt(nombre, h) {
     if (!(h.material === 'planta_compacta' || h.plantaCompacta)) return '';
     const cfg = await procesosPCCargar(); if (!cfg.modelos.length) return '';
     const tipo = procesosPCTipoUnidad(nombre, h.hojaBase); if (!tipo) return '';
+    const modTxt = (() => { const mod = procesosPCModulo(procesosCurrentProyecto); return mod && mod.miembros.length > 1 ? `Forma parte de UN módulo compacto junto con ${mod.miembros.map(x => x.nombre).filter(n => n !== nombre).join(', ')} (compartimentos que comparten ancho y altura: si se agrega una unidad al módulo, el módulo se agranda; si se le saca volumen a una para dárselo a otra, el módulo no cambia de tamaño). ` : ''; })();
     if (h.plantaCompacta && h.plantaCompacta.cfgId) {
       const m = cfg.modelos.find(x => x.id === h.plantaCompacta.cfgId);
-      return `PLANTA COMPACTA: esta unidad usa el ${h.plantaCompacta.modelo}${m ? ' — dimensiones de fábrica: ' + procesosPCDimsTxt(procesosPCDims(m, tipo)) : ''}. Las dimensiones son fijas (no se dimensiona libremente): respetalas. Si el usuario pide cambiar una, hacelo; el sistema le va a preguntar si quiere guardar ese valor en el modelo de la configuración.\n\n`;
+      return `PLANTA COMPACTA: ${modTxt}esta unidad usa el ${h.plantaCompacta.modelo}${m ? ' — dimensiones de fábrica: ' + procesosPCDimsTxt(procesosPCDims(m, tipo)) : ''}. Las dimensiones son fijas (no se dimensiona libremente): respetalas. Si el usuario pide cambiar una, hacelo; el sistema le va a preguntar si quiere guardar ese valor en el modelo de la configuración.\n\n`;
     }
     const disp = cfg.modelos.filter(m => Object.keys(procesosPCDims(m, tipo)).length).sort((a, b) => (Number(a.caudal) || 0) - (Number(b.caudal) || 0));
     if (!disp.length) return '';
@@ -14329,17 +14475,50 @@ function procesosFlowsheetFiguraSvg(tipoFig, x, y, w, h, color, etiquetaBarredor
 // dibujar {icono,etiqueta} — un ícono por unidad real (ej. 2 bombas = 2
 // íconos de bomba) hasta un tope ("cap"); si hay más, se deja un solo ícono
 // con "Nx TAG" (no tendría sentido, por ejemplo, dibujar 32 difusores).
+// Etiqueta de un equipo: la sigla, o con numeración tipo P&ID ("BS 101", "BS 101-102") cuando el flowsheet tiene listado de equipos
+function procesosFlowsheetTagTxt(eq, i, agrupado) {
+  if (eq.tagN == null) return agrupado ? `${eq.cantidad}× ${eq.tag}` : eq.tag;
+  const n = eq.cantidad || 1;
+  return agrupado ? `${n}× ${eq.tag} ${eq.tagN}-${eq.tagN + n - 1}` : `${eq.tag} ${eq.tagN + i}`;
+}
 function procesosFlowsheetExpandirIconos(lista, cap) {
   const out = [];
   (lista || []).forEach(eq => {
     const extra = { grupo: eq.grupo, zonaQ: eq.zonaQ, tipoOriginal: eq.tipoOriginal, especificacion: eq.especificacion, dosifNumero: eq.dosifNumero, dosifEtapa: eq.dosifEtapa, dosifQuimico: eq.dosifQuimico, aireNumero: eq.aireNumero, aireEtapa: eq.aireEtapa, origenEtapa: eq.origenEtapa, idReal: eq.id };
     if (eq.cantidad <= cap) {
-      for (let i = 0; i < eq.cantidad; i++) out.push(Object.assign({ icono: eq.icono, etiqueta: eq.tag, id: eq.cantidad > 1 ? `${eq.id}_${i}` : eq.id }, extra));
+      for (let i = 0; i < eq.cantidad; i++) out.push(Object.assign({ icono: eq.icono, etiqueta: procesosFlowsheetTagTxt(eq, i, false), id: eq.cantidad > 1 ? `${eq.id}_${i}` : eq.id }, extra));
     } else {
-      out.push(Object.assign({ icono: eq.icono, etiqueta: `${eq.cantidad}× ${eq.tag}`, id: eq.id }, extra));
+      out.push(Object.assign({ icono: eq.icono, etiqueta: procesosFlowsheetTagTxt(eq, 0, true), id: eq.id }, extra));
     }
   });
   return out;
+}
+// Caudal medio / pico del Paso 1 (m3/h) para el rótulo de ingreso del flowsheet
+function procesosFlowsheetCaudalesTxt(p) {
+  const out = { medio: null, pico: null };
+  const aM3h = (v, u) => { const x = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.')); if (!isFinite(x) || x <= 0) return null; const t = procesosNormTxt(u || ''); return /\/\s*d\b|\/dia|\/d$/.test(t) ? x / 24 : (/l\/s|lps/.test(t) ? x * 3.6 : x); };
+  ((p.info_cliente && p.info_cliente.corrientes) || []).forEach(c => Object.entries(c.campos || {}).forEach(([k, v]) => {
+    if (!v || typeof v !== 'object' || v.valor == null || v.valor === '') return;
+    const n = procesosNormTxt(k); if (!/caudal/.test(n)) return;
+    const q = aM3h(v.valor, v.unidad); if (q == null) return;
+    if (/pico|max|punta/.test(n)) out.pico = (out.pico || 0) + q; else if (out.medio == null || /medi|prom|dise/.test(n)) out.medio = (out.medio || 0) + q;
+  }));
+  const r = x => Math.round(x * 100) / 100;
+  return [out.medio != null ? `Q medio = ${r(out.medio)} m³/h` : '', out.pico != null ? `Q pico = ${r(out.pico)} m³/h` : ''].filter(Boolean);
+}
+// Listado de equipos (como la tabla del flowsheet): el último dibujo lo deja en p._pfListado
+function procesosFlowsheetListadoHtml(p) {
+  const L = p && p._pfListado; if (!L || !L.length) return '';
+  const TD = 'padding:3px 8px;border:1px solid var(--border);font-size:12px';
+  return `<div style="margin-top:10px"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px"><b style="font-size:13px">Listado de equipos</b><button class="btn btn-secondary btn-sm" onclick="procesosFlowsheetListadoXlsx()">⬇ Descargar listado (Excel)</button></div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%"><tr>${['Ítem', 'Descripción', 'Tag', 'Cant.', 'Ubicación', 'Marca / modelo', 'Especificación'].map(h => `<th style="${TD};background:var(--surface2);text-align:left">${h}</th>`).join('')}</tr>
+    ${L.map((r, i) => `<tr><td style="${TD}">${String((i + 1) * 10).padStart(3, '0')}</td><td style="${TD}">${esc(r.desc)}</td><td style="${TD};font-weight:600">${esc(r.tag)}</td><td style="${TD};text-align:center">${r.cant}</td><td style="${TD}">${esc(r.ubic)}</td><td style="${TD}">${esc(r.modelo || '')}</td><td style="${TD}">${esc(r.esp || '')}</td></tr>`).join('')}</table></div></div>`;
+}
+function procesosFlowsheetListadoXlsx() {
+  const p = _pfAdapter && _pfAdapter.modelo; const L = p && p._pfListado; if (!L || !L.length) return;
+  const filas = [['Ítem', 'Descripción', 'Tag', 'Cantidad', 'Ubicación', 'Marca / modelo', 'Especificación']].concat(L.map((r, i) => [String((i + 1) * 10).padStart(3, '0'), r.desc, r.tag, r.cant, r.ubic, r.modelo || '', r.esp || '']));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(filas), 'Listado de equipos');
+  XLSX.writeFile(wb, `Listado de equipos - ${(p && p.nombre) || 'flowsheet'}.xlsx`);
 }
 // Posiciones de equipos/etapas que el usuario movió a mano en el Flowsheet
 // (arrastre) — un offset {x,y} sumado a la posición calculada automáticamente,
@@ -14911,7 +15090,7 @@ function procesosFlowsheetSvg(p) {
       // etiqueta" en el panel de equipos) — pisa la sigla auto-derivada del
       // catálogo sin tocar qué ícono le corresponde.
       if (eq.etiquetaCustom) info.tag = eq.etiquetaCustom;
-      return Object.assign({ id: eq.id, cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo, especificacion: eq.especificacion, grupo: eq.grupo, origenEtapa: nombre }, info);
+      return Object.assign({ id: eq.id, cantidad: eq.cantidad || 1, tipoOriginal: eq.tipo, especificacion: eq.especificacion, grupo: eq.grupo, origenEtapa: nombre, modeloTxt: eq.modelo || '' }, info);
     });
     // Si el proyecto tiene una etapa que ES la zona de químicos (ej. "Zona de químicos", "Sala de preparación y dosificación"), todos sus equipos
     // son de la zona (aunque sean agitadores, tanques sin nombre de químico, etc.) y la etapa en sí no se dibuja como una unidad más.
@@ -15027,6 +15206,29 @@ function procesosFlowsheetSvg(p) {
   const giDe = {};
   grupos.forEach((g, gi) => g.instancias.forEach(i => { giDe[i.nombre] = gi; }));
   todas.forEach(e => { e.gi = giDe[e.nombre]; e.esLodos = e.gi != null && grupos[e.gi].linea === 'lodos'; e.entradas = flujo.porInstancia[e.nombre] || []; });
+  // Módulo compacto: las unidades de planta compacta van pegadas, con altura común y ancho según su largo, dentro de un mismo contorno
+  const hojasPF = (p.diseno_data && p.diseno_data.hojas) || {};
+  todas.forEach(e => { e._mod = !e.zonaQ && procesosPCEsMiembro(hojasPF[e.nombre]); });
+  const modInfoPF = procesosPCModulo(p);
+  const modLiq = todas.filter(e => e._mod && !e.esLodos && e.tipoFig !== 'caja' && e.tipoFig !== 'maquina');
+  if (modLiq.length) {
+    const PXM = 24, hCom = Math.max(...modLiq.map(e => e.figH));
+    modLiq.forEach(e => { const m = modInfoPF && modInfoPF.miembros.find(x => x.nombre === e.nombre); e.figW = Math.max(50, Math.round(((m && m.largo) || 3) * PXM)); e.figH = hCom; e._minW = 150; });
+  }
+  // Tags numerados y listado de equipos (por defecto, cuando hay módulo compacto)
+  p._pfListado = null;
+  if (layout.listado != null ? !!layout.listado : !!modInfoPF) {
+    const filas = []; let area = 0;
+    const numerar = (ubic, arr) => {
+      const eqs = (arr || []).filter(q => q.tag && !/__cont$/.test(String(q.id)));
+      if (!eqs.length) return;
+      area++; let n = 0;
+      eqs.forEach(q => { q.tagN = area * 100 + n + 1; n += q.cantidad || 1; filas.push({ ubic, eq: q }); });
+    };
+    todas.filter(e => !e.zonaQ).forEach(e => numerar(e.nombre, e.equipos));
+    numerar('Zona de soplantes', soplantesGlobal); numerar('Zona de químicos', quimicosGlobal);
+    p._pfListado = filas.map(({ ubic, eq }) => ({ ubic, desc: eq.tipoOriginal || eq.tag, tag: procesosFlowsheetTagTxt(eq, 0, false).replace(/^\d+× /, '') + ((eq.cantidad || 1) > 1 ? '-' + (eq.tagN + eq.cantidad - 1) : ''), cant: eq.cantidad || 1, modelo: eq.modeloTxt || '', esp: eq.especificacion || '' }));
+  }
   // Calcula ancho/alto final de la caja de una etapa (antes de dibujar, para
   // poder armar todo el layout general del diagrama).
   const medir = et => {
@@ -15039,7 +15241,7 @@ function procesosFlowsheetSvg(p) {
     const celdaAfuera = IC_OUT + 30 + (afueraExpandido.some(eq => eq.dosifNumero || eq.aireNumero) ? 11 : 0);
     const afueraCols = Math.max(1, Math.min(afueraN, 3));
     const anchoAfuera = afueraN ? afueraCols * celdaAfuera : 0;
-    const w = Math.max(BOX_MIN_W, et.figW + PAD * 2, anchoAfuera + PAD * 2);
+    const w = Math.max(et._minW || BOX_MIN_W, et.figW + PAD * (et._mod ? 0 : 2), anchoAfuera + PAD * 2);
     const filasAfuera = afueraN ? Math.ceil(afueraN / afueraCols) : 0;
     const altoAfuera = filasAfuera * celdaAfuera;
     let h = HEADER_H + (et.dimsTxt ? 14 : 0);
@@ -15057,6 +15259,7 @@ function procesosFlowsheetSvg(p) {
     return { w, h: Math.round(h), hFigura: Math.round(hFigura) };
   };
   todas.forEach(et => Object.assign(et, medir(et)));
+  modLiq.forEach(e => { e.figW = e.w; }); // el compartimento ocupa todo el ancho de su caja: los vecinos quedan pegados, como un solo tanque
   // "Zona de químicos": una caja más, medida con el mismo medir() genérico
   // (tipoFig 'caja' — grilla de íconos, sin figura de tanque), pero
   // dibujada aparte más abajo (ver más abajo) en vez de entrar en liq/lod,
@@ -15110,7 +15313,8 @@ function procesosFlowsheetSvg(p) {
   colsLiq.forEach((col, ci) => {
     const cw = Math.max(...col.map(e => e.w));
     col.forEach((e, r) => { e._col = ci; e._rank = r; e._colX = xc; e._colW = cw; e._liqX = xc + (cw - e.w) / 2; });
-    xc += cw + gapX;
+    const sigCol = colsLiq[ci + 1];
+    xc += cw + ((col.every(e => e._mod) && sigCol && sigCol.every(e => e._mod)) ? 0 : gapX); // compartimentos del módulo compacto: pegados
   });
   const xLiq = i => liq[i]._liqX;
   let x0 = liq.length ? xLiq(0) : padSides;
@@ -15483,10 +15687,22 @@ function procesosFlowsheetSvg(p) {
     const salida = puertoSalidaXY(et, x, y);
     const ax1 = salida.x, ax2 = x + et.w + gapX, ay = salida.y;
     if (!bombas.length) svg += puertoMarcadorSvg(et.nombre + '__salida', ax1, ay);
+    // ingreso de líquido a la primera unidad (con el caudal del Paso 1, si está)
+    if (et._col === 0 && et._rank === 0 && !et.esLodos && layout.ingreso !== false) {
+      const yIn = y + HEADER_H + (et.dimsTxt ? 14 : 0) + 6, qTxt = procesosFlowsheetCaudalesTxt(p);
+      svg += `<line x1="${x - 90}" y1="${yIn}" x2="${x + 4}" y2="${yIn}" stroke="${magenta}" stroke-width="2.5" marker-end="url(#pfd2-arrow)"/>`;
+      marcaTxtSvg('ingreso_t', x - 90, yIn - 8 - qTxt.length * 11, 'INGRESO LÍQUIDO', `fill="${c.text}" font-size="10" font-weight="700"`, false);
+      qTxt.forEach((t, i) => marcaTxtSvg('ingreso_q' + i, x - 90, yIn - 8 - (qTxt.length - 1 - i) * 11, t, `fill="${c.text2}" font-size="9"`, false));
+    }
     const sigs = sigsLiq(et);
     if (sigs.length) {
       sigs.forEach(sig => {
         const sigPos = posLiq(sig);
+        // compartimentos vecinos del módulo compacto: el líquido pasa por el tabique (flechita corta), sin cañería
+        if (et._mod && sig._mod && sig._col === et._col + 1 && sig._rank === et._rank && Math.abs(sig._colX - (et._colX + et._colW)) < 2) {
+          svg += `<path d="M${sigPos.x - 10},${ay} H${sigPos.x + 10}" fill="none" stroke="${magenta}" stroke-width="2.2" marker-end="url(#pfd2-arrow)"/>`;
+          return;
+        }
         const sigPorArriba = !!CONTIENE_AGUA_TOP[sig.tipoFig];
         const sigX = sigPos.x, sigY = sigPos.y;
         const mismaBanda = sig._rank === et._rank;
@@ -15516,6 +15732,17 @@ function procesosFlowsheetSvg(p) {
       marcaTxtSvg('ef_' + et.nombre, (ax1 + fx2) / 2, ay - 8, 'Efluente final', `fill="${verdeOk}" font-size="10" font-weight="600"`, true);
     }
   });
+  // Contorno único del módulo compacto (una vez por tramo de compartimentos pegados) con su rótulo y medidas
+  { const tramos = []; let tr = null;
+    colsLiq.forEach(col => { if (col.every(e => e._mod)) { if (!tr) { tr = []; tramos.push(tr); } tr.push(...col); } else tr = null; });
+    tramos.forEach((t, ri) => {
+      const x1 = Math.min(...t.map(e => e._x)) - 3, x2 = Math.max(...t.map(e => e._x + e.w)) + 3, y1 = Math.min(...t.map(e => e._y)) - 6, y2 = Math.max(...t.map(e => e._y + e.hFigura)) + 4;
+      svg += `<rect x="${x1}" y="${y1}" width="${x2 - x1}" height="${y2 - y1}" rx="3" fill="none" stroke="#1f4e9c" stroke-width="2.6" pointer-events="none"/>`;
+      marcaTxtSvg('mod_t' + ri, (x1 + x2) / 2, y1 - 22, 'MÓDULO COMPACTO', 'fill="#1f4e9c" font-size="15" font-weight="700"', true);
+      const dTxt = [modInfoPF && modInfoPF.etiqueta, modInfoPF && procesosPCModuloTxt(modInfoPF)].filter(Boolean).join(' · ');
+      if (dTxt && ri === 0) marcaTxtSvg('mod_d' + ri, (x1 + x2) / 2, y1 - 8, dTxt, `fill="${c.text2}" font-size="10"`, true);
+    });
+  }
   lod.forEach((et, k) => {
     const off = procesosFlowsheetOffset(layout, 'etapas', et.nombre);
     const x = xLod(k) + off.x, y = row2y - et.hFigura + profundidadPx(et) + off.y;
@@ -15644,7 +15871,7 @@ function procesosStep3DiagramaRender() {
   if (!svg) { el.innerHTML = '<p class="hint">Confirmá al menos una etapa para ver el diagrama.</p>'; return; }
   const zoomId = 'procesos-step3-diagrama';
   const scrollPrevio = procesosDiagramaScrollGuardar(el);
-  el.innerHTML = procesosDiagramaZoomToolbarHtml(zoomId) + procesosDiagramaZoomWrapHtml(zoomId, svg) + `<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>`;
+  el.innerHTML = procesosDiagramaZoomToolbarHtml(zoomId) + procesosDiagramaZoomWrapHtml(zoomId, svg) + `<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="procesosStep3DiagramaDescargar()">⬇ Descargar como imagen (PNG)</button>` + (_procesosDiagramaModo === 'flowsheet' ? procesosFlowsheetListadoHtml(procesosCurrentProyecto) : '');
   procesosDiagramaScrollRestaurar(el, scrollPrevio);
   if (_procesosDiagramaModo === 'flowsheet') {
     procesosFlowsheetDragInit(el, {
@@ -16815,7 +17042,7 @@ async function flowsheetsGenerarCore(p) {
   showMsg(statusId, 'loading', 'Generando flowsheet con IA...');
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('API key no disponible.');
-  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3,"acometida":null},"equipos":[{"tipo":"Bomba sumergible","cantidad":2,"especificacion":"","grupo":""}]}]}\n\nReglas:\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores. "acometida" es la profundidad (m) a la que entra el caño de ingreso respecto del nivel de terreno (típico en un pozo de bombeo enterrado) — solo si el texto la menciona explícitamente (ej. "H acometida", "cota de ingreso", "profundidad de entrada"), si no dejala en null.\n- "equipos": equipos de esa unidad con su cantidad y su "especificacion" (texto con los datos que se den: volumen en litros o m3 de un tanque, sus medidas si las dan (diámetro, alto, largo, ancho en metros) y si una cisterna es horizontal o vertical, caudal o rango de caudal de una bomba, potencia, marca/modelo, material; "" si no hay datos), tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- ZONA / SALA DE QUÍMICOS: si el texto describe una zona o sala de químicos (tanques de químicos, bins/maxibidones, cisternas, bombas dosificadoras o neumáticas, agitadores, sistemas de dosificación), armala como UNA etapa llamada "Zona de químicos" ("linea":"liquido", con sus dimensiones largo/ancho en metros si se dan) con TODOS esos equipos adentro. Cada equipo lleva "grupo" = el nombre del químico al que pertenece (ej. "Floculante", "Cloruro férrico", "Coagulante", "Antiespumante", "Ácido sulfúrico", "Cal", "Urea"): el tanque / bin / cisterna, su agitador y su bomba del mismo químico comparten el mismo "grupo". Un tanque o bin es un equipo ("tipo":"Tanque" / "Bin (maxibidón)" / "Tanque cisterna") con el volumen en su especificación (ej. "500 litros", "10 m3") y su cantidad; una bomba es otro equipo ("Bomba dosificadora" / "Bomba neumática") con su caudal en la especificación; un agitador es otro ("Agitador") con su cantidad. En el resto de las etapas "grupo" va vacío.
+  const prompt = `Sos un ingeniero de procesos especializado en tratamiento de efluentes/agua. A partir de la siguiente información de un proyecto YA DISEÑADO (por vos o por otra persona) extraé la secuencia de unidades/etapas de tratamiento (línea líquida y línea de lodos si corresponde) y los equipos de cada una, para armar un flowsheet.\n\n${textoLibre ? 'Texto provisto:\n' + textoLibre + '\n\n' : ''}${archivosTxt}Respondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"etapas":[{"nombre":"Pozo de bombeo","linea":"liquido","origenLodos":null,"dimensiones":{"largo":null,"ancho":null,"alto":null,"diametro":null,"volumen":12.3,"acometida":null},"equipos":[{"tipo":"Bomba sumergible","cantidad":2,"especificacion":"","grupo":""}],"compacta":false}]}\n\nReglas:\n- "compacta": true SOLO si la unidad es un compartimento de un MÓDULO / PLANTA COMPACTA (un solo tanque prefabricado dividido en compartimentos: digestor, cámara anóxica, reactor aeróbico, sedimentador, cámara de cloración...); false para las unidades separadas (pozo de bombeo, deshidratación, zonas de químicos...). Si hay un módulo compacto, poné en las "dimensiones" de cada compartimento su largo / ancho / alto / volumen si se dan.\n- "nombre": nombre técnico real de la unidad (ej. "Pozo de bombeo", "Reactor anóxico", "Sedimentador secundario", "DAF", "Digestor de lodos", "Deshidratación de lodos") — vocabulario técnico estándar de tratamiento de efluentes, nunca nombres genéricos como "Etapa 1".\n- "linea": "liquido" para las unidades de la línea líquida, en el orden real del proceso; "lodos" para las de tratamiento de lodos.\n- "origenLodos": SOLO para etapas de línea "lodos" que reciben lodos de una etapa líquida puntual — el "nombre" EXACTO de esa etapa líquida de origen; si es una etapa de lodos que sigue a otra etapa de lodos (ej. deshidratación después de digestor), dejalo en null.\n- "dimensiones": las que tengas del proyecto, en metros/m3 — las que no tengas dejalas en null, no inventes valores. "acometida" es la profundidad (m) a la que entra el caño de ingreso respecto del nivel de terreno (típico en un pozo de bombeo enterrado) — solo si el texto la menciona explícitamente (ej. "H acometida", "cota de ingreso", "profundidad de entrada"), si no dejala en null.\n- "equipos": equipos de esa unidad con su cantidad y su "especificacion" (texto con los datos que se den: volumen en litros o m3 de un tanque, sus medidas si las dan (diámetro, alto, largo, ancho en metros) y si una cisterna es horizontal o vertical, caudal o rango de caudal de una bomba, potencia, marca/modelo, material; "" si no hay datos), tal como se los menciona (ej. "Bomba centrífuga sumergible", "Soplador", "Mezclador sumergible", "Sensor de nivel alto", "Difusores de membrana") — si no hay info de equipos de una unidad, array vacío.\n- ZONA / SALA DE QUÍMICOS: si el texto describe una zona o sala de químicos (tanques de químicos, bins/maxibidones, cisternas, bombas dosificadoras o neumáticas, agitadores, sistemas de dosificación), armala como UNA etapa llamada "Zona de químicos" ("linea":"liquido", con sus dimensiones largo/ancho en metros si se dan) con TODOS esos equipos adentro. Cada equipo lleva "grupo" = el nombre del químico al que pertenece (ej. "Floculante", "Cloruro férrico", "Coagulante", "Antiespumante", "Ácido sulfúrico", "Cal", "Urea"): el tanque / bin / cisterna, su agitador y su bomba del mismo químico comparten el mismo "grupo". Un tanque o bin es un equipo ("tipo":"Tanque" / "Bin (maxibidón)" / "Tanque cisterna") con el volumen en su especificación (ej. "500 litros", "10 m3") y su cantidad; una bomba es otro equipo ("Bomba dosificadora" / "Bomba neumática") con su caudal en la especificación; un agitador es otro ("Agitador") con su cantidad. En el resto de las etapas "grupo" va vacío.
 - Ordená "etapas" en el orden real del proceso (línea líquida en su secuencia real, seguida de las de lodos).\n- Si la información es insuficiente para armar ni una etapa, respondé {"etapas":[]}.`;
   // Timeout propio (AbortController) — sin esto, si el pedido queda colgado
   // (extensión del navegador, red rara, etc.) el botón se queda "Generando..."
@@ -16872,6 +17099,7 @@ async function flowsheetsGenerarCore(p) {
     // (si no, procesosStep3EtapasConfirmadas las filtra todas y el flowsheet
     // queda vacío — ver comentario de ese bug en el commit de este cambio).
     hojas[nombre] = { tipo:'etapa', hojaBase: nombre, seleccionada: true, confirmada: true, linea: et.linea === 'lodos' ? 'lodos' : 'liquido', origenLodos: et.origenLodos || null, valoresConEtiqueta };
+    if (et.compacta === true) hojas[nombre].material = 'planta_compacta'; // parte de un módulo compacto: se dibuja como un solo tanque con compartimentos
     equiposEtapas[nombre] = { equipos: (et.equipos||[]).map(eq => ({ id: procesosNuevoId(), tipo: eq.tipo || '', cantidad: eq.cantidad != null ? Number(eq.cantidad) : 1, especificacion: String(eq.especificacion || '').trim(), grupo: String(eq.grupo || '').trim() })) };
   });
   // Deshacer: guarda el estado ANTERIOR a pisarlo con lo recién generado —
@@ -17000,7 +17228,7 @@ function pvUnidades(p) {
   const setPar = procesosGruposParalelo(p);
   const out = nombres.filter(n => n !== zonaNombre).map(n => {
     const b = pvBaseUnidad(p, n, hojas[n].hojaBase);
-    return { nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar) };
+    return { nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar), mod: procesosPCEsMiembro(hojas[n]) };
   });
   // zona de químicos: la etapa que la representa (con sus medidas) o, si no hay, una sala dimensionada según los químicos que haya
   const grupos = pfQuimGrupos(pfQuimEntradas(p), pvOvEq(p));
@@ -17198,7 +17426,11 @@ function pvCotaSvg(c, fx, fy, sel) {
 function pvPlantaLayout(p, unidades) {
   const GAP = 2.5, pos = {};
   const off = pvEstado(p, 'planta').pos;
-  const filas = [unidades.filter(u => u.linea === 'liquido'), unidades.filter(u => u.linea === 'lodos'), unidades.filter(u => u.sala)];
+  // el digestor (línea de lodos) que es parte del módulo compacto va con los compartimentos del módulo, al principio
+  const digMod = unidades.filter(u => u.mod && u.linea === 'lodos' && !u.sala), liqU = unidades.filter(u => u.linea === 'liquido');
+  const iPrimMod = liqU.findIndex(u => u.mod);
+  const liqConDig = digMod.length ? (iPrimMod >= 0 ? liqU.slice(0, iPrimMod).concat(digMod, liqU.slice(iPrimMod)) : liqU.concat(digMod)) : liqU;
+  const filas = [liqConDig, unidades.filter(u => u.linea === 'lodos' && !digMod.includes(u)), unidades.filter(u => u.sala)];
   let yFila = 0;
   filas.forEach(fila => {
     if (!fila.length) return;
@@ -17207,11 +17439,12 @@ function pvPlantaLayout(p, unidades) {
     const colAlto = col => col.reduce((s, u) => s + pvPAY(u, pvRotN(p, u.nombre)), 0) + GAPV * (col.length - 1);
     const hMax = Math.max(...cols.map(colAlto));
     let x = 0;
-    cols.forEach(col => {
+    cols.forEach((col, ci) => {
       const cw = Math.max(...col.map(u => pvPAX(u, pvRotN(p, u.nombre))));
-      let y = yFila + (hMax - colAlto(col)) / 2;
+      const esMod = col.every(u => u.mod), sigMod = cols[ci + 1] && cols[ci + 1].every(u => u.mod);
+      let y = yFila + (esMod ? 0 : (hMax - colAlto(col)) / 2); // compartimentos del módulo: alineados arriba
       col.forEach(u => { const r = pvRotN(p, u.nombre); pos[u.nombre] = { x: x + (cw - pvPAX(u, r)) / 2, y }; y += pvPAY(u, r) + GAPV; });
-      x += cw + GAP;
+      x += cw + ((esMod && sigMod) ? 0.05 : GAP); // y pegados entre sí
     });
     yFila += hMax + GAP * 1.6;
   });
@@ -17284,6 +17517,7 @@ function pvPlantaSvg(p, unidades) {
     const o = lod[0].origen ? liq.find(u => u.nombre === lod[0].origen) : liq[liq.length - 1];
     if (o) { const co = cen(o), cl = cen(lod[0]); const l0 = pos[lod[0].nombre], derecha = co.x > l0.x + axr(lod[0]); sv += `<path d="M${px(co.x)},${py(pos[o.nombre].y + ayr(o))} V${py(cl.y)} H${px(derecha ? l0.x + axr(lod[0]) : l0.x)}" fill="none" stroke="${PV_C.lodos}" stroke-width="2" marker-end="url(#${pvP()}flecha-l)"/>`; }
   }
+  const modIdx = {}; unidades.filter(u => u.mod).forEach((u, i) => { modIdx[u.nombre] = i; });
   unidades.forEach(u => {
     const x = pos[u.nombre].x, y = pos[u.nombre].y, w = axr(u), hh = ayr(u);
     const stroke = u.sala ? PV_C.sala : PV_C.linea, fill = u.sala ? '#fbf6e9' : PV_C.relleno, dash = u.sala ? ' stroke-dasharray="7 4"' : '';
@@ -17298,7 +17532,7 @@ function pvPlantaSvg(p, unidades) {
       g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.ancho : u.m.largo} m`);
       g += pvCotaV(py(y), py(y + hh), px(x + w) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.largo : u.m.ancho} m`, 0.2);
     }
-    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2) + roff('u:' + u.nombre).x * s}" y="${py(y) - 8 + roff('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
+    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2) + roff('u:' + u.nombre).x * s}" y="${py(y) - 8 - (u.mod && modIdx[u.nombre] % 2 ? 13 : 0) + roff('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`; // compartimentos pegados del módulo: los rótulos van alternados para no pisarse
     if (u.par) g += `<text x="${px(x + w / 2)}" y="${py(y) - 22}" text-anchor="middle" font-size="9.5" font-style="italic" fill="${PV_C.cota}" font-family="Arial,sans-serif">⇄ en paralelo</text>`;
     sv += `<g data-pv-unidad="${esc(u.nombre)}" data-pv-nombre="${esc(pvTitulo(p, u.nombre))}" style="cursor:move">${g}</g>`;
     const z = zi[u.nombre];
@@ -17318,6 +17552,13 @@ function pvPlantaSvg(p, unidades) {
       z.labels.forEach(l => { const lo = roff(l.key); sv += `<text data-pv-rotulo="${esc(l.key)}" x="${px(l.x) + lo.x * s}" y="${py(l.y) + 11 + lo.y * s}" text-anchor="middle" font-size="9" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvRot(p, l.key, l.texto))}${l.vol ? ' · ' + pvEsc(l.vol) : ''}</text>`; });
     }
   });
+  { const um = unidades.filter(u => u.mod && !u.sala && pos[u.nombre]);
+    if (um.length) {
+      const x1 = Math.min(...um.map(u => pos[u.nombre].x)), x2 = Math.max(...um.map(u => pos[u.nombre].x + axr(u))), y1 = Math.min(...um.map(u => pos[u.nombre].y)), y2 = Math.max(...um.map(u => pos[u.nombre].y + ayr(u)));
+      const mod = procesosPCModulo(p), dTxt = [mod && mod.etiqueta, mod && procesosPCModuloTxt(mod)].filter(Boolean).join(' · ');
+      sv += `<rect x="${px(x1) - 4}" y="${py(y1) - 4}" width="${(x2 - x1) * s + 8}" height="${(y2 - y1) * s + 8}" rx="3" fill="none" stroke="#1f4e9c" stroke-width="2.4" stroke-dasharray="9 4" pointer-events="none"/>`;
+      sv += `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 36}" text-anchor="middle" font-size="13" font-weight="700" fill="#1f4e9c" font-family="Arial,sans-serif">MÓDULO COMPACTO</text>${dTxt ? `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 22}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(dTxt)}</text>` : ''}`;
+    } }
   vp.cotas.forEach(c => { sv += pvCotaSvg(c, px, py, c.id === _pvCotaSel); });
   pvCortesLista(p).forEach(c => { sv += pvCortePlantaSvg(c, px, py, s, !!(_pvSel && _pvSel.kind === 'corte' && _pvSel.key === c.id)); });
   if (_pvCorteP1) sv += `<circle cx="${px(_pvCorteP1.x)}" cy="${py(_pvCorteP1.y)}" r="4" fill="#c62828"/>`;
@@ -17346,10 +17587,10 @@ function pvCorteSvg(p, unidades) {
   const lista = unidades.filter(u => (!u.sala || u.grupos) && (_pvCorteLodos || u.linea !== 'lodos'));
   if (!lista.length) return null;
   const GAP = 2.2; let x = 0;
-  const items = lista.map(u => {
+  const items = lista.map((u, iu) => {
     const ext = u.grupos ? Math.max(pvAnchoX(u), Math.max(...pvQuimDisponer(u.grupos, pvAnchoX(u)).map(i => i.x + i.gw)) + 0.4) : pvAnchoX(u);
     const o = pvOff(vc.pos, u.nombre);
-    const it = { u, x: x + o.x, w: pvAnchoX(u) }; x += ext + GAP;
+    const it = { u, x: x + o.x, w: pvAnchoX(u) }; x += ext + ((u.mod && lista[iu + 1] && lista[iu + 1].mod) ? 0.05 : GAP); // compartimentos del módulo compacto: pegados
     it.zona = u.grupos ? pvQuimCorteItems(u, it.x, vc.eqpos) : null;
     return it;
   });
@@ -18097,7 +18338,7 @@ function renderFlowsheetsDiagrama() {
   if (!svg) { el.innerHTML = '<p class="hint">Generá el flowsheet con el botón de arriba para verlo acá.</p>'; return; }
   const zoomId = 'flowsheets-diagrama-svg';
   const scrollPrevio = procesosDiagramaScrollGuardar(el);
-  el.innerHTML = procesosDiagramaZoomToolbarHtml(zoomId) + procesosDiagramaZoomWrapHtml(zoomId, svg) + `<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="flowsheetsDescargar()">⬇ Descargar como imagen (PNG)</button>`;
+  el.innerHTML = procesosDiagramaZoomToolbarHtml(zoomId) + procesosDiagramaZoomWrapHtml(zoomId, svg) + `<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="flowsheetsDescargar()">⬇ Descargar como imagen (PNG)</button>` + procesosFlowsheetListadoHtml(p);
   procesosDiagramaScrollRestaurar(el, scrollPrevio);
   procesosFlowsheetDragInit(el, {
     modelo: p,
