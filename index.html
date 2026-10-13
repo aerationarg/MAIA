@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.99</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.100</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.99</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.100</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11809,7 +11809,6 @@ function procesosStep2AbrirHoja(nombre) {
   procesosStep2PropagarCadena(nombre);
   procesosStep2RenderHojaPanel();
   procesosStep2AsegurarChequeoReq(nombre);
-  procesosStep2AutoCompletarSiHaceFalta(nombre);
 }
 
 function procesosStep2CerrarHoja() {
@@ -11908,25 +11907,15 @@ async function procesosStep2RevisarYCompletar(nombre, esAuto) {
   dd.hojas[nombre] = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre], { autoCompletado: true });
   p.diseno_data = dd; // se persiste junto con el resto en procesosStep2ChatSend
 
-  if (faltantes.length) {
-    const ok = await procesosStep2ChatSend(nombre, 'Completá los datos que todavía falten con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa — probando distintos valores si hace falta hasta que los resultados calculados den dentro de los rangos esperados. IMPORTANTE: si el primer valor que adoptás para un dato de dimensionamiento (por ejemplo el volumen de un reactor, una superficie, una cantidad de unidades) hace que otros parámetros calculados queden fuera de su rango normal o límite, NO lo dejes así — adoptá un valor mayor o menor (aunque sea bastante distinto del que calculaste al principio) hasta que el conjunto cumpla; usá "buscar_objetivo" o probá varios valores en tus acciones. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real. Contame brevemente qué adoptaste y por qué.');
-    if (!ok) return;
-    // El chat a veces "dice" en el texto que completó una celda pero no
-    // emite la acción "set" correspondiente — como una celda editable
-    // vacía en 0 no viola ningún rango, el barrido de abajo (que solo
-    // mira errores/fuera de rango) no se entera de que en realidad no
-    // quedó nada aplicado. Se verifica acá con las MISMAS celdas
-    // detectadas como faltantes al principio, y si siguen igual, se le
-    // pide de nuevo puntualmente (una sola vez).
-    const hfPost = procesosStep2GetHF(nombre);
-    const siguenFaltando = hfPost ? faltantes.filter(c => procesosStep2CeldaFalta(hfPost, c)) : [];
-    if (siguenFaltando.length) {
-      const lista = siguenFaltando.map(c => `- ${c.ref} ${c.label}`).join('\n');
-      const ok2 = await procesosStep2ChatSend(nombre, `Revisé la planilla después de tu respuesta anterior y estas celdas siguen vacías, en 0 o con error, aunque tu mensaje decía que las habías completado — el cambio no quedó aplicado de verdad:\n${lista}\n\nVolvé a fijarlas ahora mismo con una acción "set" en tu respuesta (no alcanza con mencionarlo en el texto).`);
-      if (!ok2) return;
-    }
-  }
-  await procesosStep2BarridoVerificacion(nombre);
+  // Una sola pasada: la IA completa lo que falta Y deja los resultados dentro de rango en el mismo pedido (probando valores con el cálculo real, sin mensajes extra).
+  const hojaAhora = (p.diseno_data.hojas || {})[nombre] || {};
+  const reqNo = ((hojaAhora.chequeoReq && hojaAhora.chequeoReq.items) || []).map(it => ({ it, r: procesosStep2EvaluarReq(hf, model, it) })).filter(x => x.r.estado === 'no_cumple');
+  const partes = [];
+  if (faltantes.length) partes.push('DATOS QUE FALTAN (vacíos, en 0 o con error):\n' + faltantes.map(c => `- ${c.ref} ${c.label}`).join('\n') + '\nCompletalos con los parámetros del Paso 1 donde corresponda, o con un valor razonable dentro del rango normal si no hay una fuente directa. Revisá también las celdas calculadas que dieron 0, vacío o error: si son solo una referencia a otra hoja de parámetros base (no un cálculo real combinando datos de esta hoja) y su significado coincide con un dato que ya tenés del Paso 1, reemplazá esa referencia por el dato real.');
+  if (problemasIniciales.length) partes.push('RESULTADOS CON ERROR O FUERA DE RANGO (con los valores actuales):\n' + problemasIniciales.map(x => `- ${x.ref} ${x.label}: ${x.tipo === 'error' ? 'da ' + x.valorTxt : x.valorTxt + (x.unidad ? ' ' + x.unidad : '') + ', fuera de su ' + (x.tipo === 'limite' ? 'rango límite' : 'rango normal') + ' (' + x.rango + ')'}`).join('\n'));
+  if (reqNo.length) partes.push('REQUERIMIENTOS DEL PLIEGO QUE NO SE CUMPLEN:\n' + reqNo.map(({ it, r }) => `- ${it.requerimiento}: ${r.c.ref} ${r.c.label} = ${procesosFormatearNumero(r.v)}${r.c.unidad ? ' ' + r.c.unidad : ''}, pedido ${procesosStep2ReqRangoTxt(it)}`).join('\n'));
+  const msg = 'Definí los valores de esta unidad EN UNA SOLA PASADA: adoptá los datos de entrada necesarios y dejá los resultados cumpliendo lo máximo posible (rangos límite, requerimientos del pliego y rangos normales), usando "probar_valores" hasta lograrlo. IMPORTANTE: si el primer valor que adoptás para un dato de dimensionamiento (por ejemplo el volumen de un reactor, una superficie, una cantidad de unidades) hace que otros parámetros calculados queden fuera de su rango o límite, NO lo dejes así: adoptá un valor mayor o menor (aunque sea bastante distinto del que calculaste al principio) hasta que el conjunto cumpla.\n\n' + partes.join('\n\n') + '\n\nContame brevemente qué adoptaste y por qué, y qué (si algo) no se pudo cumplir.';
+  await procesosStep2ChatSend(nombre, msg);
 }
 
 // Convierte un rango escrito en texto libre en la planilla ("4-8", "0,5 a 2",
@@ -12125,31 +12114,6 @@ function procesosStep2DetectarProblemas(nombre) {
   return problemas;
 }
 
-// "Segundo barrido": después de que la IA completa la hoja, se revisan por
-// código los resultados calculados — si alguno quedó con error o fuera de su
-// rango, se le devuelve la lista a la IA para que ajuste los datos de entrada
-// (por ejemplo, adoptar un volumen mayor que el calculado al principio) y se
-// vuelve a revisar. Hasta 2 vueltas extra; corta antes si ya no hay problemas
-// o si una vuelta no cambió nada (mismos problemas que la anterior).
-async function procesosStep2BarridoVerificacion(nombre) {
-  const MAX_VUELTAS = 1;
-  let firmaAnterior = null;
-  for (let vuelta = 1; vuelta <= MAX_VUELTAS; vuelta++) {
-    const problemas = procesosStep2DetectarProblemas(nombre);
-    if (!problemas.length) return;
-    const firma = problemas.map(x => x.ref + ':' + x.valorTxt).join('|');
-    if (firma === firmaAnterior) return;
-    firmaAnterior = firma;
-    const lista = problemas.map(x => {
-      const desc = x.tipo === 'error' ? `dio ${x.valorTxt}` : `quedó en ${x.valorTxt}${x.unidad ? ' ' + x.unidad : ''}, fuera de su ${x.tipo === 'limite' ? 'rango límite' : 'rango normal'} (${x.rango})`;
-      return `- ${x.ref} ${x.label}: ${desc}`;
-    }).join('\n');
-    const msg = `[Revisión automática — vuelta ${vuelta} de ${MAX_VUELTAS}] Después de tus cambios, revisé los resultados de la hoja y estas celdas quedaron con error o fuera de rango:\n${lista}\n\nAjustá los datos de ENTRADA para que queden dentro de rango (por ejemplo: si el volumen, la superficie o la cantidad de unidades que adoptaste es chico y por eso otros parámetros no cumplen, adoptá uno mayor aunque sea bastante distinto del inicial; usá "buscar_objetivo" o varios "set"). Priorizá cumplir los rangos límite por sobre los rangos normales. Si de verdad no se puede cumplir todo a la vez con estos datos, dejá el mejor compromiso y explicá en "reply" qué quedó fuera de rango y por qué. Contame brevemente qué cambiaste.`;
-    const ok = await procesosStep2ChatSend(nombre, msg);
-    if (!ok) return;
-  }
-}
-
 function procesosStep2RenderHojaPanel() {
   const nombre = procesosStep2State.hojaAbierta;
   // El id del slot en el DOM se arma a partir del NOMBRE (no de la posición
@@ -12252,6 +12216,8 @@ function procesosStep2RenderHojaPanel() {
   const otrasEtapas = (dd0.orden || []).filter(n => n !== nombre && dd0.hojas?.[n]?.tipo !== 'auxiliar');
   const corrientesProyecto = (p.info_cliente?.corrientes || []).map(c => c.nombre).filter(Boolean);
   const corrientesHoja = h.corrientesAsignadas || [];
+  const nFalt = (h.tipo !== 'auxiliar' && !h.confirmada && !h.autoCompletado) ? model.cells.filter(c => !mapaPorCelda[c.ref]).filter(c => procesosStep2CeldaFalta(hf, c)).length : 0;
+  const bannerDefinir = nFalt ? `<div class="card" style="margin-bottom:10px"><p class="hint" style="margin:0 0 6px">Esta unidad todavía tiene <b>${nFalt}</b> dato${nFalt === 1 ? '' : 's'} sin definir. Podés completarlos a mano, pedirlos por el chat de abajo, o dejar que la IA los defina en una sola pasada (no se manda ningún mensaje hasta que lo pidas).</p><button class="btn btn-primary btn-sm" onclick="procesosStep2RevisarYCompletar('${safe}', false)">✦ Definir valores con IA</button></div>` : '';
 
   el.innerHTML = `
     <div class="card" style="margin-top:10px">
@@ -12285,6 +12251,7 @@ function procesosStep2RenderHojaPanel() {
       </div>
       ` : ''}
       ${h.libre ? procesosLibreCabeceraHtml(nombre, h) : ''}
+      ${bannerDefinir}
       <label>Datos de la hoja${h.libre ? '' : ' (en el orden del Excel)'}</label>
       ${nOcultasVisibles ? `<p class="hint" style="margin:0 0 6px">${nOcultasVisibles} fila${nOcultasVisibles === 1 ? '' : 's'} oculta${nOcultasVisibles === 1 ? '' : 's'}. <a href="#" onclick="procesosStep2ToggleVerOcultas('${safe}');return false">${verOcultas ? 'Dejar de mostrar' : 'Mostrar'}</a></p>` : ''}
       ${filasVisibles.length ? `<div class="ps2-grid">${filasVisibles.map(rowHtml).join('')}</div>` : '<p class="hint">No se detectaron celdas en esta hoja.</p>'}
@@ -12511,28 +12478,6 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   if (procesosCurrentProyecto === p) procesosStep2RenderHojaPanel();
 }
 
-// Búsqueda numérica (bisección) del valor de una celda editable que hace que una
-// celda de fórmula llegue a un valor objetivo. Asume una relación monótona entre
-// ambas dentro del rango [min,max], que es el caso típico en estas planillas.
-function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) {
-  let lo = min != null ? min : 0.0001;
-  let hi = max != null ? max : 1e6;
-  const evalAt = x => { hf.setCellContents({ sheet: 0, row: varyCell.row, col: varyCell.col }, [[x]]); return hf.getCellValue({ sheet: 0, row: targetCell.row, col: targetCell.col }); };
-  let fLo = evalAt(lo), fHi = evalAt(hi), tries = 0;
-  while (typeof fLo === 'number' && typeof fHi === 'number' && (fLo - targetValue) * (fHi - targetValue) > 0 && tries < 20) {
-    hi *= 2; fHi = evalAt(hi); tries++;
-  }
-  let mid = (lo + hi) / 2;
-  for (let i = 0; i < 60; i++) {
-    mid = (lo + hi) / 2;
-    const fMid = evalAt(mid);
-    if (typeof fMid !== 'number') break;
-    if (Math.abs(fMid - targetValue) < Math.abs(targetValue) * 1e-4 + 1e-6) break;
-    if ((fMid - targetValue) * (fLo - targetValue) <= 0) { hi = mid; fHi = fMid; } else { lo = mid; fLo = fMid; }
-  }
-  evalAt(mid);
-}
-
 // Marca el ÚLTIMO bloque de una lista de content blocks con cache_control
 // — Anthropic cachea todo el prefijo hasta ahí (los documentos de
 // referencia adjuntos, que suelen repetirse igual entre mensajes seguidos
@@ -12608,6 +12553,108 @@ const PROCESOS_STEP2_TOOL = {
     required: ['reply', 'acciones'],
   },
 };
+
+// ── Probar valores antes de aplicarlos ──
+// La IA no puede calcular la planilla de memoria: antes la hacían "adivinar" valores y recién después se veía si cumplían. Ahora, en los pedidos que
+// arma el sistema (definir valores, corregir pliego), puede PROBAR combinaciones de valores con el cálculo real (nada se guarda), ver qué queda fuera
+// de rango y corregir, hasta que cumpla lo máximo posible; recién ahí llama a "aplicar_cambios".
+const PROCESOS_STEP2_PROBAR_TOOL = {
+  name: 'probar_valores',
+  description: 'PRUEBA valores en la planilla SIN guardar nada: aplica temporalmente los cambios indicados ("set" y/o "buscar_objetivo"), recalcula y devuelve qué celdas quedan con error, fuera de su rango límite o normal, o incumpliendo el pliego, y qué resultados cambiaron. Usala las veces que haga falta (podés cambiar varios datos a la vez) hasta que el resultado cumpla lo máximo posible; después llamá a "aplicar_cambios" con esos mismos cambios.',
+  input_schema: { type: 'object', properties: { acciones: PROCESOS_STEP2_TOOL.input_schema.properties.acciones }, required: ['acciones'] },
+};
+const PROCESOS_STEP2_GUIA_SONDEO = '\n\nFORMA DE TRABAJO (muy importante): vos NO podés calcular la planilla de memoria, pero tenés la herramienta "probar_valores", que aplica tus cambios de forma temporal con el cálculo REAL y te devuelve qué queda con error, fuera de rango límite o normal, o incumpliendo el pliego (no guarda nada). Probá, mirá el resultado y corregí: cambiá varios datos a la vez si hace falta y, si un dato de dimensionamiento (volumen, superficie, cantidad de unidades, largo/ancho) hace que otros parámetros no cumplan, adoptá uno bastante distinto en vez de dejarlo. Prioridad: errores > rangos límite > requerimientos del pliego > rangos normales. Cuando el resultado cumpla lo máximo posible, llamá a "aplicar_cambios" con EXACTAMENTE esos cambios (cada uno con su "motivo"): lo que no pase por "aplicar_cambios" NO queda guardado. Si de verdad no se puede cumplir todo a la vez, aplicá el mejor compromiso y explicá en "reply" qué quedó fuera de rango y por qué.';
+
+// Búsqueda numérica del valor de una celda editable que lleva una celda calculada a un valor objetivo. Recorre el rango [min,max] buscando dónde el resultado cruza
+// el objetivo (no asume que la relación sea monótona) y afina por bisección. Si el objetivo no se alcanza con valores dentro del rango, deja la celda como estaba
+// y lo informa (antes seguía duplicando el límite superior sin tope y podía dejar valores absurdos, como una edad de lodos de millones de días).
+function procesosStep2GoalSeek(hf, varyCell, targetCell, targetValue, min, max) {
+  const ref = { sheet: 0, row: varyCell.row, col: varyCell.col }, refT = { sheet: 0, row: targetCell.row, col: targetCell.col };
+  const original = hf.getCellSerialized(ref), actual = hf.getCellValue(ref);
+  const evalAt = x => { hf.setCellContents(ref, [[x]]); const v = hf.getCellValue(refT); return typeof v === 'number' && isFinite(v) ? v : NaN; };
+  const restaurar = () => hf.setCellContents(ref, [[original === undefined ? null : original]]);
+  const base = typeof actual === 'number' && isFinite(actual) && actual > 0 ? actual : 1;
+  let lo = min != null && isFinite(min) ? Number(min) : base / 50, hi = max != null && isFinite(max) ? Number(max) : base * 50;
+  if (!(hi > lo)) hi = lo + Math.max(1, Math.abs(lo));
+  const N = 48, useLog = lo > 0 && hi / lo > 20, xs = Array.from({ length: N + 1 }, (_, i) => useLog ? lo * Math.pow(hi / lo, i / N) : lo + (hi - lo) * i / N), fs = xs.map(evalAt);
+  const validos = fs.filter(isFinite);
+  if (!validos.length) { restaurar(); return { ok: false, razon: `"${targetCell.label}" da error con todos los valores probados de "${varyCell.label}" (entre ${lo} y ${hi})` }; }
+  let mejor = 0, errMejor = Infinity; fs.forEach((f, i) => { if (isFinite(f) && Math.abs(f - targetValue) < errMejor) { errMejor = Math.abs(f - targetValue); mejor = i; } });
+  let a = -1, dist = Infinity;                                                // el cruce más cercano al valor actual
+  for (let i = 0; i < N; i++) if (isFinite(fs[i]) && isFinite(fs[i + 1]) && (fs[i] - targetValue) * (fs[i + 1] - targetValue) <= 0) { const d = Math.abs(Math.log((xs[i] || 1e-9) / base)); if (d < dist) { dist = d; a = i; } }
+  let x = xs[mejor];
+  if (a >= 0) {
+    let l = xs[a], h = xs[a + 1], fl = fs[a];
+    for (let k = 0; k < 60; k++) { const m = (l + h) / 2, fm = evalAt(m); if (!isFinite(fm)) break; if (Math.abs(fm - targetValue) <= Math.abs(targetValue) * 1e-4 + 1e-6) { l = h = m; break; } if ((fm - targetValue) * (fl - targetValue) <= 0) h = m; else { l = m; fl = fm; } }
+    x = (l + h) / 2;
+  }
+  const f = evalAt(x);
+  if (!isFinite(f) || Math.abs(f - targetValue) > Math.abs(targetValue) * 0.02 + 1e-6) {
+    restaurar();
+    return { ok: false, razon: `con "${varyCell.label}" entre ${+lo.toPrecision(4)} y ${+hi.toPrecision(4)}, "${targetCell.label}" va de ${+Math.min(...validos).toPrecision(4)} a ${+Math.max(...validos).toPrecision(4)} y no llega a ${targetValue} (se dejó el valor anterior)` };
+  }
+  return { ok: true, valor: x, resultado: f };
+}
+
+// Aplica una lista de acciones ("set" / "buscar_objetivo") a la hoja. cb (opcional): { registrar(ref, accion), forzada(ref), mapeada(ref) } para guardar el motivo y
+// marcar las celdas que quedan fijadas a mano (una celda calculada, o alimentada desde otra hoja, que se pisa deja de recalcularse / de actualizarse desde su origen).
+function procesosStep2EjecutarAcciones(model, hf, acciones, cb) {
+  const res = { fallidas: [], tocadas: [] }, porRef = r => model.cells.find(c => c.ref === r);
+  (Array.isArray(acciones) ? acciones : []).forEach(a => {
+    try {
+      if (a.tipo === 'set') {
+        const c = porRef(a.celda), n = Number(a.valor);
+        if (!c) { res.fallidas.push(`"set": la celda ${a.celda} no existe en esta hoja`); return; }
+        if (!isFinite(n)) { res.fallidas.push(`"set" ${c.ref} ${c.label}: el valor ${a.valor} no es un número`); return; }
+        hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[n]]);
+        res.tocadas.push(c.ref);
+        if (cb) { if (c.isFormula || (cb.mapeada && cb.mapeada(c.ref))) cb.forzada(c.ref); cb.registrar(c.ref, a); }
+      } else if (a.tipo === 'buscar_objetivo') {
+        const cv = porRef(a.variar), co = porRef(a.celda_objetivo);
+        if (!cv || !co) { res.fallidas.push(`"buscar_objetivo": la celda ${!cv ? a.variar : a.celda_objetivo} no existe en esta hoja`); return; }
+        if (cv.isFormula) { res.fallidas.push(`"buscar_objetivo": ${cv.ref} ${cv.label} es un resultado calculado, no se puede variar (elegí un dato de entrada)`); return; }
+        if (!co.isFormula) { res.fallidas.push(`"buscar_objetivo": ${co.ref} ${co.label} no es un resultado calculado`); return; }
+        const r = procesosStep2GoalSeek(hf, cv, co, Number(a.valor_objetivo), a.min != null ? Number(a.min) : undefined, a.max != null ? Number(a.max) : undefined);
+        if (!r.ok) { res.fallidas.push(`"buscar_objetivo" ${cv.ref}→${co.ref}: ${r.razon}`); return; }
+        res.tocadas.push(cv.ref);
+        if (cb) { if (cb.mapeada && cb.mapeada(cv.ref)) cb.forzada(cv.ref); cb.registrar(cv.ref, a); }
+      } else res.fallidas.push(`acción desconocida "${a.tipo}"`);
+    } catch (e) { res.fallidas.push(`${a && a.tipo ? a.tipo : 'acción'}: ${e.message}`); }
+  });
+  return res;
+}
+
+// Prueba temporal: aplica las acciones, mide y devuelve la planilla a como estaba. valoresPrev = valores de las celdas antes de cualquier cambio (para mostrar qué se movió).
+function procesosStep2Probar(nombre, model, hf, acciones, valoresPrev) {
+  const lista = Array.isArray(acciones) ? acciones : [];
+  const refs = Array.from(new Set(lista.map(a => a.tipo === 'buscar_objetivo' ? a.variar : a.celda).filter(Boolean)));
+  const snap = refs.map(r => model.cells.find(c => c.ref === r)).filter(Boolean).map(c => ({ c, s: hf.getCellSerialized({ sheet: 0, row: c.row, col: c.col }) }));
+  let informe;
+  try {
+    const ej = procesosStep2EjecutarAcciones(model, hf, lista, null);
+    const problemas = procesosStep2DetectarProblemas(nombre), p = procesosCurrentProyecto, hh = (p && p.diseno_data && p.diseno_data.hojas && p.diseno_data.hojas[nombre]) || {};
+    const pliego = ((hh.chequeoReq && hh.chequeoReq.items) || []).map(it => ({ it, r: procesosStep2EvaluarReq(hf, model, it) })).filter(x => x.r.estado === 'no_cumple').map(({ it, r }) => ({ requerimiento: it.requerimiento, celda: r.c.ref, valor: +Number(r.v).toPrecision(6), pedido: procesosStep2ReqRangoTxt(it) }));
+    const cambios = []; model.cells.forEach(c => { const antes = valoresPrev && valoresPrev[c.ref], desp = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); if (typeof antes === 'number' && typeof desp === 'number' && Math.abs(antes - desp) > Math.max(1e-6, Math.abs(antes) * 1e-4)) cambios.push({ celda: c.ref, nombre: c.label, antes: +antes.toPrecision(6), despues: +desp.toPrecision(6) }); });
+    informe = {
+      cumple_todo: !problemas.length && !pliego.length && !ej.fallidas.length,
+      fuera_de_rango: problemas.map(x => ({ celda: x.ref, nombre: x.label, valor: x.valorTxt, unidad: x.unidad || '', problema: x.tipo === 'error' ? 'da error' : (x.tipo === 'limite' ? 'fuera del rango LÍMITE ' : 'fuera del rango normal ') + (x.rango || '') })),
+      pliego_no_cumple: pliego, no_se_pudo_aplicar: ej.fallidas, resultados_que_cambiaron: cambios.slice(0, 30),
+      nota: 'Es solo una prueba: no se guardó nada. Si querés dejar estos valores, llamá a aplicar_cambios con los mismos cambios.',
+    };
+  } catch (e) { informe = { error: 'No se pudo probar: ' + e.message }; }
+  finally { try { snap.forEach(({ c, s }) => hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[s === undefined ? null : s]])); } catch (_e) { /* si falla, queda lo probado: se corrige en el próximo cambio */ } }
+  return informe;
+}
+
+// A veces la IA escribe el JSON de la respuesta como texto en vez de llamar a la herramienta; en ese caso se lo interpreta igual (antes ese texto
+// se mostraba tal cual en el chat y NO se aplicaba ningún cambio).
+function procesosStep2ExtraerJsonAcciones(txt) {
+  let s = String(txt || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  const cand = [s]; if (/^"reply"\s*:/.test(s)) cand.push('{' + s + '}');
+  const a = s.indexOf('{'), b = s.lastIndexOf('}'); if (a >= 0 && b > a) cand.push(s.slice(a, b + 1));
+  for (const c of cand) { try { const o = JSON.parse(c); if (o && typeof o === 'object' && !Array.isArray(o) && (Array.isArray(o.acciones) || typeof o.reply === 'string')) return o; } catch (_e) { /* prueba el siguiente */ } }
+  return null;
+}
 
 const _procesosStep2ChatEnviando = {};
 async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
@@ -12734,28 +12781,56 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
     const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
     const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
-    const pedir = (modelo, extra) => procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
+    // Pedidos que arma el sistema (definir valores, corregir pliego): la IA puede PROBAR valores con el cálculo real (probar_valores) las veces que haga falta y recién
+    // después aplicarlos (aplicar_cambios). Mensajes que escribe el usuario: una respuesta, con razonamiento; si queda sin aplicar lo que dijo que iba a cambiar, se lo pide.
+    const usarLoop = msgOverride != null, MAX_PRUEBAS = 6;
+    const llamar = (modelo, messages, tools, extra) => procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify(Object.assign({ model: modelo, tools: [PROCESOS_STEP2_TOOL], messages: [{ role: 'user', content: contenidoMsg }] }, extra))
+      body: JSON.stringify(Object.assign({ model: modelo, tools, messages }, extra))
     });
-    const forzado = { max_tokens: 4000, tool_choice: { type: 'tool', name: PROCESOS_STEP2_TOOL.name } };
-    // Mensaje del usuario: razonamiento adaptativo (no admite tool_choice
-    // forzado, así que la herramienta queda opcional y, si la IA contesta en
-    // texto, ese texto es la respuesta sin cambios). Autocompletado: herramienta
-    // forzada y sin razonamiento, como antes.
-    let resp = await pedir(PROCESOS_STEP2_CHAT_MODEL, esAuto ? forzado : { max_tokens: 16000, thinking: { type: 'adaptive' } });
-    // Por si el modelo nuevo o el razonamiento no estuvieran disponibles para la
-    // cuenta: se vuelve al modo de antes en vez de dejar el chat sin respuesta.
-    if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) {
-      if (!esAuto) resp = await pedir(PROCESOS_STEP2_CHAT_MODEL, forzado);
-      if (!resp.ok && resp.status >= 400 && resp.status < 500 && resp.status !== 401 && resp.status !== 429) resp = await pedir('claude-sonnet-4-5', forzado);
+    const forzarAplicar = { type: 'tool', name: PROCESOS_STEP2_TOOL.name };
+    const llamarConRespaldo = async (messages, tools, extra, sinRazonar) => {
+      let r = await llamar(PROCESOS_STEP2_CHAT_MODEL, messages, tools, extra);
+      const falla4xx = x => !x.ok && x.status >= 400 && x.status < 500 && x.status !== 401 && x.status !== 429;
+      if (falla4xx(r) && sinRazonar) r = await llamar(PROCESOS_STEP2_CHAT_MODEL, messages, tools, sinRazonar);
+      if (falla4xx(r)) r = await llamar('claude-sonnet-4-5', messages, tools, sinRazonar || extra);
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
+      return r.json();
+    };
+    const contenidoFinal = usarLoop ? contenidoMsg.slice(0, -1).concat([{ type: 'text', text: contenidoMsg[contenidoMsg.length - 1].text + PROCESOS_STEP2_GUIA_SONDEO }]) : contenidoMsg;
+    let data = null, toolUse = null;
+    if (usarLoop) {
+      const msgs = [{ role: 'user', content: contenidoFinal }], tools = [PROCESOS_STEP2_PROBAR_TOOL, PROCESOS_STEP2_TOOL];
+      for (let it = 0; it <= MAX_PRUEBAS; it++) {
+        data = await llamarConRespaldo(msgs, tools, { max_tokens: 8000, tool_choice: it >= MAX_PRUEBAS ? forzarAplicar : { type: 'any' } });
+        const usos = (data.content || []).filter(c => c.type === 'tool_use');
+        toolUse = usos.find(u => u.name === PROCESOS_STEP2_TOOL.name) || null;
+        const sondeos = usos.filter(u => u.name === PROCESOS_STEP2_PROBAR_TOOL.name);
+        if (toolUse || !sondeos.length) break;
+        if (procesosCurrentProyecto === p) showMsg(statusId, 'loading', `Probando valores con el cálculo de la planilla (${it + 1})...`);
+        msgs.push({ role: 'assistant', content: data.content });
+        msgs.push({ role: 'user', content: sondeos.map(s => ({ type: 'tool_result', tool_use_id: s.id, content: JSON.stringify(procesosStep2Probar(nombre, model, hf, s.input && s.input.acciones, valoresPrompt)) })) });
+      }
+    } else {
+      data = await llamarConRespaldo([{ role: 'user', content: contenidoFinal }], [PROCESOS_STEP2_TOOL], { max_tokens: 16000, thinking: { type: 'adaptive' } }, { max_tokens: 4000, tool_choice: forzarAplicar });
+      toolUse = (data.content || []).find(c => c.type === 'tool_use' && c.name === PROCESOS_STEP2_TOOL.name) || null;
     }
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Error de la IA'); }
-    const data = await resp.json();
-    const toolUse = data.content?.find(c => c.type === 'tool_use');
-    const textoLibre = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
-    if (!toolUse && !textoLibre) throw new Error(data.stop_reason === 'max_tokens' ? 'La respuesta de la IA se cortó antes de terminar — probá de nuevo.' : 'La IA no devolvió una respuesta con la forma esperada.');
-    const parsed = toolUse ? (toolUse.input || {}) : { reply: textoLibre, acciones: [] };
+    const textoLibre = ((data && data.content) || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
+    if (!toolUse && !textoLibre) throw new Error(data && data.stop_reason === 'max_tokens' ? 'La respuesta de la IA se cortó antes de terminar — probá de nuevo.' : 'La IA no devolvió una respuesta con la forma esperada.');
+    let parsed = toolUse ? (toolUse.input || {}) : null;
+    if (!parsed) {
+      parsed = procesosStep2ExtraerJsonAcciones(textoLibre);                       // escribió el JSON como texto: se lo interpreta igual
+      if (!parsed && (usarLoop || /\b(fij[eéo]|fij[ao]r|set[eé]|seteo|cambi[eéo]|cambios|adopt[eéo]|modific[eéo]|ajust[eéo]|dej[eéo]|recalcul|corrig|actualiz|apliqu[eé]|pus[eo]|subo|bajo)/i.test(textoLibre))) {
+        try {                                                                      // no llamó a la herramienta: se le pide que aplique ahora lo que describió
+          const d2 = await llamarConRespaldo([{ role: 'user', content: contenidoFinal }, { role: 'assistant', content: [{ type: 'text', text: textoLibre }] }, { role: 'user', content: 'Tu respuesta no llamó a la herramienta "aplicar_cambios", así que NO se aplicó ningún cambio en la planilla. Si en tu respuesta decías que ibas a fijar o cambiar valores, llamá ahora a "aplicar_cambios" con EXACTAMENTE esos cambios (celda, valor y motivo). Si no correspondía ningún cambio (era solo una explicación), llamala con "acciones" vacío y el mismo "reply".' }], [PROCESOS_STEP2_TOOL], { max_tokens: 4000, tool_choice: forzarAplicar });
+          const t2 = (d2.content || []).find(c => c.type === 'tool_use' && c.name === PROCESOS_STEP2_TOOL.name);
+          if (t2 && t2.input) { parsed = t2.input; if (!(Array.isArray(parsed.acciones) && parsed.acciones.length)) parsed.reply = textoLibre; }
+        } catch (_e) { /* se muestra el texto, sin cambios */ }
+      }
+      if (!parsed) parsed = { reply: textoLibre, acciones: [] };
+    }
+    if (typeof parsed.acciones === 'string') { try { parsed.acciones = JSON.parse(parsed.acciones); } catch (_e) { parsed.acciones = []; } }
+    if (!Array.isArray(parsed.acciones)) parsed.acciones = [];
     if (parsed.leccion_aprendida) procesosStep2PendingLeccion = { hoja: nombre, texto: parsed.leccion_aprendida };
 
     // Hoja libre: la IA también puede cambiar la ESTRUCTURA (agregar/editar/quitar filas y fórmulas)
@@ -12796,28 +12871,8 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
         fecha: new Date().toLocaleDateString('es-AR'),
       };
     };
-    (parsed.acciones || []).forEach(a => {
-      try {
-        if (a.tipo === 'set') {
-          const c = cellByRef(a.celda);
-          // Se puede fijar tanto un dato editable como una celda calculada — en
-          // este segundo caso se pierde la fórmula de esa celda en esta sesión de
-          // diseño (igual que sobreescribir una fórmula a mano en Excel): si más
-          // adelante cambia un dato de entrada, esa celda ya no se recalcula sola.
-          if (c) {
-            hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(a.valor)]]);
-            if (c.isFormula) celdasForzadas.add(c.ref);
-            registrarMotivo(c.ref, a);
-          }
-        } else if (a.tipo === 'buscar_objetivo') {
-          const cv = cellByRef(a.variar), co = cellByRef(a.celda_objetivo);
-          if (cv && co && !cv.isFormula && co.isFormula) {
-            procesosStep2GoalSeek(hf, cv, co, Number(a.valor_objetivo), a.min != null ? Number(a.min) : undefined, a.max != null ? Number(a.max) : undefined);
-            registrarMotivo(cv.ref, a);
-          }
-        }
-      } catch (_e) { /* acción individual inválida, seguir con las demás */ }
-    });
+    const mapeadasHoja = new Set((((p.diseno_data || {}).mapeos || {})[nombre] || []).map(m => m.celda));
+    const ejec = procesosStep2EjecutarAcciones(model, hf, parsed.acciones, { registrar: registrarMotivo, forzada: ref => celdasForzadas.add(ref), mapeada: ref => mapeadasHoja.has(ref) });
     // Ver comentario en procesosStep2SetValor: resincroniza HyperFormula
     // después de aplicar los cambios de este mensaje.
     if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
@@ -12842,6 +12897,9 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
         (cambiosDatos.length ? '\nDatos cambiados:\n' + cambiosDatos.slice(0, 12).join('\n') : '') +
         (cambiosResultados.length ? '\nResultados recalculados:\n' + cambiosResultados.slice(0, 14).join('\n') + (cambiosResultados.length > 14 ? `\n(+${cambiosResultados.length - 14} más)` : '') : '')
       : '';
+    const restantes = procesosStep2DetectarProblemas(nombre);
+    const extraTxt = (ejec.fallidas.length ? '\n\n⚠ No se pudo aplicar:\n' + ejec.fallidas.map(x => '• ' + x).join('\n') : '') +
+      (restantes.length ? '\n\n⚠ Quedan fuera de rango (revisalos):\n' + restantes.slice(0, 10).map(x => `• ${x.ref} ${x.label}: ${x.tipo === 'error' ? x.valorTxt : x.valorTxt + (x.unidad ? ' ' + x.unidad : '') + ' (' + (x.tipo === 'limite' ? 'límite ' : 'normal ') + x.rango + ')'}`).join('\n') + (restantes.length > 10 ? `\n(+${restantes.length - 10} más)` : '') : '');
     const nuevosValores = Object.assign({}, hPrev.valores);
     model.cells.filter(c => !c.isFormula).forEach(c => {
       const seguro = procesosStep2ValorGuardable(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
@@ -12872,7 +12930,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, formulas: formulasNuevas, motivos: nuevosMotivos, chequeoReq: (dd.hojas[nombre] || {}).chequeoReq || hPrev.chequeoReq, confirmada: false });
-    h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt }]);
+    h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt + extraTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
 
