@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12712,11 +12712,11 @@ function procesosStep2ExtraerJsonAcciones(txt) {
 
 // Valores actuales de las OTRAS unidades del proyecto, para el chat de una unidad: solo lectura (las acciones solo modifican la unidad del chat), pero
 // la IA los puede consultar y copiar a esta unidad con "set" (las celdas de una unidad duplicada tienen las mismas referencias que su hoja base).
-function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas) {
+function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas, soloHermanas) {
   const dd = p.diseno_data || {}, st = procesosStep2State;
-  const nombres = (dd.orden || []).filter(n => n !== nombre && dd.hojas?.[n]?.seleccionada !== false);
+  const nombres = (dd.orden || []).filter(n => n !== nombre && dd.hojas?.[n]?.seleccionada !== false && (!soloHermanas || hermanas.includes(n)));
   if (!nombres.length) return '';
-  const MAX_CELDAS = 90;
+  const MAX_CELDAS = soloHermanas ? 90 : 60;
   const bloques = nombres.map(n => {
     const h = dd.hojas[n] || {};
     let lineas = null;
@@ -12846,7 +12846,9 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
       return `Esta unidad NO está sola: forma parte de un grupo de ${hermanasGrupo.length + 1} unidades con la misma función (hoja base "${hActual.hojaBase || nombre}"). ${dispTxt}\nLas otras unidades del grupo:\n${lista}\n\n`;
     })() : '';
     // Valores de TODAS las demás unidades del proyecto (solo lectura): para poder copiar/igualar valores de otra unidad (ej. dos reactores en paralelo), comparar, etc.
-    const otrasUnidadesTxt = procesosStep2OtrasUnidadesTxt(p, nombre, hermanasGrupo);
+    // (en pedidos que arma el sistema, o si el mensaje no se refiere a otras unidades, solo viajan las hermanas del grupo: mandar TODAS en cada mensaje encarece mucho)
+    const pideOtras = !esAuto && /(otra|otras|otro|otros|demas|resto|mismo|misma|mismos|mismas|igual|iguales|compar\w*|como en|como la|como el|paralel\w*)/.test(procesosNormTxt(msg)) || (p.diseno_data && Object.keys(p.diseno_data.hojas || {}).some(n => n !== nombre && n.length > 3 && procesosNormTxt(msg).includes(procesosNormTxt(n))));
+    const otrasUnidadesTxt = procesosStep2OtrasUnidadesTxt(p, nombre, hermanasGrupo, !pideOtras);
     const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : '';
     const plantasCompactasTxt = plantasCompactasBlocks.length ? 'Adjunto documentos de referencia de plantas compactas (modelos ya fabricados, con capacidad/volumen ya definidos) — si el usuario pregunta por esa alternativa, o te parece que aplica razonablemente para esta etapa según el caudal, mencionalo en "reply" (todavía no hay una acción automática para fijar los valores del modelo, eso el usuario lo tiene que hacer a mano por ahora).\n\n' : '';
     const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta unidad.\n\n' : '';
@@ -12880,7 +12882,8 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error?.message || 'Error de la IA'); }
       return r.json();
     };
-    const contenidoFinal = usarLoop ? contenidoMsg.slice(0, -1).concat([{ type: 'text', text: contenidoMsg[contenidoMsg.length - 1].text + PROCESOS_STEP2_GUIA_SONDEO }]) : contenidoMsg;
+    // en el loop de pruebas el mismo prompt se reenvía en cada vuelta: se marca para caché y las vueltas siguientes lo leen mucho más barato
+    const contenidoFinal = usarLoop ? contenidoMsg.slice(0, -1).concat([{ type: 'text', text: contenidoMsg[contenidoMsg.length - 1].text + PROCESOS_STEP2_GUIA_SONDEO, cache_control: { type: 'ephemeral' } }]) : contenidoMsg;
     let data = null, toolUse = null;
     if (usarLoop) {
       const msgs = [{ role: 'user', content: contenidoFinal }], tools = [PROCESOS_STEP2_PROBAR_TOOL, PROCESOS_STEP2_TOOL];
@@ -19146,11 +19149,13 @@ function procesosPropuestaParrafoTituloEtapa(texto) {
 // (Título3) — se usa en "Etapas de proceso".
 // Título de una alternativa ("Alternativa A: Lodos activados") — Título2 real, como los demás encabezados de segundo nivel de la plantilla
 function procesosPropuestaParrafoTituloAlternativa(texto) {
-  return `<w:p><w:pPr><w:pStyle w:val="Ttulo2"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+  // más grande y con línea abajo: la alternativa es la división principal, las etapas (Título 3) quedan claramente por debajo
+  return `<w:p><w:pPr><w:pStyle w:val="Ttulo2"/><w:keepNext/><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="2" w:color="4472C4"/></w:pBdr><w:spacing w:before="360" w:after="120"/></w:pPr><w:r><w:rPr><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
 }
 const PROP_SUMINISTRO_TOKEN_RE = /^\[\[suministro:([^\]]+)\]\]$/;
+const PROP_BIB_MARCA_RE = /^\[\[\/?biblioteca(?::[^\]]*)?\]\]$/; // [[biblioteca]] (Selección de tecnología) y [[biblioteca:A]] ... [[/biblioteca]] (dentro de una alternativa)
 function procesosPropuestaTextoAXml(texto, tipo) {
-  const lineas = String(texto || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const lineas = String(texto || '').split('\n').map(l => l.trim().replace(/\*\*/g, '')).filter(Boolean);
   if (!lineas.length) return '';
   const marcador = l => {
     if (l.startsWith('### ')) return procesosPropuestaParrafoTituloEtapa(l.slice(4).trim());
@@ -19167,7 +19172,7 @@ function procesosPropuestaTextoAXml(texto, tipo) {
   lineas.forEach(l => {
     if (l.startsWith('|')) { tabla.push(l); return; }
     volcarTabla();
-    if (l === '[[biblioteca]]') return;
+    if (PROP_BIB_MARCA_RE.test(l)) return; // marcas internas de la biblioteca: no se escriben
     const m = PROP_IMG_TOKEN_RE.exec(l);
     if (m) { out += propImagenParrafosXml(m[1], m[2]); return; }
     const mk = marcador(l);
@@ -19809,6 +19814,19 @@ function procesosStep4RecargarItemsDesdeEquipos() {
 // generar el contenido; queda guardado en propuesta_data.nombres_etapas {nombre del diseño → nombre para la propuesta} y se usa en
 // "Etapas de proceso" y en las tablas de Suministro y Propuesta comercial (el diseño de los pasos 2 y 3 no se toca).
 // ── Textos de introducción, resumen de unidades principales y redacción por alternativa (Paso 4 y solapa Propuestas) ──
+// Contexto liviano de UNA alternativa (diseño y equipos): para las llamadas que no necesitan todo el proyecto (cada token cuenta)
+function propContextoAlt(p, a) {
+  return `Proyecto: ${p.nombre || ''}${p.cliente ? ' — Cliente: ' + p.cliente : ''}${a.etiqueta ? '\n' + a.etiqueta : ''}\n\nDiseño:\n${procesosResumenDiseno(a.proy) || '(sin diseño)'}\n\nEquipos:\n${procesosResumenEquipos(a.proy, true) || '(sin equipos)'}`;
+}
+// Texto estándar de las etapas de las tecnologías indicadas (referencia de redacción para describir cada etapa)
+async function propReferenciaEtapasTxt(claves) {
+  try {
+    if (!claves.length) return '';
+    const tecs = await propTecnologiasCargar(true);
+    const refs = claves.map(c => tecs.find(x => x.clave === c)).filter(Boolean).map(t => propTecEtapasRefTxt(t)).filter(Boolean);
+    return refs.length ? `\nTEXTO ESTÁNDAR DE AERATION con la descripción de las etapas de la tecnología (usalo como REFERENCIA de redacción y de contenido técnico, combinándolo con los datos reales del diseño; solo para las etapas que esta alternativa SÍ tiene; si el texto estándar y el diseño difieren, manda el diseño):\n${refs.map(r => '"""\n' + r + '\n"""').join('\n')}\n` : '';
+  } catch (e) { return ''; }
+}
 const PROP_TOOL_TEXTOS = {
   name: 'textos_propuesta',
   description: 'Textos de introducción de la propuesta técnica.',
@@ -19820,11 +19838,12 @@ const PROP_TOOL_TEXTOS = {
     propuesta_tecnica_intro: { type: 'string', description: 'SOLO si la propuesta tiene varias alternativas ("" si no): 2 a 4 párrafos para abrir la PROPUESTA TÉCNICA: qué alternativas contempla el cliente/pliego (si lo dice), cuáles se estudiaron y cuáles se presentan (lista con "- Alternativa A: nombre." por línea), por qué se presentan estas y, solo si el contexto lo indica, cuáles se descartaron y por qué (una viñeta "- " por motivo). Cerrar con una línea "A continuación, se describen las configuraciones propuestas, junto con sus principales características de proceso, equipos asociados y criterios de diseño."' },
   }, required: ['introduccion', 'parametros_antes', 'vuelco_antes', 'vuelco_despues', 'propuesta_tecnica_intro'] }
 };
-async function propTextosIntroIA(p, contexto, ofertasBlocks, alts) {
+async function propTextosIntroIA(p, alts) {
   const multi = alts.length > 1;
   const reqs = procesosRequerimientosDisenoTxt(p, 'tren') || '';
-  const prompt = `${contexto}\n${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa: seguí su estilo y estructura de redacción, pero NO copies datos de otros proyectos.\n\n' : ''}Redactá los textos de introducción de la propuesta técnica de Aeration Argentina para este proyecto${multi ? ` (que tiene ${alts.length} alternativas: ${alts.map(a => a.etiqueta).join('; ')})` : ''}. Estilo: formal, en español, tercera persona, párrafos corrientes sin viñetas salvo donde se indica. Ejemplo de estilo (de otra oferta; NO copies sus datos): "En el presente documento se detalla la propuesta para la incorporación de una etapa de tratamiento biológico en la Planta de Tratamiento de Efluentes del establecimiento de X ubicado en Y. La solución propuesta ha sido desarrollada tomando como punto de partida el efluente proveniente del sistema de tratamiento primario existente, compuesto por ecualización, coagulación–floculación y flotación por aire disuelto (DAF), y tiene como objetivo completar el tratamiento del efluente hasta alcanzar los parámetros de calidad requeridos para su descarga final." / "A continuación, en la Tabla 1 se muestran los parámetros de diseño del efluente crudo y los valores de normativa a alcanzar. La ET indica además que el cuerpo receptor es el Canal San Francisco." / "Sumado a esto, en el pliego se establecen las siguientes condiciones de salida del sistema biológico: SST < 20 mg/L; SSV < 15 mg/L; DBO₅ soluble < 20 mg/L".\n\nUsá SOLO información que figure en el contexto (campos del cliente, requerimientos del pliego, normativa, tratamiento existente, cuerpo receptor...). Lo que no se pueda determinar, omitilo o dejá el campo vacío: no inventes datos.\n${reqs}`;
-  return await propLlamarForzado(PROP_TOOL_TEXTOS, [...ofertasBlocks.map(x => x.block), { type: 'text', text: prompt }], 3000);
+  const contexto = `Proyecto: ${p.nombre || ''}${p.cliente ? ' — Cliente: ' + p.cliente : ''}\n\n${procesosResumenCampos(p)}\n\nTrenes de tratamiento:\n${alts.map(a => (a.etiqueta ? a.etiqueta + ': ' : '') + propTrenTxt(a.proy).replace(/\n/g, ' → ')).join('\n')}\n`;
+  const prompt = `${contexto}\nRedactá los textos de introducción de la propuesta técnica de Aeration Argentina para este proyecto${multi ? ` (que tiene ${alts.length} alternativas: ${alts.map(a => a.etiqueta).join('; ')})` : ''}. Estilo: formal, en español, tercera persona, párrafos corrientes sin viñetas salvo donde se indica, sin negritas ni asteriscos. NO cites números de tabla ni de figura (las tablas del documento no están numeradas). Ejemplo de estilo (de otra oferta; NO copies sus datos): "En el presente documento se detalla la propuesta para la incorporación de una etapa de tratamiento biológico en la Planta de Tratamiento de Efluentes del establecimiento de X ubicado en Y. La solución propuesta ha sido desarrollada tomando como punto de partida el efluente proveniente del sistema de tratamiento primario existente, compuesto por ecualización, coagulación–floculación y flotación por aire disuelto (DAF), y tiene como objetivo completar el tratamiento del efluente hasta alcanzar los parámetros de calidad requeridos para su descarga final." / "A continuación se muestran los parámetros de diseño del efluente crudo y los valores de normativa a alcanzar. La ET indica además que el cuerpo receptor es el Canal San Francisco." / "Sumado a esto, en el pliego se establecen las siguientes condiciones de salida del sistema biológico: SST < 20 mg/L; SSV < 15 mg/L; DBO₅ soluble < 20 mg/L".\n\nUsá SOLO información que figure en el contexto (campos del cliente, requerimientos del pliego, normativa, tratamiento existente, cuerpo receptor...). Lo que no se pueda determinar, omitilo o dejá el campo vacío: no inventes datos.\n${reqs}`;
+  return await propLlamarForzado(PROP_TOOL_TEXTOS, prompt, 3000);
 }
 const PROP_TOOL_RESUMEN = {
   name: 'resumen_unidades',
@@ -19860,12 +19879,13 @@ const PROP_TOOL_ALTERNATIVA = {
     etapas: { type: 'string', description: 'Las etapas de ESTA alternativa, en el orden del proceso. Cada etapa son dos líneas o más: una "### " + el nombre EXACTO de la etapa tal como figura en el tren, y debajo su descripción técnica (uno o más párrafos, una línea cada uno) con los datos reales del diseño y de los equipos. Las etapas que son IDÉNTICAS a las de una alternativa anterior se agrupan al final en UNA etapa "### Etapas ídem Alternativa X" (X = la letra de esa alternativa), con una línea "La presente alternativa mantiene sin modificaciones las etapas desarrolladas para la Alternativa X. La principal diferencia se concentra en ..." seguida de la línea "Por lo tanto, se mantienen los criterios y sistemas previstos para:" y una línea "- Nombre de la etapa." por cada etapa mantenida. Sin listas de suministro ni tablas.' },
   }, required: ['descripcion', 'etapas'] }
 };
-async function propAlternativaIA(p, a, alts, idx, ofertasBlocks) {
+async function propAlternativaIA(p, a, alts, idx) {
   const previas = alts.slice(0, idx);
   const previasTxt = previas.length ? `ALTERNATIVAS YA REDACTADAS ANTES (para saber qué etapas se repiten):\n${previas.map(q => `── ${q.etiqueta} ──\nTren:\n${propTrenTxt(q.proy)}\nEquipos:\n${procesosResumenEquipos(q.proy, true) || '(sin equipos)'}`).join('\n\n')}\n\n` : '';
   const requer = procesosRequerimientosDisenoRaw(p);
-  const prompt = `Estás redactando una propuesta técnico-comercial de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''} que presenta ${alts.length} alternativas de tratamiento (${alts.map(q => q.etiqueta).join('; ')}). Redactá AHORA solo la ${a.etiqueta}. ${ofertasBlocks.length ? 'Adjunto ofertas anteriores de la empresa: seguí su estilo y su forma de describir cada etapa, sin copiar datos de otros proyectos. ' : ''}\n\nINFORMACIÓN DEL CLIENTE/PROYECTO:\n${procesosResumenCampos(p)}\n\n${requer ? 'REQUERIMIENTOS DE DISEÑO DEL PLIEGO:\n' + requer.texto + '\n\n' : ''}TREN DE ${a.etiqueta}:\n${propTrenTxt(a.proy)}\n\nDISEÑO DE ${a.etiqueta} (valores calculados por unidad):\n${procesosResumenDiseno(a.proy) || '(sin diseño)'}\n\nEQUIPOS DE ${a.etiqueta} (por etapa):\n${procesosResumenEquipos(a.proy, true) || '(sin equipos)'}\n\n${previasTxt}Reglas: (1) Usá SOLO los datos de ${a.etiqueta} (diseño y equipos de arriba); no mezcles equipos de otra alternativa. (2) En cada etapa mencioná lo que el diseño define: cantidad de unidades y si van en paralelo o en serie, volumen o dimensiones, tiempo de retención, material y forma constructiva si figuran, equipos principales con marca/modelo si están definidos, redundancia (ej. 1+1) y el control asociado. (3) Si dos unidades van en paralelo, decilo ("dos reactores operando en paralelo"). (4) No inventes valores: lo que no figura no se menciona. (5) Las líneas "### " llevan el nombre EXACTO de la etapa del tren.`;
-  const r = await propLlamarForzado(PROP_TOOL_ALTERNATIVA, [...ofertasBlocks.map(x => x.block), { type: 'text', text: prompt }], 6000);
+  const refEtapas = await propReferenciaEtapasTxt(propTecnologiasDeProy(a.proy, false));
+  const prompt = `Estás redactando una propuesta técnico-comercial de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''} que presenta ${alts.length} alternativas de tratamiento (${alts.map(q => q.etiqueta).join('; ')}). Redactá AHORA solo la ${a.etiqueta}. Estilo: formal, en español, sin negritas ni asteriscos, sin citar números de tabla ni de figura.\n\nINFORMACIÓN DEL CLIENTE/PROYECTO:\n${procesosResumenCampos(p)}\n\n${requer ? 'REQUERIMIENTOS DE DISEÑO DEL PLIEGO:\n' + requer.texto + '\n\n' : ''}TREN DE ${a.etiqueta}:\n${propTrenTxt(a.proy)}\n\nDISEÑO DE ${a.etiqueta} (valores calculados por unidad):\n${procesosResumenDiseno(a.proy) || '(sin diseño)'}\n\nEQUIPOS DE ${a.etiqueta} (por etapa):\n${procesosResumenEquipos(a.proy, true) || '(sin equipos)'}\n\n${previasTxt}${refEtapas}Reglas: (0) Describí SIEMPRE completas las etapas de tecnología biológica de esta alternativa (reactores de lodos activados, MBBR, MBR / cámara de membranas, anóxico, sedimentador secundario...) con sus valores de diseño y equipos, aunque se parezcan a las de otra alternativa; solo las etapas secundarias idénticas (bombeo, desinfección, lodos, químicos...) pueden ir agrupadas como "ídem". (1) Usá SOLO los datos de ${a.etiqueta} (diseño y equipos de arriba); no mezcles equipos de otra alternativa. (2) En cada etapa mencioná lo que el diseño define: cantidad de unidades y si van en paralelo o en serie, volumen o dimensiones, tiempo de retención, material y forma constructiva si figuran, equipos principales con marca/modelo si están definidos, redundancia (ej. 1+1) y el control asociado. (3) Si dos unidades van en paralelo, decilo ("dos reactores operando en paralelo"). (4) No inventes valores: lo que no figura no se menciona. (5) Las líneas "### " llevan el nombre EXACTO de la etapa del tren.`;
+  const r = await propLlamarForzado(PROP_TOOL_ALTERNATIVA, prompt, 12000);
   return { descripcion: String(r.descripcion || '').trim(), etapas: String(r.etapas || '').trim() };
 }
 function propTituloAlternativa(a) { return 'Alternativa ' + a.id + (a.nombre && !/^alternativa\s+[a-z]$/i.test(a.nombre) ? ': ' + a.nombre : ''); }
@@ -19977,40 +19997,49 @@ async function procesosStep4GenerarConIA(opts) {
     pd.secciones = Object.assign({}, pd.secciones);
     Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
     // ── Textos de introducción, resumen de las unidades principales y (con varias alternativas) la redacción de cada una ──
+    // Sin adjuntar las ofertas de referencia en estas llamadas (ya van en la principal, y adjuntarlas de nuevo multiplicaba el costo).
     const avisosGen = [];
     const setSec = (k, campos) => { pd.secciones[k] = Object.assign({ texto: '', chat: [] }, pd.secciones[k], campos); };
     let propTecIntro = '';
     try {
       showMsg(statusId, 'loading', 'Redactando la introducción y los textos de las tablas...');
-      const tx = await propTextosIntroIA(p, contexto, ofertasBlocks, alts);
+      const tx = await propTextosIntroIA(p, alts);
       setSec('intro_texto', { texto: tx.introduccion || '' });
       setSec('intro_parametros', { antes: tx.parametros_antes || '' });
       setSec('intro_calidad_vuelco', { antes: tx.vuelco_antes || '', despues: tx.vuelco_despues || '' });
       if (multi) propTecIntro = String(tx.propuesta_tecnica_intro || '').trim();
     } catch (e) { avisosGen.push('No pude redactar los textos de introducción (' + e.message + ').'); }
-    showMsg(statusId, 'loading', multi ? 'Redactando cada alternativa y armando el resumen de unidades principales...' : 'Armando el resumen de las unidades principales...');
-    const hechas = await Promise.all(alts.map(async (a, i) => {
-      const out = { resumen: null, bloque: null };
-      try { out.resumen = await propResumenUnidadesIA(p, a); } catch (e) { avisosGen.push('Resumen de unidades' + (a.id ? ' (' + a.etiqueta + ')' : '') + ': ' + e.message); }
-      if (multi) { try { out.bloque = await propAlternativaIA(p, a, alts, i, ofertasBlocks); } catch (e) { avisosGen.push('No pude redactar la ' + a.etiqueta + ': ' + e.message); } }
-      return out;
-    }));
-    const tablasResumen = [];
-    hechas.forEach((r, i) => { if (r.resumen) { if (multi) tablasResumen.push('## ' + alts[i].etiqueta); tablasResumen.push(propTablaTexto(r.resumen.columnas, r.resumen.filas)); } });
-    if (tablasResumen.length) setSec('intro_seleccion_tecnologia', { texto: String((pd.secciones.intro_seleccion_tecnologia || {}).texto || '').replace(/\s+$/, '') + '\n## Resumen de las unidades principales\n' + tablasResumen.join('\n') });
+    // una alternativa por vez (en paralelo se pasaba del límite de la API y alguna quedaba sin redactar); si falla, un reintento
+    const conReintento = async fn => { try { return await fn(); } catch (e1) { await new Promise(r => setTimeout(r, 5000)); return await fn(); } };
+    const hechas = [];
+    for (let i = 0; i < alts.length; i++) {
+      const a = alts[i], out = { resumen: null, bloque: null };
+      showMsg(statusId, 'loading', multi ? `Redactando la ${a.etiqueta} (${i + 1} de ${alts.length})...` : 'Armando el resumen de las unidades principales...');
+      try { out.resumen = await conReintento(() => propResumenUnidadesIA(p, a)); } catch (e) { avisosGen.push('Resumen de unidades' + (a.id ? ' (' + a.etiqueta + ')' : '') + ': ' + e.message); }
+      if (multi) { try { out.bloque = await conReintento(() => propAlternativaIA(p, a, alts, i)); } catch (e) { avisosGen.push('No pude redactar la ' + a.etiqueta + ': ' + e.message); } }
+      hechas.push(out);
+    }
+    const tablaResumen = r => r.resumen ? propTablaTexto(r.resumen.columnas, r.resumen.filas) : '';
     if (multi) {
       const partes = [];
       if (propTecIntro) partes.push(propTecIntro);
       alts.forEach((a, i) => {
-        const b = hechas[i].bloque;
+        const b = hechas[i].bloque, tabla = tablaResumen(hechas[i]);
         partes.push('# ' + propTituloAlternativa(a));
+        partes.push('## Descripción general');
         if (b && b.descripcion) partes.push(b.descripcion);
         partes.push(`[[img:gen:flow:${a.id}|Flowsheet esquemático Alternativa ${a.id}.]]`);
         partes.push(`[[img:gen:impl:${a.id}|Implantación esquemática Alternativa ${a.id}.]]`);
+        partes.push(`[[biblioteca:${a.id}]]`, '[[/biblioteca]]'); // acá va el texto estándar de la tecnología (generalidades), lo completa la biblioteca
+        partes.push('## Etapas de proceso');
+        if (tabla) partes.push(`Resumen de las unidades principales de la ${a.etiqueta.split(' — ')[0]}:`, tabla);
         partes.push(b && b.etapas ? b.etapas : '(No se pudo redactar esta alternativa: completala a mano o pedile a la IA por el chat de esta sección.)');
         partes.push(`[[suministro:${a.id}]]`);
       });
       setSec('etapas_proceso', { texto: partes.join('\n') });
+    } else if (hechas[0] && hechas[0].resumen) {
+      // una sola alternativa: la tablita resumen va al principio de las etapas de proceso
+      setSec('etapas_proceso', { texto: '## Resumen de las unidades principales\n' + tablaResumen(hechas[0]) + '\n' + String((pd.secciones.etapas_proceso || {}).texto || '') });
     }
     // Nombres completos de las etapas (en vez de "LA", "Sed 2°"...)
     let avisoNombres = '';
@@ -20064,7 +20093,7 @@ async function procesosStep4SeccionChatSend(key) {
       : meta.key === 'etapas_proceso'
         ? 'una línea por cada etapa del proceso: esa línea tiene que empezar con "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto), y en la línea siguiente una descripción breve (sin el "### ")'
         : meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
-    const formatoTxtFinal = formatoTxt + '. IMPORTANTE: las líneas que empiezan con "[[img:" (fotos de la biblioteca de la empresa), las filas de tabla que empiezan con "|", la línea "[[biblioteca]]", los marcadores "[[suministro:X]]", las imágenes "[[img:gen:...]]" (flowsheet/implantación de una alternativa) y los títulos de alternativa que empiezan con "# " tenés que conservarlos TAL CUAL en "texto_nuevo" (no inventes ni cambies ids de imagen); solo los movés o quitás si el usuario lo pide.';
+    const formatoTxtFinal = formatoTxt + '. IMPORTANTE: las líneas que empiezan con "[[img:" (fotos de la biblioteca de la empresa), las filas de tabla que empiezan con "|", la línea "[[biblioteca]]" y las marcas "[[biblioteca:X]]" / "[[/biblioteca]]" (con lo que hay entre ellas), los marcadores "[[suministro:X]]", las imágenes "[[img:gen:...]]" (flowsheet/implantación de una alternativa) y los títulos de alternativa que empiezan con "# " tenés que conservarlos TAL CUAL en "texto_nuevo" (no inventes ni cambies ids de imagen); solo los movés o quitás si el usuario lo pide.';
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : '';
@@ -20304,18 +20333,16 @@ const PROP_TEC_PATRONES = [
 ];
 // Tecnologías biológicas del proyecto según el nombre de sus etapas (en el orden del tren) — la línea de
 // lodos y las etapas auxiliares no cuentan (ej. un digestor anaeróbico de lodos no es la tecnología biológica)
-function propTecnologiasDelProyecto(p) {
+// Tecnologías biológicas de UN proyecto/alternativa (por los nombres de sus etapas); confirmada = también la tecnología confirmada en el Paso 1
+function propTecnologiasDeProy(proy, confirmada) {
   const textos = [];
-  if (p.tecnologia_confirmada) String(p.tecnologia_confirmada).split('+').forEach(t => textos.push(t));
-  // con varias alternativas, las tecnologías de TODAS (cada una con su texto estándar, y las fotos de obras solo de estas tecnologías)
-  procesosAlternativasLista(p).forEach(a => {
-    const dd = a.proy.diseno_data || {};
-    (dd.orden || []).forEach(n => {
-      const h = dd.hojas && dd.hojas[n];
-      if (!h || !h.seleccionada || h.tipo === 'auxiliar' || h.linea === 'lodos') return;
-      if (/digest|espes|deshidrat|\blodos?\b/.test(propNormTxt(n))) return;
-      textos.push(n); if (h.hojaBase) textos.push(h.hojaBase);
-    });
+  if (confirmada && proy.tecnologia_confirmada) String(proy.tecnologia_confirmada).split('+').forEach(t => textos.push(t));
+  const dd = proy.diseno_data || {};
+  (dd.orden || []).forEach(n => {
+    const h = dd.hojas && dd.hojas[n];
+    if (!h || !h.seleccionada || h.tipo === 'auxiliar' || h.linea === 'lodos') return;
+    if (/digest|espes|deshidrat|\blodos?\b/.test(propNormTxt(n))) return;
+    textos.push(n); if (h.hojaBase) textos.push(h.hojaBase);
   });
   const claves = [];
   textos.forEach(t => {
@@ -20324,8 +20351,14 @@ function propTecnologiasDelProyecto(p) {
   });
   return claves;
 }
-function propTecBloqueTexto(tec) {
-  const out = [`### Tecnología ${tec.nombre}`];
+function propTecnologiasDelProyecto(p) {
+  // con varias alternativas, las tecnologías de TODAS (cada una con su texto estándar, y las fotos de obras solo de estas tecnologías)
+  const claves = [];
+  procesosAlternativasLista(p).forEach((a, i) => propTecnologiasDeProy(a.proy, i === 0 || a.proy === p).forEach(c => { if (!claves.includes(c)) claves.push(c); }));
+  return claves;
+}
+function propTecBloqueTexto(tec, comoSubtitulo) {
+  const out = [`${comoSubtitulo ? '##' : '###'} Tecnología ${tec.nombre}`]; // dentro de una alternativa va como subtítulo en negrita (no como título de etapa)
   propTecSeccionesRol(tec, 'tecnologia').forEach(s => { out.push('## ' + s.titulo); if (String(s.texto).trim()) out.push(String(s.texto).trim()); });
   return out.join('\n');
 }
@@ -20339,8 +20372,8 @@ const PROP_TOOL_ELEGIR_IMAGENES = {
   }, required: ['por_etapa', 'normativa', 'referencias'] },
 };
 async function propSeleccionarImagenesIA(p, claves, etapas, imagenes, tecImgs) {
-  const ed = (p.equipos_data && p.equipos_data.etapas) || {};
-  const equiposTxt = Object.entries(ed).map(([n, e]) => `- ${n}: ` + ((e.equipos || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}${q.modelo ? ' (' + q.modelo + ')' : ''}${q.especificacion ? ' — ' + q.especificacion : ''}`).join('; ') || '(sin equipos cargados)')).join('\n') || '(no hay equipos cargados)';
+  const altsEq = procesosAlternativasLista(p);
+  const equiposTxt = altsEq.map(a => { const ed = (a.proy.equipos_data && a.proy.equipos_data.etapas) || {}; return (altsEq.length > 1 ? a.etiqueta + ':\n' : '') + Object.entries(ed).map(([n, e]) => `- ${n}: ` + ((e.equipos || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}${q.modelo ? ' (' + q.modelo + ')' : ''}${q.especificacion ? ' — ' + q.especificacion : ''}`).join('; ') || '(sin equipos cargados)')).join('\n'); }).join('\n') || '(no hay equipos cargados)';
   const cat = c => imagenes.filter(i => i.categoria === c);
   const linea = i => `${i.id} | ${i.nombre} | palabras clave: ${i.tags || '—'} | tecnologías: ${i.tecnologias || '—'}`;
   const campos = (p.info_cliente && p.info_cliente.campos) || {};
@@ -20350,6 +20383,27 @@ async function propSeleccionarImagenesIA(p, claves, etapas, imagenes, tecImgs) {
 }
 // Saca de un texto las líneas de imagen y, si hay marca de biblioteca, todo lo que sigue
 function propQuitarImagenes(texto) { return String(texto || '').split('\n').filter(l => !PROP_IMG_TOKEN_RE.test(l.trim()) || /^\[\[img:gen:/.test(l.trim())).join('\n'); } // las figuras generadas con el diseño ("gen:") se conservan
+// Bloques "[[biblioteca:A]] ... [[/biblioteca]]" dentro de "Etapas de proceso" (varias alternativas): el texto estándar de la tecnología va dentro de cada alternativa
+function propBibEnEtapas(texto, id, contenido) {
+  const out = []; let dentro = false;
+  String(texto || '').split('\n').forEach(l => {
+    const t = l.trim();
+    if (t === `[[biblioteca:${id}]]`) { out.push(l); if (contenido) out.push(contenido); dentro = true; return; }
+    if (dentro) { if (t === '[[/biblioteca]]') { dentro = false; out.push(l); } return; }
+    out.push(l);
+  });
+  return out.join('\n');
+}
+function propVaciarBibEtapas(texto) {
+  const out = []; let dentro = false;
+  String(texto || '').split('\n').forEach(l => {
+    const t = l.trim();
+    if (/^\[\[biblioteca:[^\]]+\]\]$/.test(t)) { out.push(l); dentro = true; return; }
+    if (dentro) { if (t === '[[/biblioteca]]') { dentro = false; out.push(l); } return; }
+    out.push(l);
+  });
+  return out.join('\n');
+}
 function propQuitarBloqueBiblioteca(texto) { const i = String(texto || '').indexOf('[[biblioteca]]'); return (i >= 0 ? String(texto).slice(0, i) : String(texto || '')).replace(/\s+$/, ''); }
 // Agrega, al final de cada etapa ("### Nombre"), las imágenes elegidas
 function propInsertarImagenesEnEtapas(texto, porEtapa, pieDe) {
@@ -20416,7 +20470,7 @@ const PROP_TOOL_ADAPTAR = {
 async function propAdaptarTextoTecnologia(p, nombreTec, texto, contexto) {
   const lineas = texto.split('\n');
   const lista = lineas.map((l, i) => i === 0 ? null : `${i}. ${l.replace(/\[\[img:[^|\]]*\|?([^\]]*)\]\]/, '[imagen: $1]').slice(0, 400)}`).filter(Boolean).join('\n');
-  const prompt = `${contexto ? 'CONTEXTO DEL PROYECTO (datos de diseño, etapas, equipos):\n' + contexto + '\n\n' : ''}Estás armando la sección "Selección de tecnología" de una propuesta técnico-comercial de Aeration Argentina. Abajo está el TEXTO ESTÁNDAR de la tecnología "${nombreTec}" (descripción genérica de la planta tipo, una línea por número). Tenés que adaptarlo a ESTE proyecto, sin reescribirlo entero:
+  const prompt = `${contexto ? 'CONTEXTO DEL PROYECTO (datos de diseño, etapas, equipos):\n' + contexto + '\n\n' : ''}Estás armando las generalidades de la tecnología de una propuesta técnico-comercial de Aeration Argentina. Abajo está el TEXTO ESTÁNDAR de la tecnología "${nombreTec}" (descripción genérica de la planta tipo, una línea por número). Tenés que adaptarlo a ESTE proyecto, sin reescribirlo entero:
 - QUITAR: líneas que describen una etapa, unidad o equipo que el proyecto NO tiene (ej. si el texto describe digestión de lodos o desinfección y el tren no las incluye). Si quitás un subtítulo ("## ...") quitá también las líneas de su contenido; si quitás una unidad de una lista, solo ese ítem; las imágenes de una unidad ausente también.
 - CAMBIAR: líneas con valores o afirmaciones concretas de la planta tipo (cargas volumétricas o másicas, tiempos de retención, edades de lodo, remociones, rangos, concentraciones, materiales...) que no coinciden con este proyecto o que el proyecto define distinto. Reescribí ESA línea completa cambiando solo esos valores/afirmaciones por los reales del proyecto, manteniendo el resto de la redacción idéntica. Podés hacer un cálculo directo si sale de los datos del contexto (ej. carga volumétrica = carga de DBO / volumen del reactor) y lo explicás en el motivo. Si el proyecto no tiene ese dato, NO lo inventes: dejá la línea como está o, si el valor queda claramente errado, quitá solo ese valor puntual.
 Reglas: (1) ante la duda no quites ni cambies. (2) Lo general (qué es la tecnología, ventajas cualitativas, comparaciones, rendimientos garantizados) se queda. (3) No toques filas de tabla ni líneas de imagen (salvo quitar la de una unidad ausente). (4) Una unidad puede llamarse distinto en el proyecto (ej. "Sed 2°" = clarificación): en ese caso existe.
@@ -20454,14 +20508,14 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   // Solo imágenes que corresponden a la/s tecnología/s de la propuesta: las obras de referencia tienen que ser de la MISMA tecnología (si no tienen
   // tecnología cargada no se pueden usar); las fotos de equipos/esquemas sin tecnología cargada sirven (son genéricas), las de otra tecnología no.
   const imagenes = imagenesTodas.filter(i => { const c = propImgCoincideTec(i, claves); return i.categoria === 'referencia' ? c === true : c !== false; });
-  const nExcl = imagenesTodas.length - imagenes.length;
   const pieDe = id => { const i = imagenes.find(x => x.id === id); return i ? (i.pie || i.nombre) : ''; };
   const idsValidos = new Set(imagenes.map(i => i.id));
 
   // 1) fotos de equipos por etapa + normativa + referencias (la IA elige de la biblioteca)
   let sel = null;
   const etapasSec = sec('etapas_proceso');
-  const etapas = propQuitarImagenes(etapasSec.texto).split('\n').filter(l => l.trim().startsWith('### ')).map(l => l.trim().slice(4).trim());
+  const etapasBase = propVaciarBibEtapas(etapasSec.texto); // sin el texto estándar de las tecnologías (se vuelve a armar abajo)
+  const etapas = propQuitarImagenes(etapasBase).split('\n').filter(l => l.trim().startsWith('### ')).map(l => l.trim().slice(4).trim());
   // imágenes de las secciones "de etapas" de la tecnología (su texto no se pega: sirve de referencia para redactar las etapas)
   const tecImgIds = [];
   claves.forEach(c => { const t = tecs.find(x => x.clave === c); if (t) propIdsImagenesEnTextos(propTecSeccionesRol(t, 'etapas').map(s => s.texto)).forEach(id => { if (!tecImgIds.includes(id)) tecImgIds.push(id); }); });
@@ -20475,23 +20529,21 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   let nFotos = 0;
   const porEtapa = {};
   if (sel) (sel.por_etapa || []).forEach(x => { const ids = limpiar(x.imagenes); if (ids.length) { porEtapa[x.etapa] = ids; nFotos += ids.length; } });
-  pd.secciones.etapas_proceso = Object.assign({}, etapasSec, { texto: propInsertarImagenesEnEtapas(propQuitarImagenes(etapasSec.texto), porEtapa, pieDe) });
+  pd.secciones.etapas_proceso = Object.assign({}, etapasSec, { texto: propInsertarImagenesEnEtapas(propQuitarImagenes(etapasBase), porEtapa, pieDe) });
   const vuelco = sec('intro_calidad_vuelco');
   let normaTxt = propQuitarImagenes(vuelco.texto);
   if (sel && sel.normativa && idsValidos.has(sel.normativa) && !usadas.has(sel.normativa)) { usadas.add(sel.normativa); normaTxt += `\n[[img:${sel.normativa}|${pieDe(sel.normativa)}]]`; nFotos++; }
   pd.secciones.intro_calidad_vuelco = Object.assign({}, vuelco, { texto: normaTxt });
 
-  // 2) texto estándar de la/s tecnología/s (después del texto que redactó la IA)
+  // 2) texto estándar de la/s tecnología/s: con una sola alternativa va después del texto de "Selección de tecnología"; con varias, dentro de cada alternativa
+  const alts = procesosAlternativasLista(p), multi = alts.length > 1;
   const sTec = sec('intro_seleccion_tecnologia');
-  const bloques = [];
   const sinTexto = [];
   const adaptaciones = [];
-  let contextoAdapt = '';
-  try { contextoAdapt = await procesosBuildContexto(4); } catch (e) { contextoAdapt = ''; }
-  for (const c of claves) {
+  const textoDeTec = async (c, contextoAdapt, subtitulo) => {
     const t = tecs.find(x => x.clave === c);
-    if (!t) { sinTexto.push(propTecNombre(c)); continue; }
-    let txt = propTecBloqueTexto(t);
+    if (!t) { sinTexto.push(propTecNombre(c)); return null; }
+    let txt = propTecBloqueTexto(t, subtitulo);
     try {
       const a = await propAdaptarTextoTecnologia(p, t.nombre, txt, contextoAdapt);
       txt = a.texto;
@@ -20502,7 +20554,27 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
         if (a.cambiadas.length) adaptaciones.push(`${t.nombre}: se ajustaron ${a.cambiadas.length} línea(s) a los datos del proyecto (${a.cambiadas.slice(0, 3).map(c => c.motivo).filter(Boolean).join('; ')})`);
       }
     } catch (e) { avisos.push(`No pude adaptar el texto de ${t.nombre} al proyecto (${e.message}): quedó el texto estándar completo, revisalo.`); }
-    bloques.push(txt);
+    return txt;
+  };
+  const baseTec = propQuitarBloqueBiblioteca(sTec.texto);
+  let tecUsadasTxt = [];
+  if (!multi) {
+    const bloques = [], ctx = propContextoAlt(p, alts[0]);
+    for (const c of claves) { const txt = await textoDeTec(c, ctx, false); if (txt) { bloques.push(txt); tecUsadasTxt.push(c); } }
+    pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: bloques.length ? baseTec + '\n[[biblioteca]]\n' + bloques.join('\n') : baseTec });
+  } else {
+    // "Selección de tecnología" queda solo con la comparación; las generalidades de cada tecnología van en la primera alternativa que la usa
+    pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: baseTec });
+    const asignadas = new Set();
+    let etx = (pd.secciones.etapas_proceso || {}).texto || '';
+    for (const a of alts) {
+      const clavesA = propTecnologiasDeProy(a.proy, false).filter(c => !asignadas.has(c));
+      clavesA.forEach(c => asignadas.add(c));
+      const ctx = propContextoAlt(p, a), bloques = [];
+      for (const c of clavesA) { const txt = await textoDeTec(c, ctx, true); if (txt) { bloques.push(txt); tecUsadasTxt.push(c); } }
+      etx = propBibEnEtapas(etx, a.id, bloques.join('\n'));
+    }
+    pd.secciones.etapas_proceso = Object.assign({}, pd.secciones.etapas_proceso, { texto: etx });
   }
   // Obras de referencia: sección aparte (antes de "Límite de suministro"), solo con obras de la misma tecnología que la propuesta
   const refsOk = sel ? limpiar(sel.referencias).filter(id => { const im = imagenes.find(i => i.id === id); return im && im.categoria === 'referencia' && propImgCoincideTec(im, claves) === true; }) : [];
@@ -20510,12 +20582,10 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   pd.secciones.obras_referencia = Object.assign({}, secObras, { texto: refsOk.length ? 'A continuación se presentan obras de referencia de Aeration con la tecnología propuesta.\n' + refsOk.map(id => `[[img:${id}|${pieDe(id)}]]`).join('\n') : '' });
   nFotos += refsOk.length;
   if (!refsOk.length && imagenesTodas.some(i => i.categoria === 'referencia')) avisos.push('No hay obras de referencia de la misma tecnología (' + (claves.map(propTecNombre).join(', ') || 'no identificada') + ') en la biblioteca, así que no se agregó esa sección.');
-  const base = propQuitarBloqueBiblioteca(sTec.texto);
-  pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: bloques.length ? base + '\n[[biblioteca]]\n' + bloques.join('\n') : base });
   if (!claves.length) avisos.push('No identifiqué la tecnología biológica del proyecto en los nombres de las etapas, así que no agregué texto estándar de tecnología.');
   if (sinTexto.length) avisos.push('No hay texto estándar cargado para: ' + sinTexto.join(', ') + ' (Cfg Propuestas).');
-  const tecUsadas = claves.filter(c => tecs.some(x => x.clave === c));
-  return { resumen: `Se agregó el texto estándar de ${tecUsadas.length ? tecUsadas.map(propTecNombre).join(', ') : 'ninguna tecnología'} y ${nFotos} foto(s) de la biblioteca.` + (adaptaciones.length ? ' ' + adaptaciones.join('; ') + '.' : '') + (avisos.length ? ' ' + avisos.join(' ') : ''), pd };
+  const tecUsadas = tecUsadasTxt;
+  return { resumen: `Se agregó el texto estándar de ${tecUsadas.length ? tecUsadas.map(propTecNombre).join(', ') : 'ninguna tecnología'}${multi && tecUsadas.length ? ' (dentro de cada alternativa)' : ''} y ${nFotos} foto(s) de la biblioteca.` + (adaptaciones.length ? ' ' + adaptaciones.join('; ') + '.' : '') + (avisos.length ? ' ' + avisos.join(' ') : ''), pd };
 }
 // Miniaturas de las imágenes que cita un texto (para el panel de edición de cada sección)
 function propMiniaturasTextoHtml(texto) {
