@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.104</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.104</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11378,7 +11378,13 @@ Respondé SOLO con JSON válido (sin backticks ni texto extra): {"reply":"respue
 - Si lo que piden no se puede hacer con las hojas disponibles (por ejemplo una tecnología que no está en la planilla), no inventes una hoja: explicalo en "reply" y dejá "unidades" en null.
 - Si el cambio pedido te parece técnicamente cuestionable (ej. sacar una etapa que los criterios marcan como necesaria), hacelo igual si el usuario lo pide de forma explícita, pero avisalo en "reply".`;
     const templateChat = await procesosPromptText('step2_tren_chat', DEFAULT_TEMPLATE_TREN_CHAT);
-    const prompt = procesosPromptFill(templateChat, { resumenCampos: procesosResumenCampos(p), requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'tren'), reqTrenTxt: procesosRequerimientoTrenTxt(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, fichasTxt, trenActual, historialTxt, msg, libresTxt: PROCESOS_LIBRES_TXT, alternativaTxt: PROCESOS_ALTERNATIVA_TXT });
+    // alternativas que ya hay (guardadas en el proyecto o propuestas y pendientes), para no proponer dos veces la misma
+    const trenCorto = proy => { try { return procesosStep2GruposDesdeActual(proy).map(g => g.instancias.length > 1 ? `${g.hojaBase} x${g.instancias.length}${g.disposicion ? ' (' + g.disposicion + ')' : ''}` : g.instancias[0].nombre).join(' → '); } catch (_e) { return ''; } };
+    const altsExist = [];
+    if (procesosEscenariosInfo(p)) procesosAlternativasLista(p).forEach(a => altsExist.push(`- ${a.etiqueta}${a.id === procesosEscenariosInfo(p).activo ? ' (la que se está viendo)' : ''}: ${trenCorto(a.proy) || '(sin tren)'}`));
+    if (st.trenAlternativa) altsExist.push(`- Alternativa propuesta y todavía sin decidir: "${st.trenAlternativa.titulo}" → ${st.trenAlternativa.grupos.map(g => g.hojaBase).join(' → ')}`);
+    const alternativasPrevTxt = altsExist.length ? `ALTERNATIVAS YA EXISTENTES (una alternativa nueva tiene que ser DISTINTA de todas estas y del tren actual):\n${altsExist.join('\n')}\n\n` : '';
+    const prompt = procesosPromptFill(templateChat, { resumenCampos: procesosResumenCampos(p), requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'tren'), reqTrenTxt: procesosRequerimientoTrenTxt(p), tecTxt, corrientesTxt, firmas, criteriosTxt, leccionesTxt, chatGeneralTxt, fichasTxt, trenActual, historialTxt, msg, libresTxt: PROCESOS_LIBRES_TXT, alternativasPrevTxt, alternativaTxt: PROCESOS_ALTERNATIVA_TXT });
     const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 6000, messages: [{ role: 'user', content: [...criteriosBlocks.map(x => x.block), { type: 'text', text: prompt }] }] })
@@ -18987,7 +18993,7 @@ function procesosRequerimientosDisenoTxt(p, ambito) {
   const cab = `REQUERIMIENTOS DE DISEÑO DEL CLIENTE (campo "${k}" del Paso 1, tomados del pliego/especificación — son CRITERIOS DE DISEÑO OBLIGATORIOS del proyecto, no información de contexto):\n${v}\n\n`;
   const uso = {
     unidad: 'Cómo usarlos en ESTA unidad: identificá cuáles aplican a esta unidad (tiempos de retención, F/M, edad del lodo, SSV, TRH, O2 requerido, cargas superficiales, relaciones de volúmenes, tiempos de contacto, etc.) e ignorá los que no tengan que ver con ella. Cada parámetro que figure ahí es el CRITERIO DE DISEÑO de esta unidad y tiene PRIORIDAD sobre el "rango normal" de la planilla: elegí el valor dentro del rango pedido, y si la celda no se puede fijar directo (es un resultado calculado), ajustá los datos de entrada — con "buscar_objetivo" o "set" sobre las celdas de entrada — para que el resultado quede dentro de lo pedido. Solo te podés apartar si es imposible cumplirlo (por ejemplo, choca con un rango límite o con otro requerimiento) o si el usuario lo pide: en ese caso decilo de forma explícita en "reply". Cuando fijes un valor por uno de estos requerimientos, citalo en el "motivo" (ej. "pliego: θc 20–30 días"). Si te preguntan por qué no se respeta un requerimiento que aplica, revisá el estado real de las celdas: si no se cumple, es un error a corregir, no algo para justificar.\n\n',
-    tren: 'Cómo usarlos al armar el tren: las etapas y equipos que el pliego exige (ej. desbaste, sedimentador secundario, digestión aeróbica de lodos, deshidratación, cámara de contacto, tipo de tratamiento biológico, redundancia 1+1) tienen que estar en el tren; y los parámetros de dimensionamiento que da (tiempos de retención, edad del lodo, etc.) quedan como criterio para definir sus valores después. Si el tren propuesto no cumple alguno, aclaralo en el motivo.\n\n',
+    tren: 'Cómo usarlos al armar el tren: las etapas y equipos que el pliego exige (ej. desbaste, sedimentador secundario, digestión aeróbica de lodos, deshidratación, cámara de contacto, tipo de tratamiento biológico, redundancia 1+1) tienen que estar en el tren; y los parámetros de dimensionamiento que da (tiempos de retención, edad del lodo, etc.) quedan como criterio para definir sus valores después. Si el tren propuesto no cumple alguno, aclaralo en el motivo. Si el texto plantea VARIAS ALTERNATIVAS o tecnologías a evaluar/ofertar (ej. "3 alternativas: barros activados, MBBR y MBR"), el tren principal es UNA de ellas (la que mejor convenga) y las otras se arman como alternativas del proyecto (el usuario las pide después con el chat del tren): mencionalo en el motivo.\n\n',
     equipos: 'Cómo usarlos al definir equipos: respetá lo que el pliego pida para esta etapa (cantidad y redundancia — ej. 2 bombas 1+1 con alternancia automática —, tipo/material, instrumentación, automatización, accesorios de seguridad, marca de tablero, etc.). Si el requerimiento fija o condiciona un equipo, citalo en la justificación.\n\n',
     libre: 'Cómo usarlos: si alguno aplica a esta unidad (tiempos de retención, cargas, etc.), la hoja tiene que usarlo como dato/criterio de diseño por defecto y citar el requerimiento en la nota de esa fila.\n\n',
   }[ambito] || '';
@@ -31954,7 +31960,8 @@ const PROCESOS_LIBRE_TOOL = {
   }, required: ['metodologia', 'filas'] }
 };
 const PROCESOS_LIBRES_TXT = `UNIDADES LIBRES Y CRITERIO PROPIO: la lista de hojas de la planilla NO es un límite para tu criterio técnico. Usá todo tu conocimiento de ingeniería sanitaria y de tratamiento de efluentes para armar el mejor tren posible, combinando tecnologías cuando corresponda. Si una etapa que el proyecto necesita técnicamente NO tiene hoja en la lista (por ejemplo un tanque de contingencia, un digestor aerobio, desinfección por UV, un tratamiento terciario, una tecnología poco común), proponela como unidad LIBRE dentro de "unidades", con este formato (sin "hojaBase"): {"libre":true,"nombre":"Nombre de la unidad","descripcion":"qué es y qué tendría que dimensionar su hoja (5-25 palabras)","cantidad":1,"tipo":"etapa","linea":"liquido","instancias":[{"nombre":"Nombre de la unidad","corrientes":[...],"material":"hormigon","geometria":"rectangular"}],"motivo":"por qué hace falta"}. Si una hoja de la lista ya cubre esa función, usá la hoja: las libres son solo para lo que la planilla no tiene. Esto reemplaza cualquier indicación anterior de "no inventar hojas". Al aplicar el tren, una IA crea la hoja de cálculo de cada unidad libre (con sus fórmulas y valores) para que el usuario la revise.`;
-const PROCESOS_ALTERNATIVA_TXT = `ALTERNATIVAS DE TREN: si el usuario pide una ALTERNATIVA (otra opción, otra configuración o tecnología para el tren; "proponé otra", "qué otra opción hay", "compará con…"), NO modifiques el tren actual: agregá al JSON de respuesta el campo "alternativa": {"titulo":"nombre corto de la alternativa","comparacion":"comparación breve contra el tren actual: ventajas, desventajas y su impacto en costo, espacio y operación","unidades":[ ...el tren COMPLETO alternativo, con el mismo formato que "unidades"... ]} y dejá "unidades" en null. La alternativa tiene que ser técnicamente distinta (otra tecnología, otra secuencia u otra configuración), no una variante cosmética, y puede usar unidades libres. Solo la proponés cuando el usuario la pide.`;
+const PROCESOS_ALTERNATIVA_TXT = `ALTERNATIVAS DE TREN: si el usuario pide una ALTERNATIVA (otra opción, otra configuración o tecnología para el tren; "proponé otra", "qué otra opción hay", "compará con…"), NO modifiques el tren actual: agregá al JSON de respuesta el campo "alternativa": {"titulo":"nombre corto de la alternativa","comparacion":"comparación breve contra el tren actual: ventajas, desventajas y su impacto en costo, espacio y operación","unidades":[ ...el tren COMPLETO alternativo, con el mismo formato que "unidades"... ]} y dejá "unidades" en null. La alternativa tiene que ser técnicamente distinta (otra tecnología, otra secuencia u otra configuración), no una variante cosmética, y puede usar unidades libres. Solo la proponés cuando el usuario la pide.
+QUÉ ALTERNATIVA PROPONER: si el pliego/especificación del cliente PLANTEA alternativas o tecnologías a evaluar u ofertar (lo vas a ver en "REQUERIMIENTOS DE DISEÑO DEL CLIENTE", en "REQUERIMIENTOS DEL CLIENTE SOBRE EL TREN" o en la información del Paso 1; ej. "barros activados convencional, anaeróbico con pulido aeróbico, MBR, MBBR + lodos activados"), la alternativa que propongas tiene que ser UNA DE ESAS: elegí la que mejor convenga de las que todavía NO están en el tren actual ni en otra alternativa ya guardada o propuesta (ver "ALTERNATIVAS YA EXISTENTES"), armá su tren COMPLETO respetando el resto de los requerimientos del pliego (etapas exigidas, calidad de salida, redundancia, tiempos de retención...) y ponele en "titulo" el nombre con que el pliego la llama. Solo si el pliego no plantea ninguna o ya están todas cubiertas, proponé una distinta por tu criterio y aclará en "comparacion" que no viene del pliego. Pueden coexistir hasta 3 alternativas en el proyecto.`;
 const PROCESOS_LIBRE_CHAT_TXT = `ESTA HOJA ES LIBRE (la creó una IA para este proyecto: no viene de la planilla de la empresa). Cada dato lleva un símbolo entre corchetes. Además de fijar valores ("acciones"), podés cambiar la ESTRUCTURA de la hoja con "estructura": {"op":"agregar_fila"|"editar_fila"|"quitar_fila","clave":"símbolo","etiqueta":"...","tipo":"entrada"|"calculo","valor":número (entrada),"formula":"[A]*[B]/1000" (calculo; referenciá filas por su símbolo entre corchetes),"unidad":"...","rango":"min - max","nota":"justificación","despues_de":"símbolo de la fila tras la cual insertarla (opcional)"}. Usalo cuando el usuario pida agregar un cálculo, cambiar una fórmula o quitar una fila. Nunca dejes una fórmula que dé error.`;
 
 // ── Filas: limpieza y armado de la hoja ──
@@ -32231,7 +32238,7 @@ function procesosStep2TrenAlternativaHtml(st) {
     <span class="badge" style="background:var(--blue-bg);color:var(--blue)">🔀 Alternativa: ${esc(a.titulo || 'sin título')}</span>
     ${a.comparacion ? `<p class="hint" style="margin:8px 0;white-space:pre-wrap">${esc(a.comparacion)}</p>` : ''}
     ${procesosStep2TrenDiagramaHtml(a.grupos)}
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="procesosStep2TrenUsarAlternativa()">Cambiar a esta alternativa</button>${procesosEscenariosInfo(procesosCurrentProyecto) ? '' : '<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenSumarAlternativa()" title="Aplica el tren actual como Alternativa A y crea la B con este tren: cada una con su diseño, equipos y precio, y la propuesta las presenta juntas">➕ Sumar como alternativa (la propuesta las presenta juntas)</button>'}<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenDescartarAlternativa()">Descartar alternativa</button></div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="procesosStep2TrenUsarAlternativa()">Cambiar a esta alternativa</button>${procesosAlternativasLista(procesosCurrentProyecto).length >= PROCESOS_MAX_ALTERNATIVAS ? '' : '<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenSumarAlternativa()" title="Suma este tren como una alternativa más (hasta 3): cada una con su diseño, equipos y precio, y la propuesta las presenta juntas">➕ Sumar como alternativa (la propuesta las presenta juntas)</button>'}<button class="btn btn-secondary btn-sm" onclick="procesosStep2TrenDescartarAlternativa()">Descartar alternativa</button></div>
   </div>`;
 }
 
@@ -32280,13 +32287,19 @@ function procesosEscenarioResetCaches(p) {
   procesosStep3State = { proyectoId: null, etapaAbierta: null };
   if (st.workbook) procesosLibreRegistrarTodas(p);
 }
-async function procesosEscenarioCambiar() {
+// Cambia a otra alternativa (idDestino; sin id = la primera de las que no se están viendo): la que se estaba viendo pasa a su lugar guardado.
+// Máximo 3 alternativas (A, B y C): "otro" + "extra" son los lugares de las que no se están viendo.
+async function procesosEscenarioCambiar(idDestino) {
   const p = procesosCurrentProyecto, e = procesosEscenariosInfo(p);
   if (!e) return;
   const actual = JSON.parse(JSON.stringify(Object.assign({}, p.diseno_data, { escenarios: undefined })));
-  const otroId = e.otro.id;
-  const nuevoDD = Object.assign({}, e.otro.diseno, { escenarios: { activo: otroId, nombres: e.nombres || {}, comparacion: e.comparacion || '', otro: { id: e.activo, diseno: actual, equipos: p.equipos_data || { etapas: {} } }, extra: e.extra || undefined } });
-  const nuevoEq = e.otro.equipos || { etapas: {} };
+  const lugares = [e.otro].concat(e.extra || []);
+  const i = idDestino ? lugares.findIndex(l => l.id === idDestino) : 0;
+  if (i < 0) return;
+  const destino = lugares[i];
+  lugares[i] = { id: e.activo, diseno: actual, equipos: p.equipos_data || { etapas: {} } };
+  const nuevoDD = Object.assign({}, destino.diseno, { escenarios: { activo: destino.id, nombres: e.nombres || {}, comparacion: e.comparacion || '', otro: lugares[0], extra: lugares.length > 1 ? lugares.slice(1) : undefined } });
+  const nuevoEq = destino.equipos || { etapas: {} };
   await procesosSaveProyecto({ diseno_data: nuevoDD, equipos_data: nuevoEq }, p);
   procesosEscenarioResetCaches(p);
   renderProcesosStepContent();
@@ -32304,45 +32317,65 @@ async function procesosEscenarioRenombrar(id) {
 async function procesosEscenarioQuitar() {
   const p = procesosCurrentProyecto, e = procesosEscenariosInfo(p);
   if (!e) return;
-  if (!confirm('¿Quedarte solo con la ' + procesosEscenarioEtiqueta(e, e.activo) + '? Se descarta la ' + procesosEscenarioEtiqueta(e, e.otro.id) + ' (su tren, sus valores y sus equipos) y la propuesta vuelve a tener una sola opción.')) return;
+  const otras = procesosAlternativasLista(p).filter(a => a.id !== e.activo).map(a => a.etiqueta);
+  if (!confirm('¿Quedarte solo con la ' + procesosEscenarioEtiqueta(e, e.activo) + '? Se descarta la ' + otras.join(' y la ') + ' (su tren, sus valores y sus equipos) y la propuesta vuelve a tener una sola opción.')) return;
   const dd = Object.assign({}, p.diseno_data); delete dd.escenarios;
   // los ítems de la otra alternativa salen de la propuesta comercial
   const pd = p.propuesta_data ? Object.assign({}, p.propuesta_data) : null;
   const campos = { diseno_data: dd };
-  if (pd && pd.comercial_items) { pd.comercial_items = pd.comercial_items.filter(it => !it.alternativa || it.alternativa === e.activo).map(it => { const c = Object.assign({}, it); delete c.alternativa; delete c.alternativaEtiqueta; c.etapa = String(c.etapa || '').replace(/^Alternativa [AB][^·]*·\s*/, ''); return c; }); campos.propuesta_data = pd; }
+  if (pd && pd.comercial_items) { pd.comercial_items = pd.comercial_items.filter(it => !it.alternativa || it.alternativa === e.activo).map(it => { const c = Object.assign({}, it); delete c.alternativa; delete c.alternativaEtiqueta; c.etapa = String(c.etapa || '').replace(/^Alternativa [A-F][^·]*·\s*/, ''); return c; }); campos.propuesta_data = pd; }
   await procesosSaveProyecto(campos, p);
   renderProcesosStepContent();
 }
-// Sumar la alternativa propuesta como Alternativa B: el tren actual se aplica como A y B se crea aparte, con el tren alternativo
+// Sumar la alternativa propuesta como Alternativa B (o C): el tren actual se aplica como A y la nueva se crea aparte, con el tren alternativo
+const PROCESOS_MAX_ALTERNATIVAS = 3;
 async function procesosStep2TrenSumarAlternativa() {
   const st = procesosStep2State, p = procesosCurrentProyecto;
   if (!st.trenAlternativa || !st.trenPropuesto) return;
-  if (procesosEscenariosInfo(p)) { alert('Este proyecto ya tiene dos alternativas (el máximo por ahora).'); return; }
-  if (!confirm('Se va a aplicar el tren actual como Alternativa A y crear la Alternativa B con el tren alternativo. Cada una tiene su propio diseño, equipos y precio, y la propuesta las presenta juntas. Podés alternar entre ellas con el selector de arriba. ¿Seguimos?')) return;
+  const e0 = procesosEscenariosInfo(p), cant = e0 ? procesosAlternativasLista(p).length : 1;
+  if (cant >= PROCESOS_MAX_ALTERNATIVAS) { alert('Este proyecto ya tiene ' + cant + ' alternativas (el máximo).'); return; }
   const alt = st.trenAlternativa;
-  await procesosStep2TrenAplicar({ sinLibres: true });
-  const ddA = JSON.parse(JSON.stringify(p.diseno_data || {}));
-  const eqA = p.equipos_data || { etapas: {} };
-  const ddB = { hojas: {}, orden: [], escenarios: { activo: 'B', nombres: { A: '', B: alt.titulo || '' }, comparacion: alt.comparacion || '', otro: { id: 'A', diseno: ddA, equipos: eqA } } };
-  await procesosSaveProyecto({ diseno_data: ddB, equipos_data: { etapas: {} } }, p);
-  procesosEscenarioResetCaches(p);
+  if (!e0) {
+    if (!confirm('Se va a aplicar el tren actual como Alternativa A y crear la Alternativa B con el tren alternativo. Cada una tiene su propio diseño, equipos y precio, y la propuesta las presenta juntas. Podés alternar entre ellas con el selector de arriba. ¿Seguimos?')) return;
+    await procesosStep2TrenAplicar({ sinLibres: true });
+    const ddA = JSON.parse(JSON.stringify(p.diseno_data || {}));
+    const eqA = p.equipos_data || { etapas: {} };
+    const ddB = { hojas: {}, orden: [], escenarios: { activo: 'B', nombres: { A: '', B: alt.titulo || '' }, comparacion: alt.comparacion || '', otro: { id: 'A', diseno: ddA, equipos: eqA } } };
+    await procesosSaveProyecto({ diseno_data: ddB, equipos_data: { etapas: {} } }, p);
+    procesosEscenarioResetCaches(p);
+    st.trenPropuesto = { grupos: alt.grupos };
+    await procesosStep2TrenAplicar({ sinLibres: true });
+    showMsg('procesos-step2-status', 'loading', '🔀 Creando la Alternativa B...');
+    await procesosStep2LibresGenerarPendientes();
+    await procesosEscenarioCambiar(); // se vuelve a la A, que es donde se venía trabajando (la B queda lista para abrirla con el selector)
+    showMsg('procesos-step2-status', 'success', '✓ Ahora el proyecto tiene dos alternativas. Estás en la A; cambiá a la B con el selector de arriba para definir sus valores.');
+    return;
+  }
+  // ya hay A y B: se suma la C (lugar vacío → se pasa a ella → se aplica el tren → se vuelve a la que se estaba viendo)
+  const idNuevo = ['A', 'B', 'C'].find(x => !procesosAlternativasLista(p).some(a => a.id === x));
+  if (!confirm('Se va a crear la Alternativa ' + idNuevo + ' con el tren alternativo, sin tocar las otras. Cada una tiene su propio diseño, equipos y precio, y la propuesta las presenta todas. ¿Seguimos?')) return;
+  const idVista = e0.activo;
+  const dd = Object.assign({}, p.diseno_data);
+  dd.escenarios = Object.assign({}, e0, { nombres: Object.assign({}, e0.nombres, { [idNuevo]: alt.titulo || '' }), extra: (e0.extra || []).concat([{ id: idNuevo, diseno: { hojas: {}, orden: [] }, equipos: { etapas: {} } }]) });
+  await procesosSaveProyecto({ diseno_data: dd }, p);
+  await procesosEscenarioCambiar(idNuevo);
   st.trenPropuesto = { grupos: alt.grupos };
+  showMsg('procesos-step2-status', 'loading', '🔀 Creando la Alternativa ' + idNuevo + '...');
   await procesosStep2TrenAplicar({ sinLibres: true });
-  showMsg('procesos-step2-status', 'loading', '🔀 Creando la Alternativa B...');
   await procesosStep2LibresGenerarPendientes();
-  await procesosEscenarioCambiar(); // se vuelve a la A, que es donde se venía trabajando (la B queda lista para abrirla con el selector)
-  showMsg('procesos-step2-status', 'success', '✓ Ahora el proyecto tiene dos alternativas. Estás en la A; cambiá a la B con el selector de arriba para definir sus valores.');
+  await procesosEscenarioCambiar(idVista);
+  showMsg('procesos-step2-status', 'success', '✓ Ahora el proyecto tiene ' + (cant + 1) + ' alternativas. Estás en la ' + idVista + '; cambiá a la ' + idNuevo + ' con el selector de arriba para definir sus valores.');
 }
 function procesosEscenariosBarraHtml(p) {
   const e = procesosEscenariosInfo(p);
   if (!e) return '';
   const btn = id => {
     const activo = e.activo === id;
-    return `<button class="btn btn-sm ${activo ? 'btn-primary' : 'btn-secondary'}" style="width:auto" ${activo ? '' : 'onclick="procesosEscenarioCambiar()"'}>${esc(procesosEscenarioEtiqueta(e, id))}</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" onclick="procesosEscenarioRenombrar('${id}')" title="Ponerle nombre a esta alternativa">✎</button>`;
+    return `<button class="btn btn-sm ${activo ? 'btn-primary' : 'btn-secondary'}" style="width:auto" ${activo ? '' : `onclick="procesosEscenarioCambiar('${id}')"`}>${esc(procesosEscenarioEtiqueta(e, id))}</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:4px 8px" onclick="procesosEscenarioRenombrar('${id}')" title="Ponerle nombre a esta alternativa">✎</button>`;
   };
   return `<div class="card" style="margin:6px 0 10px;border-color:var(--blue)">
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="badge" style="background:var(--blue-bg);color:var(--blue)">🔀 Este proyecto tiene 2 alternativas</span>${btn('A')}${btn('B')}<button class="btn btn-secondary btn-sm" style="margin-left:auto;width:auto" onclick="procesosEscenarioQuitar()" title="Descartar la otra alternativa y quedarte con la que estás viendo">✕ Quedarme solo con esta</button></div>
-    <p class="hint" style="margin:6px 0 0">Estás viendo la <b>${esc(procesosEscenarioEtiqueta(e, e.activo))}</b>: lo que definas en los pasos 2 y 3 se guarda en ella. La propuesta (Paso 4) presenta ambas, cada una con su total.${e.comparacion ? '<br><span style="white-space:pre-wrap">' + esc(e.comparacion) + '</span>' : ''}</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="badge" style="background:var(--blue-bg);color:var(--blue)">🔀 Este proyecto tiene ${procesosAlternativasLista(p).length} alternativas</span>${procesosAlternativasLista(p).map(a => btn(a.id)).join('')}<button class="btn btn-secondary btn-sm" style="margin-left:auto;width:auto" onclick="procesosEscenarioQuitar()" title="Descartar la otra alternativa y quedarte con la que estás viendo">✕ Quedarme solo con esta</button></div>
+    <p class="hint" style="margin:6px 0 0">Estás viendo la <b>${esc(procesosEscenarioEtiqueta(e, e.activo))}</b>: lo que definas en los pasos 2 y 3 se guarda en ella. La propuesta (Paso 4) las presenta todas, cada una con su total.${e.comparacion ? '<br><span style="white-space:pre-wrap">' + esc(e.comparacion) + '</span>' : ''}</p>
   </div>`;
 }
 // Bloque para los prompts: la otra alternativa (tren, diseño y equipos) y cómo presentar ambas en la propuesta
