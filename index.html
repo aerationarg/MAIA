@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.103</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.104</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.103</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.104</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -19138,12 +19138,20 @@ function procesosPropuestaParrafoTituloEtapa(texto) {
 // sin viñeta (para agrupar, como "Exclusiones Generales"/"SGI" en Límite de
 // suministro), y una que arranca con "### " se arma como título de etapa
 // (Título3) — se usa en "Etapas de proceso".
+// Título de una alternativa ("Alternativa A: Lodos activados") — Título2 real, como los demás encabezados de segundo nivel de la plantilla
+function procesosPropuestaParrafoTituloAlternativa(texto) {
+  return `<w:p><w:pPr><w:pStyle w:val="Ttulo2"/></w:pPr><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(texto)}</w:t></w:r></w:p>`;
+}
+const PROP_SUMINISTRO_TOKEN_RE = /^\[\[suministro:([^\]]+)\]\]$/;
 function procesosPropuestaTextoAXml(texto, tipo) {
   const lineas = String(texto || '').split('\n').map(l => l.trim()).filter(Boolean);
   if (!lineas.length) return '';
   const marcador = l => {
     if (l.startsWith('### ')) return procesosPropuestaParrafoTituloEtapa(l.slice(4).trim());
     if (l.startsWith('## ')) return procesosPropuestaParrafoSubtitulo(l.slice(3).trim());
+    if (l.startsWith('# ')) return procesosPropuestaParrafoTituloAlternativa(l.slice(2).trim());
+    const ms = PROP_SUMINISTRO_TOKEN_RE.exec(l); // "[[suministro:A]]" = la lista de suministro de esa alternativa (sale de sus equipos al armar el Word)
+    if (ms) return propSuministroAltXml(ms[1]);
     return null;
   };
   // Además: "[[img:ID|epígrafe]]" = imagen de la biblioteca, "| a | b |" = fila de tabla, "[[biblioteca]]" = marca
@@ -19157,7 +19165,7 @@ function procesosPropuestaTextoAXml(texto, tipo) {
     const m = PROP_IMG_TOKEN_RE.exec(l);
     if (m) { out += propImagenParrafosXml(m[1], m[2]); return; }
     const mk = marcador(l);
-    if (mk) { out += mk; return; }
+    if (mk !== null) { out += mk; return; }
     if (/^- /.test(l)) out += procesosPropuestaParrafoVineta(l.slice(2).trim());
     else out += tipo === 'bullets' ? procesosPropuestaParrafoVineta(l) : procesosPropuestaParrafoNormal(l);
   });
@@ -19364,30 +19372,76 @@ function procesosPropuestaReemplazarCaratula(doc, c) {
 // Aplica TODOS los datos del proyecto sobre el DOM de la plantilla ya
 // parseada — la usan tanto la vista previa como la descarga final, así las
 // dos muestran exactamente lo mismo.
+let _procesosPropCtx = null; // mientras se arma el Word: { p, alts } (alternativas del proyecto) — lo usan los marcadores [[suministro:ID]]
+// Tabla "Cant | Detalle" agrupada por etapa (como la de Suministro de la plantilla), para la lista de suministro de una alternativa
+function propSuministroTablaXml(items) {
+  let xml = '', etapaActual = null;
+  items.forEach(it => {
+    const et = it.etapa || '(sin etapa)';
+    if (et !== etapaActual) { xml += procesosPropuestaFilaSuministroEtapa(et); etapaActual = et; }
+    xml += procesosPropuestaFilaSuministro(it.cantidad, it.detalle);
+  });
+  if (!xml) xml = procesosPropuestaFilaSuministro('', '(sin equipos definidos)');
+  const bordes = `<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>`;
+  return `<w:tbl><w:tblPr><w:tblStyle w:val="Tablaconcuadrcula4-nfasis1"/><w:tblW w:w="9639" w:type="dxa"/>${bordes}<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="727"/><w:gridCol w:w="8912"/></w:tblGrid>${procesosPropuestaFilaTabla(['Cant', 'Detalle'], [727, 8912], true)}${xml}</w:tbl><w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>`;
+}
+// "Lista de Suministro (Alternativa X)": título + tabla con los equipos de esa alternativa, agrupados por etapa
+function propSuministroAltXml(id) {
+  const ctx = _procesosPropCtx; if (!ctx) return '';
+  const alt = ctx.alts.find(a => a.id === id); if (!alt) return '';
+  const items = procesosPropuestaItemsDeProyecto(ctx.p, alt.proy, null, null).map(it => ({ etapa: it.etapa, cantidad: it.cantidad, detalle: it.descripcion }));
+  return procesosPropuestaParrafoTituloEtapa('Lista de Suministro (Alternativa ' + id + ')') + propSuministroTablaXml(items);
+}
+// Inserta contenido justo antes de un encabezado de la plantilla
+function procesosPropuestaInsertarAntesDe(doc, nivel, textoHeading, xml) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, nivel, textoHeading);
+  procesosPropuestaParsearFragmento(doc, xml).forEach(n => heading.parentNode.insertBefore(n, heading));
+}
 function procesosPropuestaAplicarDatos(doc, p) {
   const pd = p.propuesta_data || {};
+  const alts = procesosAlternativasLista(p), multi = alts.length > 1;
+  _procesosPropCtx = { p, alts };
+  try {
   procesosPropuestaReemplazarCaratula(doc, pd.caratula || {});
   // No es fatal si la plantilla vinculada no tiene este encabezado puntual
   // (ej. una plantilla vieja/distinta) — el resto de la propuesta se arma
   // igual, solo no se asegura el salto de página.
   try { procesosPropuestaAsegurarSaltoDePagina(doc, 'INTRODUCCIÓN'); } catch(e) { console.warn('No se pudo asegurar el salto de página antes de la Introducción:', e.message); }
-  PROCESOS_PROPUESTA_SECCIONES.forEach(s => {
-    const texto = (pd.secciones && pd.secciones[s.key] && pd.secciones[s.key].texto) || '';
+  const sec = k => (pd.secciones && pd.secciones[k]) || {};
+  PROCESOS_PROPUESTA_SECCIONES.filter(s => !s.especial).forEach(s => {
+    const texto = sec(s.key).texto || '';
     if (s.columnas) {
       const lineasTxt = String(texto).split('\n');
       const lineasImg = lineasTxt.filter(l => PROP_IMG_TOKEN_RE.test(l.trim()));
       const filas = procesosPropuestaParsearFilasTabla(lineasTxt.filter(l => !PROP_IMG_TOKEN_RE.test(l.trim())).join('\n'), s.columnas.length);
-      const tablaXml = procesosPropuestaTablaXml(s.columnas, filas.length ? filas : [['Sin datos cargados todavía', ...Array(s.columnas.length - 1).fill('')]], s.anchos)
+      // texto de introducción de la sección (antes de la tabla) y condiciones/aclaraciones (después)
+      const antesXml = s.conTextos ? procesosPropuestaTextoAXml(sec(s.key).antes, 'prosa') : '', despuesXml = s.conTextos ? procesosPropuestaTextoAXml(sec(s.key).despues, 'prosa') : '';
+      const tablaXml = antesXml + procesosPropuestaTablaXml(s.columnas, filas.length ? filas : [['Sin datos cargados todavía', ...Array(s.columnas.length - 1).fill('')]], s.anchos) + (despuesXml ? '<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>' + despuesXml : '')
         + lineasImg.map(l => { const m = PROP_IMG_TOKEN_RE.exec(l.trim()); return propImagenParrafosXml(m[1], m[2]); }).join('');
       procesosPropuestaReemplazarBloqueTabla(doc, s.nivel, s.heading, tablaXml);
     } else {
+      if (s.key === 'intro_texto' && !texto.trim()) return; // sin texto inicial: se deja la plantilla como está
       procesosPropuestaReemplazarBloque(doc, s.nivel, s.heading, texto, s.tipo);
     }
   });
+  // Con varias alternativas el contenido arranca directo bajo "PROPUESTA TÉCNICA" (cada alternativa trae su propio título): sin el encabezado "Etapas de proceso"
+  if (multi) { try { const h = procesosPropuestaBuscarEncabezado(doc, 2, 'Etapas de proceso'); h.parentNode.removeChild(h); } catch (e) { console.warn('No se pudo sacar el encabezado "Etapas de proceso":', e.message); } }
+  // Obras de referencia: antes de "Límite de suministro" (solo si hay)
+  const obras = String(sec('obras_referencia').texto || '').trim();
+  if (obras) { try { procesosPropuestaInsertarAntesDe(doc, 2, 'Límite de suministro', procesosPropuestaParrafoTituloAlternativa('Obras de referencia') + procesosPropuestaTextoAXml(obras, 'prosa')); } catch (e) { console.warn('No se pudieron insertar las obras de referencia:', e.message); } }
   const items = pd.comercial_items || [];
-  procesosPropuestaReemplazarTablaSuministro(doc, items.map(it => ({ cantidad: it.cantidad, detalle: it.descripcion, etapa: it.etapa })));
+  if (multi) {
+    // "Suministro": con varias alternativas la lista de cada una va dentro de su alternativa; acá queda lo que es común a todas
+    const general = procesosPropuestaParsearFilasTabla(sec('suministro_general').texto || '', 2);
+    const tbl = procesosPropuestaBuscarTabla(doc, 2, 'Suministro');
+    procesosPropuestaReemplazarFilas(doc, tbl, 1, general.map(f => procesosPropuestaFilaSuministro(f[0], f[1])).join('') || procesosPropuestaFilaSuministro('', '(sin ítems generales)'));
+    try { procesosPropuestaSetTextoParrafo(doc, procesosPropuestaBuscarEncabezado(doc, 2, 'Suministro'), 'Suministro general (todas las alternativas)'); } catch (e) { console.warn('No se pudo renombrar "Suministro":', e.message); }
+  } else {
+    procesosPropuestaReemplazarTablaSuministro(doc, items.map(it => ({ cantidad: it.cantidad, detalle: it.descripcion, etapa: it.etapa })));
+  }
   procesosPropuestaReemplazarTablaComercial(doc, items);
   procesosPropuestaReemplazarCondicionesComerciales(doc, pd.condiciones_comerciales || {});
+  } finally { _procesosPropCtx = null; }
 }
 // Vuelca el contenido del documento ya fusionado a un HTML simple, solo para
 // la vista previa dentro de MAIA (no es lo que se descarga).
@@ -19502,11 +19556,21 @@ Equipos importados: los precios han sido calculados en base a impuestos, tasas y
 Las condiciones comerciales quedarán sujetas a la aprobación del permiso de importación, recepción de Orden de Compra, cobro de anticipo y aprobación técnica por parte del cliente.
 La aceptación de la OC quedará supeditada a la posibilidad de acceder, en el momento de la recepción de la OC, al Mercado Único y Libre de cambios (MULC) utilizado para realizar las importaciones.`;
 
+// Lo que va en "Suministro general" cuando la propuesta tiene varias alternativas (lo que es común a todas); una fila por línea "Cant | Detalle".
+const PROCESOS_PROPUESTA_DEFAULT_SUMINISTRO_GENERAL = `1 | Tablero eléctrico y de control
+Gral | Instrumentación, manifold, accesorios y piping
+Gral | Ingeniería básica y de detalle
+Gral | Planos de masa e implantación
+Gral | Montaje electromecánico y supervisión
+Gral | Puesta en marcha y capacitación del personal`;
 const PROCESOS_PROPUESTA_SECCIONES = [
-  { key:'intro_parametros', heading:'Parámetros de diseño', nivel:2, tipo:'tabla_parametros', label:'Parámetros de diseño', default:'', columnas:['Parámetro','Unidad','Valor'], anchos:[4500,1800,3339] },
-  { key:'intro_calidad_vuelco', heading:'Calidad de vuelco', nivel:2, tipo:'tabla_vuelco', label:'Calidad de vuelco', default:'', columnas:['Parámetro','Límite','Unidad','Fuente'], anchos:[3200,1600,1400,3439] },
+  { key:'intro_texto', heading:'INTRODUCCIÓN', nivel:1, tipo:'prosa', label:'Introducción (texto inicial)', default:'' },
+  { key:'intro_parametros', heading:'Parámetros de diseño', nivel:2, tipo:'tabla_parametros', label:'Parámetros de diseño', default:'', columnas:['Parámetro','Unidad','Valor'], anchos:[4500,1800,3339], conTextos:true },
+  { key:'intro_calidad_vuelco', heading:'Calidad de vuelco', nivel:2, tipo:'tabla_vuelco', label:'Calidad de vuelco', default:'', columnas:['Parámetro','Límite','Unidad','Fuente'], anchos:[3200,1600,1400,3439], conTextos:true },
   { key:'intro_seleccion_tecnologia', heading:'Selección de tecnología', nivel:2, tipo:'prosa', label:'Selección de tecnología', default:'' },
   { key:'etapas_proceso', heading:'Etapas de proceso', nivel:2, tipo:'prosa', label:'Etapas de proceso', default:'' },
+  { key:'suministro_general', heading:'Suministro', nivel:2, tipo:'suministro_general', label:'Suministro general (solo con varias alternativas)', default: PROCESOS_PROPUESTA_DEFAULT_SUMINISTRO_GENERAL, especial:true },
+  { key:'obras_referencia', heading:'Obras de referencia', nivel:2, tipo:'prosa', label:'Obras de referencia', default:'', especial:true, antesDe:'Límite de suministro' },
   { key:'limite_suministro', heading:'Límite de suministro', nivel:2, tipo:'bullets', label:'Límite de suministro (exclusiones)', default: PROCESOS_PROPUESTA_DEFAULT_LIMITE_SUMINISTRO },
   { key:'garantia_mecanica', heading:'Garantía mecánica', nivel:2, tipo:'prosa', label:'Garantía mecánica', default: PROCESOS_PROPUESTA_DEFAULT_GARANTIA },
   { key:'fuerza_mayor', heading:'Eventos de fuerza mayor', nivel:2, tipo:'prosa', label:'Eventos de fuerza mayor', default: PROCESOS_PROPUESTA_DEFAULT_FUERZA_MAYOR },
@@ -19517,30 +19581,35 @@ const PROCESOS_PROPUESTA_SECCIONES = [
 // Arma los ítems de Suministro/Propuesta Comercial a partir de los equipos ya
 // definidos y confirmados en el Paso 3 (uno por equipo, con la etapa como
 // referencia) — el precio unitario queda en null, se completa a mano acá.
-function procesosPropuestaItemsDesdeEquipos(p) {
-  const de = (pp, alt, etiqueta) => {
-    const ed = (pp.equipos_data && pp.equipos_data.etapas) || {};
-    const etapas = procesosStep3EtapasConfirmadas(pp).filter(n => ed[n]?.confirmada);
-    const items = [];
-    etapas.forEach(nombre => {
-      (ed[nombre].equipos || []).forEach(eq => {
-        const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
-        const nombreProp = ((p.propuesta_data && p.propuesta_data.nombres_etapas) || {})[nombre] || nombre;
-        const it = { id: procesosNuevoId(), etapa: alt ? etiqueta + ' · ' + nombreProp : nombreProp, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null };
-        if (alt) { it.alternativa = alt; it.alternativaEtiqueta = etiqueta; }
-        items.push(it);
-      });
+// Ítems (uno por equipo) de UNA alternativa — pp = el proyecto de esa alternativa; p = el proyecto real (de ahí salen los nombres de etapas para la propuesta)
+function procesosPropuestaItemsDeProyecto(p, pp, alt, etiqueta) {
+  const ed = (pp.equipos_data && pp.equipos_data.etapas) || {};
+  const etapas = procesosStep3EtapasConfirmadas(pp).filter(n => ed[n]?.confirmada);
+  const items = [];
+  etapas.forEach(nombre => {
+    (ed[nombre].equipos || []).forEach(eq => {
+      const desc = [eq.tipo, eq.especificacion, eq.modelo].filter(Boolean).join(' — ') || '(sin descripción)';
+      const nombreProp = ((p.propuesta_data && p.propuesta_data.nombres_etapas) || {})[nombre] || nombre;
+      const it = { id: procesosNuevoId(), etapa: alt ? etiqueta + ' · ' + nombreProp : nombreProp, descripcion: desc, cantidad: eq.cantidad || 1, precio_unitario: null };
+      if (alt) { it.alternativa = alt; it.alternativaEtiqueta = etiqueta; }
+      items.push(it);
     });
-    return items;
-  };
-  // Con dos alternativas, los ítems de cada una van separados (cada una con su propio total)
-  const info = procesosEscenariosInfo(p);
-  if (!info) return de(p, null, null);
-  const etA = procesosEscenarioEtiqueta(info, info.activo), etB = procesosEscenarioEtiqueta(info, info.otro.id);
-  return [...de(p, info.activo, etA), ...de(procesosEscenarioPseudoProyecto(p), info.otro.id, etB)].sort((x, y) => (x.alternativa < y.alternativa ? -1 : (x.alternativa > y.alternativa ? 1 : 0)));
+  });
+  return items;
+}
+function procesosPropuestaItemsDesdeEquipos(p) {
+  // Con varias alternativas, los ítems de cada una van separados (cada una con su propio total)
+  const alts = procesosAlternativasLista(p);
+  if (alts.length < 2) return procesosPropuestaItemsDeProyecto(p, p, null, null);
+  return alts.flatMap(a => procesosPropuestaItemsDeProyecto(p, a.proy, a.id, a.etiqueta));
 }
 function procesosPropuestaSeedIfNeeded(p) {
-  if (p.propuesta_data && p.propuesta_data.secciones) return p.propuesta_data;
+  if (p.propuesta_data && p.propuesta_data.secciones) {
+    // propuestas armadas antes de que existieran las secciones nuevas (texto inicial, obras de referencia, suministro general)
+    const sec = p.propuesta_data.secciones;
+    PROCESOS_PROPUESTA_SECCIONES.forEach(s => { if (!sec[s.key]) sec[s.key] = { texto: s.default || '', chat: [] }; });
+    return p.propuesta_data;
+  }
   const secciones = {};
   PROCESOS_PROPUESTA_SECCIONES.forEach(s => { secciones[s.key] = { texto: s.default || '', chat: [] }; });
   const pd = {
@@ -19606,7 +19675,7 @@ function procesosStep4Html(p) {
 
   return `
     <div class="card-label">Paso 4 — Generar la propuesta</div>
-    ${procesosEscenariosInfo(p) ? `<p class="hint" style="margin:6px 0 10px;color:var(--blue)">🔀 La propuesta presenta las dos alternativas (${esc(procesosEscenarioEtiqueta(procesosEscenariosInfo(p), 'A'))} y ${esc(procesosEscenarioEtiqueta(procesosEscenariosInfo(p), 'B'))}): las secciones comparan ambas y cada una tiene su propio total. Para ajustar el diseño o los equipos de una, volvé a los pasos 2 y 3 y cambiá de alternativa.</p>` : ''}
+    ${procesosEscenariosInfo(p) ? `<p class="hint" style="margin:6px 0 10px;color:var(--blue)">🔀 La propuesta presenta las ${procesosAlternativasLista(p).length} alternativas (${procesosAlternativasLista(p).map(a => esc(a.etiqueta)).join(' · ')}): "Selección de tecnología" las compara, "Etapas de proceso" tiene un bloque por alternativa (con su flowsheet, implantación, etapas y lista de suministro) y cada una tiene su propio total. Para ajustar el diseño o los equipos de una, volvé a los pasos 2 y 3 y cambiá de alternativa.</p>` : ''}
     <p class="hint" style="margin:6px 0 10px">Se usa la plantilla vinculada como "Propuesta base" en Cfg Procesos IA — se completa con lo definido en los pasos anteriores, se puede editar cada sección a mano o pedirle ajustes a la IA por chat, y se genera el Word manteniendo el formato y la letra chica original.</p>
     <div id="procesos-step4-status"></div>
     <button class="btn btn-primary" onclick="procesosStep4GenerarConIA()">✦ Generar contenido con IA</button>
@@ -19649,9 +19718,16 @@ function procesosStep4SeccionPanelHtml(meta) {
   const p = procesosCurrentProyecto;
   const pd = p.propuesta_data;
   const sec = pd.secciones[meta.key] || { texto:'', chat:[] };
+  const hintAlt = (procesosAlternativasLista(p).length > 1) ? ' Con varias alternativas: una línea "# Alternativa A: nombre" abre cada alternativa (título de segundo nivel), "[[suministro:A]]" inserta la lista de suministro de esa alternativa (sale de sus equipos) y "[[img:gen:flow:A|epígrafe]]" / "[[img:gen:impl:A|epígrafe]]" son el flowsheet y la implantación esquemática de esa alternativa, generados con el diseño.' : '';
+  const extraTxt = meta.conTextos ? `
+      <label style="font-size:12px">Texto antes de la tabla</label>
+      <textarea rows="3" oninput="procesosStep4SetSeccionExtra('${meta.key}', 'antes', this.value)">${esc(sec.antes||'')}</textarea>
+      <label style="font-size:12px;margin-top:6px">Texto después de la tabla (condiciones, aclaraciones)</label>
+      <textarea rows="3" oninput="procesosStep4SetSeccionExtra('${meta.key}', 'despues', this.value)">${esc(sec.despues||'')}</textarea>
+      <label style="font-size:12px;margin-top:6px">Filas de la tabla</label>` : '';
   return `
     <div class="card" style="margin-top:8px">
-      <p class="hint" style="margin-bottom:6px">${meta.columnas ? `Una línea = una fila de la tabla, con el formato "${meta.columnas.join(' | ')}".` : meta.key === 'etapas_proceso' ? 'Una línea "### Nombre de la etapa" por cada etapa (se ve como título), seguida de una línea con su descripción.' : meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>
+      <p class="hint" style="margin-bottom:6px">${meta.columnas ? `Una línea = una fila de la tabla, con el formato "${meta.columnas.join(' | ')}".` : meta.tipo === 'suministro_general' ? 'Una línea = una fila de la tabla "Suministro general", con el formato "Cant | Detalle". Solo se usa cuando la propuesta tiene varias alternativas.' : meta.key === 'etapas_proceso' ? 'Una línea "### Nombre de la etapa" por cada etapa (se ve como título), seguida de una línea con su descripción.' + hintAlt : meta.key === 'obras_referencia' ? 'Va como sección aparte, antes de "Límite de suministro". Solo lleva obras de la misma tecnología que la propuesta. Si queda vacía, la sección no aparece.' : meta.tipo === 'bullets' ? 'Una línea = un ítem con viñeta. Para un subtítulo en negrita antes de un grupo, empezá la línea con "## " (ej: "## Exclusiones Generales").' : 'Una línea = un párrafo.'}</p>${extraTxt}
       <textarea rows="${meta.tipo==='bullets'?12:6}" oninput="procesosStep4SetSeccionTexto('${meta.key}', this.value)">${esc(sec.texto||'')}</textarea>
       ${propMiniaturasTextoHtml(sec.texto)}
       ${/\[\[img:|\[\[biblioteca\]\]/.test(sec.texto || '') ? '<p class="hint" style="margin-top:4px">Las líneas <code>[[img:...]]</code> son fotos de la biblioteca (borrá la línea para sacarla) y <code>[[biblioteca]]</code> marca desde dónde el texto lo agregó la biblioteca.</p>' : ''}
@@ -19677,6 +19753,14 @@ function procesosStep4SetSeccionTexto(key, val) {
   const pd = Object.assign({}, p.propuesta_data);
   pd.secciones = Object.assign({}, pd.secciones);
   pd.secciones[key] = Object.assign({ texto:'', chat:[] }, pd.secciones[key], { texto: val });
+  procesosSaveProyectoDebounced({ propuesta_data: pd }, p);
+}
+// Texto extra de una sección-tabla (antes / después de la tabla)
+function procesosStep4SetSeccionExtra(key, campo, val) {
+  const p = procesosCurrentProyecto;
+  const pd = Object.assign({}, p.propuesta_data);
+  pd.secciones = Object.assign({}, pd.secciones);
+  pd.secciones[key] = Object.assign({ texto:'', chat:[] }, pd.secciones[key], { [campo]: val });
   procesosSaveProyectoDebounced({ propuesta_data: pd }, p);
 }
 function procesosStep4SetCaratula(campo, val) {
@@ -19718,6 +19802,67 @@ function procesosStep4RecargarItemsDesdeEquipos() {
 // completo y claro ("Reactor biológico de lodos activados", "Sedimentador secundario"...). La IA propone el nombre de cada una al
 // generar el contenido; queda guardado en propuesta_data.nombres_etapas {nombre del diseño → nombre para la propuesta} y se usa en
 // "Etapas de proceso" y en las tablas de Suministro y Propuesta comercial (el diseño de los pasos 2 y 3 no se toca).
+// ── Textos de introducción, resumen de unidades principales y redacción por alternativa (Paso 4 y solapa Propuestas) ──
+const PROP_TOOL_TEXTOS = {
+  name: 'textos_propuesta',
+  description: 'Textos de introducción de la propuesta técnica.',
+  input_schema: { type: 'object', properties: {
+    introduccion: { type: 'string', description: 'Texto inicial de la INTRODUCCIÓN: 1 a 3 párrafos (uno por línea). Qué se propone (la planta o la etapa que se incorpora), en qué establecimiento/ubicación, desde qué punto de partida (ej. el efluente del tratamiento existente, si lo hay) y cuál es el objetivo (alcanzar los parámetros de calidad requeridos para el vuelco). Solo con datos del contexto.' },
+    parametros_antes: { type: 'string', description: 'Párrafo que va ANTES de la tabla de parámetros de diseño: presenta la tabla y aclara de qué efluente son los parámetros (crudo / post tratamiento previo) y las condiciones generales del diseño. Ej.: "A continuación, en la tabla se muestran los parámetros de diseño del efluente a tratar...".' },
+    vuelco_antes: { type: 'string', description: 'Párrafo que va ANTES de la tabla de calidad de vuelco: presenta los valores de normativa a alcanzar, la normativa aplicable y el cuerpo receptor (si figura en el contexto).' },
+    vuelco_despues: { type: 'string', description: 'Condiciones de salida adicionales que fije el pliego/especificación y no estén en la tabla (ej. condiciones a la salida del sistema biológico, de la filtración terciaria o de la desinfección). Una línea por condición, cada una empezando con "- ", precedidas por una línea de presentación ("Sumado a esto, en el pliego se establecen las siguientes condiciones de salida:"). "" si no hay ninguna.' },
+    propuesta_tecnica_intro: { type: 'string', description: 'SOLO si la propuesta tiene varias alternativas ("" si no): 2 a 4 párrafos para abrir la PROPUESTA TÉCNICA: qué alternativas contempla el cliente/pliego (si lo dice), cuáles se estudiaron y cuáles se presentan (lista con "- Alternativa A: nombre." por línea), por qué se presentan estas y, solo si el contexto lo indica, cuáles se descartaron y por qué (una viñeta "- " por motivo). Cerrar con una línea "A continuación, se describen las configuraciones propuestas, junto con sus principales características de proceso, equipos asociados y criterios de diseño."' },
+  }, required: ['introduccion', 'parametros_antes', 'vuelco_antes', 'vuelco_despues', 'propuesta_tecnica_intro'] }
+};
+async function propTextosIntroIA(p, contexto, ofertasBlocks, alts) {
+  const multi = alts.length > 1;
+  const reqs = procesosRequerimientosDisenoTxt(p, 'tren') || '';
+  const prompt = `${contexto}\n${ofertasBlocks.length ? 'Adjunto ofertas/propuestas anteriores de la empresa: seguí su estilo y estructura de redacción, pero NO copies datos de otros proyectos.\n\n' : ''}Redactá los textos de introducción de la propuesta técnica de Aeration Argentina para este proyecto${multi ? ` (que tiene ${alts.length} alternativas: ${alts.map(a => a.etiqueta).join('; ')})` : ''}. Estilo: formal, en español, tercera persona, párrafos corrientes sin viñetas salvo donde se indica. Ejemplo de estilo (de otra oferta; NO copies sus datos): "En el presente documento se detalla la propuesta para la incorporación de una etapa de tratamiento biológico en la Planta de Tratamiento de Efluentes del establecimiento de X ubicado en Y. La solución propuesta ha sido desarrollada tomando como punto de partida el efluente proveniente del sistema de tratamiento primario existente, compuesto por ecualización, coagulación–floculación y flotación por aire disuelto (DAF), y tiene como objetivo completar el tratamiento del efluente hasta alcanzar los parámetros de calidad requeridos para su descarga final." / "A continuación, en la Tabla 1 se muestran los parámetros de diseño del efluente crudo y los valores de normativa a alcanzar. La ET indica además que el cuerpo receptor es el Canal San Francisco." / "Sumado a esto, en el pliego se establecen las siguientes condiciones de salida del sistema biológico: SST < 20 mg/L; SSV < 15 mg/L; DBO₅ soluble < 20 mg/L".\n\nUsá SOLO información que figure en el contexto (campos del cliente, requerimientos del pliego, normativa, tratamiento existente, cuerpo receptor...). Lo que no se pueda determinar, omitilo o dejá el campo vacío: no inventes datos.\n${reqs}`;
+  return await propLlamarForzado(PROP_TOOL_TEXTOS, [...ofertasBlocks.map(x => x.block), { type: 'text', text: prompt }], 3000);
+}
+const PROP_TOOL_RESUMEN = {
+  name: 'resumen_unidades',
+  description: 'Tabla resumen con los datos más importantes de las unidades principales (tecnología biológica) de una alternativa.',
+  input_schema: { type: 'object', properties: {
+    columnas: { type: 'array', items: { type: 'string' }, description: 'Encabezados de la tabla, con la unidad de medida entre paréntesis cuando corresponda. La primera es "Unidad". Entre 4 y 7 columnas en total.' },
+    filas: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'Una fila por unidad principal, con tantos valores como columnas (en el mismo orden). "-" donde el dato no aplica o no existe.' },
+  }, required: ['columnas', 'filas'] }
+};
+function propTablaTexto(columnas, filas) {
+  const lim = s => { const t = String(s == null ? '' : s).replace(/\|/g, '/').replace(/\s*\n\s*/g, ' ').trim(); return t || '-'; };
+  return ['| ' + columnas.map(lim).join(' | ') + ' |'].concat(filas.map(f => '| ' + columnas.map((_, i) => lim(f[i])).join(' | ') + ' |')).join('\n');
+}
+function propTrenTxt(proy) {
+  try {
+    return procesosStep2GruposDesdeActual(proy).map((g, i) => `${i + 1}. ${g.instancias.map(x => x.nombre).join(' + ')}${g.instancias.length > 1 ? ' (' + (g.disposicion === 'paralelo' ? 'en paralelo' : g.disposicion === 'serie' ? 'en serie' : g.instancias.length + ' líneas') + ')' : ''}${g.linea === 'lodos' ? ' [línea de lodos]' : ''}`).join('\n');
+  } catch (e) { return ''; }
+}
+// Mini resumen de las unidades de tecnología biológica de una alternativa (LA, MBR, MBBR, SBR...): datos clave de dimensionamiento y operación
+async function propResumenUnidadesIA(p, a) {
+  const dis = procesosResumenDiseno(a.proy), eq = procesosResumenEquipos(a.proy, true);
+  if (!dis) return null;
+  const prompt = `Armá una tabla RESUMEN con los datos más importantes de las UNIDADES PRINCIPALES de ${a.etiqueta || 'la propuesta'} del proyecto "${p.nombre || ''}". Unidades principales = las de TECNOLOGÍA BIOLÓGICA (reactores de lodos activados, anóxico/anaeróbico, MBBR, MBR / cámara de membranas, SBR, lecho percolador, lagunas...) y, si hay, su sedimentador secundario; NO incluyas pozos, tamices, químicos, lodos ni desinfección. Si una unidad está repetida en paralelo, una sola fila con la cantidad.\n\nTREN:\n${propTrenTxt(a.proy)}\n\nDISEÑO (valores calculados):\n${dis}\n\nEQUIPOS:\n${eq || '(sin equipos)'}\n\nColumnas: "Unidad", "Cantidad" y de 2 a 5 datos clave que sirvan para comparar (ej.: volumen útil de cada unidad, dimensiones, tiempo de retención hidráulico, concentración de biomasa SSV, edad celular, carga másica F/M, caudal de aire; en MBR: superficie de membrana, cantidad de módulos, flux; en MBBR: volumen de carriers, relleno; en sedimentador: diámetro, carga superficial). Todas las filas con las mismas columnas; poné la unidad de medida en el encabezado y solo el número en cada celda. Usá SOLO valores que figuren arriba (no los calcules ni inventes): "-" si no hay dato.`;
+  const r = await propLlamarForzado(PROP_TOOL_RESUMEN, prompt, 2000);
+  const cols = (r.columnas || []).map(String).filter(Boolean), filas = (r.filas || []).filter(f => Array.isArray(f) && f.length);
+  return cols.length >= 2 && filas.length ? { columnas: cols, filas } : null;
+}
+const PROP_TOOL_ALTERNATIVA = {
+  name: 'redactar_alternativa',
+  description: 'Redacción de una alternativa de tratamiento dentro de una propuesta con varias alternativas.',
+  input_schema: { type: 'object', properties: {
+    descripcion: { type: 'string', description: 'Descripción general de la alternativa: 2 o 3 párrafos (uno por línea). (1) En qué consiste esta tecnología/configuración. (2) Por qué se la selecciona (robustez, espacio, calidad del efluente, estabilidad, CAPEX/OPEX), solo con lo que surja del contexto.' },
+    etapas: { type: 'string', description: 'Las etapas de ESTA alternativa, en el orden del proceso. Cada etapa son dos líneas o más: una "### " + el nombre EXACTO de la etapa tal como figura en el tren, y debajo su descripción técnica (uno o más párrafos, una línea cada uno) con los datos reales del diseño y de los equipos. Las etapas que son IDÉNTICAS a las de una alternativa anterior se agrupan al final en UNA etapa "### Etapas ídem Alternativa X" (X = la letra de esa alternativa), con una línea "La presente alternativa mantiene sin modificaciones las etapas desarrolladas para la Alternativa X. La principal diferencia se concentra en ..." seguida de la línea "Por lo tanto, se mantienen los criterios y sistemas previstos para:" y una línea "- Nombre de la etapa." por cada etapa mantenida. Sin listas de suministro ni tablas.' },
+  }, required: ['descripcion', 'etapas'] }
+};
+async function propAlternativaIA(p, a, alts, idx, ofertasBlocks) {
+  const previas = alts.slice(0, idx);
+  const previasTxt = previas.length ? `ALTERNATIVAS YA REDACTADAS ANTES (para saber qué etapas se repiten):\n${previas.map(q => `── ${q.etiqueta} ──\nTren:\n${propTrenTxt(q.proy)}\nEquipos:\n${procesosResumenEquipos(q.proy, true) || '(sin equipos)'}`).join('\n\n')}\n\n` : '';
+  const requer = procesosRequerimientosDisenoRaw(p);
+  const prompt = `Estás redactando una propuesta técnico-comercial de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''} que presenta ${alts.length} alternativas de tratamiento (${alts.map(q => q.etiqueta).join('; ')}). Redactá AHORA solo la ${a.etiqueta}. ${ofertasBlocks.length ? 'Adjunto ofertas anteriores de la empresa: seguí su estilo y su forma de describir cada etapa, sin copiar datos de otros proyectos. ' : ''}\n\nINFORMACIÓN DEL CLIENTE/PROYECTO:\n${procesosResumenCampos(p)}\n\n${requer ? 'REQUERIMIENTOS DE DISEÑO DEL PLIEGO:\n' + requer.texto + '\n\n' : ''}TREN DE ${a.etiqueta}:\n${propTrenTxt(a.proy)}\n\nDISEÑO DE ${a.etiqueta} (valores calculados por unidad):\n${procesosResumenDiseno(a.proy) || '(sin diseño)'}\n\nEQUIPOS DE ${a.etiqueta} (por etapa):\n${procesosResumenEquipos(a.proy, true) || '(sin equipos)'}\n\n${previasTxt}Reglas: (1) Usá SOLO los datos de ${a.etiqueta} (diseño y equipos de arriba); no mezcles equipos de otra alternativa. (2) En cada etapa mencioná lo que el diseño define: cantidad de unidades y si van en paralelo o en serie, volumen o dimensiones, tiempo de retención, material y forma constructiva si figuran, equipos principales con marca/modelo si están definidos, redundancia (ej. 1+1) y el control asociado. (3) Si dos unidades van en paralelo, decilo ("dos reactores operando en paralelo"). (4) No inventes valores: lo que no figura no se menciona. (5) Las líneas "### " llevan el nombre EXACTO de la etapa del tren.`;
+  const r = await propLlamarForzado(PROP_TOOL_ALTERNATIVA, [...ofertasBlocks.map(x => x.block), { type: 'text', text: prompt }], 6000);
+  return { descripcion: String(r.descripcion || '').trim(), etapas: String(r.etapas || '').trim() };
+}
+function propTituloAlternativa(a) { return 'Alternativa ' + a.id + (a.nombre && !/^alternativa\s+[a-z]$/i.test(a.nombre) ? ': ' + a.nombre : ''); }
 const PROP_TOOL_NOMBRAR_ETAPAS = {
   name: 'nombrar_etapas',
   description: 'Da a cada etapa del tren un nombre completo y claro para mostrar en la propuesta al cliente.',
@@ -19727,12 +19872,16 @@ const PROP_TOOL_NOMBRAR_ETAPAS = {
   }, required: ['nombre', 'nombre_completo'] } } }, required: ['etapas'] },
 };
 async function propNombresEtapasIA(p) {
-  const dd = p.diseno_data || {}, hojas = dd.hojas || {}, ed = (p.equipos_data && p.equipos_data.etapas) || {};
-  const nombres = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false);
+  // con varias alternativas, las etapas de todas (una misma etapa que figura en dos alternativas se nombra una sola vez)
+  const nombres = [], info = {};
+  procesosAlternativasLista(p).forEach(a => {
+    const dd = a.proy.diseno_data || {}, hojas = dd.hojas || {}, ed = (a.proy.equipos_data && a.proy.equipos_data.etapas) || {};
+    (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false).forEach(n => { if (!nombres.includes(n)) { nombres.push(n); info[n] = { h: hojas[n], eq: ((ed[n] && ed[n].equipos) || []) }; } });
+  });
   if (!nombres.length) return {};
   const lista = nombres.map(n => {
-    const eq = ((ed[n] && ed[n].equipos) || []).map(q => `${q.cantidad || 1} × ${q.tipo || ''}`).join('; ');
-    const h = hojas[n];
+    const eq = info[n].eq.map(q => `${q.cantidad || 1} × ${q.tipo || ''}`).join('; ');
+    const h = info[n].h;
     return `- "${n}"${h.hojaBase && h.hojaBase !== n ? ` (planilla: ${h.hojaBase})` : ''}${h.linea === 'lodos' ? ' [línea de lodos]' : ''}${eq ? ' — equipos: ' + eq : ''}`;
   }).join('\n');
   const prompt = `Estás armando una propuesta técnico-comercial de Aeration Argentina${p.nombre ? ' para "' + p.nombre + '"' : ''}${p.tecnologia_confirmada ? ' (tecnología: ' + p.tecnologia_confirmada + ')' : ''}. El tren de tratamiento tiene estas etapas, con los nombres abreviados que usa la planilla de diseño:\n${lista}\n\nDale a cada etapa un nombre completo y claro para mostrar al cliente. Reglas: (1) en español, corto (hasta ~6 palabras), con mayúscula inicial solo en la primera palabra salvo siglas o nombres propios; (2) desabreviá (ej. "Sed 2°" → "Sedimentador secundario", "LA" → "Reactor biológico de lodos activados", "Pozo cloac" → "Pozo de bombeo cloacal", "Anóxico" → "Reactor anóxico"), usando la tecnología y los equipos de la etapa para entender de qué se trata; (3) no inventes una función que la etapa no tenga ni agregues la palabra "etapa"; (4) si el nombre actual ya es completo y claro, devolvé el mismo; (5) no repitas el mismo nombre en dos etapas.`;
@@ -19790,7 +19939,9 @@ async function procesosStep4GenerarConIA(opts) {
     const templateStep4Generar = await procesosPromptText('step4_generar', DEFAULT_TEMPLATE_STEP4_GENERAR);
     const materialesTxt = 'Al describir cada etapa en "Etapas de proceso", indicá su material y forma constructiva (los del diseño definido arriba) cuando figuren, por ejemplo "reactor biológico de hormigón armado, de planta rectangular".\n';
     const tecRefTxt = await propReferenciaTecnologiaPromptTxt(p); // texto estándar de la biblioteca: referencia para las etapas + aviso de que "Selección de tecnología" lleva el texto estándar aparte
-    const prompt = procesosPromptFill(templateStep4Generar, { contexto, ofertasTxt, materialesTxt, tecRefTxt });
+    const alts = procesosAlternativasLista(p), multi = alts.length > 1;
+    const altTxt = multi ? `ESTA PROPUESTA TIENE ${alts.length} ALTERNATIVAS (${alts.map(a => a.etiqueta).join('; ')}). Cambios respecto de lo pedido arriba: "etapas_proceso" dejalo como string vacío "" (las etapas de cada alternativa se redactan aparte, una por una). En "intro_seleccion_tecnologia" explicá brevemente por qué se presentan estas alternativas y compará sus ventajas y desventajas (espacio, operación, mantenimiento, calidad del efluente, costo) de forma equilibrada, sin extenderte en cada etapa. "intro_parametros" e "intro_calidad_vuelco" son comunes a todas las alternativas.\n` : '';
+    const prompt = procesosPromptFill(templateStep4Generar, { contexto, ofertasTxt, materialesTxt, tecRefTxt, altTxt });
     // Con las tablas (fila por parámetro) el contenido pedido es bastante más
     // largo que antes — si se corta (max_tokens insuficiente), reintenta sola
     // una vez con el doble antes de rendirse, mismo patrón que
@@ -19819,6 +19970,42 @@ async function procesosStep4GenerarConIA(opts) {
     pd.caratula = Object.assign({}, pd.caratula, parsed.caratula || {});
     pd.secciones = Object.assign({}, pd.secciones);
     Object.entries(parsed.secciones || {}).forEach(([k,v]) => { if (pd.secciones[k]) pd.secciones[k] = Object.assign({}, pd.secciones[k], { texto: v }); });
+    // ── Textos de introducción, resumen de las unidades principales y (con varias alternativas) la redacción de cada una ──
+    const avisosGen = [];
+    const setSec = (k, campos) => { pd.secciones[k] = Object.assign({ texto: '', chat: [] }, pd.secciones[k], campos); };
+    let propTecIntro = '';
+    try {
+      showMsg(statusId, 'loading', 'Redactando la introducción y los textos de las tablas...');
+      const tx = await propTextosIntroIA(p, contexto, ofertasBlocks, alts);
+      setSec('intro_texto', { texto: tx.introduccion || '' });
+      setSec('intro_parametros', { antes: tx.parametros_antes || '' });
+      setSec('intro_calidad_vuelco', { antes: tx.vuelco_antes || '', despues: tx.vuelco_despues || '' });
+      if (multi) propTecIntro = String(tx.propuesta_tecnica_intro || '').trim();
+    } catch (e) { avisosGen.push('No pude redactar los textos de introducción (' + e.message + ').'); }
+    showMsg(statusId, 'loading', multi ? 'Redactando cada alternativa y armando el resumen de unidades principales...' : 'Armando el resumen de las unidades principales...');
+    const hechas = await Promise.all(alts.map(async (a, i) => {
+      const out = { resumen: null, bloque: null };
+      try { out.resumen = await propResumenUnidadesIA(p, a); } catch (e) { avisosGen.push('Resumen de unidades' + (a.id ? ' (' + a.etiqueta + ')' : '') + ': ' + e.message); }
+      if (multi) { try { out.bloque = await propAlternativaIA(p, a, alts, i, ofertasBlocks); } catch (e) { avisosGen.push('No pude redactar la ' + a.etiqueta + ': ' + e.message); } }
+      return out;
+    }));
+    const tablasResumen = [];
+    hechas.forEach((r, i) => { if (r.resumen) { if (multi) tablasResumen.push('## ' + alts[i].etiqueta); tablasResumen.push(propTablaTexto(r.resumen.columnas, r.resumen.filas)); } });
+    if (tablasResumen.length) setSec('intro_seleccion_tecnologia', { texto: String((pd.secciones.intro_seleccion_tecnologia || {}).texto || '').replace(/\s+$/, '') + '\n## Resumen de las unidades principales\n' + tablasResumen.join('\n') });
+    if (multi) {
+      const partes = [];
+      if (propTecIntro) partes.push(propTecIntro);
+      alts.forEach((a, i) => {
+        const b = hechas[i].bloque;
+        partes.push('# ' + propTituloAlternativa(a));
+        if (b && b.descripcion) partes.push(b.descripcion);
+        partes.push(`[[img:gen:flow:${a.id}|Flowsheet esquemático Alternativa ${a.id}.]]`);
+        partes.push(`[[img:gen:impl:${a.id}|Implantación esquemática Alternativa ${a.id}.]]`);
+        partes.push(b && b.etapas ? b.etapas : '(No se pudo redactar esta alternativa: completala a mano o pedile a la IA por el chat de esta sección.)');
+        partes.push(`[[suministro:${a.id}]]`);
+      });
+      setSec('etapas_proceso', { texto: partes.join('\n') });
+    }
     // Nombres completos de las etapas (en vez de "LA", "Sed 2°"...)
     let avisoNombres = '';
     try { showMsg(statusId, 'loading', 'Poniéndole nombre completo a las etapas...'); propAplicarNombresEtapas(pd, await propNombresEtapasIA(p)); }
@@ -19830,7 +20017,7 @@ async function procesosStep4GenerarConIA(opts) {
     await procesosSaveProyecto({ propuesta_data: pd }, p);
     if (procesosCurrentProyecto === p) {
       renderProcesosStepContent();
-      showMsg(statusId, 'success', '✓ Contenido generado. ' + resumenBib + avisoNombres);
+      showMsg(statusId, 'success', '✓ Contenido generado. ' + resumenBib + avisoNombres + (avisosGen.length ? ' ⚠ ' + avisosGen.join(' ') : ''));
     }
   } catch(e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ ' + e.message);
@@ -19871,7 +20058,7 @@ async function procesosStep4SeccionChatSend(key) {
       : meta.key === 'etapas_proceso'
         ? 'una línea por cada etapa del proceso: esa línea tiene que empezar con "### " seguido del nombre EXACTO de la etapa (tal como figura en el contexto), y en la línea siguiente una descripción breve (sin el "### ")'
         : meta.tipo === 'bullets' ? 'lista con viñetas — una línea por ítem; si hace falta un subtítulo en negrita antes de un grupo de ítems, esa línea tiene que empezar con "## "' : 'texto en prosa — un párrafo por línea';
-    const formatoTxtFinal = formatoTxt + '. IMPORTANTE: las líneas que empiezan con "[[img:" (fotos de la biblioteca de la empresa), las filas de tabla que empiezan con "|" y la línea "[[biblioteca]]" tenés que conservarlas TAL CUAL en "texto_nuevo" (no inventes ni cambies ids de imagen); solo las movés o quitás si el usuario lo pide.';
+    const formatoTxtFinal = formatoTxt + '. IMPORTANTE: las líneas que empiezan con "[[img:" (fotos de la biblioteca de la empresa), las filas de tabla que empiezan con "|", la línea "[[biblioteca]]", los marcadores "[[suministro:X]]", las imágenes "[[img:gen:...]]" (flowsheet/implantación de una alternativa) y los títulos de alternativa que empiezan con "# " tenés que conservarlos TAL CUAL en "texto_nuevo" (no inventes ni cambies ids de imagen); solo los movés o quitás si el usuario lo pide.';
     const ofertasBlocks = await procesosStep4GetOfertasBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const archivosProyectoBlocks = await procesosProyectoArchivosBlocks(`${contexto}\n\nSección a redactar: ${meta.label}\nPedido del usuario: ${msg}`);
     const historialTxt = historialPrevio ? 'Conversación previa sobre esta sección:\n'+historialPrevio+'\n\n' : '';
@@ -19933,6 +20120,7 @@ async function procesosStep4ConstruirDoc() {
   // Imágenes de la biblioteca citadas en las secciones: se meten en el .docx antes de armar el texto
   const ids = propIdsImagenesEnTextos(Object.values((p.propuesta_data && p.propuesta_data.secciones) || {}).map(s => s && s.texto));
   if (ids.length) { try { await propImagenesCargar(); } catch (e) { /* sin metadatos: se usan tamaños por defecto */ } }
+  await propGenerarFiguras(p, ids.filter(i => /^gen:/.test(i))); // flowsheet / implantación de cada alternativa, con el diseño de ese momento
   _procesosPropImg = await propPrepararImagenesDoc(zip, ids);
   let imgCtx;
   try { procesosPropuestaAplicarDatos(doc, p); } finally { imgCtx = _procesosPropImg; _procesosPropImg = null; }
@@ -19992,6 +20180,52 @@ function propIdsImagenesEnTextos(textos) {
   textos.forEach(t => String(t || '').split('\n').forEach(l => { const m = PROP_IMG_TOKEN_RE.exec(l.trim()); if (m && !ids.includes(m[1])) ids.push(m[1]); }));
   return ids;
 }
+// ── Figuras generadas con el diseño de cada alternativa: "gen:flow:A" = flowsheet, "gen:impl:A" = implantación (vista en planta) ──
+const _propGenImgs = {}; // id → { mime, b64, ancho, alto } (PNG)
+function propSvgAPng(svgStr) {
+  return new Promise((res, rej) => {
+    const xml = new DOMParser().parseFromString(svgStr, 'image/svg+xml');
+    const el = xml.documentElement;
+    if (!el || xml.getElementsByTagName('parsererror').length) return rej(new Error('El esquema no se pudo leer como imagen'));
+    let vb = (el.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    if (vb.length !== 4 || !(vb[2] > 0) || !(vb[3] > 0)) return rej(new Error('El esquema no tiene tamaño'));
+    // sin las manijas de edición (redimensionar, puntitos de las flechas): son solo para trabajar en pantalla
+    el.querySelectorAll('[data-resize-tipo], [data-drag-tipo="puerto"], [data-drag-tipo="flecha_punto"]').forEach(n => n.remove());
+    // recorte al contenido (el flowsheet trae un margen grande para poder arrastrar elementos): se mide el dibujo ya renderizado
+    try {
+      const holder = document.createElement('div'); holder.style.cssText = 'position:absolute;left:-99999px;top:0;visibility:hidden'; holder.innerHTML = new XMLSerializer().serializeToString(el); document.body.appendChild(holder);
+      const live = holder.querySelector('svg'), bb = live && live.getBBox ? live.getBBox() : null; holder.remove();
+      if (bb && bb.width > 50 && bb.height > 50) { const pd = 14; vb = [Math.max(vb[0], bb.x - pd), Math.max(vb[1], bb.y - pd), Math.min(vb[2], bb.width + 2 * pd), Math.min(vb[3], bb.height + 2 * pd)]; el.setAttribute('viewBox', vb.join(' ')); }
+    } catch (e) { /* sin recorte */ }
+    const W = vb[2], H = vb[3];
+    el.setAttribute('width', String(W)); el.setAttribute('height', String(H)); el.setAttribute('style', 'background:#ffffff'); el.setAttribute('font-family', 'Arial, Helvetica, sans-serif');
+    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(el)], { type: 'image/svg+xml;charset=utf-8' }));
+    const img = new Image();
+    img.onload = () => {
+      const esc = Math.min(2, 1800 / W), cw = Math.max(1, Math.round(W * esc)), ch = Math.max(1, Math.round(H * esc));
+      const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+      const g = c.getContext('2d'); g.fillStyle = '#ffffff'; g.fillRect(0, 0, cw, ch); g.drawImage(img, 0, 0, cw, ch);
+      URL.revokeObjectURL(url);
+      res({ mime: 'image/png', b64: c.toDataURL('image/png').split(',')[1], ancho: cw, alto: ch });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('No se pudo dibujar el esquema')); };
+    img.src = url;
+  });
+}
+async function propGenerarFiguras(p, ids) {
+  const alts = procesosAlternativasLista(p);
+  for (const id of ids) {
+    const m = /^gen:(flow|impl):(.+)$/.exec(id); if (!m) continue;
+    const alt = alts.find(a => a.id === m[2]); if (!alt) continue;
+    try {
+      let svg = '';
+      if (m[1] === 'flow') svg = procesosFlowsheetSvg(alt.proy);
+      else { const u = pvUnidades(alt.proy); svg = u.length ? pvPlantaSvg(alt.proy, u).svg : ''; }
+      if (svg) _propGenImgs[id] = await propSvgAPng(svg);
+      else delete _propGenImgs[id];
+    } catch (e) { delete _propGenImgs[id]; console.warn('No se pudo generar la figura ' + id + ':', e.message); }
+  }
+}
 // Mete las imágenes en el .docx (carpeta media, relaciones y tipos de contenido) y arma el contexto
 async function propPrepararImagenesDoc(zip, ids) {
   const ctx = { mapa: {}, contador: 0, previews: {} };
@@ -20002,16 +20236,17 @@ async function propPrepararImagenesDoc(zip, ids) {
   const rels = [], exts = new Set();
   let n = 0;
   for (const id of ids) {
-    const d = await propImagenDatos(id);
+    const gen = _propGenImgs[id]; // figuras generadas con el diseño (flowsheet / implantación), no de la biblioteca
+    const d = gen || await propImagenDatos(id);
     const ext = d && EXT[d.mime];
     if (!ext) continue;
     n++;
     const bytes = propBase64ABytes(d.b64);
-    const meta = infoImgs.find(i => i.id === id) || {};
+    const meta = gen ? { ancho: gen.ancho, alto: gen.alto } : (infoImgs.find(i => i.id === id) || {});
     let cx, cy;
     if (ext === 'emf') { const mm = propEmfDimensionesMm(bytes) || { w: 120, h: 80 }; cx = mm.w * 36000; cy = mm.h * 36000; }
     else { cx = (meta.ancho || 400) * 9525; cy = (meta.alto || 300) * 9525; }
-    const esc = Math.min(1, 5040000 / cx, 3600000 / cy); // máx. ~14 cm de ancho y 10 de alto
+    const esc = gen ? Math.min(1, 6000000 / cx, 7200000 / cy) : Math.min(1, 5040000 / cx, 3600000 / cy); // biblioteca: máx. ~14 cm de ancho y 10 de alto; figuras generadas: ~16,7 × 20 cm
     cx = Math.round(cx * esc); cy = Math.round(cy * esc);
     const rid = 'rIdProp' + n, nombre = `propimg${n}.${ext}`;
     zip.file('word/media/' + nombre, bytes);
@@ -20050,6 +20285,8 @@ function propTablaProsaXml(lineas) {
   const nCols = Math.max(...filas.map(f => f.length));
   const norm = filas.map(f => { const c = f.slice(); while (c.length < nCols) c.push(''); return c; });
   const ancho = Math.floor(9639 / nCols), anchos = Array(nCols).fill(ancho);
+  // primera columna más ancha cuando hay varias (nombres de unidad / etiquetas)
+  if (nCols >= 4) { const primera = Math.floor(9639 * 0.26), resto = Math.floor((9639 - primera) / (nCols - 1)); anchos[0] = primera; for (let i = 1; i < nCols; i++) anchos[i] = resto; }
   return procesosPropuestaTablaXml(norm[0], norm.slice(1), anchos) + '<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>';
 }
 
@@ -20057,19 +20294,22 @@ function propTablaProsaXml(lineas) {
 const PROP_TEC_PATRONES = [
   ['MBR-GForce', /g.?force|mbr.?gf/], ['MBBR', /mbbr/], ['MBR', /\bmbr\b|biorreactor de membran|membrane bioreactor/],
   ['SBR', /\bsbr\b|secuencial/], ['LechoPercolador', /percolador|trickling/], ['Anaerobico', /anaer|uasb|egsb|ecsb/],
-  ['LodosActivados', /lodos? activ|barros? activ|aireaci[oó]n extendida/],
+  ['LodosActivados', /lodos? activ|barros? activ|aireaci[oó]n extendida|^la(?:[\s_-]*\d+)?$/],
 ];
 // Tecnologías biológicas del proyecto según el nombre de sus etapas (en el orden del tren) — la línea de
 // lodos y las etapas auxiliares no cuentan (ej. un digestor anaeróbico de lodos no es la tecnología biológica)
 function propTecnologiasDelProyecto(p) {
-  const dd = p.diseno_data || {};
   const textos = [];
   if (p.tecnologia_confirmada) String(p.tecnologia_confirmada).split('+').forEach(t => textos.push(t));
-  (dd.orden || []).forEach(n => {
-    const h = dd.hojas && dd.hojas[n];
-    if (!h || !h.seleccionada || h.tipo === 'auxiliar' || h.linea === 'lodos') return;
-    if (/digest|espes|deshidrat|\blodos?\b/.test(propNormTxt(n))) return;
-    textos.push(n); if (h.hojaBase) textos.push(h.hojaBase);
+  // con varias alternativas, las tecnologías de TODAS (cada una con su texto estándar, y las fotos de obras solo de estas tecnologías)
+  procesosAlternativasLista(p).forEach(a => {
+    const dd = a.proy.diseno_data || {};
+    (dd.orden || []).forEach(n => {
+      const h = dd.hojas && dd.hojas[n];
+      if (!h || !h.seleccionada || h.tipo === 'auxiliar' || h.linea === 'lodos') return;
+      if (/digest|espes|deshidrat|\blodos?\b/.test(propNormTxt(n))) return;
+      textos.push(n); if (h.hojaBase) textos.push(h.hojaBase);
+    });
   });
   const claves = [];
   textos.forEach(t => {
@@ -20099,11 +20339,11 @@ async function propSeleccionarImagenesIA(p, claves, etapas, imagenes, tecImgs) {
   const linea = i => `${i.id} | ${i.nombre} | palabras clave: ${i.tags || '—'} | tecnologías: ${i.tecnologias || '—'}`;
   const campos = (p.info_cliente && p.info_cliente.campos) || {};
   const dato = k => { const x = Object.keys(campos).find(n => propNormTxt(n).includes(k)); return x ? `${x}: ${String(campos[x]).slice(0, 300)}` : ''; };
-  const prompt = `Armás una propuesta técnica de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''}. Tecnologías biológicas del proyecto: ${claves.join(', ') || '(no identificadas)'}.\n${[dato('ubicaci'), dato('normativa'), dato('vuelco')].filter(Boolean).join('\n')}\n\nETAPAS de la sección "Etapas de proceso" (usá estos nombres exactamente):\n${etapas.map(e => '- ' + e).join('\n')}\n\nEQUIPOS cargados en el proyecto, por etapa:\n${equiposTxt}\n\nBIBLIOTECA de imágenes de equipos y esquemas (id | nombre | palabras clave | tecnologías):\n${[...cat('equipo'), ...cat('esquema')].map(linea).join('\n') || '(vacía)'}${(tecImgs || []).length ? `\n\nIMÁGENES del documento estándar de la tecnología (esquemas y fotos que explican sus etapas; id | epígrafe) — asignalas a la etapa del proyecto que ilustran, si el proyecto tiene esa etapa:\n${tecImgs.map(i => `${i.id} | ${i.pie || i.nombre}`).join('\n')}` : ''}\n\nBIBLIOTECA de normativa de vuelco:\n${cat('normativa').map(linea).join('\n') || '(vacía)'}\n\nBIBLIOTECA de obras de referencia:\n${cat('referencia').map(linea).join('\n') || '(vacía)'}\n\nReglas: (1) Para cada etapa elegí, solo si el proyecto realmente tiene ese equipo o proceso en esa etapa, las imágenes que lo muestran (foto del equipo y, si ayuda a explicarlo, un esquema de funcionamiento); máx. 3 por etapa. (2) Si el proyecto especifica una marca/modelo distinto al de la imagen, no la uses; si no especifica marca, podés usar la foto típica del equipo. (3) No repitas una imagen en dos etapas. (4) Una etapa sin imagen apropiada va con lista vacía — no fuerces. (5) Normativa: la que corresponda a la jurisdicción/norma del proyecto, o null. (6) Referencias: hasta 3 obras de la misma tecnología o de un rubro parecido al del proyecto, o ninguna.`;
+  const prompt = `Armás una propuesta técnica de Aeration Argentina para "${p.nombre || ''}"${p.cliente ? ' (cliente: ' + p.cliente + ')' : ''}. Tecnologías biológicas del proyecto: ${claves.join(', ') || '(no identificadas)'}.\n${[dato('ubicaci'), dato('normativa'), dato('vuelco')].filter(Boolean).join('\n')}\n\nETAPAS de la sección "Etapas de proceso" (usá estos nombres exactamente):\n${etapas.map(e => '- ' + e).join('\n')}\n\nEQUIPOS cargados en el proyecto, por etapa:\n${equiposTxt}\n\nBIBLIOTECA de imágenes de equipos y esquemas (id | nombre | palabras clave | tecnologías):\n${[...cat('equipo'), ...cat('esquema')].map(linea).join('\n') || '(vacía)'}${(tecImgs || []).length ? `\n\nIMÁGENES del documento estándar de la tecnología (esquemas y fotos que explican sus etapas; id | epígrafe) — asignalas a la etapa del proyecto que ilustran, si el proyecto tiene esa etapa:\n${tecImgs.map(i => `${i.id} | ${i.pie || i.nombre}`).join('\n')}` : ''}\n\nBIBLIOTECA de normativa de vuelco:\n${cat('normativa').map(linea).join('\n') || '(vacía)'}\n\nBIBLIOTECA de obras de referencia:\n${cat('referencia').map(linea).join('\n') || '(vacía)'}\n\nReglas: (1) Para cada etapa elegí, solo si el proyecto realmente tiene ese equipo o proceso en esa etapa, las imágenes que lo muestran (foto del equipo y, si ayuda a explicarlo, un esquema de funcionamiento); máx. 3 por etapa. (2) Si el proyecto especifica una marca/modelo distinto al de la imagen, no la uses; si no especifica marca, podés usar la foto típica del equipo. (3) No repitas una imagen en dos etapas. (4) Una etapa sin imagen apropiada va con lista vacía — no fuerces. (5) Normativa: la que corresponda a la jurisdicción/norma del proyecto, o null. (6) Referencias: solo se te ofrecen obras de la MISMA tecnología que la propuesta; elegí hasta 3 (mejor si son de un rubro parecido al del proyecto) o ninguna — nunca una obra de otra tecnología.`;
   return await propLlamarForzado(PROP_TOOL_ELEGIR_IMAGENES, prompt, 3000);
 }
 // Saca de un texto las líneas de imagen y, si hay marca de biblioteca, todo lo que sigue
-function propQuitarImagenes(texto) { return String(texto || '').split('\n').filter(l => !PROP_IMG_TOKEN_RE.test(l.trim())).join('\n'); }
+function propQuitarImagenes(texto) { return String(texto || '').split('\n').filter(l => !PROP_IMG_TOKEN_RE.test(l.trim()) || /^\[\[img:gen:/.test(l.trim())).join('\n'); } // las figuras generadas con el diseño ("gen:") se conservan
 function propQuitarBloqueBiblioteca(texto) { const i = String(texto || '').indexOf('[[biblioteca]]'); return (i >= 0 ? String(texto).slice(0, i) : String(texto || '')).replace(/\s+$/, ''); }
 // Agrega, al final de cada etapa ("### Nombre"), las imágenes elegidas
 function propInsertarImagenesEnEtapas(texto, porEtapa, pieDe) {
@@ -20112,6 +20352,7 @@ function propInsertarImagenesEnEtapas(texto, porEtapa, pieDe) {
   String(texto || '').split('\n').forEach(l => {
     const t = l.trim();
     if (t.startsWith('### ')) { volcar(); actual = t.slice(4).trim(); }
+    else if (/^# |^\[\[suministro:/.test(t)) { volcar(); actual = null; } // fin de la última etapa de una alternativa: sus fotos no pasan a la siguiente
     out.push(l);
   });
   volcar();
@@ -20189,13 +20430,25 @@ ${lista}`;
   const out = lineas.map((l, i) => cambiar.has(i) ? cambiar.get(i).texto : l).filter((_, i) => !quitar.has(i));
   return { texto: out.join('\n'), quitadas: [...quitar.keys()].map(n => ({ n, linea: lineas[n], motivo: quitar.get(n) })), cambiadas: [...cambiar.entries()].map(([n, c]) => ({ n, antes: lineas[n], despues: c.texto, motivo: c.motivo })) };
 }
+// ¿La imagen de la biblioteca corresponde a alguna de las tecnologías de la propuesta? true / false; null = la imagen no tiene tecnología cargada
+// (MBR y MBR-GForce cuentan como la misma familia).
+function propImgCoincideTec(img, claves) {
+  const fam = c => (c === 'MBR-GForce' ? 'MBR' : c);
+  const tags = String((img && img.tecnologias) || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!tags.length) return null;
+  return tags.some(t => claves.some(c => fam(c) === fam(t)));
+}
 async function procesosPropuestaAplicarBiblioteca(p, pd) {
   const avisos = [];
-  const tecs = await propTecnologiasCargar(true), imagenes = await propImagenesCargar(true);
-  if (!tecs.length && !imagenes.length) return { resumen: 'La biblioteca de propuestas está vacía (Cfg Propuestas), así que no se agregó texto estándar ni fotos.', pd };
+  const tecs = await propTecnologiasCargar(true), imagenesTodas = await propImagenesCargar(true);
+  if (!tecs.length && !imagenesTodas.length) return { resumen: 'La biblioteca de propuestas está vacía (Cfg Propuestas), así que no se agregó texto estándar ni fotos.', pd };
   pd.secciones = Object.assign({}, pd.secciones);
   const sec = k => Object.assign({ texto: '', chat: [] }, pd.secciones[k]);
   const claves = propTecnologiasDelProyecto(p);
+  // Solo imágenes que corresponden a la/s tecnología/s de la propuesta: las obras de referencia tienen que ser de la MISMA tecnología (si no tienen
+  // tecnología cargada no se pueden usar); las fotos de equipos/esquemas sin tecnología cargada sirven (son genéricas), las de otra tecnología no.
+  const imagenes = imagenesTodas.filter(i => { const c = propImgCoincideTec(i, claves); return i.categoria === 'referencia' ? c === true : c !== false; });
+  const nExcl = imagenesTodas.length - imagenes.length;
   const pieDe = id => { const i = imagenes.find(x => x.id === id); return i ? (i.pie || i.nombre) : ''; };
   const idsValidos = new Set(imagenes.map(i => i.id));
 
@@ -20245,7 +20498,12 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
     } catch (e) { avisos.push(`No pude adaptar el texto de ${t.nombre} al proyecto (${e.message}): quedó el texto estándar completo, revisalo.`); }
     bloques.push(txt);
   }
-  if (sel) { const refs = limpiar(sel.referencias); if (refs.length) { bloques.push('## Obras de referencia\n' + refs.map(id => `[[img:${id}|${pieDe(id)}]]`).join('\n')); nFotos += refs.length; } }
+  // Obras de referencia: sección aparte (antes de "Límite de suministro"), solo con obras de la misma tecnología que la propuesta
+  const refsOk = sel ? limpiar(sel.referencias).filter(id => { const im = imagenes.find(i => i.id === id); return im && im.categoria === 'referencia' && propImgCoincideTec(im, claves) === true; }) : [];
+  const secObras = sec('obras_referencia');
+  pd.secciones.obras_referencia = Object.assign({}, secObras, { texto: refsOk.length ? 'A continuación se presentan obras de referencia de Aeration con la tecnología propuesta.\n' + refsOk.map(id => `[[img:${id}|${pieDe(id)}]]`).join('\n') : '' });
+  nFotos += refsOk.length;
+  if (!refsOk.length && imagenesTodas.some(i => i.categoria === 'referencia')) avisos.push('No hay obras de referencia de la misma tecnología (' + (claves.map(propTecNombre).join(', ') || 'no identificada') + ') en la biblioteca, así que no se agregó esa sección.');
   const base = propQuitarBloqueBiblioteca(sTec.texto);
   pd.secciones.intro_seleccion_tecnologia = Object.assign({}, sTec, { texto: bloques.length ? base + '\n[[biblioteca]]\n' + bloques.join('\n') : base });
   if (!claves.length) avisos.push('No identifiqué la tecnología biológica del proyecto en los nombres de las etapas, así que no agregué texto estándar de tecnología.');
@@ -30013,6 +30271,13 @@ async function propuestasAbrir(id) {
 }
 
 // ── Lectura de lo que se mandó → proyecto estructurado ──
+const PROP_ETAPA_SCHEMA = { type: 'object', properties: {
+  nombre: { type: 'string' },
+  linea: { type: 'string', enum: ['liquido', 'lodos'] },
+  descripcion: { type: 'string', description: 'Qué hace la etapa y cómo está planteada (1-3 frases), según los archivos.' },
+  dimensiones: { type: 'array', items: { type: 'object', properties: { etiqueta: { type: 'string', description: 'Ej: "Volumen", "Largo", "Diámetro", "Tiempo de retención".' }, valor: { type: ['number', 'string'] }, unidad: { type: 'string' } }, required: ['etiqueta', 'valor'] } },
+  equipos: { type: 'array', items: { type: 'object', properties: { tipo: { type: 'string', description: 'Tipo de equipo (ej. "Bomba sumergible", "Soplador", "Difusor de burbuja fina", "Tamiz estático").' }, cantidad: { type: 'number' }, especificacion: { type: 'string' }, modelo: { type: 'string', description: 'Marca/modelo si está definido ("" si no).' } }, required: ['tipo', 'cantidad'] } },
+}, required: ['nombre', 'linea', 'equipos'] };
 const PROP_TOOL_EXTRAER = {
   name: 'extraer_proyecto',
   description: 'Devuelve el proyecto de tratamiento de efluentes tal como surge de los archivos y la descripción.',
@@ -30024,13 +30289,11 @@ const PROP_TOOL_EXTRAER = {
       nombre: { type: 'string' },
       parametros: { type: 'array', items: { type: 'object', properties: { nombre: { type: 'string', description: 'Nombre EXACTO del parámetro pedido.' }, valor: { type: ['number', 'string', 'null'] }, unidad: { type: 'string' }, limite_normativo: { type: ['number', 'string', 'null'] } }, required: ['nombre', 'valor', 'unidad'] } },
     }, required: ['nombre', 'parametros'] } },
-    etapas: { type: 'array', description: 'Etapas del tren de tratamiento EN ORDEN (primero la línea líquida y después la de lodos).', items: { type: 'object', properties: {
-      nombre: { type: 'string' },
-      linea: { type: 'string', enum: ['liquido', 'lodos'] },
-      descripcion: { type: 'string', description: 'Qué hace la etapa y cómo está planteada (1-3 frases), según los archivos.' },
-      dimensiones: { type: 'array', items: { type: 'object', properties: { etiqueta: { type: 'string', description: 'Ej: "Volumen", "Largo", "Diámetro", "Tiempo de retención".' }, valor: { type: ['number', 'string'] }, unidad: { type: 'string' } }, required: ['etiqueta', 'valor'] } },
-      equipos: { type: 'array', items: { type: 'object', properties: { tipo: { type: 'string', description: 'Tipo de equipo (ej. "Bomba sumergible", "Soplador", "Difusor de burbuja fina", "Tamiz estático").' }, cantidad: { type: 'number' }, especificacion: { type: 'string' }, modelo: { type: 'string', description: 'Marca/modelo si está definido ("" si no).' } }, required: ['tipo', 'cantidad'] } },
-    }, required: ['nombre', 'linea', 'equipos'] } },
+    etapas: { type: 'array', description: 'Etapas del tren de tratamiento EN ORDEN (primero la línea líquida y después la de lodos). Si la propuesta tiene varias alternativas, dejalo vacío [] y completá "alternativas".', items: PROP_ETAPA_SCHEMA },
+    alternativas: { type: 'array', description: 'SOLO si los archivos o la descripción plantean DOS O MÁS alternativas de tratamiento para ofertar (ej. lodos activados convencional / MBBR + lodos activados / MBR): cada una con su nombre y su tren COMPLETO de etapas (incluidas las que comparte con las otras, repetidas), con sus equipos y dimensiones. Si hay una sola solución, dejalo vacío [].', items: { type: 'object', properties: {
+      nombre: { type: 'string', description: 'Nombre corto de la alternativa (ej. "Lodos activados convencional").' },
+      etapas: { type: 'array', items: PROP_ETAPA_SCHEMA },
+    }, required: ['nombre', 'etapas'] } },
     caratula: { type: 'object', properties: { destinatario_empresa: { type: 'string' }, suministro_objeto: { type: 'string', description: 'Ej: "Planta de tratamiento de efluentes cloacales".' }, ref_numero: { type: 'string' } } },
   }, required: ['campos', 'corrientes', 'etapas'] },
 };
@@ -30059,21 +30322,34 @@ function propuestasArmarProyecto(ext, camposDef) {
     nombre: c.nombre || 'Efluente',
     campos: Object.fromEntries((c.parametros || []).map(pa => [pa.nombre, { valor: pa.valor == null ? '' : pa.valor, unidad: pa.unidad || '', limite_normativo: pa.limite_normativo == null ? '' : pa.limite_normativo, fuente: '' }])),
   }));
-  const orden = [], hojas = {}, etapasEq = {};
-  (ext.etapas || []).forEach(e => {
-    let nombre = String(e.nombre || '').trim(); if (!nombre) return;
-    while (hojas[nombre]) nombre += ' (2)';
-    orden.push(nombre);
-    const vce = {};
-    (e.dimensiones || []).forEach(d => { vce[d.etiqueta + (d.unidad ? ' (' + d.unidad + ')' : '')] = d.valor; });
-    hojas[nombre] = { seleccionada: true, confirmada: true, tipo: 'etapa', hojaBase: nombre, linea: e.linea === 'lodos' ? 'lodos' : 'liquido', motivo: e.descripcion || '', valores: {}, chat: [], valoresConEtiqueta: vce };
-    etapasEq[nombre] = { equipos: (e.equipos || []).map(q => ({ id: procesosNuevoId(), tipo: q.tipo, cantidad: Number(q.cantidad) || 1, especificacion: q.especificacion || '', modelo: q.modelo || '', justificacion: '' })), chat: [], confirmada: true };
-  });
-  return {
-    info_cliente: { campos, corrientes },
-    diseno_data: { orden, hojas },
-    equipos_data: { etapas: etapasEq, layout: { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {}, marcas: {} } },
+  // un tren (etapas con sus dimensiones y equipos) → diseño + equipos
+  const armarTren = etapas => {
+    const orden = [], hojas = {}, etapasEq = {};
+    (etapas || []).forEach(e => {
+      let nombre = String(e.nombre || '').trim(); if (!nombre) return;
+      while (hojas[nombre]) nombre += ' (2)';
+      orden.push(nombre);
+      const vce = {};
+      (e.dimensiones || []).forEach(d => { vce[d.etiqueta + (d.unidad ? ' (' + d.unidad + ')' : '')] = d.valor; });
+      hojas[nombre] = { seleccionada: true, confirmada: true, tipo: 'etapa', hojaBase: nombre, linea: e.linea === 'lodos' ? 'lodos' : 'liquido', motivo: e.descripcion || '', valores: {}, chat: [], valoresConEtiqueta: vce };
+      etapasEq[nombre] = { equipos: (e.equipos || []).map(q => ({ id: procesosNuevoId(), tipo: q.tipo, cantidad: Number(q.cantidad) || 1, especificacion: q.especificacion || '', modelo: q.modelo || '', justificacion: '' })), chat: [], confirmada: true };
+    });
+    return { diseno: { orden, hojas }, equipos: { etapas: etapasEq, layout: { etapas: {}, equipos: {}, puertos: {}, flechas: {}, etiquetas: {}, marcas: {} } } };
   };
+  // Varias alternativas: la primera es la A (la activa), la segunda la B y el resto van como "extra" (la propuesta las presenta todas)
+  const alts = (ext.alternativas || []).filter(a => a && Array.isArray(a.etapas) && a.etapas.length).slice(0, 6);
+  if (alts.length >= 2) {
+    const ids = ['A', 'B', 'C', 'D', 'E', 'F'], trenes = alts.map(a => armarTren(a.etapas)), nombres = {};
+    alts.forEach((a, i) => { nombres[ids[i]] = String(a.nombre || '').trim(); });
+    const extra = trenes.slice(2).map((t, i) => ({ id: ids[i + 2], diseno: t.diseno, equipos: t.equipos }));
+    return {
+      info_cliente: { campos, corrientes },
+      diseno_data: Object.assign({}, trenes[0].diseno, { escenarios: { activo: 'A', nombres, comparacion: '', otro: { id: 'B', diseno: trenes[1].diseno, equipos: trenes[1].equipos }, extra: extra.length ? extra : undefined } }),
+      equipos_data: trenes[0].equipos,
+    };
+  }
+  const t0 = armarTren(alts.length === 1 ? alts[0].etapas : ext.etapas);
+  return { info_cliente: { campos, corrientes }, diseno_data: t0.diseno, equipos_data: t0.equipos };
 }
 async function propuestasCrear() {
   if (_propDirecta.ocupado) return;
@@ -30090,7 +30366,7 @@ async function propuestasCrear() {
     const camposDef = getProcesosIAFields().filter(f => f.name.trim());
     const campoTxt = camposDef.filter(f => f.tipo !== 'parametro').map(f => `- "${f.name}": ${f.desc || ''}`).join('\n');
     const paramTxt = camposDef.filter(f => f.tipo === 'parametro').map(f => `- "${f.name}": ${f.desc || ''}`).join('\n');
-    const prompt = `Vas a armar los datos de un proyecto de tratamiento de efluentes de Aeration Argentina para generar una propuesta técnico-comercial, a partir de lo que mandó el usuario (descripción y/o archivos: pliego, memoria, planilla de equipos, mails, planos...). Extraé SOLO lo que figura — no inventes valores; lo que no esté, dejalo vacío o null.\n\nNombre de la propuesta: ${nombre}\n\n${texto ? 'DESCRIPCIÓN / INSTRUCCIONES DEL USUARIO:\n' + texto + '\n\n' : ''}Campos de información general a completar (usá el nombre EXACTO como clave en "campos"):\n${campoTxt || '(ninguno configurado)'}\n\nParámetros de cada corriente de efluente (usá el nombre EXACTO en "parametros"; con su unidad y, si el pliego/norma lo da, el límite normativo):\n${paramTxt || '(ninguno configurado)'}\n\nEtapas: el tren de tratamiento definido, en orden, con la línea de lodos al final; para cada una, sus equipos con cantidad (y marca/modelo si está definido) y sus dimensiones si figuran. Si los archivos traen un diseño ya definido (equipos, volúmenes, capacidades), respetalo tal cual. Si solo hay una descripción general, armá las etapas razonables que ahí se mencionan y dejá los equipos que no estén definidos fuera.`;
+    const prompt = `Vas a armar los datos de un proyecto de tratamiento de efluentes de Aeration Argentina para generar una propuesta técnico-comercial, a partir de lo que mandó el usuario (descripción y/o archivos: pliego, memoria, planilla de equipos, mails, planos...). Extraé SOLO lo que figura — no inventes valores; lo que no esté, dejalo vacío o null.\n\nNombre de la propuesta: ${nombre}\n\n${texto ? 'DESCRIPCIÓN / INSTRUCCIONES DEL USUARIO:\n' + texto + '\n\n' : ''}Campos de información general a completar (usá el nombre EXACTO como clave en "campos"):\n${campoTxt || '(ninguno configurado)'}\n\nParámetros de cada corriente de efluente (usá el nombre EXACTO en "parametros"; con su unidad y, si el pliego/norma lo da, el límite normativo):\n${paramTxt || '(ninguno configurado)'}\n\nEtapas: el tren de tratamiento definido, en orden, con la línea de lodos al final; para cada una, sus equipos con cantidad (y marca/modelo si está definido) y sus dimensiones si figuran. Si los archivos traen un diseño ya definido (equipos, volúmenes, capacidades), respetalo tal cual. Si solo hay una descripción general, armá las etapas razonables que ahí se mencionan y dejá los equipos que no estén definidos fuera.\n\nALTERNATIVAS: si lo que se manda plantea DOS O MÁS alternativas de tratamiento para ofertar (ej. lodos activados / MBBR + lodos activados / MBR), completá "alternativas" con cada una (nombre y tren COMPLETO, repitiendo en cada una las etapas que comparte con las otras, con sus equipos y dimensiones) y dejá "etapas" vacío. Si hay una sola solución, usá "etapas" y dejá "alternativas" vacío.`;
     showMsg(st, 'loading', 'La IA está leyendo el diseño y armando el proyecto (puede tardar)...');
     const ext = await propLlamarForzado(PROP_TOOL_EXTRAER, [...bloques, { type: 'text', text: prompt }], 8000);
     const proy = propuestasArmarProyecto(ext, camposDef);
@@ -31979,6 +32255,17 @@ function procesosEscenarioPseudoProyecto(p) {
   if (!e) return null;
   return { id: p.id, nombre: p.nombre, cliente: p.cliente, info_cliente: p.info_cliente, tecnologia_confirmada: p.tecnologia_confirmada, diseno_data: e.otro.diseno, equipos_data: e.otro.equipos || { etapas: {} } };
 }
+// Todas las alternativas del proyecto, en orden: A, B y las "extra" (una propuesta directa puede traer 3 o más; en Procesos IA el trabajo paso a
+// paso sigue siendo con A y B). Sin escenarios devuelve una sola, sin id. proy = el "proyecto" de esa alternativa (el propio p para la activa).
+function procesosAlternativasLista(p) {
+  const e = procesosEscenariosInfo(p);
+  if (!e) return [{ id: '', etiqueta: '', nombre: '', proy: p }];
+  const base = { id: p.id, nombre: p.nombre, cliente: p.cliente, info_cliente: p.info_cliente, tecnologia_confirmada: p.tecnologia_confirmada };
+  const lista = [{ id: e.activo, proy: p }, { id: e.otro.id, proy: Object.assign({}, base, { diseno_data: e.otro.diseno, equipos_data: e.otro.equipos || { etapas: {} } }) }];
+  (e.extra || []).forEach(x => { if (x && x.id && x.diseno) lista.push({ id: x.id, proy: Object.assign({}, base, { diseno_data: x.diseno, equipos_data: x.equipos || { etapas: {} } }) }); });
+  lista.forEach(a => { a.nombre = ((e.nombres || {})[a.id] || '').trim(); a.etiqueta = procesosEscenarioEtiqueta(e, a.id); });
+  return lista.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
 // Al cambiar de escenario lo calculado en la sesión (modelos, HyperFormula, hojas libres del libro) ya no corresponde
 function procesosEscenarioResetCaches(p) {
   const st = procesosStep2State;
@@ -31998,7 +32285,7 @@ async function procesosEscenarioCambiar() {
   if (!e) return;
   const actual = JSON.parse(JSON.stringify(Object.assign({}, p.diseno_data, { escenarios: undefined })));
   const otroId = e.otro.id;
-  const nuevoDD = Object.assign({}, e.otro.diseno, { escenarios: { activo: otroId, nombres: e.nombres || {}, comparacion: e.comparacion || '', otro: { id: e.activo, diseno: actual, equipos: p.equipos_data || { etapas: {} } } } });
+  const nuevoDD = Object.assign({}, e.otro.diseno, { escenarios: { activo: otroId, nombres: e.nombres || {}, comparacion: e.comparacion || '', otro: { id: e.activo, diseno: actual, equipos: p.equipos_data || { etapas: {} } }, extra: e.extra || undefined } });
   const nuevoEq = e.otro.equipos || { etapas: {} };
   await procesosSaveProyecto({ diseno_data: nuevoDD, equipos_data: nuevoEq }, p);
   procesosEscenarioResetCaches(p);
@@ -32062,16 +32349,18 @@ function procesosEscenariosBarraHtml(p) {
 function procesosEscenariosContextoTxt(p, hastaStep) {
   const e = procesosEscenariosInfo(p);
   if (!e) return '';
-  const otro = procesosEscenarioPseudoProyecto(p);
-  const nA = procesosEscenarioEtiqueta(e, e.activo), nB = procesosEscenarioEtiqueta(e, e.otro.id);
-  let t = `ALTERNATIVAS: este proyecto tiene DOS alternativas de tratamiento que se presentan juntas al cliente. Lo de arriba (diseño y equipos) corresponde a la ${nA}; la otra es la ${nB}.${e.comparacion ? '\nComparación entre ambas: ' + e.comparacion : ''}\n\n`;
-  try {
-    const tren = procesosStep2GruposDesdeActual(otro).map((g, i) => `${i + 1}. ${g.instancias.map(x => x.nombre).join(' + ')}${g.libre ? ' (unidad libre)' : ''}${g.linea === 'lodos' ? ' [lodos]' : ''}${g.instancias[0] && (g.instancias[0].material || g.instancias[0].geometria) ? ' (' + [g.instancias[0].material, g.instancias[0].geometria].filter(Boolean).join(', ') + ')' : ''}`).join('\n');
-    if (tren) t += `── ${nB}: tren de tratamiento ──\n${tren}\n\n`;
-    if (hastaStep > 2) { const dis = procesosResumenDiseno(otro); if (dis) t += `── ${nB}: diseño definido ──\n${dis}\n\n`; }
-    if (hastaStep > 3) { const eq = procesosResumenEquipos(otro, true); if (eq) t += `── ${nB}: equipos por etapa ──\n${eq}\n\n`; }
-  } catch (err) { /* se sigue con lo que haya */ }
-  if (hastaStep >= 4) t += `CÓMO PRESENTAR LAS ALTERNATIVAS EN LA PROPUESTA: la propuesta presenta AMBAS alternativas, no una sola. Los parámetros de diseño y la calidad de vuelco son comunes. En "Selección de tecnología" explicá las dos opciones y compará sus ventajas y desventajas (costo, espacio, operación, mantenimiento) de forma equilibrada. En "Etapas de proceso" describí las etapas de la ${nA} y a continuación las de la ${nB}, con subtítulos "${nA}" y "${nB}", sin mezclar equipos de una en la otra. Cuando hables de una unidad o equipo, aclará a qué alternativa pertenece.\n\n`;
+  const otras = procesosAlternativasLista(p).filter(a => a.id !== e.activo);
+  const nA = procesosEscenarioEtiqueta(e, e.activo), nOtras = otras.map(a => a.etiqueta);
+  let t = `ALTERNATIVAS: este proyecto tiene ${otras.length + 1} alternativas de tratamiento que se presentan juntas al cliente. Lo de arriba (diseño y equipos) corresponde a la ${nA}; ${otras.length > 1 ? 'las otras son la ' + nOtras.join(' y la ') : 'la otra es la ' + nOtras[0]}.${e.comparacion ? '\nComparación entre ellas: ' + e.comparacion : ''}\n\n`;
+  otras.forEach(a => {
+    try {
+      const tren = procesosStep2GruposDesdeActual(a.proy).map((g, i) => `${i + 1}. ${g.instancias.map(x => x.nombre).join(' + ')}${g.libre ? ' (unidad libre)' : ''}${g.linea === 'lodos' ? ' [lodos]' : ''}${g.instancias[0] && (g.instancias[0].material || g.instancias[0].geometria) ? ' (' + [g.instancias[0].material, g.instancias[0].geometria].filter(Boolean).join(', ') + ')' : ''}`).join('\n');
+      if (tren) t += `── ${a.etiqueta}: tren de tratamiento ──\n${tren}\n\n`;
+      if (hastaStep > 2) { const dis = procesosResumenDiseno(a.proy); if (dis) t += `── ${a.etiqueta}: diseño definido ──\n${dis}\n\n`; }
+      if (hastaStep > 3) { const eq = procesosResumenEquipos(a.proy, true); if (eq) t += `── ${a.etiqueta}: equipos por etapa ──\n${eq}\n\n`; }
+    } catch (err) { /* se sigue con lo que haya */ }
+  });
+  if (hastaStep >= 4) t += `CÓMO PRESENTAR LAS ALTERNATIVAS EN LA PROPUESTA: la propuesta presenta TODAS las alternativas, no una sola. Los parámetros de diseño y la calidad de vuelco son comunes. En "Selección de tecnología" explicá las opciones y compará sus ventajas y desventajas (costo, espacio, operación, mantenimiento) de forma equilibrada. Las etapas se redactan aparte, alternativa por alternativa (cada una con su descripción, sus etapas y su lista de suministro), sin mezclar equipos de una en la otra. Cuando hables de una unidad o equipo, aclará a qué alternativa pertenece.\n\n`;
   return t;
 }
 // Ítems y totales de la propuesta comercial, por alternativa cuando hay dos
