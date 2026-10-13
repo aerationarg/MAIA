@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.98</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.97</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.98</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -34010,34 +34010,131 @@ function simVerificarMBR(p, g) {
   if (simPos(p.aire_limpieza)) ind.push(simInd('Aire de limpieza por área de membrana', Number(p.aire_limpieza) / A, 'm3/m2·h', 0.2, 0.6, 'Típico 0,2–0,5 Nm3/m2·h.'));
   return { faltan: [], ind };
 }
-function simVerificarDAF(p, g) {
-  const A = simPos(p.area), Q = simPos(g.q_med), SS = simPos(g.sst), R = simPos(p.recirculacion), P = simPos(p.presion), falt = [];
+// ═══ Unidades "hidráulicas": tamiz, DAF, fisicoquímico y cámara de contacto (laberinto). Simulan caudales y cómo varían sus parámetros ═══
+// Sin bomba de salida: el caudal que sale es el que entra (la unidad es de paso). Con bomba de salida: la unidad es un tanque con
+// arranque/paro por nivel y el caudal que sale es el de la bomba (si no alcanza, el nivel sube y rebalsa).
+const SIM_TIPOS_ENTRADAS = ['ecualizador', 'sbr', 'mbbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'];
+const SIM_HID_PARAMS = [
+  { k: 'q_bomba', l: 'Caudal de la bomba de salida (vacío = sale por gravedad, depende de lo que entra)', u: 'm3/h', dim: 'flow', alias: [/caudal.*bomba|bomba.*caudal/] },
+  { k: 'vol_hid', l: 'Volumen que almacena (solo importa con bomba de salida; vacío = el de las dimensiones)', u: 'm3', dim: 'vol', alias: [] },
+  { k: 'niv_min_pct', l: 'Con bomba: nivel de paro', u: '% del volumen', tipico: 20, alias: [] },
+  { k: 'niv_max_pct', l: 'Con bomba: nivel de arranque', u: '% del volumen', tipico: 90, alias: [] }
+];
+function simHid(o) {
+  const dt = 15 / 3600, ns = Math.max(1, Math.round(o.dtH / dt)), qb = o.qb || null, V = o.V || 0, vmin = V * o.minPct / 100, vmax = V * o.maxPct / 100;
+  let vol = qb ? (vmin + vmax) / 2 : V, on = false; const out = { Q: [], qin: [], vol: [], spill: [], V, vmin, vmax, bomba: !!qb, qb, spillTotal: 0, dtH: o.dtH };
+  for (let i = 0; i < o.NT; i++) {
+    let aQo = 0, aSp = 0; const qin = o.Qin[i], pw = o.on ? o.on[i] : 1;
+    for (let s = 0; s < ns; s++) {
+      if (!qb) { aQo += qin; continue; }
+      if (vol >= vmax) on = true; if (vol <= vmin) on = false;
+      const qout = on && pw > 0 ? Math.min(qb, Math.max(0, vol / dt + qin)) : 0;
+      vol += (qin - qout) * dt; let sp = 0; if (vol > V) { sp = vol - V; vol = V; } if (vol < 0) vol = 0;
+      aQo += qout; aSp += sp;
+    }
+    out.Q.push(aQo / ns); out.qin.push(qin); out.vol.push(vol); out.spill.push(aSp); out.spillTotal += aSp;
+  }
+  return out;
+}
+function simHidCorrer(p, o, Vdef) {
+  const qb = simPos(p.q_bomba), V = simPos(p.vol_hid) || Vdef || 1;
+  return simHid({ Qin: o.Qin, qb, V, minPct: simNum(p.niv_min_pct) != null ? Number(p.niv_min_pct) : 20, maxPct: simNum(p.niv_max_pct) != null ? Number(p.niv_max_pct) : 90, on: o.on, NT: o.NT, dtH: o.dtH });
+}
+// indicadores comunes (bomba de salida y rebalse) y series de los parámetros para los gráficos
+function simHidCierre(res, s, pars) {
+  s.pars = pars.filter(Boolean); res.sim = s;
+  if (s.bomba) {
+    res.ind.push(simInd('Capacidad de la bomba de salida / caudal máximo que entra', s.qb / Math.max(...s.qin), '', 1.0, null, `Bomba de ${s.qb} m3/h contra ${Math.max(...s.qin).toFixed(1)} m3/h de máximo ingreso. Si es menor que 1 el nivel sube.`));
+    res.ind.push(simInd('Volumen rebalsado en el período simulado', s.spillTotal, 'm3', null, 0, s.spillTotal > 0 ? 'REBALSA: el nivel llega al máximo y el agua se pierde (la bomba no alcanza o se cortó la energía).' : ''));
+  }
+  return res;
+}
+const simMin = a => Math.min(...a), simMax = a => Math.max(...a);
+function simVerificarDAF(p, g, ev, o) {
+  const A = simPos(p.area), Q = simPos(g.q_med), SS = simPos(g.sst), R = simPos(p.recirculacion), P = simPos(p.presion), H = simPos(p.profundidad) || 1.8, falt = [];
   if (!A) falt.push('Área superficial de flotación'); if (!Q) falt.push('Caudal medio');
   if (falt.length) return { faltan: falt, ind: [] };
   const ind = [simInd('Carga hidráulica superficial', Q / A, 'm/h', 3, 10, 'Típico 5–10 m/h (menor sin placas).')];
   if (SS) ind.push(simInd('Carga de sólidos', Q * SS / 1000 / A, 'kg/m2·h', null, 10, 'Con polímero hasta ~10 kg/m2·h; sin polímero ≤ 3.'));
-  if (R && P && SS) { const sa = 18.7, f = 0.6, ratio = 1.3 * sa * (f * P - 1) * R / (SS * Q); ind.push(simInd('Relación aire/sólidos (A/S)', ratio, 'mL/mg', 0.005, 0.06, `Con presión ${P} atm absolutas, ${R} m3/h de recirculación y saturación 60%.`)); }
-  return { faltan: [], ind };
+  const sa = 18.7, f = 0.6, asF = (q, ss) => 1.3 * sa * (f * P - 1) * R / (ss * q);
+  if (R && P && SS) ind.push(simInd('Relación aire/sólidos (A/S)', asF(Q, SS), 'mL/mg', 0.005, 0.06, `Con presión ${P} atm absolutas, ${R} m3/h de recirculación y saturación 60%.`));
+  const res = { faltan: [], ind };
+  if (o && o.Qin) {
+    const s = simHidCorrer(p, o, A * H), sor = o.Qin.map(q => q / A);
+    ind.push(simInd('Carga hidráulica máxima del período simulado', simMax(sor), 'm/h', null, 10, 'Con los picos de caudal y los eventos del escenario.'));
+    ind.push(simInd('Horas con la carga hidráulica sobre 10 m/h', sor.filter(x => x > 10).length * o.dtH, 'h', null, 0, 'Por encima de ese valor sube el arrastre de flóculos con el efluente.'));
+    ind.push(simInd('Tiempo de retención mínimo (volumen ' + (A * H).toFixed(1) + ' m3)', (simPos(p.vol_hid) || A * H) / simMax(o.Qin) * 60, 'min', 10, null, 'Volumen de la unidad / caudal máximo.'));
+    let asS = null; if (R && P && o.cin && o.cin.sst) { const ss = o.cin.sst.map(x => Math.max(1, x)); asS = o.Qin.map((q, i) => asF(Math.max(q, 1e-6), ss[i])); ind.push(simInd('A/S mínima del período', simMin(asS), 'mL/mg', 0.005, null, 'La recirculación presurizada es fija: cuando sube el caudal o los sólidos, baja la relación aire/sólidos.')); }
+    return simHidCierre(res, s, [{ titulo: 'Carga hidráulica superficial (m/h)', vals: sor, max: 10, min: 3 }, asS && { titulo: 'Relación aire/sólidos A/S (mL/mg)', vals: asS, min: 0.005, max: 0.06 }]);
+  }
+  return res;
 }
-function simVerificarFQ(p, g) {
+function simVerificarFQ(p, g, ev, o) {
   const Vr = simPos(p.vol_mezcla), Vf = simPos(p.vol_floc), Q = simPos(g.q_med), Pr = simPos(p.potencia_mezcla), Pf = simPos(p.potencia_floc), falt = [];
   if (!Vr) falt.push('Volumen de mezcla rápida'); if (!Vf) falt.push('Volumen de floculación'); if (!Q) falt.push('Caudal medio');
   if (falt.length) return { faltan: falt, ind: [] };
   const mu = 0.001, tr = Vr / Q * 3600, tf = Vf / Q * 60, ind = [simInd('Tiempo de mezcla rápida', tr, 's', 10, 60, 'Típico 10–60 s.'), simInd('Tiempo de floculación', tf, 'min', 15, 30, 'Típico 15–30 min.')];
   if (Pr) ind.push(simInd('Gradiente de velocidad en mezcla rápida (G)', Math.sqrt(Pr * 1000 / (mu * Vr)), '1/s', 300, 1000, 'Típico 300–1000 1/s.'));
   if (Pf) { const G = Math.sqrt(Pf * 1000 / (mu * Vf)); ind.push(simInd('Gradiente de velocidad en floculación (G)', G, '1/s', 20, 70, 'Típico 20–70 1/s.'), simInd('G × t en floculación', G * tf * 60, '', 1e4, 1e5, 'Típico 10.000–100.000.')); }
-  if (simPos(p.area_decant)) ind.push(simInd('Carga superficial del decantador', Q / p.area_decant, 'm/h', null, simPos(p.lamelas) ? 6 : 1.5, simPos(p.lamelas) ? 'Con lamelas: sobre área proyectada, típico 3–6 m/h.' : 'Decantador convencional 1,0–1,5 m/h.'));
-  return { faltan: [], ind };
+  const Ad = simPos(p.area_decant); if (Ad) ind.push(simInd('Carga superficial del decantador', Q / Ad, 'm/h', null, simPos(p.lamelas) ? 6 : 1.5, simPos(p.lamelas) ? 'Con lamelas: sobre área proyectada, típico 3–6 m/h.' : 'Decantador convencional 1,0–1,5 m/h.'));
+  const res = { faltan: [], ind };
+  if (o && o.Qin) {
+    const s = simHidCorrer(p, o, Vr + Vf), mx = o.Qin.map(q => Vr / Math.max(q, 1e-6) * 3600), fl = o.Qin.map(q => Vf / Math.max(q, 1e-6) * 60), sorD = Ad ? o.Qin.map(q => q / Ad) : null;
+    ind.push(simInd('Tiempo de mezcla rápida mínimo del período', simMin(mx), 's', 10, null, 'Con el caudal máximo que entra.'));
+    ind.push(simInd('Tiempo de floculación mínimo del período', simMin(fl), 'min', 15, null, 'Con el caudal máximo que entra: si baja de ~15 min se forma flóculo chico y el decantador lo pierde.'));
+    if (sorD) ind.push(simInd('Carga superficial máxima del decantador', simMax(sorD), 'm/h', null, simPos(p.lamelas) ? 6 : 1.5, 'Con los picos del período simulado.'));
+    return simHidCierre(res, s, [{ titulo: 'Tiempo de floculación (min)', vals: fl, min: 15, max: 30 }, { titulo: 'Tiempo de mezcla rápida (s)', vals: mx, min: 10, max: 60 }, sorD && { titulo: 'Carga superficial del decantador (m/h)', vals: sorD, max: simPos(p.lamelas) ? 6 : 1.5 }]);
+  }
+  return res;
 }
-function simVerificarTamiz(p, g) {
+function simVerificarTamiz(p, g, ev, o) {
   const b = simPos(p.ancho_canal), y = simPos(p.tirante), Qp = simPos(g.q_pico) || (simPos(g.q_med) ? g.q_med * 2 : null), cap = simPos(p.capacidad), falt = [];
   if (!b) falt.push('Ancho del canal'); if (!y) falt.push('Tirante'); if (!Qp) falt.push('Caudal');
   if (falt.length) return { faltan: falt, ind: [] };
   const v = Qp / 3600 / (b * y), ind = [simInd('Velocidad en el canal (caudal pico)', v, 'm/s', 0.4, 0.9, 'Mínimo 0,4 para que no sedimente arena; máximo ~0,9 para no arrastrar sólidos.')];
   if (simPos(g.q_med) && simPos(p.tirante_min)) ind.push(simInd('Velocidad en el canal (caudal medio)', g.q_med / 3600 / (b * p.tirante_min), 'm/s', 0.3, null, 'Con el tirante mínimo.'));
   if (cap) ind.push(simInd('Capacidad del tamiz / caudal pico', cap / Qp, '', 1.0, null, 'Con rejilla colmatada conviene un margen (≥ 1,25 sobre el pico).'));
-  return { faltan: [], ind };
+  const res = { faltan: [], ind };
+  if (o && o.Qin) {
+    const s = simHidCorrer(p, o, b * y * 3), vel = o.Qin.map(q => q / 3600 / (b * Math.max(0.05, y * Math.pow(Math.max(q, 1e-6) / Qp, 0.6)))); // el tirante crece con el caudal (≈ Q^0,6)
+    ind.push(simInd('Velocidad mínima en el canal del período', simMin(vel), 'm/s', 0.3, null, 'Con poco caudal la velocidad baja y sedimenta arena en el canal.'));
+    ind.push(simInd('Velocidad máxima en el canal del período', simMax(vel), 'm/s', null, 0.9, 'Con los picos de caudal.'));
+    const pars = [{ titulo: 'Velocidad en el canal (m/s)', vals: vel, min: 0.4, max: 0.9 }];
+    if (cap) { const byp = o.Qin.map(q => Math.max(0, 1 - cap / Math.max(q, 1e-9))), vb = o.Qin.reduce((a, q) => a + Math.max(0, q - cap) * o.dtH, 0); s.bypass = byp;
+      ind.push(simInd('Horas con el caudal sobre la capacidad del tamiz', o.Qin.filter(q => q > cap).length * o.dtH, 'h', null, 0, 'Con más caudal que la capacidad el canal se llena y el excedente pasa sin tamizar.'));
+      ind.push(simInd('Volumen que pasa sin tamizar', vb, 'm3', null, 0, ''));
+      pars.push({ titulo: 'Caudal / capacidad del tamiz', vals: o.Qin.map(q => q / cap), max: 1 }); }
+    return simHidCierre(res, s, pars);
+  }
+  return res;
 }
+// Cámara de contacto / desinfección tipo laberinto: solo hidráulica (tiempo de contacto)
+function simVerificarDes(p, g, ev, o) {
+  const V = simPos(p.volumen), Q = simPos(g.q_med), tmin = simPos(p.tiempo_min) || 30, falt = [];
+  if (!V) falt.push('Volumen de la cámara'); if (!Q) falt.push('Caudal medio');
+  if (falt.length) return { faltan: falt, ind: [] };
+  const ind = [simInd('Tiempo de retención (caudal medio)', V / Q * 60, 'min', tmin, null, `Se pide como mínimo ${tmin} min de contacto.`)];
+  const Qp = simPos(g.q_pico); if (Qp) ind.push(simInd('Tiempo de retención (caudal pico)', V / Qp * 60, 'min', tmin, null, ''));
+  const res = { faltan: [], ind };
+  if (o && o.Qin) {
+    const s = simHidCorrer(p, o, V), trh = o.Qin.map(q => V / Math.max(q, 1e-6) * 60);
+    ind.push(simInd('Tiempo de retención mínimo del período', simMin(trh), 'min', tmin, null, 'Con el caudal máximo que entra (picos y eventos del escenario).'));
+    ind.push(simInd('Horas con el tiempo de retención por debajo del mínimo', trh.filter(x => x < tmin).length * o.dtH, 'h', null, 0, ''));
+    return simHidCierre(res, s, [{ titulo: 'Tiempo de retención en la cámara (min)', vals: trh, min: tmin }]);
+  }
+  return res;
+}
+function simGraficosHid(u, res) {
+  const s = res.sim, C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', nar: '#d98a00' }, T = a => a.map((v, i) => [i * s.dtH, v]), horas = s.Q.length * s.dtH;
+  const base = { w: 540, h: 170, xl: 'Horas desde el inicio', xmin: 0, xmax: horas, ymin: 0 }, sep = '<div style="height:8px"></div>';
+  let h = simGrafico(Object.assign({}, base, { titulo: s.bomba ? 'Caudal que entra y caudal que bombea la unidad (m3/h)' : 'Caudal que entra y sale (m3/h): sale lo que entra', series: [{ n: 'Entra', c: C.azul, pts: T(s.qin) }, { n: 'Sale', c: C.verde, pts: T(s.Q), dash: '4 3' }], yl: 'm3/h' }));
+  (s.pars || []).forEach(par => { const hl = []; if (par.min != null) hl.push({ y: par.min, c: C.verde, t: 'mínimo ' + par.min }); if (par.max != null) hl.push({ y: par.max, c: C.rojo, t: 'máximo ' + par.max }); h += sep + simGrafico(Object.assign({}, base, { titulo: par.titulo, series: [{ c: C.azul, pts: T(par.vals) }], hl })); });
+  if (s.bomba) h += sep + simGrafico(Object.assign({}, base, { titulo: 'Volumen almacenado (m3)', series: [{ n: 'Volumen', c: C.azul, pts: T(s.vol) }], hl: [{ y: s.V, c: C.rojo, t: 'rebalse' }, { y: s.vmax, c: C.nar, t: 'arranque' }, { y: s.vmin, c: C.gris, t: 'paro' }], yl: 'm3' }));
+  return h;
+}
+
+function simHidExtra(s) { return s ? { sim: s, hid: true, vol: s.vol, V: s.V, spill: s.spill, spillTotal: s.spillTotal, bomba: s.bomba } : {}; }
+function simHidAvisos(s, u, avisos, horas) { if (s && s.spillTotal > 0.5) avisos.push(`⚠ "${u.nombre}" REBALSA: ${s.spillTotal.toFixed(0)} m3 se pierden en ${horas} h (la bomba de salida no alcanza o se cortó la energía). Ese caudal no sigue a la planta.`); }
 
 // ═══ Registro de modelos (qué parámetros pide cada unidad y cómo se verifica) ═══
 // alias: expresiones sobre el nombre normalizado (sin tildes, minúsculas) para detectar el dato en un proyecto de Procesos IA.
@@ -34110,14 +34207,17 @@ const SIM_MODELOS = {
     { k: 'aire_limpieza', l: 'Caudal de aire de limpieza (scouring)', u: 'm3/h', dim: 'flow', alias: [/aire.*(limpieza|scouring|burbuj)/] }] },
   daf: { nombre: 'DAF (flotación por aire disuelto)', det: /\bdaf\b|flotacion|flotador/, verificar: simVerificarDAF, params: [
     { k: 'area', l: 'Área superficial de flotación', u: 'm2', dim: 'area', req: 1, alias: [/area|superficie/] }, { k: 'recirculacion', l: 'Caudal de recirculación presurizada', u: 'm3/h', dim: 'flow', alias: [/recirc/] },
-    { k: 'presion', l: 'Presión de saturación (absoluta)', u: 'atm', alias: [/presion/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 50, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo flotado', u: '%', tipico: 3, alias: [] }] },
+    { k: 'presion', l: 'Presión de saturación (absoluta)', u: 'atm', alias: [/presion/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 50, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo flotado', u: '%', tipico: 3, alias: [] }, { k: 'profundidad', l: 'Profundidad de agua', u: 'm', dim: 'len', tipico: 1.8, alias: [/profundidad|altura.*agua|nivel.*agua/] }].concat(SIM_HID_PARAMS) },
   fisicoquimico: { nombre: 'Fisicoquímico (coagulación-floculación)', det: /fisicoquimic|coagul|floc|mezcla rapida/, verificar: simVerificarFQ, params: [
     { k: 'vol_mezcla', l: 'Volumen de mezcla rápida', u: 'm3', dim: 'vol', req: 1, alias: [/volumen.*(mezcla|coagul)/] }, { k: 'vol_floc', l: 'Volumen de floculación', u: 'm3', dim: 'vol', req: 1, alias: [/volumen.*floc/] },
     { k: 'potencia_mezcla', l: 'Potencia de mezcla rápida', u: 'kW', alias: [/potencia.*(mezcla|coagul)/] }, { k: 'potencia_floc', l: 'Potencia de floculación', u: 'kW', alias: [/potencia.*floc/] },
-    { k: 'area_decant', l: 'Área del decantador', u: 'm2', dim: 'area', alias: [/area.*decant/] }, { k: 'lamelas', l: '¿Con lamelas? (1 = sí)', u: '', alias: [/lamel/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 45, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo', u: '%', tipico: 2, alias: [] }] },
+    { k: 'area_decant', l: 'Área del decantador', u: 'm2', dim: 'area', alias: [/area.*decant/] }, { k: 'lamelas', l: '¿Con lamelas? (1 = sí)', u: '', alias: [/lamel/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 45, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo', u: '%', tipico: 2, alias: [] }].concat(SIM_HID_PARAMS) },
+  desinfeccion: { nombre: 'Cámara de contacto / desinfección (laberinto)', det: /desinfec|laberinto|cloracion|camara de contacto/, dinamico: true, verificar: simVerificarDes, params: [
+    { k: 'volumen', l: 'Volumen de la cámara', u: 'm3', dim: 'vol', req: 1, alias: [/volumen/] },
+    { k: 'tiempo_min', l: 'Tiempo de contacto mínimo requerido', u: 'min', tipico: 30, alias: [/tiempo.*(contacto|retencion)/] }].concat(SIM_HID_PARAMS) },
   tamiz: { nombre: 'Tamiz / reja', det: /tamiz|reja|desbaste|cribado/, verificar: simVerificarTamiz, params: [
     { k: 'ancho_canal', l: 'Ancho del canal', u: 'm', dim: 'len', req: 1, alias: [/ancho.*canal/] }, { k: 'tirante', l: 'Tirante con caudal pico', u: 'm', dim: 'len', req: 1, alias: [/tirante|altura.*liquido/] },
-    { k: 'tirante_min', l: 'Tirante con caudal medio', u: 'm', dim: 'len', alias: [] }, { k: 'capacidad', l: 'Capacidad del tamiz', u: 'm3/h', dim: 'flow', alias: [/capacidad/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 10, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 5, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 5, alias: [] }] }
+    { k: 'tirante_min', l: 'Tirante con caudal medio', u: 'm', dim: 'len', alias: [] }, { k: 'capacidad', l: 'Capacidad del tamiz', u: 'm3/h', dim: 'flow', alias: [/capacidad/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 10, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 5, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 5, alias: [] }].concat(SIM_HID_PARAMS) }
 };
 // valores por defecto de los datos generales
 const SIM_GLOBAL_PARAMS = [
@@ -34133,8 +34233,8 @@ const SIM_GLOBAL_PARAMS = [
 // Simulador de plantas — pantalla, importación de datos (Procesos IA, archivos/Excel con IA, plantilla Excel) y gráficos.
 // Se guarda en doc_documentos con tipo = 'simulacion' (datos: {global, unidades[], fuente...}).
 // ═══════════════════════════════════════════════════════════════════════
-const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'fisicoquimico', 'lodos_activados'];
-const SIM_SLIDERS = { ecualizador: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
+const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'lodos_activados'];
+const SIM_SLIDERS = { ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
 const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'] };
 let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
 const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
@@ -34271,7 +34371,7 @@ function simGeoParams(tipo, m) {
     put('area', area, tagA); if (H) { put('nivel_alarma', H, tagH); const arr = Math.max(0.5, H - 1.0); put('nivel_arranque', arr, 'tipico'); put('nivel_paro', Math.max(0.25, arr - 1.0), 'tipico'); }
   } else if (tipo === 'sedimentador') {
     put('area', area, tagA); put('profundidad', H, tagH); put('long_vertedero', circ ? (m.diametro ? Math.PI * m.diametro : null) : (m.ancho ? 2 * m.ancho : null), tagA);
-  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr') put('profundidad', H, tagH); }
+  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr') put('profundidad', H, tagH); }
   else if (tipo === 'daf') put('area', area, tagA);
   return { params, fuentes };
 }
@@ -34470,7 +34570,7 @@ function simParamsNum(u) {
 }
 function simCorrer(u) {
   const m = SIM_MODELOS[u.tipo], e = u.escenario && u.escenario.mult > 0 ? { mult: Number(u.escenario.mult), inicio: Number(u.escenario.inicio) || 0, dur: Number(u.escenario.dur) || 0 } : null;
-  try { return m.verificar(simParamsNum(u), simGlobalNum(), e, u.tipo === 'pozo' ? simPozoOpciones(_simDoc.datos, e) : (['ecualizador', 'sbr', 'mbbr'].includes(u.tipo) ? simEntradas(_simDoc.datos, e) : true)); } catch (err) { return { faltan: [], ind: [], error: 'Error de cálculo: ' + err.message }; }
+  try { return m.verificar(simParamsNum(u), simGlobalNum(), e, u.tipo === 'pozo' ? simPozoOpciones(_simDoc.datos, e) : (SIM_TIPOS_ENTRADAS.includes(u.tipo) ? simEntradas(_simDoc.datos, e) : true)); } catch (err) { return { faltan: [], ind: [], error: 'Error de cálculo: ' + err.message }; }
 }
 const simFmt = v => v == null ? '—' : (typeof v !== 'number' ? String(v) : (Math.abs(v) >= 1000 ? v.toFixed(0) : Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(3)));
 // ── Gráficos (SVG propio) ──
@@ -34500,6 +34600,7 @@ function simGrafico(o) {
 function simGraficosUnidad(u, res) {
   if (!res || res.error || res.faltan.length) return '';
   if (['ecualizador', 'sbr', 'mbbr'].includes(u.tipo)) return res.sim ? simGraficosEqSbrMbbr(u, res) : '';
+  if (res.sim && res.sim.pars) return simGraficosHid(u, res);
   const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', naranja: '#d98a00' };
   if (u.tipo === 'sedimentador' && res.flujo) {
     const f = res.flujo, s = res.s, Xmax = Math.min(20, Math.max(f.Xu * 1.15, s.X * 2.5, 6)), N = 160, gb = [], gt = [], gu = [];
@@ -34556,7 +34657,7 @@ function simUnidadHtml(u, i, n) {
       <td style="${PROCESOS_EQ_TD};width:170px">${sl ? `<input type="range" class="sim-rng" min="${sl[0]}" max="${sl[1]}" step="${(sl[1] - sl[0]) / 200}" value="${simNum(v)}" oninput="simSlider('${u.id}','${df.k}',this.value)" title="Mover para ver cómo cambian los resultados" />` : ''}</td>
       <td style="${PROCESOS_EQ_TD};width:34px;text-align:center" title="${tag ? esc(tag[1]) : (falta ? 'Falta este dato' : '')}">${tag ? tag[0] : (falta ? '<span style="color:var(--red)">falta</span>' : '')}</td></tr>`;
   };
-  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'mbbr'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
+  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'mbbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
     <button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',2.5,4)">Pico ×2,5 (4 h)</button><button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',0,0)">Sin evento</button></div>` : '';
   return `<div class="card" style="margin-bottom:10px">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><span class="hint" style="margin:0">${i + 1}.</span>
@@ -34652,7 +34753,7 @@ function simPlantaDin(d) {
   const qinF = t => { if (t < 0) return simQ(g, pat, t, null); return Qin[Math.min(NT - 1, Math.floor(t / dtH))]; };
   for (let i = 0; i < us.length; i++) {
     const u = us[i], p = simParamsNum(u), m = SIM_MODELOS[u.tipo], ent = clone(cur);
-    let res; try { res = m.verificar(p, g, null, u.tipo === 'pozo' ? { horas, qin: qinF, bombasF: t => (t < 0 ? 1 : fac[Math.min(NT - 1, Math.floor(t / dtH))].pozoOn) } : (['ecualizador', 'sbr', 'mbbr'].includes(u.tipo) ? { Qin: cur.Q, cin: { dbo: cur.dbo, dqo: cur.dqo, sst: cur.sst, ntk: cur.ntk }, NT, dtH, d: dd, on: fac.map(f => f.pozoOn) } : false)); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
+    let res; try { res = m.verificar(p, g, null, u.tipo === 'pozo' ? { horas, qin: qinF, bombasF: t => (t < 0 ? 1 : fac[Math.min(NT - 1, Math.floor(t / dtH))].pozoOn) } : (SIM_TIPOS_ENTRADAS.includes(u.tipo) ? { Qin: cur.Q, cin: { dbo: cur.dbo, dqo: cur.dqo, sst: cur.sst, ntk: cur.ntk }, NT, dtH, d: dd, on: fac.map(f => f.pozoOn) } : false)); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
     if (res.faltan && res.faltan.length) { avisos.push(`"${u.nombre}": faltan datos (${res.faltan.join(', ')}); no se tiene en cuenta en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
     if (res.error) { avisos.push(`"${u.nombre}": ${res.error}`); pasa(u, ent, { incompleta: true }); continue; }
     const aplicar = (efSst, efDbo, efDqo, efNtk) => { cur.sst = cur.sst.map(x => x * (1 - efSst)); cur.dbo = cur.dbo.map(x => x * (1 - efDbo)); cur.dqo = cur.dqo.map(x => x * (1 - efDqo)); cur.ntk = cur.ntk.map(x => x * (1 - efNtk)); };
@@ -34663,12 +34764,14 @@ function simPlantaDin(d) {
     } else if (u.tipo === 'tamiz') {
       const e = [simPct(p.ef_sst, 10), simPct(p.ef_dbo, 5), simPct(p.ef_dqo, 5), 0];
       lodos.push({ nombre: u.nombre, kg_d: simMedia(cur.Q.map((q, k) => q * cur.sst[k] * e[0]), null) * 24 / 1000, q_m3d: null, sequedad: null, nota: 'Sólidos retenidos (residuos de rejas/tamiz)' });
-      aplicar(e[0], e[1], e[2], e[3]); pasa(u, ent);
+      const hs = res.sim, byp = hs && hs.bypass;
+      if (byp) { cur.sst = cur.sst.map((x, k) => x * (1 - e[0] * (1 - byp[k]))); cur.dbo = cur.dbo.map((x, k) => x * (1 - e[1] * (1 - byp[k]))); cur.dqo = cur.dqo.map((x, k) => x * (1 - e[2] * (1 - byp[k]))); } else aplicar(e[0], e[1], e[2], e[3]);
+      simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
     } else if (u.tipo === 'daf' || u.tipo === 'fisicoquimico') {
       const def = u.tipo === 'daf' ? [85, 50, 45, 5, 3] : [85, 45, 45, 5, 2], e = [simPct(p.ef_sst, def[0]), simPct(p.ef_dbo, def[1]), simPct(p.ef_dqo, def[2]), simPct(p.ef_ntk, def[3])], seq = simNum(p.sequedad_lodo) > 0 ? Number(p.sequedad_lodo) : def[4];
       const kg = simMedia(cur.Q.map((q, k) => q * cur.sst[k] * e[0]), null) * 24 / 1000 * (u.tipo === 'fisicoquimico' ? 1.25 : 1.0);
       lodos.push({ nombre: u.nombre, kg_d: kg, q_m3d: kg / (seq * 10), sequedad: seq, nota: u.tipo === 'daf' ? 'Lodo flotado' : 'Lodo fisicoquímico (incluye ~25% de precipitado químico)' });
-      aplicar(e[0], e[1], e[2], e[3]); pasa(u, ent);
+      aplicar(e[0], e[1], e[2], e[3]); const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
     } else if (u.tipo === 'lodos_activados') {
       const calc = res.calc, V = p.volumen, X = p.mlss, fv = p.fraccion_volatil || 0.75, Xv = X * fv, cap = simPos(p.capacidad_o2), ntk0 = simMedia(cur.ntk, cur.Q);
       const sed = us[i + 1] && us[i + 1].tipo === 'sedimentador' ? us[i + 1] : null; let ps = null, rs = null;
@@ -34728,6 +34831,8 @@ function simPlantaDin(d) {
       if (s.margenMin < 0) avisos.push(`⚠ SBR "${u.nombre}": en la decantación el nivel baja más que la interfaz de lodos (${(-s.margenMin).toFixed(2)} m): se arrastra lodo con el efluente (SST de hasta ${Math.max(...s.sst).toFixed(0)} mg/L).`);
       if (s.bufMax > 2 * s.Vf * s.nt) avisos.push(`SBR "${u.nombre}": el agua que espera para entrar al tanque llega a ${s.bufMax.toFixed(0)} m3; hace falta un tanque de carga o más tanques/ciclos para que no dé abasto.`);
       pasa(u, ent, { sim: s, sbr: s });
+    } else if (u.tipo === 'desinfeccion') {
+      const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
     } else if (u.tipo === 'mbr') {
       const nit = true; cur = { Q: cur.Q, dbo: cur.dbo.map(x => Math.max(2, 0.015 * x)), dqo: cur.dqo.map(x => 0.06 * x + 12), sst: fill(1), ntk: cur.ntk.map(x => nit ? Math.min(x, 3) : x * 0.9) };
       pasa(u, ent);
@@ -34828,10 +34933,10 @@ function simPlantaVista(plant, d) {
       txt('pv-v-' + nd.id, `${fmt(nd.sal.Q[k])} m3/h · ${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`);
     });
     { const ban = document.getElementById('pv-evento'); if (ban) { const oc = d.examen && d.examen.activo && !d.examen.respondido, act = oc ? [] : (plant.eventos || []).filter(e => t >= e.inicio && t < e.inicio + (e.dur || 0)); ban.textContent = act.length ? act.map(e => ((SIM_ESC_TIPOS[e.tipo] || {}).icono || '⚠') + ' ' + simEvNombre(e.tipo)).join('   ·   ') : (oc && plant.eventos.some(e => t >= e.inicio && t < e.inicio + Math.max(2, e.dur || 0)) ? '⚠ Algo no anda bien en la planta: mirá el tablero' : ''); } }
-    for (let i = 0; i < n - 1; i++) { const nd = nodos[i], q = nd.sal.Q[k], c = colorDe(nd, k), ln = document.getElementById('pv-f-' + i), hd = document.getElementById('pv-fh-' + i); if (ln) { ln.setAttribute('stroke-width', flujoSeg(q)); ln.setAttribute('stroke', c); ln.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } if (hd) hd.setAttribute('fill', c); }
-    const lo = nodos[n - 1], lq = lo.sal.Q[k], lc = colorDe(lo, k), l1 = document.getElementById('pv-f-out'); if (l1) { l1.setAttribute('stroke-width', flujoSeg(lq)); l1.setAttribute('stroke', lc); l1.setAttribute('stroke-dashoffset', -fase * (0.5 + lq / Qmax * 2)); } const h1 = document.getElementById('pv-fh-out'); if (h1) h1.setAttribute('fill', lc);
+    for (let i = 0; i < n - 1; i++) { const nd = nodos[i], q = nd.sal.Q[k], c = colorDe(nd, k), ln = document.getElementById('pv-f-' + i), hd = document.getElementById('pv-fh-' + i); if (ln) { ln.setAttribute('stroke-width', flujoSeg(q)); ln.setAttribute('stroke', c); ln.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } if (hd) hd.setAttribute('fill', c); const vi = q > Math.max(0.05, 0.004 * Qmax); if (ln) ln.setAttribute('opacity', vi ? 1 : 0); if (hd) hd.setAttribute('opacity', vi ? 1 : 0); }
+    const lo = nodos[n - 1], lq = lo.sal.Q[k], lc = colorDe(lo, k), l1 = document.getElementById('pv-f-out'); if (l1) { l1.setAttribute('stroke-width', flujoSeg(lq)); l1.setAttribute('stroke', lc); l1.setAttribute('stroke-dashoffset', -fase * (0.5 + lq / Qmax * 2)); } const h1 = document.getElementById('pv-fh-out'); if (h1) h1.setAttribute('fill', lc); { const vo2 = lq > Math.max(0.05, 0.004 * Qmax); if (l1) l1.setAttribute('opacity', vo2 ? 1 : 0); if (h1) h1.setAttribute('opacity', vo2 ? 1 : 0); }
     const vo = document.getElementById('pv-v-out'); if (vo) vo.textContent = `${fmt(lq)} m3/h · ${varNombre} ${fmt(lo.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`;
-    if (plant.recirc) { const r = document.getElementById('pv-rec'), q = plant.recirc.Q[k]; if (r) { r.setAttribute('stroke-width', 2 + 6 * q / Qmax); r.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } const tv = document.getElementById('pv-v-rec'); if (tv) tv.textContent = `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`; const pu = document.getElementById('pv-purga'); if (pu) pu.setAttribute('stroke-dashoffset', -fase); }
+    if (plant.recirc) { const r = document.getElementById('pv-rec'), q = plant.recirc.Q[k]; if (r) { r.setAttribute('stroke-width', 2 + 6 * q / Qmax); r.setAttribute('stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); } const tv = document.getElementById('pv-v-rec'); if (tv) tv.textContent = `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`; const pu = document.getElementById('pv-purga'); if (r) r.setAttribute('opacity', q > Math.max(0.05, 0.004 * Qmax) ? 1 : 0); if (pu) { pu.setAttribute('stroke-dashoffset', -fase); pu.setAttribute('opacity', plant.fac && plant.fac[k] && plant.fac[k].purga <= 0.001 ? 0 : 1); } }
   };
   function hopDe() { return 28; }
   return svg;
@@ -34858,8 +34963,8 @@ function simGeoUnidad(u) {
   } else if (t === 'sedimentador') {
     circ = g.forma !== 'rect'; const A = p.area || (p.diametro ? Math.PI * p.diametro * p.diametro / 4 : 78); col = p.profundidad || colGeo || 3.5;
     w = circ ? (p.diametro && !p.area ? p.diametro : Math.sqrt(4 * A / Math.PI)) : Math.sqrt(A * ratio); alto = col + free; ang = g.angulo || 22; ent = Math.min(g.enterrado || 0, alto);
-  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador'].includes(t)) {
-    col = t === 'sbr' ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
+  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion'].includes(t)) {
+    col = t === 'sbr' ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : t === 'desinfeccion' ? 2.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
     w = porVol(V, col); alto = col + free; ent = Math.min(g.enterrado || 0, alto);
   } else {
     const def = { daf: [6, 2], tamiz: [1.6, 1.3], mbr: [5, 3.5], fisicoquimico: [4, 2.5] }[t] || [4, 2.5];
@@ -34952,15 +35057,16 @@ function simPlantaCorte(plant, d) {
         const fh = Math.min(22, 0.9 * s) * Math.min(1, ex.foam[k]); set('cp-foam-' + id, 'height', fh); set('cp-foam-' + id, 'y', P.yS - fh); set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000));
         t3 = `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`; if (ex.do[k] < 0.3) top = '⚠ SIN OXÍGENO';
         const dem = ex.aire ? Math.max(0.05, ex.aire[k] * 2.2) : 1; document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); });
+      } else if (ex.hid) { const fr = ex.bomba ? Math.min(1, ex.vol[k] / ex.V) : 1, sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; if (ex.bomba) t3 = `nivel ${(fr * 100).toFixed(0)}%`;
       } else set('cp-w-' + id, 'fill', col);
       txt('cp-n-' + id, top); txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`); txt('cp-t3-' + id, t3);
     });
     { const ban = document.getElementById('pv-evento'); if (ban) { const oc = d.examen && d.examen.activo && !d.examen.respondido, act = oc ? [] : (plant.eventos || []).filter(e => t >= e.inicio && t < e.inicio + (e.dur || 0)); ban.textContent = act.length ? act.map(e => ((SIM_ESC_TIPOS[e.tipo] || {}).icono || '⚠') + ' ' + simEvNombre(e.tipo)).join('   ·   ') : (oc && plant.eventos.some(e => t >= e.inicio && t < e.inicio + Math.max(2, e.dur || 0)) ? '⚠ Algo no anda bien en la planta: mirá el tablero' : ''); } }
-    const pipe = (idL, idH, q, c) => { set(idL, 'stroke-width', flujoSeg(q)); set(idL, 'stroke', c); set(idL, 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); set(idH, 'fill', c); };
+    const vis = q => q > Math.max(0.05, 0.004 * Qmax), pipe = (idL, idH, q, c) => { set(idL, 'opacity', vis(q) ? 1 : 0); set(idH, 'opacity', vis(q) ? 1 : 0); set(idL, 'stroke-width', flujoSeg(q)); set(idL, 'stroke', c); set(idL, 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); set(idH, 'fill', c); };
     const ent0 = plant.nodos[0]; pipe('cp-f-in', 'cp-fh-in', ent0.sal.Q[k], colorDe(ent0, k)); txt('cp-v-in', `${fmt(ent0.sal.Q[k])} m3/h`);
     for (let i = 0; i < n - 1; i++) pipe('cp-f-' + i, 'cp-fh-' + i, nodos[i].sal.Q[k], colorDe(nodos[i], k));
     const lo = nodos[n - 1]; pipe('cp-f-out', 'cp-fh-out', lo.sal.Q[k], colorDe(lo, k)); txt('cp-v-out', `${fmt(lo.sal.Q[k])} m3/h`); txt('cp-v-out2', `${varNombre} ${fmt(lo.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`);
-    if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`); set('cp-purga', 'stroke-dashoffset', -fase); }
+    if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'opacity', vis(q) ? 1 : 0); set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`); set('cp-purga', 'stroke-dashoffset', -fase); set('cp-purga', 'opacity', plant.fac && plant.fac[k] && plant.fac[k].purga <= 0.001 ? 0 : 1); }
   };
   return sv;
 }
