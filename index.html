@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1404,6 +1404,17 @@
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Normativas, planillas de cálculo e información general de la empresa, vinculadas desde SharePoint. Los de "Normativa" e "Información general" se adjuntan solos en el Paso 1; los de "Planilla de cálculo" e "Información general" se adjuntan solos en el Paso 2.</p>
         <div id="procesos-documentos-list"></div>
         <button class="btn btn-secondary" onclick="procesosDocAdd()" style="margin-top:4px">+ Agregar documento</button>
+      </div>
+      <div class="card">
+        <div class="card-label">Plantas compactas — modelos y dimensiones</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Una fila por modelo, con las dimensiones del reactor, el sedimentador, el digestor y la cámara de cloración. Cuando una unidad del Paso 2 se define como <b>planta compacta</b>, MAIA propone el modelo que cubre el caudal y carga sus dimensiones. Todo es editable acá; si ajustás un valor al diseñar una planta, MAIA te pregunta si querés guardarlo en el modelo.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <input type="file" id="procesos-pc-file" accept=".xlsx,.xls" style="display:none" onchange="procesosPCImportar(this.files[0]); this.value=''" />
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('procesos-pc-file').click()">📥 Importar desde Excel</button>
+          <button class="btn btn-secondary btn-sm" onclick="procesosPCAgregar()">+ Agregar modelo</button>
+          <span id="procesos-pc-status" class="hint" style="margin:0"></span>
+        </div>
+        <div id="procesos-pc-list"></div>
       </div>
       <div class="card">
         <div class="card-label">Preferencias por tecnología</div>
@@ -2414,7 +2425,7 @@ function switchPanel(name) {
   if (name === 'flowsheets') renderFlowsheetsList();
   if (name === 'cfg-propuestas') propCfgRender();
   if (name === 'propuestas') propuestasRender();
-  if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
+  if (name === 'cfg-procesos') { renderProcesosMailSearchToggle(); renderProcesosIAFields(); renderProcesosDocumentos(); renderProcesosPlantasCompactas(); renderProcesosTecPrefs(); renderProcesosEquiposPlantilla(); renderProcesosMcdmMatriz(); renderProcesosEficiencias(); renderProcesosPrompts(); renderProcesosCatalogo(); renderProcesosLecciones(); renderProcesosLeccionesSp(); }
   if (name === 'cotizaciones') { cotizHistorialRender(); cotizArmadoRender(); cotizCotizacionesRender(); }
   if (name === 'clientes') clientesRender();
   if (name === 'microorganismos') microoRender();
@@ -11888,6 +11899,7 @@ async function procesosStep2DefinirTodas() {
     showMsg(statusId, 'loading', `Definiendo valores (${i+1}/${orden.length}): ${nombre}...`);
     try {
       procesosStep2PropagarCadena(nombre);
+      try { await procesosPCAutoAplicar(nombre); } catch (ePC) { console.warn('No se pudo aplicar la planta compacta a "' + nombre + '":', ePC.message); } // si es planta compacta, primero el modelo
       await procesosStep2AutoCompletarSiHaceFalta(nombre);
     } catch (e) {
       console.warn(`No se pudo definir "${nombre}":`, e.message);
@@ -12344,6 +12356,152 @@ function procesosStep2RenderHojaPanel() {
   if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
 }
 
+// ═══ Plantas compactas: tabla de modelos con sus dimensiones (Cfg Procesos IA) ═══
+// Una fila por modelo. Se guarda en app_config (clave procesos_plantas_compactas_<empresa>) como { modelos: [...], notas: '' }.
+// Cuando una unidad del Paso 2 es planta compacta se elige un modelo según el caudal y se cargan sus dimensiones en las celdas de la hoja.
+const PROC_PC_COLS = [
+  ['Modelo', 'ai', 'AI'], ['Modelo', 'aa', 'AA (m³ reactor)'], ['Modelo', 'caudal', 'Caudal (m³/d)'],
+  ['Reactor', 'vr', 'Vol. (m³)'], ['Reactor', 'rl', 'Largo (m)'], ['Reactor', 'ra', 'Ancho (m)'], ['Reactor', 'rh', 'Alto (m)'],
+  ['Sedimentador', 'ss', 'Sup. c/u (m²)'], ['Sedimentador', 'sc', 'Cant.'], ['Sedimentador', 'sl', 'Largo (m)'], ['Sedimentador', 'sa', 'Ancho (m)'],
+  ['Digestor', 'vd', 'Vol. (m³)'], ['Digestor', 'dl', 'Largo (m)'], ['Digestor', 'da', 'Ancho (m)'], ['Digestor', 'dh', 'Alto (m)'],
+  ['Cámara de cloración', 'vc', 'Vol. (m³)'], ['Cámara de cloración', 'cl', 'Largo (m)'], ['Cámara de cloración', 'ca', 'Ancho (m)'], ['Cámara de cloración', 'cnl', 'N.L. (m)'], ['Cámara de cloración', 'ch', 'Alto (m)'],
+  ['Planta completa', 'tl', 'Largo total (m)', true], ['Planta completa', 'at', 'Ancho (m)'], ['Planta completa', 'th', 'Alto (m)', true], ['Planta completa', 'ts', 'Superficie (m²)', true], ['Planta completa', 'chapa', 'Chapa (kg)']
+];
+let _procesosPC = null;
+function PROC_PC_KEY() { return 'procesos_plantas_compactas_' + currentEmpresa; }
+async function procesosPCCargar(force) {
+  if (_procesosPC && !force && _procesosPC.empresa === currentEmpresa) return _procesosPC;
+  let o = { modelos: [], notas: '' };
+  try { const raw = await supaConfigGet(PROC_PC_KEY()); if (raw) { const j = typeof raw === 'string' ? JSON.parse(raw) : raw; if (j && Array.isArray(j.modelos)) o = { modelos: j.modelos, notas: j.notas || '' }; } } catch (e) { console.warn('No se pudieron leer las plantas compactas:', e.message); }
+  _procesosPC = Object.assign(o, { empresa: currentEmpresa });
+  return _procesosPC;
+}
+let _procesosPCTimer = null;
+function procesosPCGuardarDebounced() { clearTimeout(_procesosPCTimer); _procesosPCTimer = setTimeout(() => procesosPCGuardar(), 600); }
+async function procesosPCGuardar() {
+  if (!_procesosPC) return;
+  try { await supaConfigSet(PROC_PC_KEY(), JSON.stringify({ modelos: _procesosPC.modelos, notas: _procesosPC.notas || '' })); const st = document.getElementById('procesos-pc-status'); if (st) st.textContent = '✓ Guardado.'; }
+  catch (e) { const st = document.getElementById('procesos-pc-status'); if (st) st.textContent = '✕ No se pudo guardar: ' + e.message; else alert('No se pudo guardar la planta compacta: ' + e.message); }
+}
+function procesosPCTotal(m, k) {
+  const n = x => Number(x) || 0;
+  if (k === 'tl') return n(m.rl) + n(m.sl) + n(m.dl) + n(m.cl);
+  if (k === 'th') return n(m.rh);
+  if (k === 'ts') return procesosPCTotal(m, 'tl') * (n(m.at) || n(m.ra));
+  return 0;
+}
+const procesosPCEtiqueta = m => m ? `Modelo AA ${m.aa}${m.ai ? ' (AI ' + m.ai + ')' : ''}${Number(m.caudal) > 0 ? ' — ' + m.caudal + ' m³/d' : ''}` : '';
+// Qué parte del modelo corresponde a una unidad (por su nombre / hoja base): reactor, sedimentador, digestor o cámara de cloración
+function procesosPCTipoUnidad(nombre, hojaBase) {
+  const t = procesosNormTxt((nombre || '') + ' ' + (hojaBase || ''));
+  if (/digest/.test(t)) return 'dig';
+  if (/\bsed\b|sedimentad|clarificad/.test(t)) return 'sed';
+  if (/desinfec|clorac|clorad|contacto|laberinto/.test(t)) return 'clor';
+  if (/\bla\b|lodos activ|barros activ|aireacion|reactor|mbbr|\bsbr\b|biolog/.test(t)) return 'reactor';
+  return null;
+}
+// Campos del modelo → dimensión de la hoja, según el tipo de unidad
+const PROC_PC_MAPA = {
+  reactor: { volumen: 'vr', largo: 'rl', ancho: 'ra', altura: 'rh' },
+  sed: { superficie: 'ss', largo: 'sl', ancho: 'sa' },
+  dig: { volumen: 'vd', largo: 'dl', ancho: 'da', altura: 'dh' },
+  clor: { volumen: 'vc', largo: 'cl', ancho: 'ca', nivelAgua: 'cnl', altura: 'ch' }
+};
+function procesosPCDims(m, tipo) {
+  const mapa = PROC_PC_MAPA[tipo], out = {};
+  if (!m || !mapa) return out;
+  Object.entries(mapa).forEach(([dim, k]) => { const v = Number(m[k]); if (isFinite(v) && v > 0) out[dim] = v; });
+  return out;
+}
+const procesosPCDimsTxt = d => Object.entries(d).map(([k, v]) => `${k} ${v}`).join(', ');
+// Modelo más chico que cubre el caudal (m3/d); si ninguno alcanza, el más grande
+function procesosPCRecomendado(modelos, q) {
+  const ord = (modelos || []).filter(m => Number(m.caudal) > 0).sort((a, b) => Number(a.caudal) - Number(b.caudal));
+  if (!ord.length) return null;
+  return (q > 0 && ord.find(m => Number(m.caudal) >= q)) || ord[ord.length - 1];
+}
+// Caudal de la planta (m3/d) según el balance del Paso 2: el de la primera unidad de reactor, o el mayor de la línea líquida
+async function procesosPCCaudalPlanta() {
+  try {
+    const st = procesosStep2State;
+    if (!st.balance) st.balance = await procesosStep2CalcularBalance();
+    const us = ((st.balance && st.balance.unidades) || []).filter(u => !u.esLodos && u.q > 0);
+    const r = us.find(u => procesosPCTipoUnidad(u.nombre, u.hojaBase) === 'reactor');
+    return r ? r.q : (us.length ? Math.max(...us.map(u => u.q)) : null);
+  } catch (e) { return null; }
+}
+// Importa el Excel de dimensiones (hoja 1: dos filas de encabezado, una fila por modelo, notas al final)
+async function procesosPCImportar(file) {
+  if (!file) return;
+  const st = document.getElementById('procesos-pc-status');
+  try {
+    if (st) st.textContent = 'Leyendo el Excel...';
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const filas = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+    const ih = filas.findIndex(f => /modelo\s*ai/i.test(String((f && f[0]) || '')) || /modelo\s*aa/i.test(String((f && f[1]) || '')));
+    if (ih < 0) throw new Error('No encontré el encabezado "Modelo AI / Modelo AA" en la primera hoja.');
+    const num = v => { const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace(',', '.')); return isFinite(n) ? Math.round(n * 10000) / 10000 : null; };
+    // posición de cada dato en las columnas del Excel (A..Y)
+    const POS = { ai: 0, aa: 1, caudal: 2, vr: 3, rl: 4, ra: 5, rh: 6, ss: 7, sc: 8, sl: 9, sa: 10, vd: 11, dl: 12, da: 13, dh: 14, vc: 15, cl: 16, ca: 17, cnl: 18, ch: 19, at: 21, chapa: 24 };
+    const modelos = []; let i = ih + 2;
+    for (; i < filas.length; i++) {
+      const f = filas[i] || [];
+      if (num(f[1]) == null && num(f[0]) == null) break;
+      if (num(f[1]) == null) continue;
+      const m = { id: 'pc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) };
+      Object.entries(POS).forEach(([k, c]) => { const v = num(f[c]); if (v != null) m[k] = v; });
+      if (m.at == null && m.ra != null) m.at = m.ra;
+      modelos.push(m);
+    }
+    if (!modelos.length) throw new Error('No encontré ningún modelo (filas con el "Modelo AA").');
+    const notas = filas.slice(i).map(f => (f || []).filter(v => v != null && v !== '').join(' ')).filter(t => t.trim()).join('\n');
+    const cfg = await procesosPCCargar(true);
+    if (cfg.modelos.length && !confirm(`Ya hay ${cfg.modelos.length} modelo(s) cargados. ¿Reemplazarlos por los ${modelos.length} del Excel? (se pierden los cambios que hayas hecho a mano)`)) { if (st) st.textContent = ''; return; }
+    cfg.modelos = modelos; cfg.notas = notas;
+    await procesosPCGuardar();
+    renderProcesosPlantasCompactas();
+    if (st) st.textContent = `✓ Se importaron ${modelos.length} modelos.`;
+  } catch (e) { if (st) st.textContent = '✕ ' + e.message; else alert('No se pudo importar: ' + e.message); }
+}
+async function procesosPCAgregar() {
+  const cfg = await procesosPCCargar();
+  cfg.modelos.push({ id: 'pc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) });
+  await procesosPCGuardar(); renderProcesosPlantasCompactas();
+}
+async function procesosPCEliminar(id) {
+  const cfg = await procesosPCCargar(); const m = cfg.modelos.find(x => x.id === id);
+  if (!m || !confirm(`¿Eliminar el ${procesosPCEtiqueta(m) || 'modelo'}?`)) return;
+  cfg.modelos = cfg.modelos.filter(x => x.id !== id);
+  await procesosPCGuardar(); renderProcesosPlantasCompactas();
+}
+async function procesosPCSetCampo(id, k, val) {
+  const cfg = await procesosPCCargar(); const m = cfg.modelos.find(x => x.id === id); if (!m) return;
+  const n = val === '' ? null : Number(String(val).replace(',', '.'));
+  if (n == null || !isFinite(n)) delete m[k]; else m[k] = n;
+  procesosPCGuardarDebounced();
+  // los totales se recalculan en pantalla
+  const tr = document.getElementById('pc-row-' + id);
+  if (tr) PROC_PC_COLS.filter(c => c[3]).forEach(c => { const td = tr.querySelector('[data-pc-calc="' + c[1] + '"]'); if (td) td.textContent = procesosPCTotal(m, c[1]).toFixed(2).replace(/\.?0+$/, ''); });
+}
+function procesosPCSetNotas(val) { if (_procesosPC) { _procesosPC.notas = val; procesosPCGuardarDebounced(); } }
+async function renderProcesosPlantasCompactas() {
+  const el = document.getElementById('procesos-pc-list'); if (!el) return;
+  el.innerHTML = 'Cargando...';
+  const cfg = await procesosPCCargar(true);
+  if (!cfg.modelos.length) { el.innerHTML = '<p class="hint">Todavía no hay modelos cargados. Importá el Excel de dimensiones o agregá uno a mano.</p>'; return; }
+  const modelos = cfg.modelos.slice().sort((a, b) => (Number(a.aa) || 0) - (Number(b.aa) || 0));
+  const grupos = []; PROC_PC_COLS.forEach(c => { const g = grupos[grupos.length - 1]; if (g && g.t === c[0]) g.n++; else grupos.push({ t: c[0], n: 1 }); });
+  const TH = 'padding:3px 6px;border:1px solid var(--border);background:var(--surface2);font-size:11px;white-space:nowrap;text-align:center';
+  const fila = m => `<tr id="pc-row-${m.id}">${PROC_PC_COLS.map(c => c[3]
+    ? `<td data-pc-calc="${c[1]}" style="padding:2px 6px;border:1px solid var(--border);font-size:12px;text-align:right;background:var(--surface2)">${procesosPCTotal(m, c[1]).toFixed(2).replace(/\.?0+$/, '')}</td>`
+    : `<td style="padding:1px;border:1px solid var(--border)"><input type="number" step="any" value="${m[c[1]] != null ? m[c[1]] : ''}" style="width:64px;font-size:12px;padding:3px 4px;border:none" onchange="procesosPCSetCampo('${m.id}','${c[1]}',this.value)" /></td>`).join('')}<td style="padding:1px 4px;border:1px solid var(--border)"><button class="remove-btn" onclick="procesosPCEliminar('${m.id}')" title="Eliminar este modelo">&#x2715;</button></td></tr>`;
+  el.innerHTML = `<div style="overflow-x:auto;max-height:420px;overflow-y:auto"><table style="border-collapse:collapse"><thead><tr>${grupos.map(g => `<th colspan="${g.n}" style="${TH};font-weight:700">${esc(g.t)}</th>`).join('')}<th style="${TH}"></th></tr><tr>${PROC_PC_COLS.map(c => `<th style="${TH}">${esc(c[2])}</th>`).join('')}<th style="${TH}"></th></tr></thead><tbody>${modelos.map(fila).join('')}</tbody></table></div>
+    <label style="margin-top:10px">Notas de dimensionamiento (criterios con los que se armó la tabla)</label>
+    <textarea rows="5" onchange="procesosPCSetNotas(this.value)">${esc(cfg.notas || '')}</textarea>`;
+}
+
 // Modelos de planta compacta disponibles (documentos de referencia,
 // categoría plantas_compactas) con dimensiones ya extraídas — cacheado por
 // proyecto, igual criterio que _procesosBibliografiaCache.
@@ -12366,10 +12524,11 @@ async function procesosObtenerModelosPlantaCompacta() {
 }
 
 // Panel chico (se llena async, sin bloquear el resto del render) para elegir
-// un modelo de planta compacta con dimensiones ya cargadas para ESTA hoja, o
+// un modelo de planta compacta (de la tabla de Cfg Procesos IA o de las fichas de documentos) con dimensiones cargadas para ESTA hoja, o
 // para ver/quitar el que ya se aplicó.
 async function procesosStep2RenderPlantaCompactaSelector(nombre) {
   const modelos = await procesosObtenerModelosPlantaCompacta();
+  const cfg = await procesosPCCargar();
   // El usuario puede haber cambiado de hoja mientras se esperaba esto.
   if (procesosStep2State.hojaAbierta !== nombre) return;
   const cont = document.getElementById('procesos-step2-pc-selector');
@@ -12379,20 +12538,28 @@ async function procesosStep2RenderPlantaCompactaSelector(nombre) {
   const safe = nombre.replace(/'/g,"\\'");
   if (h.plantaCompacta) {
     cont.innerHTML = `
-      <div class="sp-selected" style="margin-top:6px">
-        <span style="font-size:12px">🏭 Planta compacta aplicada: <b>${esc(h.plantaCompacta.modelo)}</b></span>
+      <div class="sp-selected" style="margin-top:6px;flex-wrap:wrap">
+        <span style="font-size:12px">🏭 Planta compacta aplicada: <b>${esc(h.plantaCompacta.modelo)}</b>${h.plantaCompacta.cfgId ? ' <span class="hint" style="display:inline;margin:0">· si cambiás una de sus dimensiones te pregunto si querés guardarla en el modelo</span>' : ''}</span>
         <button class="sp-browse-btn" onclick="procesosStep2QuitarPlantaCompacta('${safe}')">Quitar</button>
       </div>`;
     return;
   }
-  const disponibles = modelos.filter(m => m.dimensiones[nombre] && Object.values(m.dimensiones[nombre]).some(v => v != null));
-  if (!disponibles.length) { cont.innerHTML = ''; return; }
+  const tipo = procesosPCTipoUnidad(nombre, h.hojaBase);
+  const cfgDisp = tipo ? cfg.modelos.filter(m => Object.keys(procesosPCDims(m, tipo)).length).sort((a, b) => (Number(a.caudal) || 0) - (Number(b.caudal) || 0)) : [];
+  const docDisp = modelos.filter(m => m.dimensiones[nombre] && Object.values(m.dimensiones[nombre]).some(v => v != null));
+  if (!cfgDisp.length && !docDisp.length) { cont.innerHTML = ''; return; }
+  const esPC = h.material === 'planta_compacta';
+  const q = esPC && cfgDisp.length ? await procesosPCCaudalPlanta() : null;
+  if (procesosStep2State.hojaAbierta !== nombre) return;
+  const dd = p.diseno_data || {};
+  const rec = esPC ? (cfgDisp.find(m => m.id === dd.pcModeloId) || procesosPCRecomendado(cfgDisp, q)) : null;
   cont.innerHTML = `
-    <div class="sp-selected" style="margin-top:6px">
-      <span style="font-size:12px">🏭 Hay modelo(s) de planta compacta con dimensiones cargadas para esta etapa:</span>
+    <div class="sp-selected" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+      <span style="font-size:12px">🏭 ${esPC ? '<b>Esta unidad es planta compacta</b> — elegí el modelo:' : 'Hay modelo(s) de planta compacta con dimensiones cargadas para esta etapa:'}${rec ? ` <span style="color:var(--blue)">recomendado: ${esc(procesosPCEtiqueta(rec))}${q ? ' (caudal ≈ ' + Math.round(q) + ' m³/d)' : ''}</span>` : ''}</span>
       <select id="procesos-step2-pc-select">
         <option value="">Elegir modelo...</option>
-        ${disponibles.map(m => `<option value="${esc(m.nombre)}">${esc(m.nombre)}</option>`).join('')}
+        ${cfgDisp.length ? `<optgroup label="Tabla de la empresa (Cfg Procesos IA)">${cfgDisp.map(m => `<option value="cfg:${m.id}" ${rec && rec.id === m.id ? 'selected' : ''}>${esc(procesosPCEtiqueta(m))}</option>`).join('')}</optgroup>` : ''}
+        ${docDisp.length ? `<optgroup label="Fichas de documentos">${docDisp.map(m => `<option value="${esc(m.nombre)}">${esc(m.nombre)}</option>`).join('')}</optgroup>` : ''}
       </select>
       <button class="sp-browse-btn" onclick="procesosStep2AplicarPlantaCompacta('${safe}', document.getElementById('procesos-step2-pc-select').value)">Aplicar dimensiones</button>
     </div>`;
@@ -12410,6 +12577,7 @@ function procesosStep2MatchCelda(model, tipo) {
     altura: [/^altura$/i, /^h\s*[uú]til$/i, /h[uú]til/i, /altura/i],
     volumen: [/^volumen\s*[uú]til$/i, /^volumen$/i, /volumen/i],
     superficie: [/^superficie$/i, /superficie/i, /[aá]rea/i],
+    nivelAgua: [/nivel.*agua/i, /^n\.?\s?l\.?$/i],
   };
   for (const rx of (patrones[tipo] || [])) {
     const c = model.cells.find(c => !c.isFormula && rx.test((c.label||'').trim()));
@@ -12418,37 +12586,79 @@ function procesosStep2MatchCelda(model, tipo) {
   return null;
 }
 
-async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre) {
+async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre, silencioso) {
   if (!modeloNombre) return;
-  const modelos = await procesosObtenerModelosPlantaCompacta();
-  const modelo = modelos.find(m => m.nombre === modeloNombre);
-  const dims = modelo && modelo.dimensiones && modelo.dimensiones[nombre];
-  if (!dims) return;
+  const p = procesosCurrentProyecto;
+  let dims, etiqueta = modeloNombre, cfgId = null, tipo = null;
+  if (String(modeloNombre).startsWith('cfg:')) {
+    const cfg = await procesosPCCargar();
+    const m = cfg.modelos.find(x => x.id === modeloNombre.slice(4));
+    tipo = procesosPCTipoUnidad(nombre, ((p.diseno_data?.hojas?.[nombre]) || {}).hojaBase);
+    dims = m && tipo ? procesosPCDims(m, tipo) : null;
+    if (m) { etiqueta = procesosPCEtiqueta(m); cfgId = m.id; }
+  } else {
+    const modelos = await procesosObtenerModelosPlantaCompacta();
+    const modelo = modelos.find(m => m.nombre === modeloNombre);
+    dims = modelo && modelo.dimensiones && modelo.dimensiones[nombre];
+  }
+  if (!dims || !Object.keys(dims).length) return;
   const model = procesosStep2State.hojaModels[nombre];
   const hf = procesosStep2GetHF(nombre);
-  const p = procesosCurrentProyecto;
   const dd = Object.assign({}, p.diseno_data);
   dd.hojas = Object.assign({}, dd.hojas);
   const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[nombre]);
   const nuevosValores = Object.assign({}, h.valores);
-  const celdasAplicadas = [];
-  ['largo','ancho','altura','volumen','superficie'].forEach(tipo => {
-    const valor = dims[tipo];
+  const celdasAplicadas = [], campos = {};
+  ['largo','ancho','altura','volumen','superficie','nivelAgua'].forEach(dim => {
+    const valor = dims[dim];
     if (valor == null) return;
-    const c = procesosStep2MatchCelda(model, tipo);
+    const c = procesosStep2MatchCelda(model, dim);
     if (!c) return;
     hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[Number(valor)]]);
     nuevosValores[c.ref] = Number(valor);
-    celdasAplicadas.push(c.ref);
+    celdasAplicadas.push(c.ref); campos[c.ref] = dim;
   });
-  if (!celdasAplicadas.length) { alert('No se pudo hacer coincidir ninguna dimensión de "'+modeloNombre+'" con celdas editables de esta hoja — revisá los nombres de celda en Cfg Procesos IA.'); return; }
+  if (!celdasAplicadas.length) { if (!silencioso) alert('No se pudo hacer coincidir ninguna dimensión de "'+etiqueta+'" con celdas editables de esta hoja — revisá los nombres de celda en Cfg Procesos IA.'); return; }
   if (procesosStep2State.hfShared) procesosStep2State.hfShared.rebuildAndRecalculate();
   h.valores = nuevosValores;
   h.confirmada = false;
-  h.plantaCompacta = { modelo: modeloNombre, celdas: celdasAplicadas };
+  h.plantaCompacta = { modelo: etiqueta, celdas: celdasAplicadas };
+  if (cfgId) { h.plantaCompacta.cfgId = cfgId; h.plantaCompacta.tipo = tipo; h.plantaCompacta.campos = campos; dd.pcModeloId = cfgId; } // el mismo modelo para todas las unidades de la planta
   dd.hojas[nombre] = h;
+  p.diseno_data = dd;
   await procesosSaveProyecto({ diseno_data: dd }, p);
   procesosStep2RenderHojaPanel();
+}
+// Si la unidad es planta compacta y todavía no tiene modelo, se aplica el de la planta (el ya elegido, o el que cubre el caudal)
+async function procesosPCAutoAplicar(nombre) {
+  const p = procesosCurrentProyecto, h = (p.diseno_data?.hojas?.[nombre]) || {};
+  if (h.material !== 'planta_compacta' || h.plantaCompacta) return false;
+  const tipo = procesosPCTipoUnidad(nombre, h.hojaBase); if (!tipo) return false;
+  const cfg = await procesosPCCargar();
+  const disp = cfg.modelos.filter(m => Object.keys(procesosPCDims(m, tipo)).length);
+  if (!disp.length) return false;
+  const rec = disp.find(m => m.id === p.diseno_data.pcModeloId) || procesosPCRecomendado(disp, await procesosPCCaudalPlanta());
+  if (!rec) return false;
+  await procesosStep2AplicarPlantaCompacta(nombre, 'cfg:' + rec.id, true);
+  const h2 = (procesosCurrentProyecto.diseno_data?.hojas?.[nombre]) || {};
+  return !!h2.plantaCompacta;
+}
+// Texto para el chat de la unidad: cómo trabajar si es planta compacta (modelo ya aplicado, o modelos disponibles)
+async function procesosPCPromptTxt(nombre, h) {
+  try {
+    if (!(h.material === 'planta_compacta' || h.plantaCompacta)) return '';
+    const cfg = await procesosPCCargar(); if (!cfg.modelos.length) return '';
+    const tipo = procesosPCTipoUnidad(nombre, h.hojaBase); if (!tipo) return '';
+    if (h.plantaCompacta && h.plantaCompacta.cfgId) {
+      const m = cfg.modelos.find(x => x.id === h.plantaCompacta.cfgId);
+      return `PLANTA COMPACTA: esta unidad usa el ${h.plantaCompacta.modelo}${m ? ' — dimensiones de fábrica: ' + procesosPCDimsTxt(procesosPCDims(m, tipo)) : ''}. Las dimensiones son fijas (no se dimensiona libremente): respetalas. Si el usuario pide cambiar una, hacelo; el sistema le va a preguntar si quiere guardar ese valor en el modelo de la configuración.\n\n`;
+    }
+    const disp = cfg.modelos.filter(m => Object.keys(procesosPCDims(m, tipo)).length).sort((a, b) => (Number(a.caudal) || 0) - (Number(b.caudal) || 0));
+    if (!disp.length) return '';
+    const q = await procesosPCCaudalPlanta(), rec = procesosPCRecomendado(disp, q);
+    const i = rec ? disp.indexOf(rec) : 0, lista = disp.slice(Math.max(0, i - 1), i + 3);
+    return `PLANTA COMPACTA: esta unidad va en una planta compacta de fábrica, así que NO se dimensiona libremente: se elige un modelo de la tabla de la empresa (el más chico cuyo caudal cubra el de la planta) y se cargan sus dimensiones fijas en las celdas de dimensiones de la hoja (volumen, largo, ancho, altura / superficie). Caudal de la planta ≈ ${q ? Math.round(q) + ' m³/d' : '(sin calcular todavía)'}${rec ? '; modelo recomendado: ' + procesosPCEtiqueta(rec) : ''}. Modelos cercanos y sus dimensiones para esta unidad:\n${lista.map(m => `- ${procesosPCEtiqueta(m)}: ${procesosPCDimsTxt(procesosPCDims(m, tipo))}${tipo === 'sed' && m.sc ? ' (el modelo lleva ' + m.sc + ' sedimentador/es)' : ''}`).join('\n')}\nElegí el modelo, fijá con "set" esas dimensiones en las celdas correspondientes (motivo: modelo de planta compacta) y nombralo en "reply". El resto de la hoja (cargas, tiempos, verificaciones) se calcula con esas dimensiones.\n\n`;
+  } catch (e) { return ''; }
 }
 
 async function procesosStep2QuitarPlantaCompacta(nombre) {
@@ -12499,6 +12709,7 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   if (typeof val === 'string' && val.trim()[0] === '=') return procesosStep2SetFormula(nombre, cellRef, val); // "=..." es una fórmula, como en Excel
   if (cell.extra) return procesosStep2ExtraSetContenido(nombre, cell, val);
   const numVal = val === '' ? '' : (isNaN(Number(val)) ? val : Number(val));
+  const antesPC = ((procesosCurrentProyecto.diseno_data?.hojas?.[nombre]) || {}).plantaCompacta;
   hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[numVal]]);
   // Fuerza un recálculo completo del grafo de dependencias — HyperFormula
   // recalcula solo con cada setCellContents, pero en esta app una misma
@@ -12525,6 +12736,13 @@ async function procesosStep2SetValor(nombre, cellRef, val) {
   h.motivos = Object.assign({}, h.motivos, { [cellRef]: { motivo: 'lo cargó o modificó el usuario a mano', origen: 'edición manual', fecha: new Date().toLocaleDateString('es-AR') } });
   h.confirmada = false;
   dd.hojas[nombre] = h;
+  // Planta compacta: si se cambió una de las dimensiones del modelo aplicado, se ofrece guardar el valor en el modelo (Cfg Procesos IA)
+  if (antesPC && antesPC.cfgId && antesPC.campos && antesPC.campos[cellRef] && typeof numVal === 'number') {
+    try {
+      const cfg = await procesosPCCargar(), m = cfg.modelos.find(x => x.id === antesPC.cfgId), k = m && PROC_PC_MAPA[antesPC.tipo] && PROC_PC_MAPA[antesPC.tipo][antesPC.campos[cellRef]];
+      if (m && k && Number(m[k]) !== numVal && confirm(`Cambiaste "${cell.label}" a ${numVal} (el ${antesPC.modelo} tiene ${m[k] != null ? m[k] : 'sin dato'}).\n\n¿Querés guardar este valor para ese modelo en la configuración (Cfg Procesos IA)? Así los próximos proyectos con ese modelo lo usan.\n\nAceptar = guardar en el modelo · Cancelar = vale solo para este proyecto.`)) { m[k] = numVal; await procesosPCGuardar(); }
+    } catch (e) { console.warn('No se pudo guardar el valor en el modelo:', e.message); }
+  }
   // Guardado directo (no debounced): así no queda ningún guardado viejo
   // pendiente que pueda llegar después y pisar este con datos desactualizados.
   clearTimeout(_procesosSaveTimeout);
@@ -12864,7 +13082,8 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     // coincide con lo que después se ve en las celdas — se lo aclaramos.
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
     const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
+    const plantaCompactaTxt = await procesosPCPromptTxt(nombre, hActual);
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, plantaCompactaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
     const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
     // Pedidos que arma el sistema (definir valores, corregir pliego): la IA puede PROBAR valores con el cálculo real (probar_valores) las veces que haga falta y recién
     // después aplicarlos (aplicar_cambios). Mensajes que escribe el usuario: una respuesta, con razonamiento; si queda sin aplicar lo que dijo que iba a cambiar, se lo pide.
