@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12509,6 +12509,13 @@ async function renderProcesosPlantasCompactas() {
 // le saca volumen a una unidad para dárselo a otra, el módulo no cambia de tamaño. Largo total = suma de los largos de los compartimentos.
 // diseno_data.moduloCompacto = { modeloId, etiqueta, ancho, alto, nivelUtil } se guarda al aplicar un modelo de la tabla.
 const procesosPCEsMiembro = h => !!h && h.material === 'planta_compacta' && h.tipo !== 'auxiliar' && h.seleccionada !== false;
+// Cantidad de unidades iguales en paralelo dentro del compartimento (ej. 2 sedimentadores lado a lado a lo ancho del módulo): el valor actual del modelo de la tabla, o el guardado al aplicarlo
+function procesosPCCantidad(h) {
+  const pc = h && h.plantaCompacta; if (!pc || pc.tipo !== 'sed') return 1;
+  const m = pc.cfgId && _procesosPC && (_procesosPC.modelos || []).find(x => x.id === pc.cfgId);
+  const n = Math.round(Number(m && m.sc) || Number(pc.cantidad) || 1);
+  return n > 1 ? Math.min(n, 6) : 1;
+}
 function procesosPCModulo(p, dimsDe) {
   const dd = p.diseno_data || {}, hojas = dd.hojas || {};
   const nombres = (dd.orden || []).filter(n => procesosPCEsMiembro(hojas[n]) && !procesosFlowsheetEsZonaQuimicos(n));
@@ -12766,6 +12773,7 @@ async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre, silencio
   if (cfgId) {
     h.plantaCompacta.cfgId = cfgId; h.plantaCompacta.tipo = tipo; h.plantaCompacta.campos = campos; dd.pcModeloId = cfgId; // el mismo modelo para todas las unidades de la planta
     const mm = (await procesosPCCargar()).modelos.find(x => x.id === cfgId);
+    if (mm && tipo === 'sed' && Number(mm.sc) > 1) h.plantaCompacta.cantidad = Number(mm.sc);
     if (mm) dd.moduloCompacto = { modeloId: cfgId, etiqueta: procesosPCEtiqueta(mm), ancho: Number(mm.at) || Number(mm.ra) || null, alto: Number(mm.rh) || null, nivelUtil: (mm.vr && mm.rl && mm.ra) ? Math.round(mm.vr / (mm.rl * mm.ra) * 100) / 100 : null };
     h.material = 'planta_compacta'; // aplicar un modelo = la unidad pasa a ser parte del módulo
   }
@@ -15432,7 +15440,11 @@ function procesosFlowsheetSvg(p) {
       cy += icMaqR + 22;
     } else if (et.tipoFig !== 'caja') {
       const fx = x + (et.w - et.figW) / 2, fy = cy;
-      s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq, et.barredorTags && et.barredorTags.join(', '), et.angFrac);
+      const nSed = et._mod && et.tipoFig === 'sedimentador' ? procesosPCCantidad(hojasPF[et.nombre]) : 1;
+      if (nSed > 1) { // varios sedimentadores lado a lado a lo ancho del módulo
+        const gS = 4, wS = (et.figW - gS * (nSed - 1)) / nSed;
+        for (let k = 0; k < nSed; k++) s += procesosFlowsheetFiguraSvg(et.tipoFig, fx + k * (wS + gS), fy, wS, et.figH, verdeEq, k === 0 ? (et.barredorTags && et.barredorTags.join(', ')) : '', et.angFrac);
+      } else s += procesosFlowsheetFiguraSvg(et.tipoFig, fx, fy, et.figW, et.figH, verdeEq, et.barredorTags && et.barredorTags.join(', '), et.angFrac);
       // Sensores de nivel: se ubican a la altura real a la que van (alto,
       // medio o bajo del tanque), no todos arriba — se agrupan por nivel
       // para no superponerlos si hay más de uno al mismo nivel.
@@ -17177,7 +17189,8 @@ function pvBaseUnidad(p, nombre, hojaBase) {
   const d = procesosFlowsheetDimsDeEtapa(p, nombre);
   let tip = Object.assign({}, PV_TIPICAS[fig] || PV_TIPICAS.caja);
   if (fig === 'maquina') { const n = procesosNormTxt(nombre + ' ' + (hojaBase || '')); const mq = PV_MAQUINAS.find(([re]) => re.test(n)); if (mq) Object.assign(tip, mq[1]); }
-  const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : tip.forma, fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
+  // un sedimentador con largo y ancho (ej. el de una planta compacta) es rectangular
+  const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : (d.largo && d.ancho && !d.diametro ? 'rect' : tip.forma), fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
   if (tip.angulo) { b.angulo = tip.angulo; b.fuente.angulo = 'típica'; }
   let L = d.largo, A = d.ancho, H = d.alto, D = d.diametro; const V = d.volumen; const RAT = tip.ratio || 1.5;
   const marca = (c, src) => { b.fuente[c] = src; };
@@ -17228,7 +17241,9 @@ function pvUnidades(p) {
   const setPar = procesosGruposParalelo(p);
   const out = nombres.filter(n => n !== zonaNombre).map(n => {
     const b = pvBaseUnidad(p, n, hojas[n].hojaBase);
-    return { nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar), mod: procesosPCEsMiembro(hojas[n]) };
+    const nS = procesosPCEsMiembro(hojas[n]) ? procesosPCCantidad(hojas[n]) : 1;
+    if (nS > 1 && b.forma === 'rect' && b.ancho) b.ancho = pvR(b.ancho * nS); // N sedimentadores lado a lado: la huella ocupa todo el ancho del módulo
+    return { n: nS, nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar), mod: procesosPCEsMiembro(hojas[n]) };
   });
   // zona de químicos: la etapa que la representa (con sus medidas) o, si no hay, una sala dimensionada según los químicos que haya
   const grupos = pfQuimGrupos(pfQuimEntradas(p), pvOvEq(p));
@@ -17529,10 +17544,14 @@ function pvPlantaSvg(p, unidades) {
       g += `<text x="${px(x + w / 2)}" y="${py(y + hh / 2) - 6}" text-anchor="middle" font-size="11" fill="${PV_C.cota}" font-family="Arial,sans-serif">Ø ${u.m.diametro} m</text>`;
     } else {
       g += `<rect x="${px(x)}" y="${py(y)}" width="${w * s}" height="${hh * s}" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/>`;
+      if (u.n > 1) { // varias unidades iguales lado a lado (a lo ancho del módulo)
+        const horiz = !pvImpar(pvRotN(p, u.nombre)); // ancho en Y
+        for (let k = 1; k < u.n; k++) g += horiz ? `<line x1="${px(x)}" y1="${py(y + hh * k / u.n)}" x2="${px(x + w)}" y2="${py(y + hh * k / u.n)}" stroke="${stroke}" stroke-width="2"/>` : `<line x1="${px(x + w * k / u.n)}" y1="${py(y)}" x2="${px(x + w * k / u.n)}" y2="${py(y + hh)}" stroke="${stroke}" stroke-width="2"/>`;
+      }
       g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.ancho : u.m.largo} m`);
       g += pvCotaV(py(y), py(y + hh), px(x + w) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.largo : u.m.ancho} m`, 0.2);
     }
-    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2) + roff('u:' + u.nombre).x * s}" y="${py(y) - 8 - (u.mod && modIdx[u.nombre] % 2 ? 13 : 0) + roff('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}</text>`; // compartimentos pegados del módulo: los rótulos van alternados para no pisarse
+    g += `<text data-pv-rotulo="u:${esc(u.nombre)}" x="${px(x + w / 2) + roff('u:' + u.nombre).x * s}" y="${py(y) - 8 - (u.mod && modIdx[u.nombre] % 2 ? 13 : 0) + roff('u:' + u.nombre).y * s}" text-anchor="middle" font-size="12.5" font-weight="700" fill="${PV_C.texto}" font-family="Arial,sans-serif" style="cursor:move">${pvEsc(pvTitulo(p, u.nombre))}${u.n > 1 ? ' ×' + u.n : ''}</text>`; // compartimentos pegados del módulo: los rótulos van alternados para no pisarse
     if (u.par) g += `<text x="${px(x + w / 2)}" y="${py(y) - 22}" text-anchor="middle" font-size="9.5" font-style="italic" fill="${PV_C.cota}" font-family="Arial,sans-serif">⇄ en paralelo</text>`;
     sv += `<g data-pv-unidad="${esc(u.nombre)}" data-pv-nombre="${esc(pvTitulo(p, u.nombre))}" style="cursor:move">${g}</g>`;
     const z = zi[u.nombre];
@@ -17557,7 +17576,7 @@ function pvPlantaSvg(p, unidades) {
       const x1 = Math.min(...um.map(u => pos[u.nombre].x)), x2 = Math.max(...um.map(u => pos[u.nombre].x + axr(u))), y1 = Math.min(...um.map(u => pos[u.nombre].y)), y2 = Math.max(...um.map(u => pos[u.nombre].y + ayr(u)));
       const mod = procesosPCModulo(p), dTxt = [mod && mod.etiqueta, mod && procesosPCModuloTxt(mod)].filter(Boolean).join(' · ');
       sv += `<rect x="${px(x1) - 4}" y="${py(y1) - 4}" width="${(x2 - x1) * s + 8}" height="${(y2 - y1) * s + 8}" rx="3" fill="none" stroke="#1f4e9c" stroke-width="2.4" stroke-dasharray="9 4" pointer-events="none"/>`;
-      sv += `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 36}" text-anchor="middle" font-size="13" font-weight="700" fill="#1f4e9c" font-family="Arial,sans-serif">MÓDULO COMPACTO</text>${dTxt ? `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 22}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(dTxt)}</text>` : ''}`;
+      sv += `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 52}" text-anchor="middle" font-size="13" font-weight="700" fill="#1f4e9c" font-family="Arial,sans-serif">MÓDULO COMPACTO</text>${dTxt ? `<text x="${px((x1 + x2) / 2)}" y="${py(y1) - 38}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(dTxt)}</text>` : ''}`;
     } }
   vp.cotas.forEach(c => { sv += pvCotaSvg(c, px, py, c.id === _pvCotaSel); });
   pvCortesLista(p).forEach(c => { sv += pvCortePlantaSvg(c, px, py, s, !!(_pvSel && _pvSel.kind === 'corte' && _pvSel.key === c.id)); });
