@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -12528,11 +12528,32 @@ function procesosPCModulo(p, dimsDe) {
   const nivel = info.nivelUtil || (alto ? alto * 0.87 : null);
   const r2 = x => Math.round(x * 100) / 100;
   const miembros = raw.map(r => {
-    let L = r.d.largo || null;
+    let L = r.d.largo || null, A = r.d.ancho || null;
+    const h = hojas[r.nombre] || {}, pcm = h.plantaCompacta || {};
+    const fijo = Object.values(pcm.campos || {}).includes('ancho') || procesosPCTipoUnidad(r.nombre, h.hojaBase) === 'sed'; // medidas de fábrica del modelo: no se tocan
+    if (!fijo && ancho && A && Math.abs(A - ancho) / ancho > 0.03) {
+      // todos los compartimentos comparten el ancho del módulo: si el ancho cargado no coincide, o estaban cruzados largo/ancho o se recalcula el largo con el volumen
+      if (L && Math.abs(L - ancho) / ancho <= 0.03) { const t = L; L = A; A = t; }
+      else if (r.d.volumen && nivel) { L = r.d.volumen / (ancho * nivel); A = ancho; }
+    }
     if (!L && r.d.volumen && ancho && nivel) L = r.d.volumen / (ancho * nivel);
-    return { nombre: r.nombre, volumen: r.d.volumen || null, largo: L ? r2(L) : null, ancho: r.d.ancho || null, alto: r.d.alto || null };
+    return { nombre: r.nombre, volumen: r.d.volumen || null, largo: L ? r2(L) : null, ancho: A || null, alto: r.d.alto || null };
   });
   return { etiqueta: info.etiqueta || '', modeloId: info.modeloId || null, ancho, alto, nivelUtil: nivel, miembros, largoTotal: r2(miembros.reduce((a, m) => a + (m.largo || 0), 0)) };
+}
+// Sedimentadores de un módulo compacto: si caben lado a lado a lo ancho del módulo (n × ancho ≤ ancho del módulo) van así; si no, en serie a lo largo.
+// Devuelve la huella total (largo × ancho) de todos juntos. Las medidas de la hoja pueden venir por unidad o ya sumadas.
+function procesosPCSedDisp(p, nombre, dims) {
+  const hojas = (p.diseno_data && p.diseno_data.hojas) || {}, h = hojas[nombre], n = procesosPCCantidad(h);
+  if (n < 2) return { n: 1 };
+  const pc = h.plantaCompacta || {}, m = pc.cfgId && _procesosPC && (_procesosPC.modelos || []).find(x => x.id === pc.cfgId);
+  const W = ((p.diseno_data || {}).moduloCompacto || {}).ancho || null;
+  const sl = (m && Number(m.sl)) || null, sa = (m && Number(m.sa)) || null;
+  const dl = dims.largo || null, da = dims.ancho || null;
+  const aU = sa || da, modo = (W && aU && n * aU <= W * 1.03) ? 'ancho' : 'largo';
+  const r2 = x => Math.round(x * 100) / 100;
+  if (modo === 'largo') { const lu = sl || dl; return { n, modo, largo: lu ? r2(dl && lu && dl >= n * lu * 0.97 ? dl : n * (dl || lu)) : null, ancho: da || sa }; }
+  const au = sa || da; return { n, modo, largo: dl || sl, ancho: au ? r2(da && da >= n * au * 0.97 ? da : n * (da || au)) : null };
 }
 const procesosPCModuloTxt = m => m ? `${m.largoTotal ? 'Largo ' + procesosFormatearNumero(m.largoTotal) + ' m' : ''}${m.ancho ? ' · Ancho ' + procesosFormatearNumero(m.ancho) + ' m' : ''}${m.alto ? ' · Alto ' + procesosFormatearNumero(m.alto) + ' m' : ''}`.replace(/^ · /, '') : '';
 // Dimensiones de una unidad leídas de las celdas de su hoja (valores actuales, aunque la hoja todavía no esté confirmada)
@@ -17199,7 +17220,7 @@ function pvBaseUnidad(p, nombre, hojaBase) {
   let tip = Object.assign({}, PV_TIPICAS[fig] || PV_TIPICAS.caja);
   if (fig === 'maquina') { const n = procesosNormTxt(nombre + ' ' + (hojaBase || '')); const mq = PV_MAQUINAS.find(([re]) => re.test(n)); if (mq) Object.assign(tip, mq[1]); }
   // un sedimentador con largo y ancho (ej. el de una planta compacta) es rectangular
-  const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : (d.largo && d.ancho && !d.diametro ? 'rect' : tip.forma), fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
+  const b = { forma: (d.diametro && !d.largo && !d.ancho) ? 'circ' : ((d.largo && d.ancho && (!d.diametro || procesosPCEsMiembro(((p.diseno_data || {}).hojas || {})[nombre]))) ? 'rect' : tip.forma), fuente: {}, enterradoTodo: tip.enterrado === 'todo', fig };
   if (tip.angulo) { b.angulo = tip.angulo; b.fuente.angulo = 'típica'; }
   let L = d.largo, A = d.ancho, H = d.alto, D = d.diametro; const V = d.volumen; const RAT = tip.ratio || 1.5;
   const marca = (c, src) => { b.fuente[c] = src; };
@@ -17248,11 +17269,20 @@ function pvUnidades(p) {
   const nombres = (dd.orden || []).filter(n => hojas[n] && hojas[n].seleccionada !== false && hojas[n].confirmada !== false && hojas[n].tipo !== 'auxiliar');
   const zonaNombre = nombres.find(n => procesosFlowsheetEsZonaQuimicos(n));
   const setPar = procesosGruposParalelo(p);
+  const modInfo = procesosPCModulo(p), fig0 = b => b.fig;
   const out = nombres.filter(n => n !== zonaNombre).map(n => {
     const b = pvBaseUnidad(p, n, hojas[n].hojaBase);
-    const nS = procesosPCEsMiembro(hojas[n]) ? procesosPCCantidad(hojas[n]) : 1;
-    if (nS > 1 && b.forma === 'rect' && b.ancho) b.ancho = pvR(b.ancho * nS); // N sedimentadores lado a lado: la huella ocupa todo el ancho del módulo
-    return { n: nS, nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar), mod: procesosPCEsMiembro(hojas[n]) };
+    let nS = 1, nModo = null;
+    if (procesosPCEsMiembro(hojas[n]) && b.forma === 'rect') {
+      if (fig0(b) === 'sedimentador') { // N sedimentadores: la huella es la de todos juntos
+        const sd = procesosPCSedDisp(p, n, { largo: b.largo, ancho: b.ancho });
+        if (sd.n > 1) { nS = sd.n; nModo = sd.modo; if (sd.largo) b.largo = pvR(sd.largo); if (sd.ancho) b.ancho = pvR(sd.ancho); }
+      } else { // los demás compartimentos comparten el ancho del módulo
+        const mi = modInfo && modInfo.miembros.find(x => x.nombre === n);
+        if (mi && mi.ancho) { if (mi.largo) { b.largo = pvR(mi.largo); b.fuente.largo = 'diseño'; } if (mi.ancho) { b.ancho = pvR(mi.ancho); b.fuente.ancho = 'diseño'; } }
+      }
+    }
+    return { n: nS, nModo, nombre: n, linea: hojas[n].linea === 'lodos' ? 'lodos' : 'liquido', origen: hojas[n].origenLodos || null, fig: b.fig, m: pvMedidasUnidad(p, n, b), sala: false, par: procesosParaleloId(p, n, setPar), mod: procesosPCEsMiembro(hojas[n]) };
   });
   // zona de químicos: la etapa que la representa (con sus medidas) o, si no hay, una sala dimensionada según los químicos que haya
   const grupos = pfQuimGrupos(pfQuimEntradas(p), pvOvEq(p));
@@ -17554,7 +17584,7 @@ function pvPlantaSvg(p, unidades) {
     } else {
       g += `<rect x="${px(x)}" y="${py(y)}" width="${w * s}" height="${hh * s}" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/>`;
       if (u.n > 1) { // varias unidades iguales lado a lado (a lo ancho del módulo)
-        const horiz = !pvImpar(pvRotN(p, u.nombre)); // ancho en Y
+        const horiz = (u.nModo === 'ancho') !== pvImpar(pvRotN(p, u.nombre)); // las divisiones van a lo ancho (lado a lado) o a lo largo (en serie)
         for (let k = 1; k < u.n; k++) g += horiz ? `<line x1="${px(x)}" y1="${py(y + hh * k / u.n)}" x2="${px(x + w)}" y2="${py(y + hh * k / u.n)}" stroke="${stroke}" stroke-width="2"/>` : `<line x1="${px(x + w * k / u.n)}" y1="${py(y)}" x2="${px(x + w * k / u.n)}" y2="${py(y + hh)}" stroke="${stroke}" stroke-width="2"/>`;
       }
       g += pvCotaH(px(x), px(x + w), py(y + hh) + 18, `${pvImpar(pvRotN(p, u.nombre)) ? u.m.ancho : u.m.largo} m`);
@@ -17609,6 +17639,13 @@ function pvQuimCorteItems(u, ux, eqpos) {
   });
   return { items, labels };
 }
+// Contorno de un sedimentador con n tolvas en serie (en px); n=1 es el de siempre
+function pvContornoSed(x0, wp, top, bot, conoPx, bocaPx, n) {
+  n = n || 1; const wu = wp / n; let d = `M${x0},${top} V${bot - conoPx}`;
+  for (let k = 0; k < n; k++) { const xa = x0 + k * wu; d += ` L${xa + wu / 2 - bocaPx},${bot} H${xa + wu / 2 + bocaPx} L${xa + wu},${bot - conoPx}`; }
+  return d + ` V${top}`;
+}
+const pvNTolvas = u => (u.fig === 'sedimentador' && u.n > 1 && u.nModo === 'largo') ? u.n : 1;
 function pvCorteSvg(p, unidades) {
   const vc = pvEstado(p, 'corte');
   const ro = k => pvOff(vc.rotpos, k);
@@ -17669,14 +17706,15 @@ function pvCorteSvg(p, unidades) {
     const nivel = Math.min(u.m.nivelAgua, u.m.alto), yAgua = bot - nivel * s;
     let g = '';
     const esSed = u.fig === 'sedimentador';
-    const cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * (w / 2 - 0.25))) : 0; // el fondo cónico sale del ángulo (pared vs horizontal)
-    const contorno = esSed ? `M${x0},${top} V${bot - cono * s} L${x0 + wp / 2 - 0.25 * s},${bot} H${x0 + wp / 2 + 0.25 * s} L${x0 + wp},${bot - cono * s} V${top}` : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
+    const nT = pvNTolvas(u);
+    const cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * (w / nT / 2 - 0.25))) : 0; // el fondo cónico sale del ángulo (pared vs horizontal)
+    const contorno = esSed ? pvContornoSed(x0, wp, top, bot, cono * s, 0.25 * s, nT) : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
     const idc = 'pvclip' + Math.random().toString(36).slice(2, 7);
     g += `<clipPath id="${idc}"><path d="${contorno} Z"/></clipPath><rect x="${x0}" y="${yAgua}" width="${wp}" height="${bot - yAgua}" fill="${PV_C.agua}" clip-path="url(#${idc})"/>`;
     g += `<path d="${contorno}" fill="none" stroke="${PV_C.linea}" stroke-width="2.4"/><path d="M${x0},${yAgua} H${x0 + wp}" stroke="#1565c0" stroke-width="1.2" stroke-dasharray="5 3"/>`;
     const sum = []; ((ed[u.nombre] || {}).equipos || []).forEach(q => { const inf = procesosFlowsheetInfoDe(q.tipo, q.especificacion); if (inf && PROCESOS_FLOWSHEET_ICONOS_SUMERGIBLES[inf.icono]) for (let i = 0; i < Math.min(3, Number(q.cantidad) || 1); i++) sum.push(inf.icono); });
     sum.slice(0, 6).forEach((ic, i) => { const cx = x0 + wp * (i + 1) / (Math.min(6, sum.length) + 1), sz = Math.min(26, wp / 5, (bot - yAgua) * 0.7 + 8); g += procesosFlowsheetIconoSvg(ic, cx, bot - sz / 2 - 3, sz, '#2e7d32'); });
-    g += pvCotaH(x0, x0 + wp, bot + 22, `${esSed || u.m.forma === 'circ' ? 'Ø ' + u.m.diametro : u.m.largo} m`);
+    g += pvCotaH(x0, x0 + wp, bot + 22, `${u.m.forma === 'circ' ? 'Ø ' + u.m.diametro : u.m.largo}${nT > 1 ? ' (' + nT + ' × ' + pvR(u.m.largo / nT) + ')' : ''} m`);
     g += pvCotaV(top, bot, x0 - 12, `H = ${u.m.alto} m`);
     g += `<text x="${x0 + wp - 4}" y="${yAgua + 13}" text-anchor="end" font-size="10" fill="#1565c0" font-family="Arial,sans-serif">NA ${u.m.nivelAgua} m</text>`;
     if (ent > 0) g += `<text x="${x0 + wp / 2}" y="${bot + 38}" text-anchor="middle" font-size="10" fill="${PV_C.cota}" font-family="Arial,sans-serif">enterrado ${ent} m</text>`;
@@ -17801,8 +17839,8 @@ function pvCorteDefSvg(p, unidades, c) {
         g += `<text x="${x0 + wp / 2}" y="${top - 6}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${PV_C.cota}" font-family="Arial,sans-serif">${pvEsc(pvTitulo(p, u.nombre))}</text>`;
       } else {
         const nivel = Math.min(u.m.nivelAgua || 0, u.m.alto), yAgua = bot - nivel * s, esSed = u.fig === 'sedimentador';
-        const wm = b - a, cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * Math.max(0.05, wm / 2 - 0.25))) : 0;
-        const contorno = esSed ? `M${x0},${top} V${bot - cono * s} L${x0 + wp / 2 - 0.25 * s},${bot} H${x0 + wp / 2 + 0.25 * s} L${x0 + wp},${bot - cono * s} V${top}` : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
+        const nT = pvNTolvas(u), wm = b - a, cono = esSed ? Math.min(u.m.alto * 0.9, Math.max(0.05, Math.tan((u.m.angulo || 22) * Math.PI / 180) * Math.max(0.05, wm / nT / 2 - 0.25))) : 0;
+        const contorno = esSed ? pvContornoSed(x0, wp, top, bot, cono * s, 0.25 * s, nT) : `M${x0},${top} V${bot} H${x0 + wp} V${top}`;
         const idq = 'pvcl' + Math.random().toString(36).slice(2, 7);
         g += `<clipPath id="${idq}"><path d="${contorno} Z"/></clipPath><rect x="${x0}" y="${yAgua}" width="${wp}" height="${bot - yAgua}" fill="${PV_C.agua}" clip-path="url(#${idq})"/>`;
         g += `<path d="${contorno}" fill="none" stroke="${PV_C.linea}" stroke-width="2.4"/><path d="M${x0},${yAgua} H${x0 + wp}" stroke="#1565c0" stroke-width="1.2" stroke-dasharray="5 3"/>`;
