@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -34475,7 +34475,8 @@ function pptRender() {
       </div>
       ${n ? '' : '<p class="hint">Todavía no hay diapositivas. Armá el índice con la IA o agregalas a mano abajo.</p>'}
       ${dt.diapositivas.map(slideCard).join('')}
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px"><span class="hint" style="margin:0">Agregar al final:</span>${PPT_TIPOS_DIAP.filter(t => t[0] !== 'cierre').map(t => `<button class="btn btn-secondary btn-sm" onclick="pptAgregar('${t[0]}')">+ ${t[1]}</button>`).join('')}
+      <input type="file" id="ppt-img-sumar" multiple accept=".jpg,.jpeg,.png" style="display:none" onchange="pptSumarImagenes(this)" />
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px"><button class="btn btn-secondary btn-sm" ${ocup} onclick="document.getElementById('ppt-img-sumar').click()" title="La IA mira las imágenes y las pone en la diapositiva que corresponde, con su leyenda. No toca el resto de la presentación.">🖼 Sumar imágenes con IA</button><span class="hint" style="margin:0">Agregar al final:</span>${PPT_TIPOS_DIAP.filter(t => t[0] !== 'cierre').map(t => `<button class="btn btn-secondary btn-sm" onclick="pptAgregar('${t[0]}')">+ ${t[1]}</button>`).join('')}
         <select onchange="if(this.value){pptAgregarBib(this.value);this.value=''}" style="width:auto;max-width:280px"><option value="">+ De la biblioteca de teoría…</option>${PPT_BIB.map(b => `<option value="${b.k}">${esc(b.titulo)}</option>`).join('')}</select></div>
     </div>
     ${n ? `<div class="card"><div class="card-label">Ajustar con el chat</div>
@@ -34549,6 +34550,50 @@ const PPT_TOOL_CONTENIDO = {
 };
 // sinIncluidas: deja afuera las imágenes que se incluyen en la presentación (ya se ubicaron en el índice: no hace falta mandarlas de nuevo)
 async function pptBloquesArchivos(sinIncluidas) { const a = sinIncluidas ? _pptIa.archivos.filter(f => !f._incluir) : _pptIa.archivos; return a.length ? await mantIaBloques(a) : []; }
+const PPT_TOOL_IMAGENES = {
+  name: 'ubicar_imagenes',
+  description: 'Dónde va cada imagen adjunta en la presentación y su leyenda.',
+  input_schema: { type: 'object', properties: {
+    imagenes: { type: 'array', items: { type: 'object', properties: {
+      archivo: { type: 'string', description: 'Nombre EXACTO del archivo de la imagen.' },
+      despues_de: { type: ['string', 'null'], description: 'id EXACTO de la diapositiva después de la cual va (la que trata el tema de la imagen); null = antes de la diapositiva de cierre / al final.' },
+      titulo: { type: 'string', description: 'Título corto de la diapositiva (hasta ~8 palabras).' },
+      pie: { type: 'string', description: 'Leyenda corta de lo que muestra la imagen, según lo que ves en ella.' }
+    }, required: ['archivo', 'titulo'] } }
+  }, required: ['imagenes'] }
+};
+// Suma imágenes a una presentación ya armada: la IA las mira y decide en qué diapositiva va cada una (diapositivas nuevas; no toca las demás)
+async function pptSumarImagenes(input) {
+  const files = [...input.files].filter(f => procesosArchivoLocalEsImagen(f.name)); input.value = '';
+  if (!files.length || !_pptDoc || _pptIa.ocupado) return;
+  const d = _pptDoc, dt = d.datos, st = 'ppt-status';
+  try {
+    const grandes = files.filter(f => f.size > 20 * 1024 * 1024); if (grandes.length) throw new Error(`"${grandes[0].name}" pesa más de 20 MB.`);
+    _pptIa.ocupado = true; pptRender();
+    showMsg(st, 'loading', 'Subiendo las imágenes...');
+    for (const f of files) { const pr = await manImagenPreparar(f, false); f._sub = { ruta: await propImagenSubirStorage(pr.mime, pr.b64), mime: pr.mime, ancho: pr.ancho, alto: pr.alto }; }
+    showMsg(st, 'loading', 'La IA está mirando las imágenes...');
+    const bloques = await mantIaBloques(files);
+    const prompt = `Tenés una presentación de PowerPoint ya armada (tipo: ${PPT_TIPOS_PRES[dt.tipo].nombre}, tema: ${d.nombre}) y el usuario te adjunta imágenes para SUMARLE.\n\nDIAPOSITIVAS ACTUALES (id, tipo, título):\n${dt.diapositivas.map((x, i) => `${i + 1}. id=${x.id} [${x.tipo}] ${String(x.titulo).replace(/\n/g, ' / ')}`).join('\n')}\n${dt.resumen_fuentes ? '\nDATOS CLAVE DE LAS FUENTES:\n' + dt.resumen_fuentes.slice(0, 3000) + '\n' : ''}\nIMÁGENES ADJUNTAS (las ves arriba, con su nombre): ${files.map(f => '"' + f.name + '"').join(', ')}.\n${dt.instrucciones.trim() ? 'Instrucciones originales del usuario: ' + dt.instrucciones.trim() + '\n' : ''}\nPara CADA imagen (todas se usan, una por diapositiva nueva): mirala y decidí después de qué diapositiva va (la que trata el tema de la imagen), con un título corto y una leyenda corta de lo que muestra. Si no encaja con ninguna, "despues_de" null.`;
+    const r = await dfsLlamar([...bloques, { type: 'text', text: prompt }], PPT_TOOL_IMAGENES, 3000);
+    pptSnapshot();
+    const lista = Array.isArray(r.imagenes) ? r.imagenes : [], usadas = new Set(), nuevas = [];
+    lista.forEach(x => {
+      const nf = String(x.archivo || '').trim().toLowerCase(), f = files.find(q => q.name.toLowerCase() === nf && !usadas.has(q)); if (!f) return;
+      usadas.add(f); nuevas.push({ f, despues: x.despues_de || null, titulo: String(x.titulo || f.name.replace(/\.[^.]+$/, '')), pie: String(x.pie || '') });
+    });
+    files.filter(f => !usadas.has(f)).forEach(f => nuevas.push({ f, despues: null, titulo: f.name.replace(/\.[^.]+$/, ''), pie: '' }));
+    nuevas.forEach(n => {
+      const a = dt.diapositivas, sl = pptDiapNormal({ tipo: 'imagen', titulo: n.titulo, imagen: n.f._sub, imagen_fuente: 'foto', pie: n.pie, listo: true });
+      let i = n.despues ? a.findIndex(x => x.id === n.despues) : -1;
+      if (i >= 0) { while (a[i + 1] && a[i + 1].tipo === 'imagen' && a[i + 1].imagen_fuente === 'foto' && nuevas.some(m => m.sl === a[i + 1])) i++; a.splice(i + 1, 0, sl); }
+      else { const ic = a.length && a[a.length - 1].tipo === 'cierre' ? a.length - 1 : a.length; a.splice(ic, 0, sl); }
+      n.sl = sl;
+    });
+    await pptGuardar(); _pptIa.ocupado = false; pptRender();
+    showMsg(st, 'success', `✓ Se sumaron ${nuevas.length} imagen${nuevas.length === 1 ? '' : 'es'} (una diapositiva cada una). Revisá dónde quedaron; podés moverlas con las flechas o deshacer.`);
+  } catch (e) { _pptIa.ocupado = false; pptRender(); showMsg(st, 'error', '✕ ' + e.message); }
+}
 // Sube a Storage las imágenes a incluir (una vez por archivo)
 async function pptSubirImagenesIncluir() {
   const incl = _pptIa.archivos.filter(f => f._incluir && procesosArchivoLocalEsImagen(f.name));
