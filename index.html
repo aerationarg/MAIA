@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -20371,14 +20371,6 @@ async function propTextosIntroIA(p, alts) {
   const prompt = `${contexto}\nRedactá los textos de introducción de la propuesta técnica de Aeration Argentina para este proyecto${multi ? ` (que tiene ${alts.length} alternativas: ${alts.map(a => a.etiqueta).join('; ')})` : ''}. Estilo: formal, en español, tercera persona, párrafos corrientes sin viñetas salvo donde se indica, sin negritas ni asteriscos. NO cites números de tabla ni de figura (las tablas del documento no están numeradas). Ejemplo de estilo (de otra oferta; NO copies sus datos): "En el presente documento se detalla la propuesta para la incorporación de una etapa de tratamiento biológico en la Planta de Tratamiento de Efluentes del establecimiento de X ubicado en Y. La solución propuesta ha sido desarrollada tomando como punto de partida el efluente proveniente del sistema de tratamiento primario existente, compuesto por ecualización, coagulación–floculación y flotación por aire disuelto (DAF), y tiene como objetivo completar el tratamiento del efluente hasta alcanzar los parámetros de calidad requeridos para su descarga final." / "A continuación se muestran los parámetros de diseño del efluente crudo y los valores de normativa a alcanzar. La ET indica además que el cuerpo receptor es el Canal San Francisco." / "Sumado a esto, en el pliego se establecen las siguientes condiciones de salida del sistema biológico: SST < 20 mg/L; SSV < 15 mg/L; DBO₅ soluble < 20 mg/L".\n\nUsá SOLO información que figure en el contexto (campos del cliente, requerimientos del pliego, normativa, tratamiento existente, cuerpo receptor...). Lo que no se pueda determinar, omitilo o dejá el campo vacío: no inventes datos.\n${reqs}`;
   return await propLlamarForzado(PROP_TOOL_TEXTOS, prompt, 3000);
 }
-const PROP_TOOL_RESUMEN = {
-  name: 'resumen_unidades',
-  description: 'Tabla resumen con los datos más importantes de las unidades principales (tecnología biológica) de una alternativa.',
-  input_schema: { type: 'object', properties: {
-    columnas: { type: 'array', items: { type: 'string' }, description: 'Encabezados de la tabla, con la unidad de medida entre paréntesis cuando corresponda. La primera es "Unidad". Entre 4 y 7 columnas en total.' },
-    filas: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'Una fila por unidad principal, con tantos valores como columnas (en el mismo orden). "-" donde el dato no aplica o no existe.' },
-  }, required: ['columnas', 'filas'] }
-};
 function propTablaTexto(columnas, filas) {
   const lim = s => { const t = String(s == null ? '' : s).replace(/\|/g, '/').replace(/\s*\n\s*/g, ' ').trim(); return t || '-'; };
   return ['| ' + columnas.map(lim).join(' | ') + ' |'].concat(filas.map(f => '| ' + columnas.map((_, i) => lim(f[i])).join(' | ') + ' |')).join('\n');
@@ -20388,14 +20380,43 @@ function propTrenTxt(proy) {
     return procesosStep2GruposDesdeActual(proy).map((g, i) => `${i + 1}. ${g.instancias.map(x => x.nombre).join(' + ')}${g.instancias.length > 1 ? ' (' + (g.disposicion === 'paralelo' ? 'en paralelo' : g.disposicion === 'serie' ? 'en serie' : g.instancias.length + ' líneas') + ')' : ''}${g.linea === 'lodos' ? ' [línea de lodos]' : ''}`).join('\n');
   } catch (e) { return ''; }
 }
-// Mini resumen de las unidades de tecnología biológica de una alternativa (LA, MBR, MBBR, SBR...): datos clave de dimensionamiento y operación
-async function propResumenUnidadesIA(p, a) {
+const PROP_TOOL_RESUMEN_ETAPAS = {
+  name: 'resumen_etapas',
+  description: 'Resumen de los parámetros más importantes de las etapas principales de una alternativa, una tablita por etapa.',
+  input_schema: { type: 'object', properties: {
+    etapas: { type: 'array', items: { type: 'object', properties: {
+      etapa: { type: 'string', description: 'Nombre de la etapa EXACTAMENTE como figura en el tren.' },
+      filas: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'De 3 a 6 filas [Parámetro, Unidad, Valor]; solo el número en Valor. Solo parámetros con dato.' }
+    }, required: ['etapa', 'filas'] } }
+  }, required: ['etapas'] }
+};
+// Parámetros más importantes de las etapas principales de una alternativa: cada tablita va DENTRO de su etapa
+async function propResumenEtapasIA(p, a) {
   const dis = procesosResumenDiseno(a.proy), eq = procesosResumenEquipos(a.proy, true);
   if (!dis) return null;
-  const prompt = `Armá una tabla RESUMEN con los datos más importantes de las UNIDADES PRINCIPALES de ${a.etiqueta || 'la propuesta'} del proyecto "${p.nombre || ''}". Unidades principales = las de TECNOLOGÍA BIOLÓGICA (reactores de lodos activados, anóxico/anaeróbico, MBBR, MBR / cámara de membranas, SBR, lecho percolador, lagunas...) y, si hay, su sedimentador secundario; NO incluyas pozos, tamices, químicos, lodos ni desinfección. Si una unidad está repetida en paralelo, una sola fila con la cantidad.\n\nTREN:\n${propTrenTxt(a.proy)}\n\nDISEÑO (valores calculados):\n${dis}\n\nEQUIPOS:\n${eq || '(sin equipos)'}\n\nColumnas: "Unidad", "Cantidad" y de 2 a 5 datos clave que sirvan para comparar (ej.: volumen útil de cada unidad, dimensiones, tiempo de retención hidráulico, concentración de biomasa SSV, edad celular, carga másica F/M, caudal de aire; en MBR: superficie de membrana, cantidad de módulos, flux; en MBBR: volumen de carriers, relleno; en sedimentador: diámetro, carga superficial). Todas las filas con las mismas columnas; poné la unidad de medida en el encabezado y solo el número en cada celda. Usá SOLO valores que figuren arriba (no los calcules ni inventes): "-" si no hay dato.`;
-  const r = await propLlamarForzado(PROP_TOOL_RESUMEN, prompt, 2000);
-  const cols = (r.columnas || []).map(String).filter(Boolean), filas = (r.filas || []).filter(f => Array.isArray(f) && f.length);
-  return cols.length >= 2 && filas.length ? { columnas: cols, filas } : null;
+  const prompt = `Armá, para ${a.etiqueta || 'la propuesta'} del proyecto "${p.nombre || ''}", una TABLITA RESUMEN con los parámetros más importantes de cada etapa PRINCIPAL. Etapas principales = las de tecnología biológica (reactores de lodos activados, anóxico/anaeróbico, MBBR, MBR / cámara de membranas, SBR, lecho percolador, lagunas...), su sedimentador secundario y, solo si el diseño los define con claridad, otras unidades de proceso importantes (DAF, tamizado, desinfección). NO incluyas pozo de bombeo, dosificación de químicos, tanques auxiliares ni la línea de lodos. Si una unidad está repetida en paralelo, una sola tablita con la fila "Cantidad de unidades".\n\nTREN:\n${propTrenTxt(a.proy)}\n\nDISEÑO (valores calculados):\n${dis}\n\nEQUIPOS:\n${eq || '(sin equipos)'}\n\nPara cada etapa principal: "etapa" = el nombre EXACTO como figura en el TREN, y de 3 a 6 filas [Parámetro, Unidad, Valor] con los parámetros que mejor la caracterizan (ej.: volumen útil; dimensiones largo × ancho × altura; tiempo de retención hidráulico; concentración de biomasa SSV; edad celular; carga másica F/M; caudal de aire; en MBR: superficie de membrana, cantidad de módulos, flux; en MBBR: volumen de carriers, relleno; en sedimentador: superficie, carga superficial, tiempo de retención). Usá SOLO valores que figuren arriba (no los calcules ni inventes) y NO pongas filas sin dato. En Valor, solo el número (o "a × b × c" para dimensiones).`;
+  const r = await propLlamarForzado(PROP_TOOL_RESUMEN_ETAPAS, prompt, 3000);
+  const out = [];
+  (r.etapas || []).forEach(x => {
+    const filas = (x.filas || []).filter(f => Array.isArray(f) && f.length >= 2).map(f => f.length === 2 ? [f[0], '', f[1]] : [f[0], f[1], f[2]]).filter(f => String(f[2] == null ? '' : f[2]).trim() && String(f[2]).trim() !== '-');
+    if (x.etapa && filas.length >= 2) out.push({ etapa: String(x.etapa), filas });
+  });
+  return out.length ? out : null;
+}
+// Mete cada tablita al final de la descripción de SU etapa ("### nombre" ... hasta la próxima etapa), con el rótulo "Parámetros principales"
+function propInsertarTablasEtapas(texto, resumenes) {
+  if (!resumenes || !resumenes.length) return texto;
+  const norm = x => procesosNormTxt(String(x || '')).replace(/\s+/g, ' ').trim(), mapa = {};
+  resumenes.forEach(r => { mapa[norm(r.etapa)] = r; });
+  const out = []; let pend = null;
+  const flush = () => { if (pend) { out.push('## Parámetros principales', propTablaTexto(['Parámetro', 'Unidad', 'Valor'], pend.filas)); pend = null; } };
+  String(texto || '').split('\n').forEach(l => {
+    const t = l.trim();
+    if (t.startsWith('### ')) { flush(); pend = mapa[norm(t.slice(4))] || null; }
+    out.push(l);
+  });
+  flush();
+  return out.join('\n');
 }
 const PROP_TOOL_ALTERNATIVA = {
   name: 'redactar_alternativa',
@@ -20540,17 +20561,16 @@ async function procesosStep4GenerarConIA(opts) {
     const hechas = [];
     for (let i = 0; i < alts.length; i++) {
       const a = alts[i], out = { resumen: null, bloque: null };
-      showMsg(statusId, 'loading', multi ? `Redactando la ${a.etiqueta} (${i + 1} de ${alts.length})...` : 'Armando el resumen de las unidades principales...');
-      try { out.resumen = await conReintento(() => propResumenUnidadesIA(p, a)); } catch (e) { avisosGen.push('Resumen de unidades' + (a.id ? ' (' + a.etiqueta + ')' : '') + ': ' + e.message); }
+      showMsg(statusId, 'loading', multi ? `Redactando la ${a.etiqueta} (${i + 1} de ${alts.length})...` : 'Armando el resumen de las etapas principales...');
+      try { out.resumen = await conReintento(() => propResumenEtapasIA(p, a)); } catch (e) { avisosGen.push('Resumen de las etapas' + (a.id ? ' (' + a.etiqueta + ')' : '') + ': ' + e.message); }
       if (multi) { try { out.bloque = await conReintento(() => propAlternativaIA(p, a, alts, i)); } catch (e) { avisosGen.push('No pude redactar la ' + a.etiqueta + ': ' + e.message); } }
       hechas.push(out);
     }
-    const tablaResumen = r => r.resumen ? propTablaTexto(r.resumen.columnas, r.resumen.filas) : '';
     if (multi) {
       const partes = [];
       if (propTecIntro) partes.push(propTecIntro);
       alts.forEach((a, i) => {
-        const b = hechas[i].bloque, tabla = tablaResumen(hechas[i]);
+        const b = hechas[i].bloque;
         partes.push('# ' + propTituloAlternativa(a));
         partes.push('## Descripción general');
         if (b && b.descripcion) partes.push(b.descripcion);
@@ -20558,14 +20578,13 @@ async function procesosStep4GenerarConIA(opts) {
         partes.push(`[[img:gen:impl:${a.id}|Implantación esquemática Alternativa ${a.id}.]]`);
         partes.push(`[[biblioteca:${a.id}]]`, '[[/biblioteca]]'); // acá va el texto estándar de la tecnología (generalidades), lo completa la biblioteca
         partes.push('## Etapas de proceso');
-        if (tabla) partes.push(`Resumen de las unidades principales de la ${a.etiqueta.split(' — ')[0]}:`, tabla);
-        partes.push(b && b.etapas ? b.etapas : '(No se pudo redactar esta alternativa: completala a mano o pedile a la IA por el chat de esta sección.)');
+        partes.push(b && b.etapas ? propInsertarTablasEtapas(b.etapas, hechas[i].resumen) : '(No se pudo redactar esta alternativa: completala a mano o pedile a la IA por el chat de esta sección.)');
         partes.push(`[[suministro:${a.id}]]`);
       });
       setSec('etapas_proceso', { texto: partes.join('\n') });
     } else if (hechas[0] && hechas[0].resumen) {
-      // una sola alternativa: la tablita resumen va al principio de las etapas de proceso
-      setSec('etapas_proceso', { texto: '## Resumen de las unidades principales\n' + tablaResumen(hechas[0]) + '\n' + String((pd.secciones.etapas_proceso || {}).texto || '') });
+      // una sola alternativa: la tablita de parámetros va dentro de cada etapa principal
+      setSec('etapas_proceso', { texto: propInsertarTablasEtapas(String((pd.secciones.etapas_proceso || {}).texto || ''), hechas[0].resumen) });
     }
     // Nombres completos de las etapas (en vez de "LA", "Sed 2°"...)
     let avisoNombres = '';
@@ -20668,6 +20687,38 @@ async function procesosPropuestaObtenerPlantillaBytes() {
   if (!resp.ok) throw new Error('No se pudo descargar la plantilla de SharePoint (HTTP '+resp.status+').');
   return await resp.arrayBuffer();
 }
+// Los Título 3 de la plantilla comparten UNA lista de numeración: si en la Introducción hay uno (ej. "Tecnología MBR"), la primera etapa salía como "2.".
+// Se reinicia en 1 al empezar cada bloque (Título 1 y cada título de alternativa) con una lista nueva (startOverride) para esos párrafos.
+async function propReiniciarNumeracionTitulos(zip, doc) {
+  const WNS = PROCESOS_PROPUESTA_WNS, nf = zip.file('word/numbering.xml'), sf = zip.file('word/styles.xml');
+  if (!nf || !sf) return;
+  const styles = new DOMParser().parseFromString(await sf.async('string'), 'application/xml');
+  let numId3 = null;
+  Array.from(styles.getElementsByTagName('w:style')).forEach(st => { if (st.getAttribute('w:styleId') === 'Ttulo3') { const n = st.getElementsByTagName('w:numId')[0]; if (n) numId3 = n.getAttribute('w:val'); } });
+  if (!numId3) return;
+  const numXml = new DOMParser().parseFromString(await nf.async('string'), 'application/xml'), nums = Array.from(numXml.getElementsByTagName('w:num'));
+  const base = nums.find(n => n.getAttribute('w:numId') === numId3), absEl = base && base.getElementsByTagName('w:abstractNumId')[0];
+  if (!absEl) return;
+  const abs = absEl.getAttribute('w:val'); let maxId = Math.max(0, ...nums.map(n => +n.getAttribute('w:numId') || 0)), ultimo = nums[nums.length - 1];
+  const nuevoNum = () => {
+    const id = ++maxId, el = numXml.createElementNS(WNS, 'w:num'), a = numXml.createElementNS(WNS, 'w:abstractNumId'), lo = numXml.createElementNS(WNS, 'w:lvlOverride'), so = numXml.createElementNS(WNS, 'w:startOverride');
+    el.setAttributeNS(WNS, 'w:numId', String(id)); a.setAttributeNS(WNS, 'w:val', abs); lo.setAttributeNS(WNS, 'w:ilvl', '0'); so.setAttributeNS(WNS, 'w:val', '1');
+    lo.appendChild(so); el.appendChild(a); el.appendChild(lo); ultimo.parentNode.insertBefore(el, ultimo.nextSibling); ultimo = el; return id;
+  };
+  const ANTES = ['w:pStyle', 'w:keepNext', 'w:keepLines', 'w:pageBreakBefore', 'w:framePr', 'w:widowControl'];
+  let actual = null, usados = 0;
+  for (const p of Array.from(doc.getElementsByTagName('w:p'))) {
+    const ps = p.getElementsByTagName('w:pStyle')[0], v = ps && ps.getAttribute('w:val'), ppr = p.getElementsByTagName('w:pPr')[0];
+    if (v === 'Ttulo1' || (v === 'Ttulo2' && ppr && ppr.getElementsByTagName('w:pBdr').length)) { actual = null; continue; }
+    if (v !== 'Ttulo3' || !ppr) continue;
+    if (actual == null) { actual = nuevoNum(); usados++; }
+    Array.from(ppr.childNodes).forEach(c => { if (c.nodeType === 1 && c.tagName === 'w:numPr') ppr.removeChild(c); });
+    let ref = null; Array.from(ppr.childNodes).forEach(c => { if (c.nodeType === 1 && ANTES.includes(c.tagName)) ref = c; });
+    const np = procesosPropuestaParsearFragmento(doc, `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="${actual}"/></w:numPr>`)[0];
+    ppr.insertBefore(np, ref ? ref.nextSibling : ppr.firstChild);
+  }
+  if (usados) zip.file('word/numbering.xml', new XMLSerializer().serializeToString(numXml));
+}
 async function procesosStep4ConstruirDoc() {
   const p = procesosCurrentProyecto;
   const bytes = await procesosPropuestaObtenerPlantillaBytes();
@@ -20685,6 +20736,7 @@ async function procesosStep4ConstruirDoc() {
   _procesosPropImg = await propPrepararImagenesDoc(zip, ids);
   let imgCtx;
   try { procesosPropuestaAplicarDatos(doc, p); } finally { imgCtx = _procesosPropImg; _procesosPropImg = null; }
+  try { await propReiniciarNumeracionTitulos(zip, doc); } catch (e) { console.warn('No se pudo reiniciar la numeración de las etapas:', e.message); }
   return { zip, doc, imgCtx };
 }
 async function procesosStep4Previsualizar() {
