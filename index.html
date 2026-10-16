@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -35419,19 +35419,88 @@ function simVerificarAnoxico(p, g) {
   if (Rras != null) { const R = ri + Rras; ind.push(simInd('Desnitrificación máxima teórica R / (1 + R), con R = recirculación interna + del sedimentador', R / (1 + R) * 100, '%', null, null, `R = ${ri.toFixed(1)} + ${Rras.toFixed(1)}. Es un tope: lo que se logre depende de la DBO disponible y del volumen.`)); }
   return { faltan: [], ind };
 }
-function simVerificarMBR(p, g) {
+// ── MBR dinámico: reactor biológico de mezcla completa SIN sedimentador (las membranas retienen todos los sólidos; solo salen por la purga) + hidráulica y ensuciamiento de la membrana ──
+// Flux J = Qpermeado / Área (L/m2·h). TMP = J / permeabilidad limpia × (1 + resistencia reversible + irreversible) × viscosidad(T). El ensuciamiento crece con (J / flux crítico)^n (n = 1,5; 4 por encima del crítico),
+// el MLSS y la falta de aire de limpieza; la parte reversible se relaja con τ = 0,5 d (retrolavado/relajación); la irreversible solo baja con la acción "Limpiar membranas".
+function simMbrDin(o) {
+  const kn = simKinMotor(o.kin, o.kinA), d = o.d, V = o.V, A = o.A, YH = kn.YH, YA = 0.24, bH = kn.bH, bA = kn.bA, fd = 0.15, Ks = kn.Ks, KOH = 0.2, KOA = 0.4, KNH = 1.0, muH = kn.muH, muA = kn.muA, iN = 0.12, VSS = o.fv > 0 ? o.fv : 0.85, DOd = o.DOsp || 2;
+  const dtH = o.dtH, NT = o.NT, dt = 15 / 3600, nPorGrab = Math.max(1, Math.round(dtH / dt)), mean = a => a.reduce((x, y) => x + y, 0) / a.length, th = (k, T) => Math.pow(k, T - 20);
+  const Qm = mean(o.Qin), S0m = mean(o.cin.dbo) / 0.68, NTKm = mean(o.cin.ntk), Tb = o.T, SRT = o.SRT, Qd = Qm * 24, X0 = o.X0, Jc = o.Jc, P0 = o.P0, Jmax = 1.6 * Jc, Vbuf = 0.15 * V;
+  const bHT = bH * th(1.04, Tb), muHT = muH * th(1.07, Tb), S = Math.max(3, Ks * (1 + bHT * SRT) / (SRT * (muHT - bHT) - 1) || 3);
+  const XHv = YH * Qd * (S0m - S) * SRT / (V * (1 + bHT * SRT)), XPv = fd * bHT * XHv * SRT, muAT = muA * th(1.10, Tb) * DOd / (KOA + DOd), bAT = bA * th(1.04, Tb), nit = o.nitrif && SRT > 1.3 * (muAT > bAT ? 1 / (muAT - bAT) : Infinity);
+  const NOx0 = nit ? Math.max(0, NTKm - 0.12 * XHv * V / (Qd * SRT) - 2) : 0, XAv = nit ? YA * Qd * NOx0 * SRT / (V * (1 + bAT * SRT)) : 0.02 * XHv, XIs = Math.max(0.03 * X0, X0 - (XHv + XAv + XPv) / VSS), XIin = XIs * V / (Qd * SRT);
+  const st = { S, XH: XHv, XA: XAv, XP: XPv, XI: XIs, NH: nit ? 1.0 : Math.max(2, NTKm - 6), NO: NOx0, DO: o.DOsp }, TSS = () => (st.XH + st.XA + st.XP) / VSS + st.XI;
+  const OUR0 = () => (1 - 1.42 * YH) * (muHT / YH) * (st.S / (Ks + st.S)) * st.XH + 1.42 * (1 - fd) * bHT * st.XH + 1.42 * (1 - fd) * bAT * st.XA + 4.33 * (muAT / YA) * (st.NH / (KNH + st.NH)) * st.XA;
+  const capMg = o.cap && o.cap > 0 ? o.cap * 24000 / V : 1.6 * OUR0(), DOref = 2, Qw0 = V / SRT / 24;
+  let aireI = 0.5, rRev = 0, rIrr = 0, vx = 0, spillTot = 0;
+  const out = { Q: [], Qw: [], qin: [], S: [], NH: [], NO: [], DO: [], MLSS: [], XH: [], XA: [], aire: [], aor: [], J: [], TMP: [], perm: [], vx: [], spill: [], dbo: [], dqo: [], sst: [], ntk: [], cap: capMg * V / 24000, Jc, V, A, Vbuf, P0, dtH };
+  const interp = (arr, t) => { const x = Math.min(arr.length - 1, Math.max(0, t / dtH)), i = Math.floor(x), fr = x - i; return arr[i] * (1 - fr) + arr[Math.min(arr.length - 1, i + 1)] * fr; };
+  const warmH = 24, pasos = Math.round((warmH + NT * dtH) / dt), acc = (d && d.acciones) || [];
+  let a = { Q: 0, Qw: 0, qin: 0, S: 0, NH: 0, NO: 0, DO: 0, MLSS: 0, XH: 0, XA: 0, aire: 0, aor: 0, J: 0, TMP: 0, perm: 0, spill: 0, n: 0 };
+  for (let k = 0; k < pasos; k++) {
+    const t = k * dt - warmH, f = simFactores(t, d), Tt = Tb + f.dT, dtd = dt / 24, Q = t < 0 ? Qm : interp(o.Qin, t), S0 = (t < 0 ? S0m : interp(o.cin.dbo, t) / 0.68), NTKin = t < 0 ? NTKm : interp(o.cin.ntk, t), dqoIn = t < 0 ? mean(o.cin.dqo) : interp(o.cin.dqo, t);
+    const power = f.pozoOn > 0 ? 1 : 0, Qw = Qw0 * f.purga * power, Qpmax = Jmax * A / 1000 * power, Qp = Math.min(Qpmax, Math.max(0, Q - Qw) + vx / 1.0);
+    vx += (Q - Qw - Qp) * dt; let sp = 0; if (vx > Vbuf) { sp = vx - Vbuf; vx = Vbuf; } if (vx < 0) vx = 0; spillTot += sp;
+    // biología (reactor de mezcla completa; los sólidos solo salen por la purga)
+    const fTh = th(1.07, Tt), fTa = th(1.10, Tt), fTd = th(1.04, Tt), inh = 1 - Math.min(0.95, f.tox), nutL = 1 - 0.45 * f.nut, fDOH = st.DO / (KOH + st.DO), fDOA = st.DO / (KOA + st.DO);
+    const rsu = (muH * fTh * inh * nutL / YH) * (st.S / (Ks + st.S)) * fDOH * st.XH, rn = nit || st.XA > 0.05 ? (muA * fTa * inh / YA) * (st.NH / (KNH + st.NH)) * fDOA * st.XA : 0;
+    const anox = st.DO < 0.5 ? (muH * fTh * inh * 0.6 / YH) * (st.S / (Ks + st.S)) * (KOH / (KOH + st.DO)) * (st.NO / (0.5 + st.NO)) * st.XH : 0, dec = bH * fTd * st.XH, decA = bA * fTd * st.XA, our = (1 - 1.42 * YH) * rsu + 1.42 * (1 - fd) * (dec + decA) + 4.33 * rn;
+    const sp0 = f.od != null ? f.od : o.DOsp, err = sp0 - st.DO; aireI = Math.min(1, Math.max(0, aireI + (2 * err) * dt)); const aire = Math.min(Math.min(1, Math.max(0, aireI + 0.15 * err)), f.aireMax), sat = simDOsat(Tt), supply = aire * capMg * Math.max(0, sat - st.DO) / Math.max(1, sat - DOref);
+    const Qd24 = Q * 24, Qw24 = Qw * 24;
+    st.XH = Math.max(0, st.XH + (-Qw24 * st.XH / V + YH * rsu - dec) * dtd); st.XA = Math.max(0, st.XA + (-Qw24 * st.XA / V + YA * rn - decA) * dtd); st.XP = Math.max(0, st.XP + (-Qw24 * st.XP / V + fd * (dec + decA)) * dtd); st.XI = Math.max(0, st.XI + ((Qd24 * XIin - Qw24 * st.XI) / V) * dtd);
+    st.S = Math.max(0, st.S + (Qd24 * (S0 - st.S) / V - rsu - anox) * dtd); st.NH = Math.max(0, st.NH + (Qd24 * (NTKin - st.NH) / V - iN * YH * rsu - rn * (1 + iN * YA)) * dtd); st.NO = Math.max(0, st.NO + (-Qd24 * st.NO / V + rn - anox * (1 - YH) / 2.86) * dtd); st.DO = Math.min(sat, Math.max(0, st.DO + (-Qd24 * st.DO / V + supply - our) * dtd));
+    ((d && d.eventos) || []).forEach(e => { if (e.tipo === 'toxico' && t >= e.inicio && t < e.inicio + dt) { const kf = 0.7 * Number(e.int); st.XH *= 1 - kf; st.XA *= 1 - Math.min(0.95, kf * 1.2); } });
+    // membrana
+    const J = Qp / A * 1000, g = Math.pow(Math.max(0.01, J) / Jc, J > Jc ? 4 : 1.5), aF = 1 + 2.5 * (1 - Math.min(1, f.aireMax)), mem = 1 + 3 * f.mem, mF = TSS() / 10000;
+    rRev = Math.max(0, rRev + (0.3 * g * mF * aF * mem - rRev / 0.5) * dtd); rIrr += 0.04 * g * mF * aF * mem * dtd;
+    if (t >= 0 && acc.some(x => x.tipo === 'limpieza' && t >= x.inicio && t < x.inicio + dt)) { rIrr *= 0.15; rRev = 0; }
+    const TMP = Qp > 1e-6 ? J / P0 * (1 + rRev + rIrr) * Math.pow(1.025, 20 - Tt) : 0;
+    if (t >= 0) {
+      const tssE = 1, fvv = 0.5; void fvv;
+      a.Q += Qp; a.Qw += Qw; a.qin += Q; a.S += st.S; a.NH += st.NH; a.NO += st.NO; a.DO += st.DO; a.MLSS += TSS(); a.XH += st.XH; a.XA += st.XA; a.aire += aire; a.aor += our * V / 24000; a.J += J; a.TMP += TMP * 100; a.perm += TMP > 0 ? J / TMP : P0; a.spill += sp; a.n++;
+      out.dbo.push(0.68 * st.S + 0.3 * 0.8 * tssE); out.dqo.push(0.06 * dqoIn + st.S + 1.2 * 0.8 * tssE); out.sst.push(tssE); out.ntk.push(st.NH + 1.5 + 0.08 * tssE);
+      if (a.n === nPorGrab) { const n = a.n; out.Q.push(a.Q / n); out.Qw.push(a.Qw / n); out.qin.push(a.qin / n); out.S.push(a.S / n); out.NH.push(a.NH / n); out.NO.push(a.NO / n); out.DO.push(a.DO / n); out.MLSS.push(a.MLSS / n); out.XH.push(a.XH / n); out.XA.push(a.XA / n); out.aire.push(a.aire / n); out.aor.push(a.aor / n); out.J.push(a.J / n); out.TMP.push(a.TMP / n); out.perm.push(a.perm / n); out.vx.push(vx); out.spill.push(a.spill); a = { Q: 0, Qw: 0, qin: 0, S: 0, NH: 0, NO: 0, DO: 0, MLSS: 0, XH: 0, XA: 0, aire: 0, aor: 0, J: 0, TMP: 0, perm: 0, spill: 0, n: 0 }; }
+    }
+  }
+  // un valor por paso de 5 min (los de calidad se promediaron por el tamaño del paso: se vuelven a muestrear)
+  ['dbo', 'dqo', 'sst', 'ntk'].forEach(kk => { const arr = out[kk], res = []; for (let i = 0; i < NT; i++) { let sm = 0; for (let j = 0; j < nPorGrab; j++) sm += arr[Math.min(arr.length - 1, i * nPorGrab + j)]; res.push(sm / nPorGrab); } out[kk] = res; });
+  out.spillTotal = spillTot; out.nit = nit; return out;
+}
+function simVerificarMBR(p, g, ev, o) {
   const A = simPos(p.area_membrana), Q = simPos(g.q_med), Qp = simPos(g.q_pico) || (Q ? Q * 1.5 : null), falt = [];
   if (!A) falt.push('Área de membrana'); if (!Q) falt.push('Caudal medio');
   if (falt.length) return { faltan: falt, ind: [] };
-  const flujo = Q * 1000 / A, flujoP = Qp * 1000 / A, ind = [simInd('Flujo de permeado (caudal medio)', flujo, 'L/m2·h', 10, 25, 'Típico 15–25 LMH (membranas sumergidas).'), simInd('Flujo de permeado (caudal pico)', flujoP, 'L/m2·h', null, 40, 'Pico sostenido: ≤ 35–40 LMH.')];
-  if (simPos(p.mlss)) ind.push(simInd('MLSS', Number(p.mlss), 'mg/L', 6000, 12000, 'Típico MBR 8.000–12.000 mg/L.'));
+  const Jc = simPos(p.flux_critico) || 25, V = simPos(p.volumen), X = simPos(p.mlss), SRT = simPos(p.edad_lodos), S0 = simPos(g.dbo), P0 = simPos(p.perm_limpia) || 200;
+  const flujo = Q * 1000 / A, flujoP = Qp * 1000 / A, ind = [simInd('Flujo de permeado (caudal medio)', flujo, 'L/m2·h', 10, Jc, `Típico 15–25 L/m2·h (membranas sumergidas). Flux crítico adoptado: ${Jc} L/m2·h.`), simInd('Flujo de permeado (caudal pico)', flujoP, 'L/m2·h', null, Math.max(40, Jc * 1.4), 'Pico sostenido: ≤ 35–40 L/m2·h; por encima del flux crítico el ensuciamiento se acelera.')];
+  if (X) ind.push(simInd('MLSS', X, 'mg/L', 6000, 12000, 'Típico MBR 8.000–12.000 mg/L (planilla Máster: Xt 12.000).'));
   if (simPos(p.aire_limpieza)) ind.push(simInd('Aire de limpieza por área de membrana', Number(p.aire_limpieza) / A, 'm3/m2·h', 0.2, 0.6, 'Típico 0,2–0,5 Nm3/m2·h.'));
-  return { faltan: [], ind };
+  if (V && S0 && X) { const fv = simPos(p.fraccion_volatil) || 0.85; ind.push(simInd('Relación F/M', Q * 24 * S0 / (V * X * fv), 'kg DBO/kg SSV·d', null, 0.1, 'Planilla Máster: en un MBR no pasar de 0,1 (Kubota); en lodos activados puede llegar a 0,3.'), simInd('Tiempo de retención hidráulico', V / Q, 'h', 6, null, 'Volumen total (preaireación + cámara de membranas) / caudal medio.')); }
+  const res = { faltan: [], ind };
+  if (o && o.Qin && V && X && SRT) {
+    const kc = simKinDeParams(p), nit = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s');
+    const sim = simMbrDin({ kin: kc.kin, kinA: kc.kinA, fv: simPos(p.fraccion_volatil) || 0.85, V, A, X0: X, SRT, cap: simPos(p.capacidad_o2), DOsp: simPos(p.oxigeno_disuelto) || 2, T: simNum(g.temp) != null ? Number(g.temp) : 20, nitrif: nit, Jc, P0, Qin: o.Qin, cin: o.cin, dtH: o.dtH, NT: o.NT, d: o.d });
+    const hSobre = sim.J.filter(j => j > Jc).length * o.dtH, tmpMax = Math.max(...sim.TMP), permMin = Math.min(...sim.perm);
+    ind.push(simInd('Flux máximo del período', Math.max(...sim.J), 'L/m2·h', null, Jc, 'Con los picos de caudal y los eventos del escenario (el permeado sale con el caudal que entra, menos la purga).'),
+      simInd('Horas con el flux sobre el crítico', hSobre, 'h', null, 0, 'Cada hora por encima del flux crítico ensucia la membrana mucho más rápido.'),
+      simInd('Presión transmembrana (TMP) máxima', tmpMax, 'kPa', null, 40, `Con la membrana limpia: ${(flujo / P0 * 100).toFixed(1)} kPa a caudal medio. Típico: limpieza química al llegar a 40–50 kPa.`),
+      simInd('Permeabilidad mínima', permMin, 'L/m2·h·bar', 0.5 * P0, null, `Limpia: ${P0}. Si baja del 50 % toca limpieza química (acción "Limpiar difusores / membranas").`),
+      simInd('Volumen que rebalsa por falta de capacidad de filtración', sim.spillTotal, 'm3', null, 0, sim.spillTotal > 0 ? 'La membrana (o un corte de energía) no deja pasar el caudal y el reactor se llena por encima de su reserva.' : ''));
+    const nhM = simMean(sim.NH); ind.push(simInd('Amonio promedio en el permeado', nhM, 'mg/L', null, 10, ''));
+    res.sim = sim;
+  }
+  return res;
+}
+function simGraficosMbr(u, res) {
+  const s = res.sim, C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', nar: '#d98a00' }, T = a => a.map((v, i) => [i * s.dtH, v]), horas = s.Q.length * s.dtH, base = { w: 540, h: 170, xl: 'Horas desde el inicio', xmin: 0, xmax: horas, ymin: 0 }, sep = '<div style="height:8px"></div>';
+  return simGrafico(Object.assign({}, base, { titulo: 'Flux de permeado (L/m2·h)', series: [{ n: 'Flux', c: C.azul, pts: T(s.J) }], hl: [{ y: s.Jc, c: C.rojo, t: 'flux crítico ' + s.Jc }], yl: 'L/m2·h' }))
+    + sep + simGrafico(Object.assign({}, base, { titulo: 'Presión transmembrana TMP (kPa) y permeabilidad (% de la limpia)', series: [{ n: 'TMP', c: C.rojo, pts: T(s.TMP) }, { n: 'Permeabilidad (% de la limpia)', c: C.verde, pts: T(s.perm.map(x => x / s.P0 * 100)), dash: '4 3' }], hl: [{ y: 40, c: C.gris, t: 'limpieza química (40 kPa)' }], yl: 'kPa / %' }))
+    + sep + simGrafico(Object.assign({}, base, { titulo: 'Caudal: entra, permeado y purga (m3/h)', series: [{ n: 'Entra', c: C.gris, pts: T(s.qin) }, { n: 'Permeado', c: C.azul, pts: T(s.Q) }, { n: 'Purga', c: C.nar, pts: T(s.Qw) }], yl: 'm3/h' }))
+    + sep + simGrafico(Object.assign({}, base, { titulo: 'Oxígeno disuelto, amonio y nitrato en el reactor (mg/L)', series: [{ n: 'OD', c: C.azul, pts: T(s.DO) }, { n: 'Amonio', c: C.rojo, pts: T(s.NH) }, { n: 'Nitrato', c: C.verde, pts: T(s.NO), dash: '4 3' }], yl: 'mg/L' }));
 }
 // ═══ Unidades "hidráulicas": tamiz, DAF, fisicoquímico y cámara de contacto (laberinto). Simulan caudales y cómo varían sus parámetros ═══
 // Sin bomba de salida: el caudal que sale es el que entra (la unidad es de paso). Con bomba de salida: la unidad es un tanque con
 // arranque/paro por nivel y el caudal que sale es el de la bomba (si no alcanza, el nivel sube y rebalsa).
-const SIM_TIPOS_ENTRADAS = ['ecualizador', 'sbr', 'mbbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion', 'desengrasadora', 'espesador', 'digestor', 'deshidratacion'];
+const SIM_TIPOS_ENTRADAS = ['ecualizador', 'sbr', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion', 'desengrasadora', 'espesador', 'digestor', 'deshidratacion'];
 const SIM_HID_PARAMS = [
   { k: 'q_bomba', l: 'Caudal de la bomba de salida (vacío = sale por gravedad, depende de lo que entra)', u: 'm3/h', dim: 'flow', alias: [/^(?!.*(dosific|quimic|reactivo|polimero|coagul|floculante|cloro|hipoclor|recircul|aire|lodo|purga|retrolav|nutrient|soda|acido|antiespum))(?=.*(caudal.*bomba|bomba.*caudal))/] },
   { k: 'vol_hid', l: 'Volumen que almacena (solo importa con bomba de salida; vacío = el de las dimensiones)', u: 'm3', dim: 'vol', alias: [] },
@@ -35745,9 +35814,18 @@ const SIM_MODELOS = {
     { k: 'oxigeno_disuelto', l: 'Oxígeno disuelto (set point)', u: 'mg/L', tipico: 2, alias: [/oxigeno disuelto|\bod\b/] },
     { k: 'nitrifica', l: '¿Debe nitrificar? (si / no)', u: '', texto: true, tipico: 'si', alias: [/nitrific/] },
     { k: 'capacidad_o2', l: 'Capacidad de aireación instalada en cada tanque (opcional)', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] }].concat(SIM_COEF_PARAMS) },
-  mbr: { nombre: 'MBR', det: /\bmbr\b|membrana/, verificar: simVerificarMBR, params: [
-    { k: 'area_membrana', l: 'Superficie total de membranas (St)', u: 'm2', dim: 'area', req: 1, alias: [/superficie total.*membrana|area.*membrana|superficie.*membrana|membrana.*area/] }, { k: 'mlss', l: 'Sólidos suspendidos totales (Xt, MLSS)', u: 'mg/L', alias: [/mlss|ssla|solidos suspendidos totales|\bxt\b/] },
-    { k: 'aire_limpieza', l: 'Requerimiento de aire de las membranas (scouring)', u: 'm3/h', dim: 'flow', alias: [/aire.*(limpieza|scouring|burbuj|membrana)|requerimiento.*aire.*mbr/] }] },
+  mbr: { nombre: 'MBR (biorreactor de membranas)', det: /\bmbr\b|membrana/, dinamico: true, verificar: simVerificarMBR, params: [
+    { k: 'area_membrana', l: 'Superficie total de membranas (St)', u: 'm2', dim: 'area', req: 1, alias: [/superficie total.*membrana|area.*membrana|superficie.*membrana|membrana.*area/] },
+    { k: 'volumen', l: 'Volumen adoptado total (preaireación + cámara de membranas)', u: 'm3', dim: 'vol', alias: [/volumen adoptado/, /volumen total/, /volumen/] },
+    { k: 'mlss', l: 'Sólidos suspendidos totales (Xt, MLSS)', u: 'mg/L', alias: [/mlss|ssla|solidos suspendidos totales|\bxt\b/] },
+    { k: 'edad_lodos', l: 'Edad celular media (Theta)', u: 'd', dim: 'dias', alias: [/edad.*(lodos|celular|barro)|srt|theta|tiempo.*residencia.*celular/] },
+    { k: 'fraccion_volatil', l: 'Relación volátiles/totales (Xv/Xt)', u: '', tipico: 0.85, alias: [/fraccion.*volatil|ssv.*sst|relacion.*volatiles|xv.*xt/] },
+    { k: 'oxigeno_disuelto', l: 'Oxígeno disuelto', u: 'mg/L', tipico: 2, alias: [/oxigeno disuelto|\bod\b/] },
+    { k: 'nitrifica', l: '¿Debe nitrificar? (si / no)', u: '', texto: true, tipico: 'si', alias: [/nitrific/] },
+    { k: 'capacidad_o2', l: 'Capacidad de aireación instalada en campo (opcional)', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] },
+    { k: 'aire_limpieza', l: 'Requerimiento de aire de las membranas (scouring)', u: 'm3/h', dim: 'flow', alias: [/aire.*(limpieza|scouring|burbuj|membrana)|requerimiento.*aire.*mbr/] },
+    { k: 'flux_critico', l: 'Flux crítico (por encima, la membrana se ensucia rápido)', u: 'L/m2·h', tipico: 25, alias: [], ayuda: 'Planilla Máster: flux de diseño 0,3 m3/m2·d (12,5 L/m2·h) industrial, hasta 0,6 (25 L/m2·h) cloacal.' },
+    { k: 'perm_limpia', l: 'Permeabilidad de la membrana limpia', u: 'L/m2·h·bar', tipico: 200, alias: [], ayuda: 'Típico 150–300 con membrana nueva a 20 °C.' }].concat(SIM_COEF_PARAMS) },
   daf: { nombre: 'DAF (flotación por aire disuelto)', det: /\bdaf\b|flotacion|flotador/, verificar: simVerificarDAF, params: [
     { k: 'area', l: 'Área superficial de flotación', u: 'm2', dim: 'area', req: 1, alias: [/area|superficie/] }, { k: 'recirculacion', l: 'Caudal de recirculación presurizada', u: 'm3/h', dim: 'flow', alias: [/recirc/] },
     { k: 'presion', l: 'Presión de saturación (absoluta)', u: 'atm', alias: [/presion/] }, { k: 'ef_sst', l: 'Remoción de SST', u: '%', tipico: 85, alias: [] }, { k: 'ef_dbo', l: 'Remoción de DBO', u: '%', tipico: 50, alias: [] }, { k: 'ef_dqo', l: 'Remoción de DQO', u: '%', tipico: 45, alias: [] }, { k: 'sequedad_lodo', l: 'Sequedad del lodo flotado', u: '%', tipico: 3, alias: [] },
@@ -35800,7 +35878,7 @@ const SIM_GLOBAL_PARAMS = [
 // Se guarda en doc_documentos con tipo = 'simulacion' (datos: {global, unidades[], fuente...}).
 // ═══════════════════════════════════════════════════════════════════════
 const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'anoxico', 'lodos_activados'];
-const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], anoxico: ['volumen', 'rec_interna'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
+const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], anoxico: ['volumen', 'rec_interna'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana', 'volumen', 'edad_lodos', 'mlss'], daf: ['area'], tamiz: ['ancho_canal'] };
 const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'], preset: ['📚', 'coeficientes de referencia (planilla Máster / bibliografía)'], calibrado: ['⚙', 'calibrado con datos medidos de la planta'] };
 let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
 const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
@@ -36173,6 +36251,7 @@ function simGrafico(o) {
 function simGraficosUnidad(u, res) {
   if (!res || res.error || res.faltan.length) return '';
   if (['ecualizador', 'sbr', 'mbbr'].includes(u.tipo)) return res.sim ? simGraficosEqSbrMbbr(u, res) : '';
+  if (u.tipo === 'mbr' && res.sim) return simGraficosMbr(u, res);
   if (res.sim && res.sim.pars) return simGraficosHid(u, res);
   const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', naranja: '#d98a00' };
   if (u.tipo === 'sedimentador' && res.flujo) {
@@ -36239,7 +36318,7 @@ function simUnidadHtml(u, i, n) {
       <td style="${PROCESOS_EQ_TD};width:170px">${sl ? `<input type="range" class="sim-rng" min="${sl[0]}" max="${sl[1]}" step="${(sl[1] - sl[0]) / 200}" value="${simNum(v)}" oninput="simSlider('${u.id}','${df.k}',this.value)" title="Mover para ver cómo cambian los resultados" />` : ''}</td>
       <td style="${PROCESOS_EQ_TD};width:34px;text-align:center" title="${tag ? esc(tag[1]) : (falta ? 'Falta este dato' : '')}">${tag ? tag[0] : (falta ? '<span style="color:var(--red)">falta</span>' : '')}</td></tr>`;
   };
-  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'mbbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
+  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
     <button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',2.5,4)">Pico ×2,5 (4 h)</button><button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',0,0)">Sin evento</button></div>` : '';
   return `<div class="card" style="margin-bottom:10px">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><span class="hint" style="margin:0">${i + 1}.</span>
@@ -36248,7 +36327,7 @@ function simUnidadHtml(u, i, n) {
       <button class="btn btn-secondary btn-sm" onclick="simUMover('${u.id}',-1)" ${i ? '' : 'disabled'}>↑</button><button class="btn btn-secondary btn-sm" onclick="simUMover('${u.id}',1)" ${i < n - 1 ? '' : 'disabled'}>↓</button><button class="remove-btn" onclick="simUQuitar('${u.id}')">&#x2715;</button></div>
     <details ${u.abierta === false ? '' : 'open'} ontoggle="simUAbierta('${u.id}',this.open)"><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Datos de la unidad</summary>
       <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px">${m.params.map(fila).join('')}</table></div>
-      ${['lodos_activados', 'sbr'].includes(u.tipo) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px"><span class="hint" style="margin:0">Coeficientes cinéticos:</span><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','master')" title="k 5 · Ks 60 · Y 0,6 · kd 0,06: los de la planilla Máster (hoja Coeficientes cinéticos)">Máster (cloacal típico)</button><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','asm1')" title="Los que usaba el simulador antes: biomasa más rápida (μ 6 1/d, kd 0,12)">Más rápidos (ASM1)</button><button class="btn btn-secondary btn-sm" onclick="simCalibrar('${u.id}')" title="Ajusta k y μn para que la simulación dé los valores medidos que cargaste en los campos de calibración">⚙ Calibrar con los datos medidos</button></div>` : ''}
+      ${['lodos_activados', 'sbr', 'mbr'].includes(u.tipo) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px"><span class="hint" style="margin:0">Coeficientes cinéticos:</span><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','master')" title="k 5 · Ks 60 · Y 0,6 · kd 0,06: los de la planilla Máster (hoja Coeficientes cinéticos)">Máster (cloacal típico)</button><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','asm1')" title="Los que usaba el simulador antes: biomasa más rápida (μ 6 1/d, kd 0,12)">Más rápidos (ASM1)</button><button class="btn btn-secondary btn-sm" onclick="simCalibrar('${u.id}')" title="Ajusta k y μn para que la simulación dé los valores medidos que cargaste en los campos de calibración">⚙ Calibrar con los datos medidos</button></div>` : ''}
       ${u.tipo === 'ecualizador' && sim24(u.params.perfil_in) ? `<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-secondary btn-sm" onclick="simEqAplicarPerfil('${u.id}')">↳ Usar este ingreso como caudal de toda la planta</button><span class="hint" style="display:inline;margin:0">Cambia la variación del caudal en el día de los datos generales (escalonada hora a hora).</span></div>` : ''}
       ${u.crudo ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--text2)">Ver los datos de la planilla del proyecto (${Object.keys(u.crudo).length})</summary><div style="columns:2;font-size:11.5px;margin-top:4px">${Object.entries(u.crudo).map(([k2, x]) => `<div>${esc(k2)}: <b>${esc(typeof x === 'object' ? '' : x)}</b></div>`).join('')}</div></details>` : ''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><button class="btn btn-secondary btn-sm" onclick="simCompletarIA('${u.id}')" ${u.crudo ? '' : 'disabled'} title="${u.crudo ? 'Busca en la planilla del proyecto los datos que faltan' : 'Solo para unidades importadas de Procesos IA'}">✨ Completar con IA desde la planilla</button></div>
@@ -36458,6 +36537,13 @@ function simPlantaDin1(d, ret) {
       pasa(u, ent, { sim: s, sbr: s });
     } else if (u.tipo === 'desinfeccion' || u.tipo === 'desengrasadora') {
       const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
+    } else if (u.tipo === 'mbr' && res.sim) {
+      const sm = res.sim; cur = { Q: sm.Q.slice(), dbo: sm.dbo.slice(), dqo: sm.dqo.slice(), sst: sm.sst.slice(), ntk: sm.ntk.slice() };
+      const kgM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) * 24 / 1000, qM = simMedia(sm.Qw, null) * 24, xM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) / Math.max(1e-9, simMedia(sm.Qw, null));
+      if (qM > 0) { lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: kgM, q_m3d: qM, sequedad: xM / 10000 * 100, nota: 'Purga directa del reactor de membranas (sin sedimentador), al MLSS del reactor' }); fuentesLodo.push({ id: u.id, nombre: 'Purga de ' + u.nombre, Q: sm.Qw.slice(), X: sm.MLSS.slice() }); purga = { nombre: 'Purga de lodo en exceso', kg_d: kgM, q_m3d: qM, X_gL: xM / 1000, SRT: simPos(p.edad_lodos), desde: u.id }; }
+      if (sm.spillTotal > 0.5) avisos.push(`⚠ MBR "${u.nombre}": ${sm.spillTotal.toFixed(0)} m3 rebalsan en ${horas} h (las membranas no dejan pasar el caudal que entra, o se cortó la energía).`);
+      if (Math.max(...sm.TMP) > 40) avisos.push(`MBR "${u.nombre}": la presión transmembrana llega a ${Math.max(...sm.TMP).toFixed(0)} kPa: hace falta limpieza química.`);
+      pasa(u, ent, { sim: sm, mbr: true, mlss: sm.MLSS, do: sm.DO, nh: sm.NH, no: sm.NO, aire: sm.aire, aor: sm.aor, cap: sm.cap });
     } else if (u.tipo === 'mbr') {
       const nit = true; cur = { Q: cur.Q, dbo: cur.dbo.map(x => Math.max(2, 0.015 * x)), dqo: cur.dqo.map(x => 0.06 * x + 12), sst: fill(1), ntk: cur.ntk.map(x => nit ? Math.min(x, 3) : x * 0.9) };
       pasa(u, ent);
@@ -36484,7 +36570,7 @@ function simPlantaDin1(d, ret) {
   const ef = cur, st = arr => ({ media: simMedia(arr, ef.Q), max: Math.max(...arr) });
   const lim = { dbo: simPos(g.lim_dbo), dqo: simPos(g.lim_dqo), sst: simPos(g.sst_vuelco), ntk: simPos(g.lim_ntk) };
   const cumpl = ['dbo', 'dqo', 'sst', 'ntk'].filter(k => lim[k] != null || (ef[k] && ef[k].some(x => x > 0))).map(k => { const s = st(ef[k]); const estado = lim[k] == null ? 'info' : (s.media > lim[k] ? 'mal' : (s.max > lim[k] ? 'justo' : 'ok')); const hFuera = lim[k] == null ? 0 : ef[k].filter(x => x > lim[k]).length * dtH; return { k, nombre: { dbo: 'DBO', dqo: 'DQO', sst: 'SST', ntk: 'NTK' }[k], media: s.media, max: s.max, limite: lim[k], estado, hFuera }; });
-  { const bN = nodos.find(n => n.tipo === 'lodos_activados' && n.extra && n.extra.no && n.extra.no.length === ef.Q.length);
+  { const bN = nodos.find(n => (n.tipo === 'lodos_activados' || n.tipo === 'mbr') && n.extra && n.extra.no && n.extra.no.length === ef.Q.length);
     if (bN) { const no = bN.extra.no, nt = ef.ntk.map((x, k) => x + no[k]); cumpl.push({ k: 'no', nombre: 'Nitrato (N-NO3) del efluente', media: simMedia(no, ef.Q), max: Math.max(...no), limite: null, estado: 'info', hFuera: 0 }, { k: 'nt', nombre: 'Nitrógeno total (NTK + nitrato)', media: simMedia(nt, ef.Q), max: Math.max(...nt), limite: null, estado: 'info', hFuera: 0 }); } }
   return { t: T, horas, dias, dtH, nodos, efluente: ef, recirc, recircInt, purga, lodos, avisos, cumpl, Qin, fac, eventos: dd.eventos, acciones: dd.acciones, retornos, lodoFeed };
 }
@@ -36713,6 +36799,7 @@ function simPlantaCorte(plant, d) {
         const fh = Math.min(22, 0.9 * s) * Math.min(1, ex.foam[k]); set('cp-foam-' + id, 'height', fh); set('cp-foam-' + id, 'y', P.yS - fh); set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000));
         t3 = `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`; if (ex.do[k] < 0.3) top = '⚠ SIN OXÍGENO';
         const dem = ex.aire ? Math.max(0.05, ex.aire[k] * 2.2) : 1; document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); });
+      } else if (t0 === 'mbr' && ex.mbr) { set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 12000)); t3 = `TMP ${ex.sim.TMP[k].toFixed(0)} kPa · flux ${ex.sim.J[k].toFixed(0)}`; if (ex.sim.TMP[k] > 40) top = '⚠ LIMPIEZA QUÍMICA'; if (ex.sim.spill[k] > 0) top = '⚠ REBALSA';
       } else if (t0 === 'anoxico' && ex.anox) { set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000)); t3 = `NO3 ${ex.no[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`;
       } else if (ex.hid) { const fr = ex.bomba ? Math.min(1, ex.vol[k] / ex.V) : 1, sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; if (ex.bomba) t3 = `nivel ${(fr * 100).toFixed(0)}%`;
       } else set('cp-w-' + id, 'fill', col);
@@ -37048,7 +37135,7 @@ const SIM_ACC_TIPOS = {
 };
 // Factores del momento t (h) según los eventos programados y las acciones del operador
 function simFactores(t, d) {
-  const f = { aireMax: 1, rec: 1, purga: 1, pozoOn: 1, qmult: 1, carga: 1, ivl: 1, clump: 0, foam: 0, rise: 0, dT: 0, tox: 0, nut: 0, od: null, kill: 0, qlim: 1 };
+  const f = { aireMax: 1, rec: 1, purga: 1, pozoOn: 1, qmult: 1, carga: 1, ivl: 1, clump: 0, foam: 0, rise: 0, dT: 0, tox: 0, nut: 0, od: null, kill: 0, qlim: 1, mem: 0 };
   if (t < 0) return f;
   const ev = (d && d.eventos) || [], ac = (d && d.acciones) || [];
   const ramp = (e, hasta) => Math.min(1, Math.max(0, (t - e.inicio) / Math.max(0.01, e.dur || 24))) * (hasta == null ? 1 : hasta);
@@ -37058,7 +37145,7 @@ function simFactores(t, d) {
     switch (e.tipo) {
       case 'corte_energia': if (dentro) { f.aireMax = 0; f.rec = 0; f.purga = 0; f.pozoOn = 0; } break;
       case 'falla_soplante': if (dentro) f.aireMax = Math.min(f.aireMax, 1 - i); break;
-      case 'colmatacion': { let c = i * ramp(e); const a = tras('limpieza', e); if (a) c = 0; f.aireMax = Math.min(f.aireMax, 1 - c); break; }
+      case 'colmatacion': { let c = i * ramp(e); const a = tras('limpieza', e); if (a) c = 0; f.aireMax = Math.min(f.aireMax, 1 - c); f.mem = Math.max(f.mem, c); break; }
       case 'bulking': { let b = 3 * i * ramp(e); const a = tras('cloro', e); if (a) b *= Math.exp(-(t - a.inicio) / 30); const n = tras('nutri', e); if (n) b *= Math.exp(-(t - n.inicio) / 60); f.ivl *= 1 + b; break; }
       case 'clumping': { let c = i * ramp(e); const a = tras('cloro', e); if (a) c *= Math.exp(-(t - a.inicio) / 40); f.clump = Math.max(f.clump, c); break; }
       case 'espuma': { let c = i * ramp(e); const a = tras('antiespumante', e); if (a) c *= Math.exp(-(t - a.inicio) / 8); const b = tras('cloro', e); if (b) c *= Math.exp(-(t - b.inicio) / 25); f.foam = Math.max(f.foam, c); break; }
