@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -35068,9 +35068,9 @@ function simRangoR(A, Q, Xf, ves) {
 }
 function simSedParams(p, g) {
   const nl = Math.max(1, Math.round(simNum(p.n_lineas) || 1)), A1 = simPos(p.area) || (simPos(p.diametro) ? Math.PI * p.diametro * p.diametro / 4 : null), A = A1 ? A1 * nl : null, Q = simPos(g.q_med), Qp = simPos(g.q_pico) || (Q ? Q * Math.max(...simPatron(g)) : null);
-  const Qr = simPos(p.q_rec) || (simPos(p.relacion_rec) && Q ? p.relacion_rec * Q : null), X = simPos(p.mlss) ? p.mlss / 1000 : null;
+  const prog = sim24(p.rec_horaria), Qr = simPos(p.q_rec) || (simPos(p.relacion_rec) && Q ? p.relacion_rec * Q : null) || (prog ? simMedia(prog) : null), X = simPos(p.mlss) ? p.mlss / 1000 : null;
   const prop = String(p.rec_proporcional || 'no').toLowerCase().startsWith('s'), QrP = Qr ? (prop && Q ? Qr / Q * Qp : Qr) : null;
-  return { A, Q, Qp, Qr, QrP, prop, X, H: simPos(p.profundidad), ivl: simPos(p.ivl), ves: simVesilind(p.ivl, p) };
+  return { A, Q, Qp, Qr, QrP, prop, prog, X, H: simPos(p.profundidad), ivl: simPos(p.ivl), ves: simVesilind(p.ivl, p) };
 }
 // Simulación dinámica del sedimentador: modelo de capas 1-D (10 capas), con flujo límite entre capas. Alimentación MLSS constante.
 function simSedDin(p, g, ev, qfun) {
@@ -35078,8 +35078,8 @@ function simSedDin(p, g, ev, qfun) {
   const vs = X => { const d = X - Xmin; if (d <= 0) return 0; return Math.max(0, Math.min(vmax, ves.v0 * Math.exp(-ves.n * d) * (1 - Math.exp(-rp * d)))); };
   const patron = simPatron(g), dt = Math.min(0.25 / 60, 0.4 * dz / Math.max(vmax, 1, (s.Qp + s.QrP) / s.A));
   const X = Array.from({ length: N }, () => Xf), Js = new Array(N).fill(0);
-  const step = Q => {
-    const Qr = s.prop ? s.Qr / s.Q * Q : s.Qr, vup = Q / s.A, vdn = Qr / s.A, Qf = Q + Qr;
+  const step = (Q, tt) => {
+    const Qr = s.prog ? s.prog[Math.floor((((tt || 0) % 24) + 24) % 24)] : (s.prop ? s.Qr / s.Q * Q : s.Qr), vup = Q / s.A, vdn = Qr / s.A, Qf = Q + Qr;
     for (let i = 0; i < N - 1; i++) { const a = vs(X[i]) * X[i], b = vs(X[i + 1]) * X[i + 1]; Js[i] = X[i + 1] > Xt ? Math.min(a, b) : a; }
     Js[N - 1] = 0;
     const dX = new Array(N);
@@ -35090,12 +35090,12 @@ function simSedDin(p, g, ev, qfun) {
     }
     for (let i = 0; i < N; i++) X[i] = Math.max(0, X[i] + dX[i] * dt);
   };
-  const warm = Math.round(14 / dt); for (let k = 0; k < warm; k++) step(simPos(g.q_med));
+  const warm = Math.round(14 / dt); for (let k = 0; k < warm; k++) step(simPos(g.q_med), k * dt - 14);
   const total = Math.round(24 / dt), every = Math.round(5 / 60 / dt), out = { t: [], manto: [], tssEfl: [], xu: [], q: [], perf: [] };
   let mantoMax = 0, tssMax = 0, falla = false;
   const manto = () => { let i = N; while (i > 0 && X[i - 1] > 1.0) i--; return (N - i) * dz + (i > 0 ? dz * Math.min(1, X[i - 1] / 1.0) : 0); };
   for (let k = 0; k < total; k++) {
-    const t = k * dt, Q = qfun ? qfun(t) : simQ(g, patron, t, ev); step(Q);
+    const t = k * dt, Q = qfun ? qfun(t) : simQ(g, patron, t, ev); step(Q, t);
     const mt = manto(), tss = X[0] * 1000; if (mt > mantoMax) mantoMax = mt; if (tss > tssMax) tssMax = tss; if (mt >= (N - m) * dz) falla = true;
     if (k % every === 0) { out.t.push(t); out.manto.push(mt); out.tssEfl.push(tss); out.xu.push(X[N - 1]); out.q.push(Q); out.perf.push(X.slice()); }
   }
@@ -35126,6 +35126,7 @@ function simVerificarSed(p, g, ev, conDin) {
     simInd('Concentración de lodo recirculado / máxima alcanzable (≈10^6/IVL)', f.Xu * 1000 / (1e6 / s.ivl), '', null, 1.0, `Lodo recirculado ${(f.Xu).toFixed(1)} g/L; el espesamiento tiene un tope cercano a ${(1e3 / s.ivl).toFixed(1)} g/L (referencia práctica).`)
   ];
   if (lv) ind.splice(6, 0, simInd('Carga sobre vertedero (caudal medio)', s.Q * 24 / lv, 'm3/m·d', null, 250, 'Típico 125 a 250 m3/m·d (hasta 375 en plantas chicas).'));
+  if (s.prog) ind.splice(7, 0, simInd('Recirculación programada: relación mínima (Qr/Q medio)', Math.min(...s.prog) / s.Q, '', crit.R[0], null, `La hora de menor recirculación (${Math.min(...s.prog).toFixed(1)} m3/h): con poca recirculación el lodo se acumula en el sedimentador.`), simInd('Recirculación programada: relación máxima (Qr/Q medio)', Math.max(...s.prog) / s.Q, '', null, crit.R[1], `La hora de mayor recirculación (${Math.max(...s.prog).toFixed(1)} m3/h). Los indicadores de arriba usan el caudal promedio de la programación (${s.Qr.toFixed(1)} m3/h).`));
   const res = { faltan: [], ind, flujo: f, flujoPico: fp, mlssMax: mm, mlssMaxPico: mmP, rangoR: rr, s };
   if (conDin) { res.din = simSedDin(p, g, ev); res.ind.push(simInd('Manto de lodos máximo (simulación 24 h)', res.din.mantoMax, 'm', null, 0.33 * s.H, 'Se pide mantenerlo por debajo de ~1/3 de la profundidad lateral.'), simInd('SST máximo en el efluente (simulación 24 h)', res.din.tssMax, 'mg/L', null, simPos(g.sst_vuelco) || 30, 'Valor orientativo; el que vale es el límite de vuelco del proyecto.')); }
   return res;
@@ -35158,6 +35159,8 @@ function simVerificarLA(p, g) {
     simInd('Caudal de purga necesario para esa edad de lodos', Qw, 'm3/d', null, null, 'Estimado purgando desde la recirculación (si no se informa su concentración, se supone ≈2,2 × MLSS).'),
     simInd('Demanda de oxígeno (promedio)', AOR, 'kg O2/h', null, null, `Carbonosa ${(AORc / 24).toFixed(1)}${nitrifica && ntk ? ` + nitrificación ${(AORn / 24).toFixed(1)}` : ''} kg O2/h.`)
   ];
+  const pgH = sim24(p.purga_horaria);
+  if (pgH) { const qd = pgH.reduce((a, b) => a + b, 0), Xr = simPos(p.mlss_recirc) || X * 2.2, srtR = qd > 0 ? V * X / (qd * Xr) : Infinity; ind.push(simInd('Purga programada por día', qd, 'm3/d', null, null, `Para la edad de lodos de diseño hacen falta ${Qw.toFixed(1)} m3/d (con ${Xr.toFixed(0)} mg/L en la recirculación).`), simInd('Edad de lodos con la purga programada', srtR, 'd', cr.srt[0], cr.srt[1], 'V × MLSS / (purga × concentración del lodo purgado). Si se aparta de la edad de diseño, el MLSS sube o baja con los días.')); }
   if (simPos(p.capacidad_o2)) ind.push(simInd('Capacidad de aireación / demanda con factor pico 1,5', Number(p.capacidad_o2) / AORp, '', 1.0, null, `Capacidad instalada en campo ${p.capacidad_o2} kg O2/h contra ${AORp.toFixed(1)} kg O2/h de demanda pico.`));
   if (nitrifica) ind.push(simInd('Edad de lodos / edad mínima para nitrificar', SRT / SRTmin, '', 1.5, null, `Edad mínima ${isFinite(SRTmin) ? SRTmin.toFixed(1) : '∞'} d a ${T} °C y ${DO} mg/L de OD; factor de seguridad recomendado ≥ 1,5.`));
   return { faltan: [], ind, calc: { F_M, SRT, PxBio, AOR, AORp, Qw, SRTmin } };
@@ -35688,6 +35691,7 @@ const SIM_MODELOS = {
     { k: 'long_vertedero', l: 'Longitud de vertedero', u: 'm', dim: 'len', alias: [/vertedero/] },
     { k: 'rec_proporcional', l: '¿La recirculación sube con el caudal? (si / no)', u: '', texto: true, tipico: 'no', alias: [/recirculacion.*proporcional/] },
     { k: 'tipo_proceso', l: 'Tipo de proceso (extendida / convencional)', u: '', texto: true, tipico: 'extendida', alias: [/tipo.*proceso/] },
+    { k: 'rec_horaria', l: 'Recirculación programada hora a hora (caudal de la bomba de recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de recirculación constante (la hora 0 es de 00:00 a 01:00). Los eventos (falla de recirculación, corte de energía) y las acciones del operador se siguen aplicando encima.' },
     { k: 'v0', l: 'v0 de Vesilind (opcional, de ensayo)', u: 'm/h', alias: [/\bv0\b/], ayuda: 'Si se deja vacío se estima desde el IVL.' },
     { k: 'n', l: 'n de Vesilind (opcional, de ensayo)', u: 'L/g', alias: [], ayuda: 'Si se deja vacío se estima desde el IVL.' }] },
   lodos_activados: { nombre: 'Reactor de lodos activados', det: /lodos activados|reactor biologico|reactor aerobico|aireacion|\bla\b|oxidacion|zanja|biologico/, verificar: simVerificarLA, params: [
@@ -35701,6 +35705,7 @@ const SIM_MODELOS = {
     { k: 'tipo_proceso', l: 'Tipo de proceso (extendida / convencional)', u: '', texto: true, tipico: 'extendida', alias: [/tipo.*proceso/] },
     { k: 'mlss_recirc', l: 'Concentración sedimentador (RAS) (Xr)', u: 'mg/L', alias: [/concentracion.*(sedimentador|recirc|purga|lodo)|\bxr\b/] },
     { k: 'q_purga', l: 'Volumen purga en totales (Tx) — sale de la recirculación del sedimentador', u: 'm3/h', dim: 'flow', alias: [/volumen.*purga.*totales|caudal.*purga|\btx\b/], ayuda: 'Si se carga, manda sobre la edad celular media (que pasa a ser un resultado). Vacío: se calcula la purga para lograr la edad celular media.' },
+    { k: 'purga_horaria', l: 'Purga programada hora a hora (caudal de purga, sale de la recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de purga constante (por ejemplo purgar solo en el turno de día). La edad de lodos real pasa a ser un resultado.' },
     { k: 'capacidad_o2', l: 'Capacidad de aireación instalada en campo', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] }].concat(SIM_COEF_PARAMS) },
   mbbr: { nombre: 'MBBR', det: /mbbr/, dinamico: true, verificar: simVerificarMBBR, params: [
     { k: 'volumen', l: 'Volumen adoptado (Vadp)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen/] }, { k: 'llenado', l: '% llenado de carriers', u: '%', req: 1, tipico: 50, alias: [/llenado|relleno|fill/] },
@@ -35932,9 +35937,9 @@ const SIM_TOOL_MAPEO_VARIAS = {
 };
 // Un solo pedido a la IA para todas las unidades que todavía tienen datos obligatorios sin resolver
 async function simAutoCompletarIA(unidades) {
-  const pend = unidades.filter(u => u.crudo && SIM_MODELOS[u.tipo].params.some(d => (d.req && (u.params[d.k] == null || u.params[d.k] === '')) || (d.serie24 && !sim24(u.params[d.k]))));
+  const pend = unidades.filter(u => u.crudo && SIM_MODELOS[u.tipo].params.some(d => (d.req && (u.params[d.k] == null || u.params[d.k] === '')) || (d.serie24 && !d.opcional && !sim24(u.params[d.k]))));
   if (!pend.length) return 0;
-  const bloques = pend.map(u => { const falt = SIM_MODELOS[u.tipo].params.filter(d => u.params[d.k] == null || u.params[d.k] === '' || u.fuentes[d.k] === 'tipico'); return `### Unidad "${u.nombre}" (modelo: ${SIM_MODELOS[u.tipo].nombre})\nPLANILLA (etiqueta: valor):\n${Object.entries(u.crudo).map(([k, v]) => `- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('\n')}\nPARÁMETROS A COMPLETAR (clave — descripción [unidad]):\n${falt.map(d => `- ${d.k} — ${d.l} [${simUDesc(d)}]`).join('\n')}`; }).join('\n\n');
+  const bloques = pend.map(u => { const falt = SIM_MODELOS[u.tipo].params.filter(d => !d.opcional && (u.params[d.k] == null || u.params[d.k] === '' || u.fuentes[d.k] === 'tipico')); return `### Unidad "${u.nombre}" (modelo: ${SIM_MODELOS[u.tipo].nombre})\nPLANILLA (etiqueta: valor):\n${Object.entries(u.crudo).map(([k, v]) => `- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('\n')}\nPARÁMETROS A COMPLETAR (clave — descripción [unidad]):\n${falt.map(d => `- ${d.k} — ${d.l} [${simUDesc(d)}]`).join('\n')}`; }).join('\n\n');
   const prompt = `Estás cargando los datos de unidades de una planta de tratamiento en un simulador. Para cada unidad se muestra su planilla de diseño y los parámetros que faltan. Asigná a cada parámetro el dato de la planilla que le corresponde, convertido a la unidad indicada (m3/d → m3/h, mm → m, etc.). Podés calcular un valor si se deriva directo de otros de la planilla (área = largo × ancho o π·D²/4; volumen = área × profundidad; etc.). Si no hay un dato claro, NO lo incluyas (no inventes ni uses valores típicos).\n\n${bloques}`;
   const r = await dfsLlamar([{ type: 'text', text: prompt }], SIM_TOOL_MAPEO_VARIAS, 4000); let n = 0;
   (r.unidades || []).forEach(x => { const u = pend.find(y => y.nombre === x.nombre); if (!u) return; (x.mapeo || []).forEach(m => { const df = SIM_MODELOS[u.tipo].params.find(y => y.k === m.clave); if (!df || m.valor === '' || m.valor == null) return; if (u.fuentes[df.k] && u.fuentes[df.k] !== 'tipico' && u.fuentes[df.k] !== 'geometria') return; const v = df.serie24 ? sim24(m.valor) : (df.texto ? String(m.valor) : Number(m.valor)); if (df.serie24 ? !v : (!df.texto && !isFinite(v))) return; u.params[df.k] = v; u.fuentes[df.k] = 'ia'; n++; }); });
@@ -36345,7 +36350,7 @@ function simPlantaDin(d) {
       const nitr = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s');
       if (sed && rs) {
         // reactor + sedimentador acoplados (dinámica de biomasa, oxígeno, nitrógeno y sólidos)
-        const kc = simKinDeParams(p), bio = simBioDin({ kin: kc.kin, kinA: kc.kinA, fv, V, X0: X, SRT: calc.SRT, Qw: simPos(p.q_purga), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
+        const kc = simKinDeParams(p), pgH = sim24(p.purga_horaria), bio = simBioDin({ kin: kc.kin, kinA: kc.kinA, fv, QrProg: rs.s.prog || null, QwProg: pgH, V, X0: X, SRT: calc.SRT, Qw: simPos(p.q_purga) || (pgH ? simMedia(pgH) : null), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
         const Qe = bio.Q.map((q, k) => Math.max(0, q - bio.Qw[k]));
         const react = { Q: bio.Q.slice(), dbo: bio.S.map(s => 0.68 * s), dqo: bio.S.slice(), sst: bio.MLSS.slice(), ntk: bio.NH.map(x => x + 1.5) };
         cur = react; pasa(u, ent, { mlss: bio.MLSS, aor: bio.aor, cap: bio.cap, do: bio.DO, nh: bio.NH, no: bio.NO, aire: bio.aire, foam: bio.foam, ivl: bio.ivl, v30: bio.v30, xh: bio.XH, xa: bio.XA, nivel: 1, DOsp: simPos(p.oxigeno_disuelto) || 2, bio });
@@ -36874,6 +36879,7 @@ function simSerieFilaHtml(u, df) {
   return `<tr><td colspan="5" style="${PROCESOS_EQ_TD}"><details ${v ? 'open' : ''}><summary style="cursor:pointer;font-weight:600">${esc(df.l)} [${esc(df.u)}] ${tag ? `<span title="${esc(tag[1])}">${tag[0]}</span>` : ''} ${estado}</summary>
     ${df.ayuda ? `<div class="hint" style="margin:4px 0 0;font-size:11px">${esc(df.ayuda)}</div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:4px;margin-top:6px">${cel}</div>
+    ${['purga_horaria', 'rec_horaria'].includes(df.k) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px"><span class="hint" style="margin:0">Rellenar con:</span><button class="btn btn-secondary btn-sm" onclick="simSerieRellenar('${id}','${df.k}','const')" title="El caudal de diseño las 24 horas">Caudal de diseño constante</button>${df.k === 'purga_horaria' ? `<button class="btn btn-secondary btn-sm" onclick="simSerieRellenar('${id}','${df.k}','dia')" title="El mismo volumen diario, solo de 8 a 16 h">Solo en el turno de día (8–16 h)</button>` : `<button class="btn btn-secondary btn-sm" onclick="simSerieRellenar('${id}','${df.k}','prop')" title="El mismo caudal medio, repartido como el caudal de la planta en el día">Proporcional al caudal del día</button>`}</div>` : ''}
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;margin-top:8px"><textarea id="sim-pg-${id}-${df.k}" rows="3" placeholder="Pegá acá los 24 valores desde Excel (una columna), o 2 columnas: ingreso | egreso" style="flex:1;min-width:220px;font-size:12px"></textarea>
       <div style="display:flex;flex-direction:column;gap:4px"><button class="btn btn-secondary btn-sm" onclick="simSeriePegar('${id}','${df.k}')">Cargar lo pegado</button><button class="btn btn-secondary btn-sm" onclick="simSerieLimpiar('${id}','${df.k}')">Borrar</button></div></div>
   </details></td></tr>`;
@@ -36889,6 +36895,23 @@ function simSeriePegar(id, k) {
   if (cols.length >= 2) cols.slice(0, series.length).forEach((c, i) => { u.params[series[i].k] = c; u.fuentes[series[i].k] = 'manual'; }); // 2 columnas = ingreso | egreso, en el orden de la planilla
   else { u.params[k] = cols[0]; u.fuentes[k] = 'manual'; }
   simGuardar(); simRender();
+}
+// Rellena la programación horaria de la purga o la recirculación a partir del caudal de diseño de la unidad
+function simSerieRellenar(id, k, modo) {
+  const u = simU(id), p = simParamsNum(u), g = simGlobalNum(); let nom = null;
+  try {
+    if (k === 'purga_horaria') {
+      nom = simPos(p.q_purga);
+      if (!nom) { const bak = u.params.purga_horaria; u.params.purga_horaria = null; try { const pl = simPlantaDin(_simDoc.datos); nom = pl.purga ? pl.purga.q_m3d / 24 : null; } finally { u.params.purga_horaria = bak; } }   // la purga que usa la simulación sin programación
+      if (!nom) nom = (simVerificarLA(p, g).calc || {}).Qw / 24 || null;
+    } else nom = simSedParams(p, g).Qr || null;
+  } catch (e) { nom = null; }
+  if (!(nom > 0)) { alert(k === 'purga_horaria' ? 'No hay un caudal de purga de diseño: cargá la edad de lodos, el volumen y el MLSS (o el caudal de purga).' : 'No hay un caudal de recirculación de diseño: cargá el caudal de recirculación o su relación.'); return; }
+  let a;
+  if (modo === 'dia') a = Array.from({ length: 24 }, (_, h) => h >= 8 && h < 16 ? nom * 3 : 0);
+  else if (modo === 'prop') { const pat = simPatron(g); a = pat.map(x => nom * x); }
+  else a = Array(24).fill(nom);
+  u.params[k] = a.map(x => +x.toFixed(3)); u.fuentes[k] = 'manual'; simGuardar(); simRender();
 }
 function simSerieLimpiar(id, k) { const u = simU(id); u.params[k] = null; delete u.fuentes[k]; simGuardar(); simRender(); }
 // ── Tablero de las unidades con simulación propia (ecualizador, SBR, MBBR) ──
@@ -37032,7 +37055,7 @@ function simBioDin(o) {
     const qb = t < 0 ? Qm : interp(o.Qin, t), Q = qb, cMult = 1;
     const S0 = (t < 0 ? S0m : interp(o.dbo, t) / 0.68) * cMult, NTKin = (t < 0 ? NTKm : interp(o.ntk, t)) * (1 + (cMult - 1) * 0.7), XIinT = XIin;
     // caudales
-    const Qr = (sd.prop ? Qr0 / Qm * Q : Qr0) * f.rec, Qw = Qw0 * f.purga, Qe = Math.max(0, Q - Qw), Qf = Math.max(0, Q + Qr);
+    const hh24 = Math.floor((((t % 24) + 24) % 24)), Qr = (o.QrProg ? o.QrProg[hh24] : (sd.prop ? Qr0 / Qm * Q : Qr0)) * f.rec, Qw = (o.QwProg ? o.QwProg[hh24] : Qw0) * f.purga, Qe = Math.max(0, Q - Qw), Qf = Math.max(0, Q + Qr);
     // cinética
     const fTh = th(1.07, Tt), fTa = th(1.10, Tt), fTd = th(1.04, Tt), inh = 1 - Math.min(0.95, f.tox), nutL = 1 - 0.45 * f.nut;
     const fDOH = st.DO / (KOH + st.DO), fDOA = st.DO / (KOA + st.DO);
