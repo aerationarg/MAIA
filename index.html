@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -35595,7 +35595,28 @@ function simVerificarTamiz(p, g, ev, o) {
   }
   return res;
 }
-// Cámara de contacto / desinfección tipo laberinto: solo hidráulica (tiempo de contacto)
+// Cloro y coliformes en la cámara de contacto: N tanques de mezcla completa en serie (cada línea con su volumen y su caudal). El cloro entra con la dosis (bomba de caudal fijo,
+// calculada con el caudal pico, o proporcional al caudal) menos la demanda inmediata del efluente, y decae a primer orden; los coliformes se inactivan según Chick–Watson (dN/dt = −Λ·C·N).
+function simCloro(o, V, nl, p, g) {
+  const dosis = simPos(p.cloro_dosis); if (!dosis) return null;
+  const NC = Math.max(1, Math.min(20, Math.round(simNum(p.n_comp) || 8))), kc = simNum(p.k_cloro) != null && Number(p.k_cloro) >= 0 ? Number(p.k_cloro) : 0.02, lam = simPos(p.lambda_coli) || 0.23, N0 = simPos(p.coli_in) || 1e6, prop = String(p.dosif_proporcional || 'no').toLowerCase().startsWith('s'), dem = simNum(p.demanda_cloro);
+  const qm = simMean(o.Qin) / nl, Qpk = (simPos(g.q_pico) || (simPos(g.q_med) ? g.q_med * 1.5 : null) || Math.max(...o.Qin)) / nl, G = dosis * Qpk, Vi = V / NC, dt = 15 / 3600, ns = Math.max(1, Math.round(o.dtH / dt));
+  const C = Array(NC).fill(0), Nn = Array(NC).fill(N0), mean = a => a.reduce((x, y) => x + y, 0) / a.length, cm = { dbo: mean(o.cin.dbo), sst: mean(o.cin.sst), ntk: mean(o.cin.ntk) };
+  const paso = (q, cin) => {
+    const qq = Math.max(q, 1e-6), Cd = Math.min(500, prop ? dosis : G / qq), D0 = dem != null && dem >= 0 ? dem : 0.8 + 0.03 * cin.dbo + 0.01 * cin.sst + 2 * Math.max(0, cin.ntk - 2), c0 = Math.max(0, Cd - D0), a = qq / Vi; let cP = c0, nP = N0;
+    for (let i = 0; i < NC; i++) { const cOld = C[i], nOld = Nn[i]; C[i] = Math.max(0, cOld + (a * (cP - cOld) - 60 * kc * cOld) * dt); Nn[i] = Math.max(1e-3, nOld + (a * (nP - nOld) - 60 * lam * cOld * nOld) * dt); cP = cOld; nP = nOld; }
+    return { Cd, D0, c0, trh: V / qq * 60 };
+  };
+  for (let k = 0; k < Math.round(3 / dt); k++) paso(qm, cm);   // 3 h de calentamiento con el caudal medio
+  const out = { resid: [], dosis: [], ct: [], coli: [], log: [], dem: [], c0: [], N0, nl, NC };
+  for (let i = 0; i < o.NT; i++) {
+    let sr = 0, sd = 0, sc = 0, sn = 0, sD = 0, s0 = 0; const cin = { dbo: o.cin.dbo[i], sst: o.cin.sst[i], ntk: o.cin.ntk[i] }, q = o.Qin[i] / nl;
+    for (let j = 0; j < ns; j++) { const r = paso(q, cin); sr += C[NC - 1]; sd += r.Cd; sc += mean(C) * Math.min(r.trh, 1e4); sn += Math.log10(Math.max(1e-3, Nn[NC - 1])); sD += r.D0; s0 += r.c0; }
+    out.resid.push(sr / ns); out.dosis.push(sd / ns); out.ct.push(sc / ns); out.coli.push(Math.pow(10, sn / ns)); out.log.push(Math.log10(N0) - sn / ns); out.dem.push(sD / ns); out.c0.push(s0 / ns);
+  }
+  return out;
+}
+// Cámara de contacto / desinfección tipo laberinto: hidráulica (tiempo de contacto) y, si se carga la dosis, cinética del cloro y coliformes
 function simVerificarDes(p, g, ev, o) {
   const V = simPos(p.volumen), Q = simPos(g.q_med), tmin = simPos(p.tiempo_min) || 30, nl = Math.max(1, Math.round(simNum(p.n_lineas) || 1)), falt = [];
   if (!V) falt.push('Volumen de la cámara'); if (!Q) falt.push('Caudal medio');
@@ -35607,7 +35628,19 @@ function simVerificarDes(p, g, ev, o) {
     const s = simHidCorrer(p, o, V * nl), trh = o.Qin.map(q => V / Math.max(q / nl, 1e-6) * 60);
     ind.push(simInd('Tiempo de retención mínimo del período', simMin(trh), 'min', tmin, null, 'Con el caudal máximo que entra (picos y eventos del escenario).'));
     ind.push(simInd('Horas con el tiempo de retención por debajo del mínimo', trh.filter(x => x < tmin).length * o.dtH, 'h', null, 0, ''));
-    return simHidCierre(res, s, [{ titulo: 'Tiempo de retención en la cámara (min)', vals: trh, min: tmin }]);
+    const pars = [{ titulo: 'Tiempo de retención en la cámara (min)', vals: trh, min: tmin }];
+    if (o.cin && simPos(p.cloro_dosis)) {
+      const cl = simCloro(o, V, nl, p, g), lim = simPos(p.coli_lim) || 2000, N0 = cl.N0, logReq = Math.max(0, Math.log10(N0 / lim));
+      ind.push(simInd('Cloro residual a la salida: mínimo del período', simMin(cl.resid), 'mg/L', 0.5, null, 'Típico 0,5 a 1,5 mg/L de cloro residual a la salida; con poco caudal sube la dosis (bomba fija) y con el pico baja.'),
+        simInd('Cloro residual a la salida: promedio', simMean(cl.resid), 'mg/L', 0.5, 3, `Dosis ${p.cloro_dosis} mg/L; demanda inmediata del efluente ${simFmt(simMean(cl.dem))} mg/L; decaimiento ${simPos(p.k_cloro) || 0.02} 1/min.`),
+        simInd('CT mínimo del período (cloro medio × tiempo de contacto)', simMin(cl.ct), 'mg·min/L', 15, null, 'Típico ≥ 15–30 mg·min/L para 3 log de coliformes con cloro libre; con cloraminas se necesitan valores de 100 o más.'),
+        simInd('Reducción de coliformes mínima (log)', simMin(cl.log), 'log', logReq, null, `Hace falta ${logReq.toFixed(1)} log para pasar de ${N0.toExponential(0)} a ${lim} NMP/100 mL.`),
+        simInd('Coliformes máximos en el efluente', simMax(cl.coli), 'NMP/100 mL', null, lim, 'Con la constante de inactivación cargada (Chick–Watson): validar con ensayos de la planta.'));
+      if (simPos(p.demanda_cloro) == null && simMax(cl.dem) > p.cloro_dosis) ind.push(simInd('Dosis de cloro menor que la demanda inmediata', simMax(cl.dem) - Number(p.cloro_dosis), 'mg/L', null, 0, 'El efluente consume más cloro del que se agrega: casi no queda residual.'));
+      pars.push({ titulo: 'Cloro: dosis que llega al agua (mg/L) y residual a la salida (mg/L)', vals: cl.dosis.map(x => Math.min(x, 30)), vals2: cl.resid, n1: 'Dosis inicial', n2: 'Residual', min: 0.5 }, { titulo: 'Reducción de coliformes (log) y CT (mg·min/L ÷ 10)', vals: cl.log, vals2: cl.ct.map(x => x / 10), n1: 'Reducción (log)', n2: 'CT / 10', min: logReq }, { titulo: 'Coliformes en el efluente (log10 NMP/100 mL)', vals: cl.coli.map(x => Math.log10(Math.max(1, x))), max: Math.log10(lim) });
+      res.cl = cl;
+    }
+    return simHidCierre(res, s, pars);
   }
   return res;
 }
@@ -35781,7 +35814,7 @@ const SIM_MODELOS = {
     { k: 'volumen', l: 'Volumen útil (V)', u: 'm3', dim: 'vol', req: 1, alias: [/^volumen util/, /volumen.*(anoxic|util|adoptado)|volumen/] },
     { k: 'rec_interna', l: 'Recirculación interna desde el reactor aerobio (Qri / Q medio)', u: '', tipico: 3, alias: [/recirculacion interna|relacion.*recirc.*intern|\bqri\b/], ayuda: 'No figura en la planilla: típico 2–4 veces el caudal medio (devuelve el nitrato del aerobio al anóxico). Se simula si el anóxico está justo antes del reactor de lodos activados y su sedimentador; el lodo recirculado del sedimentador también vuelve al anóxico.' },
     { k: 'q_rec_interna', l: 'Caudal de recirculación interna (si se conoce; reemplaza a la relación)', u: 'm3/h', dim: 'flow', alias: [/caudal.*recirculacion interna/] }] },
-  lodos_activados: { nombre: 'Reactor de lodos activados', det: /lodos activados|reactor biologico|reactor aerobico|aireacion|\bla\b|oxidacion|zanja|biologico/, verificar: simVerificarLA, params: [
+  lodos_activados: { nombre: 'Reactor de lodos activados', det: /lodos activados|reactor biologico|reactor aerobi[oc]o|aireacion|\bla\b|oxidacion|zanja|biologico/, verificar: simVerificarLA, params: [
     { k: 'volumen', l: 'Volumen adoptado (Vadp)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen.*(reactor|aireacion|total|util)|volumen/] },
     { k: 'mlss', l: 'Sólidos suspendidos totales (Xt, MLSS)', u: 'mg/L', req: 1, alias: [/mlss|ssla|solidos suspendidos totales|solidos.*(reactor|licor)|concentracion.*(biomasa|lodos)|\bxt\b/] },
     { k: 'edad_lodos', l: 'Edad celular media (Theta)', u: 'd', dim: 'dias', req: 1, alias: [/edad.*(lodos|celular|barro)|srt|theta|tiempo.*residencia.*celular/] },
@@ -35838,7 +35871,15 @@ const SIM_MODELOS = {
   desinfeccion: { nombre: 'Cámara de contacto / desinfección (laberinto)', det: /desinfec|laberinto|cloracion|camara de contacto/, dinamico: true, verificar: simVerificarDes, params: [
     { k: 'volumen', l: 'Volumen cámara cloración (de cada línea)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen.*(camara|cloracion)|volumen util seleccionado/, /volumen/] },
     { k: 'n_lineas', l: 'Número de líneas (n)', u: 'u', tipico: 1, alias: [/numero.*lineas|cantidad.*lineas|^lineas/] },
-    { k: 'tiempo_min', l: 'Tiempo residencia caudal promedio (TRH mínimo requerido)', u: 'min', tipico: 30, alias: [/tiempo.*residencia.*prom/, /tiempo.*(contacto|retencion|residencia)/] }].concat(SIM_HID_PARAMS) },
+    { k: 'tiempo_min', l: 'Tiempo residencia caudal promedio (TRH mínimo requerido)', u: 'min', tipico: 30, alias: [/tiempo.*residencia.*prom/, /tiempo.*(contacto|retencion|residencia)/] },
+    { k: 'cloro_dosis', l: 'Cantidad deseada de cloro activo a inyectar en el agua', u: 'mg/L', alias: [/cantidad deseada de cloro|cloro activo a inyectar|dosis.*cloro/], ayuda: 'Opcional. Si se carga (planilla Máster: 5 mg/L), se simula la cinética del cloro y la inactivación de coliformes en la cámara. Vacío o 0: solo hidráulica (por ejemplo si se desinfecta con UV).' },
+    { k: 'dosif_proporcional', l: '¿La bomba dosificadora sigue el caudal? (si / no)', u: '', texto: true, tipico: 'no', alias: [], ayuda: 'No: la bomba trabaja con un caudal fijo, el de diseño a caudal pico (como en la planilla Máster), y la dosis que llega al agua sube cuando baja el caudal y baja cuando sube.' },
+    { k: 'demanda_cloro', l: 'Demanda inmediata de cloro del efluente (opcional)', u: 'mg/L', alias: [], ayuda: 'Vacío: se estima con la calidad del efluente que llega: 0,8 + 0,03 × DBO + 0,01 × SST + 2 × (NTK − 2).' },
+    { k: 'k_cloro', l: 'Decaimiento del cloro residual (primer orden)', u: '1/min', tipico: 0.02, alias: [], ayuda: 'Típico 0,01–0,05 1/min (vida media de 15 a 70 min).' },
+    { k: 'n_comp', l: 'Compartimentos equivalentes de la cámara (mezcla completa en serie)', u: 'u', tipico: 8, alias: [], ayuda: 'Un laberinto bien tabicado se comporta como 6–10 tanques en serie (más cerca de flujo pistón); un tanque sin tabiques como 1–2.' },
+    { k: 'coli_in', l: 'Coliformes que entran a la cámara', u: 'NMP/100 mL', tipico: 1000000, alias: [], ayuda: 'Típico de un efluente secundario: 10^5 a 10^7.' },
+    { k: 'lambda_coli', l: 'Constante de inactivación de coliformes (Chick–Watson)', u: 'L/mg·min', tipico: 0.23, alias: [], ayuda: 'ln(N/N0) = −Λ · C · t. Típico: 3 log con CT ≈ 30 mg·min/L de cloro libre; con cloraminas (efluente con amonio) es de 10 a 50 veces más lenta: ajustala con ensayos.' },
+    { k: 'coli_lim', l: 'Límite de coliformes en el vuelco', u: 'NMP/100 mL', tipico: 2000, alias: [] }].concat(SIM_HID_PARAMS) },
   desengrasadora: { nombre: 'Cámara desengrasadora', det: /desengras|trampa de grasa|camara de grasa/, dinamico: true, verificar: simVerificarDes, params: [
     { k: 'volumen', l: 'Volumen útil', u: 'm3', dim: 'vol', req: 1, alias: [/volumen util/, /volumen/] },
     { k: 'tiempo_min', l: 'TRH (tiempo de retención mínimo requerido)', u: 'min', tipico: 20, alias: [/^trh|tiempo.*(retencion|residencia)/] }].concat(SIM_HID_PARAMS) },
@@ -36220,7 +36261,7 @@ function simParamsNum(u) {
 }
 function simCorrer(u) {
   const m = SIM_MODELOS[u.tipo], e = u.escenario && u.escenario.mult > 0 ? { mult: Number(u.escenario.mult), inicio: Number(u.escenario.inicio) || 0, dur: Number(u.escenario.dur) || 0 } : null;
-  if (SIM_TIPOS_LODOS.includes(u.tipo)) { try { const nd = simPlantaCache(_simDoc.datos).nodos.find(x => x.id === u.id); if (nd && nd.extra && nd.extra.res) return nd.extra.res; } catch (err) { return { faltan: [], ind: [], error: 'Error de cálculo: ' + err.message }; } }
+  if (SIM_TIPOS_LODOS.includes(u.tipo) || (u.tipo === 'desinfeccion' && simPos(simParamsNum(u).cloro_dosis))) { try { const nd = simPlantaCache(_simDoc.datos).nodos.find(x => x.id === u.id); if (nd && nd.extra && nd.extra.res) return nd.extra.res; } catch (err) { return { faltan: [], ind: [], error: 'Error de cálculo: ' + err.message }; } }   // la línea de lodos y el cloro dependen de lo que llega de la planta
   try { return m.verificar(simParamsNum(u), simGlobalNum(), e, u.tipo === 'pozo' ? simPozoOpciones(_simDoc.datos, e) : (SIM_TIPOS_ENTRADAS.includes(u.tipo) ? simEntradas(_simDoc.datos, e) : true)); } catch (err) { return { faltan: [], ind: [], error: 'Error de cálculo: ' + err.message }; }
 }
 const simFmt = v => v == null ? '—' : (typeof v !== 'number' ? String(v) : (Math.abs(v) >= 1000 ? v.toFixed(0) : Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toFixed(3)));
@@ -36536,7 +36577,8 @@ function simPlantaDin1(d, ret) {
       if (s.bufMax > 2 * s.Vf * s.nt) avisos.push(`SBR "${u.nombre}": el agua que espera para entrar al tanque llega a ${s.bufMax.toFixed(0)} m3; hace falta un tanque de carga o más tanques/ciclos para que no dé abasto.`);
       pasa(u, ent, { sim: s, sbr: s });
     } else if (u.tipo === 'desinfeccion' || u.tipo === 'desengrasadora') {
-      const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
+      const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, Object.assign(simHidExtra(hs), res.cl ? { cl: res.cl, res } : {}));
+      if (res.cl) { const lim = simPos(p.coli_lim) || 2000, mx = simMax(res.cl.coli); if (mx > lim) avisos.push(`⚠ "${u.nombre}": los coliformes del efluente llegan a ${mx.toExponential(1)} NMP/100 mL (límite ${lim}); el cloro residual mínimo es ${simMin(res.cl.resid).toFixed(2)} mg/L.`); }
     } else if (u.tipo === 'mbr' && res.sim) {
       const sm = res.sim; cur = { Q: sm.Q.slice(), dbo: sm.dbo.slice(), dqo: sm.dqo.slice(), sst: sm.sst.slice(), ntk: sm.ntk.slice() };
       const kgM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) * 24 / 1000, qM = simMedia(sm.Qw, null) * 24, xM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) / Math.max(1e-9, simMedia(sm.Qw, null));
