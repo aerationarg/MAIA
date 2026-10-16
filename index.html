@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -36332,17 +36332,33 @@ function simPlantaCache(d) {
   if (_simPlantaMemo.k !== k || !_simPlantaMemo.v) _simPlantaMemo = { k, v: simPlantaDin(d) };
   return _simPlantaMemo.v;
 }
+// Retornos de la línea de lodos (rebose del espesador, filtrado de la deshidratación) a la cabecera de la planta: la línea de lodos depende de las purgas y los retornos
+// cambian lo que entra, así que se itera (planta → lodos → retornos → planta) hasta que se estabiliza (2 vueltas alcanzan).
+// Concentraciones estimadas (típicas): rebose del espesador DBO 60 + 0,25·SST, NTK 15 + 0,04·SST; filtrado DBO 150 + 0,3·SST, NTK 60 + 0,05·SST (mg/L).
+function simRetornoCabecera(rets) {
+  const NT = rets[0].Q.length, Q = Array(NT).fill(0), db = Array(NT).fill(0), nt = Array(NT).fill(0), ss = Array(NT).fill(0), C = { espesador: [60, 0.25, 15, 0.04], deshidratacion: [150, 0.3, 60, 0.05] };
+  rets.forEach(r => { const c = C[r.tipo] || C.espesador; for (let k = 0; k < NT; k++) { const q = r.Q[k] || 0, x = r.X[k] || 0; Q[k] += q; ss[k] += q * x; db[k] += q * (c[0] + c[1] * x); nt[k] += q * (c[2] + c[3] * x); } });
+  if (!Q.some(q => q > 1e-9)) return null;
+  const w = a => a.map((v, k) => Q[k] > 1e-9 ? v / Q[k] : 0), dbo = w(db);
+  return { Q, sst: w(ss), dbo, dqo: dbo.map(x => 2.2 * x), ntk: w(nt) };
+}
 function simPlantaDin(d) {
+  let pl = simPlantaDin1(d, null);
+  for (let it = 0; it < 2 && pl.retornos && pl.retornos.length; it++) { const rt = simRetornoCabecera(pl.retornos); if (!rt) break; pl = simPlantaDin1(d, rt); }
+  return pl;
+}
+function simPlantaDin1(d, ret) {
   const g = simGlobalNum(), dias = Math.min(7, Math.max(1, Math.round(d.horizonte_dias || 1))), horas = 24 * dias, NT = horas * 12, dtH = SIM_DTH;
   const T = Array.from({ length: NT }, (_, i) => i * dtH), pat = simPatron(g), temp = g.temp != null ? g.temp : 20;
   const dd = { eventos: (d.eventos || []).slice(), acciones: d.acciones || [] };
   if (d.evento && Number(d.evento.mult) > 0) dd.eventos.push({ tipo: 'pico_caudal', inicio: Number(d.evento.inicio) || 0, dur: Number(d.evento.dur) || 0, int: Number(d.evento.mult) });
   const fac = T.map(t => simFactores(t, dd)), qm = simPos(g.q_med) || 0;
-  const Qin = T.map((t, i) => Math.min(1, fac[i].qlim) * Math.max(simQ(g, pat, t, null), fac[i].qmult > 1 ? qm * fac[i].qmult : 0));
+  const Qin0 = T.map((t, i) => Math.min(1, fac[i].qlim) * Math.max(simQ(g, pat, t, null), fac[i].qmult > 1 ? qm * fac[i].qmult : 0)), Qin = ret ? Qin0.map((q, k) => q + ret.Q[k]) : Qin0;
   const fill = v => Array(NT).fill(v == null ? 0 : v), dqo0 = g.dqo != null ? g.dqo : (g.dbo ? g.dbo * 2 : 0);
   const clone = s => ({ Q: s.Q.slice(), dbo: s.dbo.slice(), dqo: s.dqo.slice(), sst: s.sst.slice(), ntk: s.ntk.slice() });
-  let cur = { Q: Qin, dbo: fac.map(f => (g.dbo || 0) * (1 + (f.carga - 1))), dqo: fac.map(f => dqo0 * f.carga), sst: fill(g.sst), ntk: fac.map(f => (g.ntk || 0) * (1 + (f.carga - 1) * 0.7)) };
+  let cur = { Q: Qin0, dbo: fac.map(f => (g.dbo || 0) * (1 + (f.carga - 1))), dqo: fac.map(f => dqo0 * f.carga), sst: fill(g.sst), ntk: fac.map(f => (g.ntk || 0) * (1 + (f.carga - 1) * 0.7)) };
   const nodos = [{ id: 'entrada', nombre: 'Afluente', tipo: 'entrada', sal: clone(cur) }], avisos = [], lodos = [], fuentesLodo = [], us = d.unidades;
+  if (ret) { const c0 = cur, mix = (a, b) => a.map((x, k) => Qin[k] > 1e-9 ? (c0.Q[k] * x + ret.Q[k] * b[k]) / Qin[k] : x); cur = { Q: Qin.slice(), dbo: mix(c0.dbo, ret.dbo), dqo: mix(c0.dqo, ret.dqo), sst: mix(c0.sst, ret.sst), ntk: mix(c0.ntk, ret.ntk) }; }   // los retornos de la línea de lodos entran con el afluente
   let anoxPend = null, recircInt = null;
   let recirc = null, purga = null; const srcC = (u, kg, q) => { if (q > 0 && kg > 0) fuentesLodo.push({ id: u.id, nombre: u.nombre, Q: Array(NT).fill(q / 24), X: Array(NT).fill(kg / q * 1000) }); };
   const resamp = arr => T.map((t, k) => { const a = Math.floor(t * 30), b = Math.min(arr.length - 1, Math.max(a, Math.floor((t + dtH) * 30) - 1)); let s = 0; for (let i = a; i <= b; i++) s += arr[Math.min(i, arr.length - 1)]; return s / (b - a + 1); });
@@ -36458,12 +36474,12 @@ function simPlantaDin(d) {
       if ((res.faltan && res.faltan.length) || res.error || !res.sim) { avisos.push(`"${u.nombre}": ${res.error || 'faltan datos (' + (res.faltan || []).join(', ') + ')'}; no se tiene en cuenta en la línea de lodos.`); nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent: { Q: zL, dbo: zL, dqo: zL, sst: zL, ntk: zL }, sal: { Q: zL, dbo: zL, dqo: zL, sst: zL, ntk: zL }, extra: { lodo: true, incompleta: true, res } }); return; }
       const s = res.sim;
       nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent: { Q: s.qin, dbo: zL, dqo: zL, sst: s.Xin, ntk: zL }, sal: { Q: s.Q, dbo: zL, dqo: zL, sst: s.X, ntk: zL }, extra: { lodo: true, sim: s, res, spillTotal: s.spillTotal || 0 } });
-      if (s.ret) retornos.push({ nombre: u.nombre, Q: s.ret.Q, X: s.ret.X });
+      if (s.ret) retornos.push({ nombre: u.nombre, tipo: u.tipo, Q: s.ret.Q, X: s.ret.X });
       if (u.tipo === 'deshidratacion') { const kg = simMedia(s.Q.map((q, k) => q * s.X[k]), null) * 24 / 1000, qd = simMedia(s.Q, null) * 24; lodos.push({ nombre: 'Torta (' + u.nombre + ')', kg_d: kg, q_m3d: qd, sequedad: simMedia(s.X, null) / 10000, nota: 'Lodo deshidratado' }); }
       if (s.spillTotal > 0.5) avisos.push(`⚠ "${u.nombre}": el tanque de lodo se llena y se pierden ${s.spillTotal.toFixed(1)} m3 en ${horas} h.`);
       sl = { Q: s.Q, X: s.X };
     });
-    if (retornos.length) avisos.push('Retornos a la cabecera de la planta (todavía no se suman al ingreso): ' + retornos.map(r => `${r.nombre} ${(simMedia(r.Q, null) * 24).toFixed(1)} m3/d con SST ${(simMedia(r.Q.map((q, k) => q * r.X[k]), null) / Math.max(1e-9, simMedia(r.Q, null))).toFixed(0)} mg/L`).join('; ') + '.');
+    if (retornos.length) avisos.push((ret ? 'Retornos de la línea de lodos sumados al ingreso de la planta (concentraciones estimadas de DBO y NTK): ' : 'Retornos a la cabecera de la planta: ') + retornos.map(r => `${r.nombre} ${(simMedia(r.Q, null) * 24).toFixed(1)} m3/d con SST ${(simMedia(r.Q.map((q, k) => q * r.X[k]), null) / Math.max(1e-9, simMedia(r.Q, null))).toFixed(0)} mg/L`).join('; ') + '.');
   }
   const ef = cur, st = arr => ({ media: simMedia(arr, ef.Q), max: Math.max(...arr) });
   const lim = { dbo: simPos(g.lim_dbo), dqo: simPos(g.lim_dqo), sst: simPos(g.sst_vuelco), ntk: simPos(g.lim_ntk) };
