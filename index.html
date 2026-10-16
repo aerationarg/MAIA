@@ -390,7 +390,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -447,7 +447,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -37794,7 +37794,7 @@ async function casoLeccionGlobal(id) {
 }
 
 // ── IA ──
-const CASO_SISTEMA = `Sos el copiloto de trabajo del equipo de Procesos de Aeration (tratamiento de aguas y efluentes), dentro de MAIA. Trabajás sobre un CASO: un trabajo concreto para un cliente. Respondé en español rioplatense, claro y directo, con rigor técnico.
+const CASO_SISTEMA = `REGLA CRÍTICA: nunca digas que hiciste, cambiaste, agregaste, quitaste, giraste o guardaste algo si en ESTE turno no ejecutaste la herramienta que lo hace y esta confirmó el resultado. Si no hay herramienta para algo, decí que no se puede. Las respuestas anteriores del historial pueden aparentar haber hecho cosas sin herramientas: no las imites. Después de modificar un documento, releé el resultado (leer_registro) si tenés dudas antes de afirmarlo.\n\nSos el copiloto de trabajo del equipo de Procesos de Aeration (tratamiento de aguas y efluentes), dentro de MAIA. Trabajás sobre un CASO: un trabajo concreto para un cliente. Respondé en español rioplatense, claro y directo, con rigor técnico.
 
 Cómo trabajar:
 - Tenés herramientas para LEER lo que ya existe en MAIA: proyectos de Procesos IA, flowsheets, DFS, manuales, presentaciones, simulaciones, catálogo de proyectos anteriores, lecciones aprendidas, bibliografía de referencia (documentos ya cargados en Cfg Procesos IA) y los demás módulos. Usalas en vez de suponer: buscá primero, leé solo la parte que necesitás (casi todas las lecturas aceptan "parte") y decí de dónde sale cada dato (proyecto, documento, lección).
@@ -37860,21 +37860,27 @@ async function casoEnviar() {
   _casoMsgs.push({ rol: 'user', contenido: contenidoUser, meta: adj.length ? { adjuntos: adj.map(f => f.name) } : {} }); casoRenderMsgs('Pensando…');
   try {
     const bloquesAdj = (adj.length ? await mantIaBloques(adj) : []).map(b => (b.type === 'text' && b.text.length > 12000 && /^── Documento adjunto: "[^"]+\.(xlsx?|docx)" ──/i.test(b.text.slice(0, 300))) ? { type: 'text', text: b.text.slice(0, 3000) + `\n[… el archivo sigue (${b.text.length.toLocaleString('es-AR')} caracteres en total): no se manda entero para no gastar de más; usá ver_archivo con hoja/rango o desde/hasta para ver lo que necesites.]` } : b);
-    const hist = _casoMsgs.slice(0, -1).slice(-14).map(m => ({ role: m.rol === 'user' ? 'user' : 'assistant', content: m.contenido }));
+    const hist = _casoMsgs.slice(0, -1).slice(-14).map(m => ({ role: m.rol === 'user' ? 'user' : 'assistant', content: casoRespSinHerr(m) ? CASO_AVISO_SIN_HERR + m.contenido : m.contenido }));
     while (hist.length && hist[0].role !== 'user') hist.shift();
     const messages = hist.concat([{ role: 'user', content: bloquesAdj.concat([{ type: 'text', text: texto || '(ver adjuntos)' }]) }]);
-    let fallos = 0, ultimoErr = '';
+    let fallos = 0, ultimoErr = '', mutoOk = false, nudged = false;
     for (let ronda = 0; ronda < 10; ronda++) {
       const data = await casoLlamar(messages); costo += casoCosto(data.usage, modeloKey);
       messages.push({ role: 'assistant', content: data.content });
       const tus = (data.content || []).filter(c => c.type === 'tool_use');
-      if (!tus.length) { final = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim() + (data.stop_reason === 'max_tokens' ? '\n\n(La respuesta se cortó por largo: pedime que siga.)' : ''); break; }
+      if (!tus.length) {
+        const txt = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim(), miente = !mutoOk && casoPidioCambio(texto) && casoAfirmaAccion(txt);
+        if (miente && !nudged) { nudged = true; casoRenderMsgs('Verificando que el cambio se haya hecho…'); messages.push({ role: 'user', content: [{ type: 'text', text: CASO_NUDGE }] }); continue; }
+        final = txt + (data.stop_reason === 'max_tokens' ? '\n\n(La respuesta se cortó por largo: pedime que siga.)' : '') + (miente ? '\n\n⚠ MAIA: en esta respuesta no se ejecutó ninguna herramienta que modifique algo, así que NO cambió nada. Pedímelo de nuevo, más específico (por ejemplo, el nombre exacto del equipo).' : '');
+        break;
+      }
       casoRenderMsgs('Usando herramientas: ' + tus.map(t => t.name.replace(/_/g, ' ')).join(', ') + '…');
       const res = [], cortado = data.stop_reason === 'max_tokens';   // si la respuesta se cortó, la llamada a la herramienta llegó incompleta
       for (const tu of tus) {
         let out, err = false;
         if (cortado) { out = 'Error: tu llamada se cortó por superar el máximo de salida, así que llegó incompleta y NO se ejecutó. Dividila en llamadas más chicas (hasta ~40 celdas o filas por llamada) o usá operaciones compactas (copiar_rango / copiar_hoja en Excel).'; err = true; }
         else { try { out = await casoEjecutarHerramienta(tu.name, tu.input || {}); } catch (e) { out = 'Error: ' + e.message; err = true; } }
+        if (!err && CASO_TOOLS_MUTAN.has(tu.name) && !/^(Ya hay|No se|Tipo desconocido|Herramienta desconocida)/.test(String(out))) mutoOk = true;
         usos.push((err ? '✕ ' : '') + casoEtiquetaUso(tu)); res.push({ type: 'tool_result', tool_use_id: tu.id, content: String(out).slice(0, (tu.name === 'leer_documento' ? 16000 : CASO_MAX_RESULTADO) + 500), is_error: err || undefined });
       }
       messages.push({ role: 'user', content: res });
@@ -38937,7 +38943,7 @@ async function casoVerDoc(tipo, id, nombre) {
     const r = await casoRest(`${tabla}?id=eq.${encodeURIComponent(v.id)}&select=*`), rows = await r.json().catch(() => []); if (!r.ok || !rows.length) throw new Error('No se pudo leer el documento (¿se borró?).');
     const p = rows[0]; let cuerpo = '';
     if (v.tipo === 'flowsheet' || v.tipo === 'procesos') {
-      const secc = (titulo, svg) => `<h4 style="margin:12px 0 4px">${titulo}</h4><div class="cvf-svg" style="overflow:auto;border:1px solid var(--border);border-radius:6px;background:#fff">${svg.replace('<svg', '<svg style="width:100%;height:auto;max-width:none"')}</div>`;
+      const nav = []; const secc = (titulo, svg) => { const k = 'cvf-s' + nav.length; nav.push([k, titulo]); return `<h4 id="${k}" style="margin:12px 0 4px">${titulo}</h4><div class="cvf-svg" style="overflow:auto;border:1px solid var(--border);border-radius:6px;background:#fff">${svg.replace('<svg', '<svg style="width:100%;height:auto;max-width:none"')}</div>`; };
       let partes = ''; const svg = procesosFlowsheetSvg(p);
       partes += svg ? secc('Diagrama de proceso', svg) : '<p class="hint">Todavía no tiene etapas para dibujar el diagrama.</p>';
       try {
@@ -38947,7 +38953,7 @@ async function casoVerDoc(tipo, id, nombre) {
           try { const cs = pvCortesLista(p); partes += secc(cs.length ? 'Vista en corte (general)' : 'Vista en corte', pvCorteSvg(p, un).svg); cs.forEach(k => { try { partes += secc(`Corte ${esc(k.nombre)}–${esc(k.nombre)}'`, pvCorteDefSvg(p, un, k).svg); } catch (e) { /* sin ese corte */ } }); } catch (e) { partes += `<p class="hint">No se pudo dibujar la vista en corte: ${esc(e.message)}</p>`; }
         }
       } catch (e) { /* sin vistas */ }
-      cuerpo = `<div style="margin-bottom:6px"><label style="font-size:12px">Zoom <input type="range" min="40" max="250" value="100" oninput="document.querySelectorAll('.cvf-svg').forEach(d => { const s = d.firstElementChild; if (s) s.style.width = this.value + '%'; })" style="width:160px;vertical-align:middle" /></label></div>` + partes + (v.tipo === 'procesos' ? `<pre style="white-space:pre-wrap;font-size:12.5px;margin-top:10px">${esc(casoProyectoTxt(p, 'tren', false))}</pre>` : '');
+      cuerpo = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px">${nav.map(([k, t]) => `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="document.getElementById('${k}').scrollIntoView({behavior:'smooth'})">${t}</button>`).join('')}<label style="font-size:12px;margin-left:auto">Zoom <input type="range" min="40" max="250" value="100" oninput="document.querySelectorAll('.cvf-svg').forEach(d => { const s = d.firstElementChild; if (s) s.style.width = this.value + '%'; })" style="width:160px;vertical-align:middle" /></label></div>` + partes + (v.tipo === 'procesos' ? `<pre style="white-space:pre-wrap;font-size:12.5px;margin-top:10px">${esc(casoProyectoTxt(p, 'tren', false))}</pre>` : '');
     } else if (v.tipo === 'presentacion') {
       const dt = pptNormalizar(p.datos); cuerpo = dt.diapositivas.length ? `<div style="max-width:760px;margin:0 auto">${dt.diapositivas.map((s, k) => `<div style="margin-bottom:14px"><div class="hint" style="margin:0 0 2px">${k + 1}${s.listo ? '' : ' · sin redactar'}</div>${pptSlideHtml(s, dt, k + 1)}</div>`).join('')}</div>` : '<p class="hint">La presentación todavía no tiene diapositivas.</p>';
     } else if (v.tipo === 'dfs') {
@@ -39763,6 +39769,15 @@ async function casoOptimizarDocx(blob) {
   return await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', compression: 'DEFLATE', compressionOptions: { level: 6 } });
 }
 
+// ── Casos · la IA no puede decir que hizo algo que no hizo ──
+// Si el modelo responde "listo, ya lo hice" sin haber llamado a ninguna herramienta que modifique algo, no se hizo nada. Se detecta y se le pide que lo haga de verdad o que diga que no se hizo;
+// si insiste, se avisa en la propia respuesta. En el historial, las respuestas anteriores que decían haber hecho algo sin herramientas se marcan para que no se imiten.
+const CASO_TOOLS_MUTAN = new Set(['modificar_documento', 'editar_documento', 'crear_documento', 'editar_excel', 'editar_word', 'generar_word', 'generar_excel', 'restaurar_documento', 'duplicar_documento', 'guardar_nota_caso', 'actualizar_estado_caso', 'crear_pendiente', 'actualizar_pendiente', 'vincular_a_caso', 'exportar_documento', 'versiones_archivo']);
+const casoPidioCambio = t => /(sac[aá]|saque|quit[aá]|elimin[aá]|borr[aá]|agreg[aá]|sum[aá]|pon[eé]|ponele|rot[aá]|gir[aá]|mov[eé]|cambi[aá]|modific[aá]|edit[aá]|actualiz[aá]|renombr[aá]|cre[aá]|arm[aá]|gener[aá]|duplic[aá]|restaur[aá]|reemplaz[aá]|insert[aá]|aument[aá]|reduc[ií]|corr[ií]g[ií]|complet[aá])/i.test(String(t || ''));
+const casoAfirmaAccion = t => /(ya (est[aá]|fue|fueron|se)[^.]{0,70}(rotad|elimin|agreg|modific|actualiz|cambiad|cread|quitad|sacad|movid|girad|aplicad|guardad|reemplazad)|se guard[oó]|copia de seguridad|\b(elimin|agreg|modific|actualiz|cre|quit|saqu|rot|gir|mov|apliqu|cambi)[eé]\b|(rotad|eliminad|agregad|modificad|actualizad|cambiad|cread|quitad|sacad|movid|girad)[oa]s?\b)/i.test(String(t || ''));
+const CASO_NUDGE = '(Mensaje automático de MAIA, no lo escribió el usuario) Dijiste que hiciste un cambio, pero en este turno NO ejecutaste ninguna herramienta que modifique nada: en MAIA no se cambió NADA. Si el usuario pidió un cambio, ejecutalo AHORA con la herramienta que corresponde (flowsheets, DFS, manuales, presentaciones y propuestas: modificar_documento, leyendo antes los ids con leer_registro; Excel y Word: editar_excel / editar_word). Si no podés hacerlo, decile claramente que NO se hizo y por qué. No repitas el texto anterior.';
+const CASO_AVISO_SIN_HERR = '[Respuesta anterior SIN herramientas: no se ejecutó nada ni se cambió nada en MAIA, aunque el texto diga lo contrario. No imites este estilo: cada cambio requiere llamar a una herramienta en el turno actual.]\n';
+const casoRespSinHerr = m => m && m.rol !== 'user' && m.meta && Array.isArray(m.meta.herramientas) && !m.meta.herramientas.length && !m.meta.sistema && casoAfirmaAccion(m.contenido);
 const SECTOR_TABS = {
   'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','concil','procesos','casos','propuestas','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','presentaciones','simulador','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
   'Administración':    ['rend','viajes','hallazgos','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
