@@ -79,3 +79,27 @@ create policy "maia_casos_archivos_authenticated_all" on maia_casos_archivos for
 insert into storage.buckets (id, name, public) values ('casos', 'casos', false) on conflict (id) do nothing;
 drop policy if exists "casos_storage_authenticated_all" on storage.objects;
 create policy "casos_storage_authenticated_all" on storage.objects for all to authenticated using (bucket_id = 'casos') with check (bucket_id = 'casos');
+
+-- ── Pendientes de los casos (tareas con responsable y fecha límite) ──
+-- Si ya corriste lo anterior, corré solo este bloque.
+create table if not exists maia_casos_pendientes (
+  id uuid primary key default gen_random_uuid(),
+  caso_id uuid not null references maia_casos(id) on delete cascade,
+  empresa text not null,
+  titulo text not null,
+  detalle text default '',
+  responsable_id uuid,
+  responsable_nombre text,
+  fecha_limite date,
+  prioridad text default 'media',
+  estado text default 'abierto',
+  creado_por_nombre text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  completado_at timestamptz
+);
+create index if not exists maia_casos_pendientes_caso_idx on maia_casos_pendientes (caso_id, estado);
+create index if not exists maia_casos_pendientes_resp_idx on maia_casos_pendientes (responsable_id, estado, fecha_limite);
+alter table maia_casos_pendientes enable row level security;
+drop policy if exists "maia_casos_pendientes_authenticated_all" on maia_casos_pendientes;
+create policy "maia_casos_pendientes_authenticated_all" on maia_casos_pendientes for all to authenticated using (true) with check (true);
