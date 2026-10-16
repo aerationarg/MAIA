@@ -55,3 +55,27 @@ create index if not exists maia_casos_recetas_empresa_idx on maia_casos_recetas 
 alter table maia_casos_recetas enable row level security;
 drop policy if exists "maia_casos_recetas_authenticated_all" on maia_casos_recetas;
 create policy "maia_casos_recetas_authenticated_all" on maia_casos_recetas for all to authenticated using (true) with check (true);
+
+-- ── Archivos del caso (adjuntos y lo que genera/edita la IA; cada guardado es una versión) ──
+-- Si ya corriste lo anterior, corré solo este bloque. Crea la tabla y el bucket privado "casos" de Storage.
+create table if not exists maia_casos_archivos (
+  id uuid primary key default gen_random_uuid(),
+  caso_id uuid not null references maia_casos(id) on delete cascade,
+  empresa text not null,
+  nombre text not null,
+  ruta text not null,
+  mime text,
+  tamano bigint,
+  origen text default 'adjunto',
+  version int default 1,
+  creado_por_nombre text,
+  created_at timestamptz default now()
+);
+create index if not exists maia_casos_archivos_caso_idx on maia_casos_archivos (caso_id, nombre, created_at desc);
+alter table maia_casos_archivos enable row level security;
+drop policy if exists "maia_casos_archivos_authenticated_all" on maia_casos_archivos;
+create policy "maia_casos_archivos_authenticated_all" on maia_casos_archivos for all to authenticated using (true) with check (true);
+
+insert into storage.buckets (id, name, public) values ('casos', 'casos', false) on conflict (id) do nothing;
+drop policy if exists "casos_storage_authenticated_all" on storage.objects;
+create policy "casos_storage_authenticated_all" on storage.objects for all to authenticated using (bucket_id = 'casos') with check (bucket_id = 'casos');
