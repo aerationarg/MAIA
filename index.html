@@ -388,7 +388,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -445,7 +445,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -35405,6 +35405,20 @@ function simEntradas(d, e) {
 }
 
 // ═══ VERIFICACIONES POR CRITERIO (unidades sin simulación dinámica todavía) ═══
+// ═══ ZONA ANÓXICA (pre-desnitrificación): se simula junto con el reactor de lodos activados y su sedimentador (ver simBioDin) ═══
+function simVerificarAnoxico(p, g) {
+  const V = simPos(p.volumen), Q = simPos(g.q_med), falt = [];
+  if (!V) falt.push('Volumen útil'); if (!Q) falt.push('Caudal medio (datos generales)');
+  if (falt.length) return { faltan: falt, ind: [] };
+  const ri = simPos(p.q_rec_interna) ? p.q_rec_interna / Q : (simNum(p.rec_interna) != null ? Number(p.rec_interna) : 3);
+  const us = (_simDoc && _simDoc.datos.unidades) || [], la = us.find(x => x.tipo === 'lodos_activados'), sd = us.find(x => x.tipo === 'sedimentador');
+  const Vla = la ? simPos(simParamsNum(la).volumen) : null; let Rras = null; try { if (sd) { const sp = simSedParams(simParamsNum(sd), g); Rras = sp.Qr && sp.Q ? sp.Qr / sp.Q : null; } } catch (e) { Rras = null; }
+  const ind = [simInd('Tiempo de retención hidráulico (caudal medio, sin recirculaciones)', V / Q, 'h', 1, null, 'Típico 1–3 h en lodos activados convencional; en aireación extendida los volúmenes son mayores y el tiempo también (la planilla Máster dimensiona el anóxico como 20–30 % del reactor).')];
+  if (Vla) ind.push(simInd('Volumen anóxico / volumen del reactor biológico', V / Vla, '', 0.2, 0.3, 'Planilla Máster (hoja Anóxico): 20 a 30 % del volumen del reactor biológico que se adopte.'));
+  ind.push(simInd('Recirculación interna (Qri / Q)', ri, '', 1, 5, 'Típico 2–4: el nitrato formado en el reactor aerobio vuelve al anóxico. Más recirculación desnitrifica más, pero arrastra oxígeno y gasta energía.'));
+  if (Rras != null) { const R = ri + Rras; ind.push(simInd('Desnitrificación máxima teórica R / (1 + R), con R = recirculación interna + del sedimentador', R / (1 + R) * 100, '%', null, null, `R = ${ri.toFixed(1)} + ${Rras.toFixed(1)}. Es un tope: lo que se logre depende de la DBO disponible y del volumen.`)); }
+  return { faltan: [], ind };
+}
 function simVerificarMBR(p, g) {
   const A = simPos(p.area_membrana), Q = simPos(g.q_med), Qp = simPos(g.q_pico) || (Q ? Q * 1.5 : null), falt = [];
   if (!A) falt.push('Área de membrana'); if (!Q) falt.push('Caudal medio');
@@ -35694,6 +35708,10 @@ const SIM_MODELOS = {
     { k: 'rec_horaria', l: 'Recirculación programada hora a hora (caudal de la bomba de recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de recirculación constante (la hora 0 es de 00:00 a 01:00). Los eventos (falla de recirculación, corte de energía) y las acciones del operador se siguen aplicando encima.' },
     { k: 'v0', l: 'v0 de Vesilind (opcional, de ensayo)', u: 'm/h', alias: [/\bv0\b/], ayuda: 'Si se deja vacío se estima desde el IVL.' },
     { k: 'n', l: 'n de Vesilind (opcional, de ensayo)', u: 'L/g', alias: [], ayuda: 'Si se deja vacío se estima desde el IVL.' }] },
+  anoxico: { nombre: 'Reactor anóxico (pre-desnitrificación)', det: /^(?!.*aerob).*(anoxic|desnitrific)/, verificar: simVerificarAnoxico, params: [
+    { k: 'volumen', l: 'Volumen útil (V)', u: 'm3', dim: 'vol', req: 1, alias: [/^volumen util/, /volumen.*(anoxic|util|adoptado)|volumen/] },
+    { k: 'rec_interna', l: 'Recirculación interna desde el reactor aerobio (Qri / Q medio)', u: '', tipico: 3, alias: [/recirculacion interna|relacion.*recirc.*intern|\bqri\b/], ayuda: 'No figura en la planilla: típico 2–4 veces el caudal medio (devuelve el nitrato del aerobio al anóxico). Se simula si el anóxico está justo antes del reactor de lodos activados y su sedimentador; el lodo recirculado del sedimentador también vuelve al anóxico.' },
+    { k: 'q_rec_interna', l: 'Caudal de recirculación interna (si se conoce; reemplaza a la relación)', u: 'm3/h', dim: 'flow', alias: [/caudal.*recirculacion interna/] }] },
   lodos_activados: { nombre: 'Reactor de lodos activados', det: /lodos activados|reactor biologico|reactor aerobico|aireacion|\bla\b|oxidacion|zanja|biologico/, verificar: simVerificarLA, params: [
     { k: 'volumen', l: 'Volumen adoptado (Vadp)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen.*(reactor|aireacion|total|util)|volumen/] },
     { k: 'mlss', l: 'Sólidos suspendidos totales (Xt, MLSS)', u: 'mg/L', req: 1, alias: [/mlss|ssla|solidos suspendidos totales|solidos.*(reactor|licor)|concentracion.*(biomasa|lodos)|\bxt\b/] },
@@ -35781,8 +35799,8 @@ const SIM_GLOBAL_PARAMS = [
 // Simulador de plantas — pantalla, importación de datos (Procesos IA, archivos/Excel con IA, plantilla Excel) y gráficos.
 // Se guarda en doc_documentos con tipo = 'simulacion' (datos: {global, unidades[], fuente...}).
 // ═══════════════════════════════════════════════════════════════════════
-const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'lodos_activados'];
-const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
+const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'anoxico', 'lodos_activados'];
+const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], anoxico: ['volumen', 'rec_interna'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana'], daf: ['area'], tamiz: ['ancho_canal'] };
 const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'], preset: ['📚', 'coeficientes de referencia (planilla Máster / bibliografía)'], calibrado: ['⚙', 'calibrado con datos medidos de la planta'] };
 let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
 const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
@@ -35924,7 +35942,7 @@ function simGeoParams(tipo, m) {
     put('area', area, tagA); if (H) { put('nivel_alarma', H, tagH); const arr = Math.max(0.5, H - 1.0); put('nivel_arranque', arr, 'tipico'); put('nivel_paro', Math.max(0.25, arr - 1.0), 'tipico'); }
   } else if (tipo === 'sedimentador' || tipo === 'espesador') {
     put('area', area, tagA); put('profundidad', H, tagH); put('long_vertedero', circ ? (m.diametro ? Math.PI * m.diametro : null) : (m.ancho ? 2 * m.ancho : null), tagA);
-  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr') put('profundidad', H, tagH); }
+  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr') put('profundidad', H, tagH); }
   else if (tipo === 'daf') put('area', area, tagA);
   return { params, fuentes };
 }
@@ -36197,8 +36215,17 @@ function simResultadosHtml(u) {
   if (u.tipo === 'mbbr' && res.sim) h += `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:2px">Vista animada del MBBR: carriers con biopelícula, aire y calidad del agua (usá el reproductor de arriba)</div>${simVistaMbbr(u, res.sim)}</div>`;
   if (u.tipo === 'sedimentador' && res.din && res.din.perf) { const x = ndP && ndP.extra && ndP.extra.perf ? { perf: ndP.extra.perf, manto: ndP.extra.manto, tssEfl: ndP.extra.tssEfl, xu: ndP.extra.xu, q: ndP.extra.Qe, Qr: ndP.extra.Qr, H: ndP.extra.H, dtH: SIM_DTH } : Object.assign({ dtH: SIM_DTH }, res.din); h += `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:2px">Vista animada del sedimentador: concentración de sólidos por capa (usá el reproductor de arriba)</div>${simVistaSedimentador(u, null, x, res.s)}</div>`; }
   if (u.tipo === 'lodos_activados' && ndP && ndP.extra && ndP.extra.do) h += `<div style="margin-top:10px"><div style="font-size:12px;font-weight:600;margin-bottom:2px">Vista animada del reactor: color según MLSS, burbujeo según el aire entregado (usá el reproductor de arriba)</div>${simVistaReactor(u, ndP)}</div>`;
+  if (u.tipo === 'anoxico' && ndP && ndP.extra && ndP.extra.anox) h += simAnoxicoHtml(ndP);
   const g = simGraficosUnidad(u, res); if (g) h += `<div style="margin-top:10px">${g}</div>`;
   return h;
+}
+// Resultados dinámicos de la zona anóxica: nitrato en el anóxico, en el aerobio y en el efluente, y nitrógeno eliminado
+function simAnoxicoHtml(nd) {
+  const e = nd.extra, pl = _simPlanta, bio = pl && pl.nodos.find(x => x.tipo === 'lodos_activados' && x.extra && x.extra.no); if (!bio) return '';
+  const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b' }, T = a => a.map((v, i) => [i * SIM_DTH, v]), horas = e.no.length * SIM_DTH, ef = pl.efluente;
+  const nIn = simMedia(pl.nodos[0].sal.ntk, pl.nodos[0].sal.Q), nOut = simMedia(ef.ntk, ef.Q) + simMedia(bio.extra.no, ef.Q), elim = nIn > 0 ? (1 - nOut / nIn) * 100 : 0;
+  return `<div style="margin-top:10px"><div style="font-size:12.5px;margin-bottom:4px">Nitrato medio: <b>${simFmt(simMedia(e.no))}</b> mg N/L en el anóxico, <b>${simFmt(simMedia(bio.extra.no))}</b> en el aerobio. Nitrógeno total eliminado: <b>${elim.toFixed(0)} %</b> (entra ${simFmt(nIn)} mg/L de NTK; sale ${simFmt(nOut)} mg/L entre NTK y nitrato).</div>
+    ${simGrafico({ titulo: 'Nitrato: en el anóxico, en el reactor aerobio y amonio del aerobio (mg N/L)', h: 170, w: 560, series: [{ n: 'Nitrato anóxico', c: C.verde, pts: T(e.no) }, { n: 'Nitrato aerobio (= salida)', c: C.azul, pts: T(bio.extra.no) }, { n: 'Amonio aerobio', c: C.rojo, pts: T(bio.extra.nh), dash: '4 3' }], xl: 'Horas desde el inicio', yl: 'mg N/L', xmin: 0, xmax: horas, ymin: 0 })}</div>`;
 }
 function simUnidadHtml(u, i, n) {
   const m = SIM_MODELOS[u.tipo], d = _simDoc.datos, e = u.escenario || {};
@@ -36316,16 +36343,19 @@ function simPlantaDin(d) {
   const clone = s => ({ Q: s.Q.slice(), dbo: s.dbo.slice(), dqo: s.dqo.slice(), sst: s.sst.slice(), ntk: s.ntk.slice() });
   let cur = { Q: Qin, dbo: fac.map(f => (g.dbo || 0) * (1 + (f.carga - 1))), dqo: fac.map(f => dqo0 * f.carga), sst: fill(g.sst), ntk: fac.map(f => (g.ntk || 0) * (1 + (f.carga - 1) * 0.7)) };
   const nodos = [{ id: 'entrada', nombre: 'Afluente', tipo: 'entrada', sal: clone(cur) }], avisos = [], lodos = [], fuentesLodo = [], us = d.unidades;
+  let anoxPend = null, recircInt = null;
   let recirc = null, purga = null; const srcC = (u, kg, q) => { if (q > 0 && kg > 0) fuentesLodo.push({ id: u.id, nombre: u.nombre, Q: Array(NT).fill(q / 24), X: Array(NT).fill(kg / q * 1000) }); };
   const resamp = arr => T.map((t, k) => { const a = Math.floor(t * 30), b = Math.min(arr.length - 1, Math.max(a, Math.floor((t + dtH) * 30) - 1)); let s = 0; for (let i = a; i <= b; i++) s += arr[Math.min(i, arr.length - 1)]; return s / (b - a + 1); });
   const pasa = (u, ent, extra) => nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent, sal: clone(cur), extra: extra || {} });
+  const flushAnox = motivo => { if (!anoxPend) return; avisos.push(`"${anoxPend.u.nombre}": ${motivo}; el balance la deja pasar sin cambios.`); pasa(anoxPend.u, anoxPend.ent, {}); anoxPend = null; };
   const qinF = t => { if (t < 0) return simQ(g, pat, t, null); return Qin[Math.min(NT - 1, Math.floor(t / dtH))]; };
   for (let i = 0; i < us.length; i++) {
     const u = us[i], p = simParamsNum(u), m = SIM_MODELOS[u.tipo], ent = clone(cur);
+    if (anoxPend && u.tipo !== 'lodos_activados') flushAnox('no está justo antes de un reactor de lodos activados con sedimentador');
     if (SIM_TIPOS_LODOS.includes(u.tipo)) continue;                     // la línea de lodos se calcula después con las purgas
     let res; try { res = m.verificar(p, g, null, u.tipo === 'pozo' ? { horas, qin: qinF, bombasF: t => (t < 0 ? 1 : fac[Math.min(NT - 1, Math.floor(t / dtH))].pozoOn) } : (SIM_TIPOS_ENTRADAS.includes(u.tipo) ? { Qin: cur.Q, cin: { dbo: cur.dbo, dqo: cur.dqo, sst: cur.sst, ntk: cur.ntk }, NT, dtH, d: dd, on: fac.map(f => f.pozoOn) } : false)); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
-    if (res.faltan && res.faltan.length) { avisos.push(`"${u.nombre}": faltan datos (${res.faltan.join(', ')}); no se tiene en cuenta en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
-    if (res.error) { avisos.push(`"${u.nombre}": ${res.error}`); pasa(u, ent, { incompleta: true }); continue; }
+    if (res.faltan && res.faltan.length) { if (u.tipo === 'lodos_activados') flushAnox('el reactor de lodos activados que sigue no tiene los datos completos'); avisos.push(`"${u.nombre}": faltan datos (${res.faltan.join(', ')}); no se tiene en cuenta en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
+    if (res.error) { if (u.tipo === 'lodos_activados') flushAnox('el reactor de lodos activados que sigue tiene un error'); avisos.push(`"${u.nombre}": ${res.error}`); pasa(u, ent, { incompleta: true }); continue; }
     const aplicar = (efSst, efDbo, efDqo, efNtk) => { cur.sst = cur.sst.map(x => x * (1 - efSst)); cur.dbo = cur.dbo.map(x => x * (1 - efDbo)); cur.dqo = cur.dqo.map(x => x * (1 - efDqo)); cur.ntk = cur.ntk.map(x => x * (1 - efNtk)); };
     if (u.tipo === 'pozo') {
       const r = res.sim; cur.Q = resamp(r.qout);
@@ -36343,23 +36373,30 @@ function simPlantaDin(d) {
       const qL = simPos(p.q_barros) ? p.q_barros * 24 : kg / (seq * 10); srcC(u, kg, qL);
       lodos.push({ nombre: u.nombre, kg_d: kg, q_m3d: qL, sequedad: seq, nota: u.tipo === 'daf' ? 'Lodo flotado' : 'Lodo fisicoquímico (incluye ~25% de precipitado químico)' });
       aplicar(e[0], e[1], e[2], e[3]); const hs = res.sim; simHidAvisos(hs, u, avisos, horas); if (hs) cur.Q = hs.Q.slice(); pasa(u, ent, simHidExtra(hs));
+    } else if (u.tipo === 'anoxico') {
+      const n1 = us[i + 1], n2 = us[i + 2];
+      if (n1 && n1.tipo === 'lodos_activados' && n2 && n2.tipo === 'sedimentador') anoxPend = { u, p, ent };
+      else { avisos.push(`"${u.nombre}": la zona anóxica se simula cuando está justo antes del reactor de lodos activados y de su sedimentador secundario; por ahora el balance la deja pasar sin cambios.`); pasa(u, ent, {}); }
     } else if (u.tipo === 'lodos_activados') {
       const calc = res.calc, V = p.volumen, X = p.mlss, fv = p.fraccion_volatil || 0.75, Xv = X * fv, cap = simPos(p.capacidad_o2), ntk0 = simMedia(cur.ntk, cur.Q);
       const sed = us[i + 1] && us[i + 1].tipo === 'sedimentador' ? us[i + 1] : null; let ps = null, rs = null;
       if (sed) { ps = simParamsNum(sed); rs = SIM_MODELOS.sedimentador.verificar(ps, g, null, false); if (rs.faltan && rs.faltan.length) { avisos.push(`"${sed.nombre}": faltan datos (${rs.faltan.join(', ')}); el balance sigue sin sedimentador.`); rs = null; } }
+      if (anoxPend && !(sed && rs)) flushAnox('el reactor de lodos activados que sigue no tiene un sedimentador con datos completos');
       const nitr = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s');
       if (sed && rs) {
         // reactor + sedimentador acoplados (dinámica de biomasa, oxígeno, nitrógeno y sólidos)
-        const kc = simKinDeParams(p), pgH = sim24(p.purga_horaria), bio = simBioDin({ kin: kc.kin, kinA: kc.kinA, fv, QrProg: rs.s.prog || null, QwProg: pgH, V, X0: X, SRT: calc.SRT, Qw: simPos(p.q_purga) || (pgH ? simMedia(pgH) : null), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
+        const kc = simKinDeParams(p), pgH = sim24(p.purga_horaria), anoxP = anoxPend ? { V: simPos(anoxPend.p.volumen), ri: simNum(anoxPend.p.rec_interna) != null ? Number(anoxPend.p.rec_interna) : 3, Qri: simPos(anoxPend.p.q_rec_interna) } : null, bio = simBioDin({ anox: anoxP, kin: kc.kin, kinA: kc.kinA, fv, QrProg: rs.s.prog || null, QwProg: pgH, V, X0: X, SRT: calc.SRT, Qw: simPos(p.q_purga) || (pgH ? simMedia(pgH) : null), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
         const Qe = bio.Q.map((q, k) => Math.max(0, q - bio.Qw[k]));
         const react = { Q: bio.Q.slice(), dbo: bio.S.map(s => 0.68 * s), dqo: bio.S.slice(), sst: bio.MLSS.slice(), ntk: bio.NH.map(x => x + 1.5) };
+        if (anoxPend && bio.an) { const a = bio.an; nodos.push({ id: anoxPend.u.id, nombre: anoxPend.u.nombre, tipo: 'anoxico', ent: anoxPend.ent, sal: { Q: bio.Q.slice(), dbo: a.S.map(x => 0.68 * x), dqo: a.S.slice(), sst: a.MLSS.slice(), ntk: a.NH.map(x => x + 1.5) }, extra: { anox: true, no: a.NO, nh: a.NH, s: a.S, mlss: a.MLSS, qri: a.Qri, V: a.V, noAe: bio.NO } }); recircInt = { Q: a.Qri, desde: u.id, hasta: anoxPend.u.id }; }
         cur = react; pasa(u, ent, { mlss: bio.MLSS, aor: bio.aor, cap: bio.cap, do: bio.DO, nh: bio.NH, no: bio.NO, aire: bio.aire, foam: bio.foam, ivl: bio.ivl, v30: bio.v30, xh: bio.XH, xa: bio.XA, nivel: 1, DOsp: simPos(p.oxigeno_disuelto) || 2, bio });
         cur = { Q: Qe, dbo: bio.dbo, dqo: bio.dqo, sst: bio.tssEfl, ntk: bio.ntk };
-        recirc = { Q: bio.Qr, X: bio.xu.map(x => x * 1000), desde: sed.id, hasta: u.id };
+        recirc = { Q: bio.Qr, X: bio.xu.map(x => x * 1000), desde: sed.id, hasta: anoxPend ? anoxPend.u.id : u.id };
         const kgPurga = simMedia(bio.Qw.map((q, k) => q * bio.xu[k] * 1000), null) * 24 / 1000, qPurga = simMedia(bio.Qw, null) * 24, xuMed = simMedia(bio.xu.map((x, k) => x * bio.Qw[k]), null) / Math.max(1e-9, simMedia(bio.Qw, null));
         purga = { nombre: 'Purga de lodo en exceso', kg_d: kgPurga, q_m3d: qPurga, X_gL: xuMed, SRT: calc.SRT, desde: sed.id };
         lodos.push({ nombre: 'Lodo en exceso (' + sed.nombre + ')', kg_d: kgPurga, q_m3d: qPurga, sequedad: xuMed / 10, nota: 'Purga de la recirculación del sedimentador (lodo concentrado del fondo)' });
         fuentesLodo.push({ id: sed.id, nombre: 'Purga de ' + sed.nombre, Q: bio.Qw.slice(), X: bio.xu.map(x => x * 1000) });
+        anoxPend = null;
         pasa(sed, clone(nodos[nodos.length - 1].sal), { perf: bio.perf, H: bio.H, manto: bio.manto, tssEfl: bio.tssEfl, xu: bio.xu, Qr: bio.Qr, N: 10, mlss: X, tssExtra: bio.tssExtra, foam: bio.foam, mantoMax: Math.max(...bio.manto), tssMax: Math.max(...bio.tssEfl), dtH, Qe });
         i++;
       } else {
@@ -36410,6 +36447,7 @@ function simPlantaDin(d) {
       pasa(u, ent);
     } else pasa(u, ent);
   }
+  if (anoxPend) flushAnox('no se pudo acoplar al reactor de lodos activados');
   let retornos = [], lodoFeed = null;
   const uL = us.filter(u => SIM_TIPOS_LODOS.includes(u.tipo));
   if (uL.length) {
@@ -36430,7 +36468,9 @@ function simPlantaDin(d) {
   const ef = cur, st = arr => ({ media: simMedia(arr, ef.Q), max: Math.max(...arr) });
   const lim = { dbo: simPos(g.lim_dbo), dqo: simPos(g.lim_dqo), sst: simPos(g.sst_vuelco), ntk: simPos(g.lim_ntk) };
   const cumpl = ['dbo', 'dqo', 'sst', 'ntk'].filter(k => lim[k] != null || (ef[k] && ef[k].some(x => x > 0))).map(k => { const s = st(ef[k]); const estado = lim[k] == null ? 'info' : (s.media > lim[k] ? 'mal' : (s.max > lim[k] ? 'justo' : 'ok')); const hFuera = lim[k] == null ? 0 : ef[k].filter(x => x > lim[k]).length * dtH; return { k, nombre: { dbo: 'DBO', dqo: 'DQO', sst: 'SST', ntk: 'NTK' }[k], media: s.media, max: s.max, limite: lim[k], estado, hFuera }; });
-  return { t: T, horas, dias, dtH, nodos, efluente: ef, recirc, purga, lodos, avisos, cumpl, Qin, fac, eventos: dd.eventos, acciones: dd.acciones, retornos, lodoFeed };
+  { const bN = nodos.find(n => n.tipo === 'lodos_activados' && n.extra && n.extra.no && n.extra.no.length === ef.Q.length);
+    if (bN) { const no = bN.extra.no, nt = ef.ntk.map((x, k) => x + no[k]); cumpl.push({ k: 'no', nombre: 'Nitrato (N-NO3) del efluente', media: simMedia(no, ef.Q), max: Math.max(...no), limite: null, estado: 'info', hFuera: 0 }, { k: 'nt', nombre: 'Nitrógeno total (NTK + nitrato)', media: simMedia(nt, ef.Q), max: Math.max(...nt), limite: null, estado: 'info', hFuera: 0 }); } }
+  return { t: T, horas, dias, dtH, nodos, efluente: ef, recirc, recircInt, purga, lodos, avisos, cumpl, Qin, fac, eventos: dd.eventos, acciones: dd.acciones, retornos, lodoFeed };
 }
 // ── Colores: concentración (claro → marrón) ──
 function simColorConc(v, vmax) {
@@ -36488,7 +36528,7 @@ function simPlantaVista(plant, d) {
     const burb = ['lodos_activados', 'sbr', 'mbbr'].includes(nd.tipo) ? Array.from({ length: 7 }, (_, j) => `<circle class="pv-bub-${id}" cx="${x + 10 + j * 13}" cy="${yT + bh - 6}" r="2.2" fill="#fff" fill-opacity=".8"/>`).join('') : '', espuma = nd.tipo === 'lodos_activados' ? `<rect id="pv-foam-${id}" x="${x}" y="${yT - 2}" width="${bw}" height="0" fill="#f1e6d0" stroke="#c9b48a"/>` : '';
     const tipoTxt = nd.incompleta || (nd.extra && nd.extra.incompleta) ? '<text x="' + (x + bw / 2) + '" y="' + (yT + bh / 2) + '" text-anchor="middle" font-size="10" fill="#c0392b">faltan datos</text>' : '';
     cuerpo += `<g><g clip-path="url(#pv-clip-${id})">${agua}${burb}${nd.tipo === 'mbbr' ? Array.from({ length: 12 }, (_, j) => `<circle cx="${x + 10 + (j * 29) % (bw - 20)}" cy="${yT + 14 + (j * 41) % (bh - 28)}" r="4.5" fill="#d9a441" stroke="#8a6d00" stroke-width=".8"/>`).join('') : ''}</g>${espuma}<path d="${clip}" fill="none" stroke="#1b1b1b" stroke-width="2"/>${sed ? `<line id="pv-man-${id}" x1="${x}" x2="${x + bw}" y1="${yT + bh}" y2="${yT + bh}" stroke="#8a5a1a" stroke-width="1.5" stroke-dasharray="4 3" clip-path="url(#pv-clip-${id})"/>` : ''}${bomb}${tipoTxt}
-      <text x="${x + bw / 2}" y="${yT + bh + 18}" text-anchor="middle" font-size="11" font-weight="600">${esc(nd.nombre.length > 18 ? nd.nombre.slice(0, 17) + '…' : nd.nombre)}</text><text id="pv-v-${id}" x="${x + bw / 2}" y="${yT + bh + 32}" text-anchor="middle" font-size="10" fill="#555"></text>${(pozo || ['lodos_activados', 'ecualizador', 'sbr', 'mbbr'].includes(nd.tipo)) ? `<text id="pv-n-${id}" x="${x + bw / 2}" y="${yT - 8}" text-anchor="middle" font-size="10" fill="#555"></text>` : ''}</g>`;
+      <text x="${x + bw / 2}" y="${yT + bh + 18}" text-anchor="middle" font-size="11" font-weight="600">${esc(nd.nombre.length > 18 ? nd.nombre.slice(0, 17) + '…' : nd.nombre)}</text><text id="pv-v-${id}" x="${x + bw / 2}" y="${yT + bh + 32}" text-anchor="middle" font-size="10" fill="#555"></text>${(pozo || ['lodos_activados', 'anoxico', 'ecualizador', 'sbr', 'mbbr'].includes(nd.tipo)) ? `<text id="pv-n-${id}" x="${x + bw / 2}" y="${yT - 8}" text-anchor="middle" font-size="10" fill="#555"></text>` : ''}</g>`;
   });
   // flechas entre nodos (el flujo sale del borde derecho de uno y entra al izquierdo del siguiente)
   let flechas = '';
@@ -36515,6 +36555,7 @@ function simPlantaVista(plant, d) {
       else if (nd.tipo === 'ecualizador' && nd.extra && nd.extra.vol) { const e = nd.extra, fr = Math.min(1, e.vol[k] / e.V), hh = (bh - 4) * fr, sobre = e.spill[k] > 0; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', sobre ? '#e57373' : col); txt('pv-n-' + nd.id, sobre ? '⚠ REBALSA' : `nivel ${(fr * 100).toFixed(0)}%`); }
       else if (nd.tipo === 'sbr' && nd.extra && nd.extra.sbr) { const sb = nd.extra.sbr, q = sb.tanque, fr = Math.max(0, Math.min(1, q.hw[k] / sb.Hmax)), hh = (bh - 4) * fr; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', simColorConc(q.MLSS[k], 7000)); txt('pv-n-' + nd.id, `${SIM_FASES_SBR[q.fase[k]].split(' ')[0]} · OD ${q.DO[k].toFixed(1)}`); }
       else if (nd.tipo === 'mbbr' && nd.extra && nd.extra.mbbr) { const s = nd.extra.sim; set('pv-w-' + nd.id, 'fill', col); txt('pv-n-' + nd.id, `OD ${s.DO[k].toFixed(1)} · NH4 ${s.NH[k].toFixed(1)}`); }
+      else if (nd.tipo === 'anoxico' && nd.extra && nd.extra.anox) { set('pv-w-' + nd.id, 'fill', simColorConc(nd.extra.mlss[k], 7000)); txt('pv-n-' + nd.id, `NO3 ${nd.extra.no[k].toFixed(1)} · NH4 ${nd.extra.nh[k].toFixed(1)}`); }
       else set('pv-w-' + nd.id, 'fill', col);
       if (nd.tipo === 'lodos_activados' && nd.extra && nd.extra.do) { const ex = nd.extra, fh = 16 * Math.min(1, ex.foam[k]); set('pv-foam-' + nd.id, 'height', fh); set('pv-foam-' + nd.id, 'y', yT - fh); txt('pv-n-' + nd.id, `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)} · NO3 ${ex.no[k].toFixed(0)}`); set('pv-w-' + nd.id, 'fill', simColorConc(ex.mlss[k], 7000)); }
       if (nd.tipo === 'lodos_activados' && nd.extra && nd.extra.aor) { const dem = nd.extra.aire ? Math.max(0.05, nd.extra.aire[k] * 2.2) : nd.extra.aor[k] / (nd.extra.aor.reduce((a, b) => a + b, 0) / nd.extra.aor.length || 1); document.querySelectorAll('.pv-bub-' + nd.id).forEach((c, j) => { const y0 = yT + bh - 6, ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', y0 - ciclo * (bh - 14)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); }); }
@@ -36552,7 +36593,7 @@ function simGeoUnidad(u) {
   } else if (t === 'sedimentador' || t === 'espesador') {
     circ = g.forma !== 'rect'; const A = p.area || (p.diametro ? Math.PI * p.diametro * p.diametro / 4 : 78); col = p.profundidad || colGeo || 3.5;
     w = circ ? (p.diametro && !p.area ? p.diametro : Math.sqrt(4 * A / Math.PI)) : Math.sqrt(A * ratio); alto = col + free; ang = g.angulo || 22; ent = Math.min(g.enterrado || 0, alto);
-  } else if (['lodos_activados', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(t)) {
+  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(t)) {
     col = t === 'sbr' ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : (t === 'desinfeccion' || t === 'desengrasadora') ? 2.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
     w = porVol(V, col); alto = col + free; ent = Math.min(g.enterrado || 0, alto);
   } else {
@@ -36627,8 +36668,9 @@ function simPlantaCorte(plant, d) {
   let rec = '';
   if (plant.recirc) {
     const iS = nodos.findIndex(x => x.id === plant.recirc.desde), iR = nodos.findIndex(x => x.id === plant.recirc.hasta);
-    if (iS >= 0 && iR >= 0) { const yR = yBase + 74, xS = pos[iS].cx, xR = pos[iR].cx; rec = `<path class="cp-fl" id="cp-rec" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec" x="${(xS + xR) / 2}" y="${yR + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a"></text>`; if (!nodosS.length) { const xp = xS + pos[iS].wp * 0.2; rec += `<path class="cp-fl" id="cp-purga" d="M${xp},${pos[iS].bot} V${yR + 32}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xp + 6}" y="${yR + 40}" font-size="10" fill="#5a3a10">Purga (del sedimentador)</text>`; } }
+    if (iS >= 0 && iR >= 0) { const yR = yBase + (plant.recircInt ? 92 : 74), xS = pos[iS].cx, xR = pos[iR].cx; rec = `<path class="cp-fl" id="cp-rec" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec" x="${(xS + xR) / 2}" y="${yR + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a"></text>`; if (!nodosS.length) { const xp = xS + pos[iS].wp * 0.2; rec += `<path class="cp-fl" id="cp-purga" d="M${xp},${pos[iS].bot} V${yR + 32}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xp + 6}" y="${yR + 40}" font-size="10" fill="#5a3a10">Purga (del sedimentador)</text>`; } }
   }
+  if (plant.recircInt) { const iS = nodos.findIndex(x => x.id === plant.recircInt.desde), iR = nodos.findIndex(x => x.id === plant.recircInt.hasta); if (iS >= 0 && iR >= 0) { const yR = yBase + 62, xS = pos[iS].x0 + 8, xR = pos[iR].x1 - 8; rec += `<path class="cp-fl" id="cp-rec2" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#1a8f4d" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec2" x="${(xS + xR) / 2}" y="${yR + 12}" text-anchor="middle" font-size="9.5" fill="#1a8f4d"></text>`; } }
   sv += `<defs>${defs}</defs>` + cuerpo + tub + rec + `<text x="${W - 10}" y="${Hh - 8}" text-anchor="end" font-size="10" fill="#6b7b8b">Corte a escala · medidas en metros</text></svg>`;
   const fmt = v => v == null ? '—' : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)), colorDe = (nd, k) => nd.extra && nd.extra.lodo ? simColorConc(nd.sal.sst[k], 40000) : simColorConc(nd.sal[VAR][k], maxV), flujoSeg = x => 2.5 + 8.5 * (x / Qmax);
   let fase = 0;
@@ -36655,6 +36697,7 @@ function simPlantaCorte(plant, d) {
         const fh = Math.min(22, 0.9 * s) * Math.min(1, ex.foam[k]); set('cp-foam-' + id, 'height', fh); set('cp-foam-' + id, 'y', P.yS - fh); set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000));
         t3 = `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`; if (ex.do[k] < 0.3) top = '⚠ SIN OXÍGENO';
         const dem = ex.aire ? Math.max(0.05, ex.aire[k] * 2.2) : 1; document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); });
+      } else if (t0 === 'anoxico' && ex.anox) { set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000)); t3 = `NO3 ${ex.no[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`;
       } else if (ex.hid) { const fr = ex.bomba ? Math.min(1, ex.vol[k] / ex.V) : 1, sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; if (ex.bomba) t3 = `nivel ${(fr * 100).toFixed(0)}%`;
       } else set('cp-w-' + id, 'fill', col);
       txt('cp-n-' + id, top); if (ex.lodo) { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k] * 24)} m3/d`); txt('cp-t2-' + id, `${(nd.sal.sst[k] / 10000).toFixed(1)} % sólidos`); } else { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`); } txt('cp-t3-' + id, t3);
@@ -36670,6 +36713,7 @@ function simPlantaCorte(plant, d) {
       for (let i = nL; i < n - 1; i++) pipeS('cp-ls-' + i, 'cp-lsh-' + i, nodos[i].sal.Q[k], colorDe(nodos[i], k));
       const zl = nodos[n - 1]; pipeS('cp-lo', 'cp-loh', zl.sal.Q[k], colorDe(zl, k)); txt('cp-lov', `${fmt(zl.sal.Q[k] * 24)} m3/d`);
     }
+    if (plant.recircInt) { const q = plant.recircInt.Q[k]; set('cp-rec2', 'opacity', vis(q) ? 1 : 0); set('cp-rec2', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec2', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec2', `Rec. interna ${fmt(q)} m3/h`); }
     if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'opacity', vis(q) ? 1 : 0); set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`); set('cp-purga', 'stroke-dashoffset', -fase); set('cp-purga', 'opacity', plant.fac && plant.fac[k] && plant.fac[k].purga <= 0.001 ? 0 : 1); }
   };
   return sv;
@@ -37039,6 +37083,14 @@ function simBioDin(o) {
   const XIin = XIs * V / (Qd * SRT);
   let st = { S, XH: XHv, XA: XAv, XP: XPv, XI: XIs, NH: nit ? 1.0 : Math.max(2, NTKm - 6), NO: NOx0, DO: o.DOsp };
   const TSS = () => (st.XH + st.XA + st.XP) / VSS + st.XI;
+  // zona anóxica previa (opcional): tanque de mezcla completa al que entran el afluente, el lodo recirculado y la recirculación interna del reactor aerobio
+  const an = o.anox && o.anox.V > 0 ? o.anox : null; let sa = null, Va = 0, Qri0 = 0;
+  if (an) {
+    Qri0 = an.Qri > 0 ? an.Qri : (an.ri > 0 ? an.ri * Qm : 0);
+    Va = Math.max(an.V, 2 * (Math.max(...o.Qin) + 1.5 * Math.max(Qr0, ...(o.QrProg || [0])) + Qri0) * dt);   // volumen mínimo para que el paso de cálculo sea estable
+    st.NO = nit ? NOx0 / (1 + 0.9 * (Qri0 + Qr0) / Qm) : 0;
+    sa = { S: Math.min(S0m, S * 2 + 5), XH: XHv, XA: XAv, XP: XPv, XI: XIs, NH: st.NH + 2, NO: st.NO * 0.3, DO: 0 };
+  }
   // capacidad de aireación: la informada o 1,6 × la demanda inicial
   const OUR0 = () => (1 - 1.42 * YH) * (muHT / YH) * (st.S / (Ks + st.S)) * st.XH + 1.42 * (1 - fd) * bHT * st.XH + 1.42 * (1 - fd) * bAT * st.XA + 4.33 * (muAT / YA) * (st.NH / (KNH + st.NH)) * st.XA;
   const capMg = (o.cap && o.cap > 0 ? o.cap * 24000 / V : 1.6 * OUR0()) , DOref = 2, Xr0 = Math.max(1.2 * X0, Math.min(0.8e6 / Math.max(30, sd.ivl), (Qm + Qr0) * X0 / Math.max(1e-6, Qr0))), Qw0 = o.Qw ? o.Qw : V * X0 / SRT / Xr0 / 24; // m3/h de purga: se saca de la recirculación (fondo del sedimentador), a la concentración del lodo recirculado
@@ -37046,9 +37098,9 @@ function simBioDin(o) {
   const X = Array.from({ length: N }, (_, i) => TSS() / 1000);
   const Js = new Array(N).fill(0);
   let aireI = 0.5, foamLvl = 0;
-  const out = { t: [], Q: [], Qr: [], Qw: [], S: [], NH: [], NO: [], DO: [], MLSS: [], XH: [], XA: [], aire: [], aor: [], cap: capMg * V / 24000, manto: [], tssEfl: [], tssExtra: [], xu: [], perf: [], ivl: [], v30: [], foam: [], dbo: [], dqo: [], ntk: [], temp: [], H: sd.H, inert: XIin, nit };
+  const out = { t: [], Q: [], Qr: [], Qw: [], S: [], NH: [], NO: [], DO: [], MLSS: [], XH: [], XA: [], aire: [], aor: [], cap: capMg * V / 24000, manto: [], tssEfl: [], tssExtra: [], xu: [], perf: [], ivl: [], v30: [], foam: [], dbo: [], dqo: [], ntk: [], temp: [], H: sd.H, inert: XIin, nit, an: an ? { S: [], NH: [], NO: [], XH: [], MLSS: [], Qri: [], V: Va } : null };
   const interp = (arr, t) => { const x = Math.min(arr.length - 1, Math.max(0, t / dtH)), i = Math.floor(x), fr = x - i; return arr[i] * (1 - fr) + arr[Math.min(arr.length - 1, i + 1)] * fr; };
-  const warmH = 24, totalH = NT * dtH, pasos = Math.round((warmH + totalH) / dt);
+  const warmH = an ? 48 : 24, totalH = NT * dtH, pasos = Math.round((warmH + totalH) / dt);
   let manto = 0, tssEx = 0;
   for (let k = 0; k < pasos; k++) {
     const t = k * dt - warmH, f = simFactores(t, d), Tt = Tb + f.dT, dtd = dt / 24;
@@ -37056,6 +37108,7 @@ function simBioDin(o) {
     const S0 = (t < 0 ? S0m : interp(o.dbo, t) / 0.68) * cMult, NTKin = (t < 0 ? NTKm : interp(o.ntk, t)) * (1 + (cMult - 1) * 0.7), XIinT = XIin;
     // caudales
     const hh24 = Math.floor((((t % 24) + 24) % 24)), Qr = (o.QrProg ? o.QrProg[hh24] : (sd.prop ? Qr0 / Qm * Q : Qr0)) * f.rec, Qw = (o.QwProg ? o.QwProg[hh24] : Qw0) * f.purga, Qe = Math.max(0, Q - Qw), Qf = Math.max(0, Q + Qr);
+    const Qri = an ? Qri0 * (f.pozoOn > 0 ? 1 : 0) : 0, Qt = Q + Qr + Qri, Qt24 = Qt * 24;   // recirculación interna (se frena sin energía)
     // cinética
     const fTh = th(1.07, Tt), fTa = th(1.10, Tt), fTd = th(1.04, Tt), inh = 1 - Math.min(0.95, f.tox), nutL = 1 - 0.45 * f.nut;
     const fDOH = st.DO / (KOH + st.DO), fDOA = st.DO / (KOA + st.DO);
@@ -37072,15 +37125,22 @@ function simBioDin(o) {
     const tssR = Math.max(1, TSS()), XuMg = X[N - 1] * 1000, ratio = Qr > 0 ? XuMg / tssR : 0, foamK = 0.2 * f.foam;
     foamLvl = f.foam;
     const Qd24 = Q * 24, Qr24 = Qr * 24, Qe24 = Qe * 24, rate = (Qin_, cin, c) => (Qin_ * 24 * cin + Qr24 * c * ratio - (Q + Qr) * 24 * c) / V;
-    const dXH = rate(Q, 0, st.XH) + YH * rsu - dec + YH * anox * 0 - foamK * st.XH - Qe24 * tssEx / tssR / V * st.XH, dXA = rate(Q, 0, st.XA) + YA * rn - decA - foamK * st.XA - Qe24 * tssEx / tssR / V * st.XA;
-    const dXP = rate(Q, 0, st.XP) + fd * (dec + decA) - foamK * st.XP - Qe24 * tssEx / tssR / V * st.XP, dXI = rate(Q, XIinT, st.XI) - foamK * st.XI - Qe24 * tssEx / tssR / V * st.XI;
-    const dS = Qd24 * (S0 - st.S) / V - rsu - anox, dNH = Qd24 * (NTKin - st.NH) / V - iN * YH * rsu - rn * (1 + iN * YA), dNO = Qd24 * (0 - st.NO) / V + rn - anox * (1 - YH) / 2.86;
-    const dDO = Qd24 * (0 - st.DO) / V + supply - our;
+    const dXH = (an ? Qt24 * (sa.XH - st.XH) / V : rate(Q, 0, st.XH)) + YH * rsu - dec + YH * anox * 0 - foamK * st.XH - Qe24 * tssEx / tssR / V * st.XH, dXA = (an ? Qt24 * (sa.XA - st.XA) / V : rate(Q, 0, st.XA)) + YA * rn - decA - foamK * st.XA - Qe24 * tssEx / tssR / V * st.XA;
+    const dXP = (an ? Qt24 * (sa.XP - st.XP) / V : rate(Q, 0, st.XP)) + fd * (dec + decA) - foamK * st.XP - Qe24 * tssEx / tssR / V * st.XP, dXI = (an ? Qt24 * (sa.XI - st.XI) / V : rate(Q, XIinT, st.XI)) - foamK * st.XI - Qe24 * tssEx / tssR / V * st.XI;
+    const dS = (an ? Qt24 * (sa.S - st.S) : Qd24 * (S0 - st.S)) / V - rsu - anox, dNH = (an ? Qt24 * (sa.NH - st.NH) : Qd24 * (NTKin - st.NH)) / V - iN * YH * rsu - rn * (1 + iN * YA), dNO = (an ? Qt24 * (sa.NO - st.NO) : Qd24 * (0 - st.NO)) / V + rn - anox * (1 - YH) / 2.86;
+    const dDO = (an ? Qt24 * (sa.DO - st.DO) : Qd24 * (0 - st.DO)) / V + supply - our;
+    let dsa = null;   // zona anóxica: sin aire (OD ≈ 0); el heterótrofo usa el nitrato como aceptor (η = 0,8)
+    if (an) {
+      const flP = Qr * ratio + Qri, flS = Qr + Qri, k24 = 24 / Va, rsa = (muH * fTh * inh * nutL * 0.8 / YH) * (sa.S / (Ks + sa.S)) * (sa.NO / (0.5 + sa.NO)) * sa.XH, deca = bH * fTd * sa.XH, decAa = bA * fTd * sa.XA;
+      dsa = { XH: (flP * st.XH - Qt * sa.XH) * k24 + YH * rsa - deca, XA: (flP * st.XA - Qt * sa.XA) * k24 - decAa, XP: (flP * st.XP - Qt * sa.XP) * k24 + fd * (deca + decAa), XI: (Q * XIinT + flP * st.XI - Qt * sa.XI) * k24,
+        S: (Q * S0 + flS * st.S - Qt * sa.S) * k24 - rsa, NH: (Q * NTKin + flS * st.NH - Qt * sa.NH) * k24 - iN * YH * rsa, NO: (flS * st.NO - Qt * sa.NO) * k24 - rsa * (1 - YH) / 2.86 };
+    }
     // paso del reactor (Euler, con paso chico) — todos los deltas están en mg/L/d
     st.XH = Math.max(0, st.XH + dXH * dtd); st.XA = Math.max(0, st.XA + dXA * dtd); st.XP = Math.max(0, st.XP + dXP * dtd); st.XI = Math.max(0, st.XI + dXI * dtd);
     st.S = Math.max(0, st.S + dS * dtd); st.NH = Math.max(0, st.NH + dNH * dtd); st.NO = Math.max(0, st.NO + dNO * dtd); st.DO = Math.min(sat, Math.max(0, st.DO + dDO * dtd));
+    if (an) ['XH', 'XA', 'XP', 'XI', 'S', 'NH', 'NO'].forEach(kk => { sa[kk] = Math.max(0, sa[kk] + dsa[kk] * dtd); });
     // shock tóxico: al comenzar el evento muere una fracción de la biomasa (además de la inhibición del crecimiento mientras dura)
-    ((d && d.eventos) || []).forEach(e => { if (e.tipo === 'toxico' && t >= e.inicio && t < e.inicio + dt) { const kf = 0.7 * Number(e.int); st.XH *= 1 - kf; st.XA *= 1 - Math.min(0.95, kf * 1.2); } });
+    ((d && d.eventos) || []).forEach(e => { if (e.tipo === 'toxico' && t >= e.inicio && t < e.inicio + dt) { const kf = 0.7 * Number(e.int); st.XH *= 1 - kf; st.XA *= 1 - Math.min(0.95, kf * 1.2); if (an) { sa.XH *= 1 - kf; sa.XA *= 1 - Math.min(0.95, kf * 1.2); } } });
     // sedimentador por capas (modelo de flujo límite)
     const Xf = TSS() / 1000, ivlT = sd.ivl * f.ivl, vb = simVesilind(sd.ivl, sd), vt = simVesilind(ivlT, { v0: sd.v0 ? sd.v0 * simVesilind(ivlT, {}).v0 / simVesilind(sd.ivl, {}).v0 : null, n: sd.n ? sd.n * simVesilind(ivlT, {}).n / simVesilind(sd.ivl, {}).n : null });
     const c = f.clump, v0 = vt.v0 * (1 - 0.3 * c), nn = vt.n * (1 + 0.35 * c), Xmin = fns * Xf, smass = X.reduce((a, x) => a + x, 0) * dz, RT = smass / Math.max(1e-6, ((Qr + Qw) / sd.A) * X[N - 1]), rho = Math.min(1, Math.max(0, (RT - 1) / 3)), vgas = 0.55 * f.rise * Math.min(1, st.NO / 8) * rho;
@@ -37103,6 +37163,7 @@ function simBioDin(o) {
       out.t.push(t); out.Q.push(Q); out.Qr.push(Qr); out.Qw.push(Qw); out.S.push(st.S); out.NH.push(st.NH); out.NO.push(st.NO); out.DO.push(st.DO); out.MLSS.push(TSS()); out.XH.push(st.XH); out.XA.push(st.XA);
       out.aire.push(aire); out.aor.push(our * V / 24000); out.manto.push(mt); out.tssEfl.push(tssE); out.tssExtra.push(tssEx); out.xu.push(X[N - 1]); out.perf.push(X.slice()); out.ivl.push(ivlT); out.v30.push(ivlT * TSS() / 1000);
       out.foam.push(f.foam); out.temp.push(Tt);
+      if (an) { out.an.S.push(sa.S); out.an.NH.push(sa.NH); out.an.NO.push(sa.NO); out.an.XH.push(sa.XH); out.an.MLSS.push((sa.XH + sa.XA + sa.XP) / VSS + sa.XI); out.an.Qri.push(Qri); }
       out.dbo.push(0.68 * st.S + 0.3 * 0.8 * tssE); out.dqo.push(0.06 * (o.dqo ? interp(o.dqo, Math.max(0, t)) : 0) + st.S + 1.2 * fvv * tssE); out.ntk.push(st.NH + 1.5 + 0.08 * tssE);
     }
   }
