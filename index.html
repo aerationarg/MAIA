@@ -390,7 +390,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -447,7 +447,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -37597,10 +37597,15 @@ function simUAgregar(tipo) { _simDoc.datos.unidades.push(simUnidadNueva(tipo)); 
 // lecciones, bibliografía de referencia, catálogo y los demás módulos) y puede guardar notas/lecciones y actualizar el estado del caso.
 // Tablas (Supabase): maia_casos y maia_casos_mensajes — ver docs/casos.sql. Costos de IA por mensaje; caché de prompt en el sistema, las herramientas y la conversación.
 // ═══════════════════════════════════════════════════════════════════════
+// Precios en USD por millón de tokens (pin entrada, pout salida, pcw escritura de caché, pcr lectura de caché). Haiku 5.5 cobra más si el prompt supera 100.000 tokens (campo "alto").
 const CASO_MODELOS = {
-  economico: { id: 'claude-haiku-4-5-20251001', nombre: 'Económico (Haiku 4.5)', pin: 1.0, pout: 5.0, pcw: 1.25, pcr: 0.10 },
-  estandar: { id: 'claude-sonnet-4-5', nombre: 'Estándar (Sonnet 4.5)', pin: 3.0, pout: 15.0, pcw: 3.75, pcr: 0.30 }
+  economico: { id: 'claude-haiku-5-5', nombre: 'Económico (Haiku 5.5)', pin: 0.10, pout: 0.50, pcw: 0.125, pcr: 0.01, alto: { pin: 0.50, pout: 2.50, pcw: 0.625, pcr: 0.05 } },
+  estandar: { id: 'claude-sonnet-5-5', nombre: 'Estándar (Sonnet 5.5)', pin: 2.0, pout: 10.0, pcw: 2.5, pcr: 0.10 },
+  avanzado: { id: 'claude-opus-5-5', nombre: 'Avanzado (Opus 5.5) · ≈2× más caro', pin: 4.0, pout: 20.0, pcw: 5.0, pcr: 0.20 },
+  maximo: { id: 'claude-fable-5-1', nombre: 'Máximo (Fable 5.1) · ≈5× más caro', pin: 10.0, pout: 50.0, pcw: 12.5, pcr: 0.25 }
 };
+// Modelos anteriores que todavía usan otros módulos (generadores de DFS, manual, etc.), solo para medir su gasto.
+const CASO_PRECIOS_VIEJOS = [[/haiku/i, { pin: 1.0, pout: 5.0, pcw: 1.25, pcr: 0.10 }], [/opus/i, { pin: 5.0, pout: 25.0, pcw: 6.25, pcr: 0.50 }], [/./, { pin: 3.0, pout: 15.0, pcw: 3.75, pcr: 0.30 }]];
 const CASO_TIPOS_NOTA = { nota: 'Nota', decision: 'Decisión', supuesto: 'Supuesto', pendiente: 'Pendiente', leccion: 'Lección', calculo: 'Cálculo' };
 const CASO_VINCULOS = {
   procesos: { label: 'Procesos IA', tab: 'procesos', abrir: id => procesosAbrirProyecto(id) },
@@ -37845,7 +37850,8 @@ async function casoLlamar(messages) {
   return resp.json();
 }
 function casoCosto(uso, modeloKey) {
-  const m = CASO_MODELOS[modeloKey] || CASO_MODELOS.estandar; if (!uso) return 0;
+  let m = typeof modeloKey === 'object' ? modeloKey : (CASO_MODELOS[modeloKey] || CASO_MODELOS.estandar); if (!uso) return 0;
+  if (m.alto && (uso.input_tokens || 0) + (uso.cache_creation_input_tokens || 0) + (uso.cache_read_input_tokens || 0) > 100000) m = m.alto;
   return ((uso.input_tokens || 0) * m.pin + (uso.output_tokens || 0) * m.pout + (uso.cache_creation_input_tokens || 0) * m.pcw + (uso.cache_read_input_tokens || 0) * m.pcr) / 1e6;
 }
 async function casoEnviar() {
@@ -37872,6 +37878,7 @@ async function casoEnviar() {
       if (!tus.length) {
         const miente = !mutoOk && casoPidioCambio(texto) && casoAfirmaAccion(txt);
         if (miente && !nudged) { nudged = true; casoRenderMsgs('Verificando que el cambio se haya hecho…'); messages.push({ role: 'user', content: [{ type: 'text', text: CASO_NUDGE }] }); continue; }
+        if (data.stop_reason === 'refusal') { final = acum.concat([txt]).filter(Boolean).join('\n\n') + '\n\n✕ El modelo se negó a responder este pedido (filtro de seguridad de Anthropic). Reformulalo o probá con otro modelo.'; break; }
         if (data.stop_reason === 'max_tokens' && continuaciones < 3) { continuaciones++; acum.push(txt); casoRenderMsgs('Continuando la respuesta…'); messages.push({ role: 'user', content: [{ type: 'text', text: 'Continuá exactamente donde quedaste, sin repetir lo que ya escribiste.' }] }); continue; }
         final = acum.concat([txt]).filter(Boolean).join('\n\n') + (data.stop_reason === 'max_tokens' ? '\n\n(La respuesta se cortó por largo: pedime que siga.)' : '') + (miente ? '\n\n⚠ MAIA: en esta respuesta no se ejecutó ninguna herramienta que modifique algo, así que NO cambió nada. Pedímelo de nuevo, más específico (por ejemplo, el nombre exacto del equipo).' : '');
         break;
@@ -38076,7 +38083,7 @@ const CASO_DOCS = {
 };
 let _casoDriverOcupado = false, _casoSubGasto = 0, _casoAdjMsg = [], _casoCopiados = new Set();
 const casoEspera = ms => new Promise(r => setTimeout(r, ms));
-const casoCostoModelo = (uso, modelId) => casoCosto(uso, /haiku/i.test(String(modelId)) ? 'economico' : 'estandar');
+const casoCostoModelo = (uso, modelId) => { const id = String(modelId), ent = Object.values(CASO_MODELOS).find(m => m.id === id); return casoCosto(uso, ent || CASO_PRECIOS_VIEJOS.find(x => x[0].test(id))[1]); };
 // Mide lo que gastan las llamadas a la IA que hacen los módulos (se engancha a fetch mientras dura la generación) para sumarlo al gasto del caso
 async function casoMedir(fn) {
   const f0 = window.fetch;
