@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -38893,6 +38893,7 @@ function casoVisorMostrar(titulo, acciones, cuerpo) {
 function casoVisorCerrar(forzar) {
   if (!forzar && _casoVisor && _casoVisor.dirty && !confirm('Hay cambios sin guardar. ¿Cerrar igual?')) return;
   const m = document.getElementById('caso-visor'); if (m) m.remove(); _casoVisor = null;
+  ['cvw-barra', 'cvw-indice'].forEach(id => { const x = document.getElementById(id); if (x) x.remove(); });
 }
 const casoVisorMsg = t => { const e = document.getElementById('caso-visor-msg'); if (e) e.textContent = t || ''; };
 async function casoVisorAbrir(nombre, ver) {
@@ -38962,27 +38963,202 @@ async function casoVxGuardar() {
 async function casoVxDescargar() { const s = _casoVisor; if (!s) return; const blob = await casoVxBuffer(), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = casoBase(s.nombre) + ' (editado).xlsx'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
 
 // ── Word: texto y tablas editables ──
+// ── Casos · visor de Word: resaltar, comentar, formato, estilos y buscar/reemplazar ──
+// El visor muestra el texto con su formato básico (negrita, cursiva, subrayado, resaltado) y los comentarios del Word. Lo que se marca acá (resaltados, formato, comentarios) queda como <span> en pantalla
+// y recién al guardar se traduce a operaciones sobre el .docx (formato_texto, comentario, estilo_parrafo...), que conservan el resto del documento tal cual está.
+const CASO_VW_COLORES = { amarillo: '#fff176', verde: '#a5e8a5', celeste: '#9fe3f5', rosa: '#f8b4e6', gris: '#d9d9d9' };
+const CASO_VW_COLOR_OP = { amarillo: 'amarillo', verde: 'verde', celeste: 'celeste', rosa: 'magenta', gris: 'gris' };
+const CASO_VW_HL = { yellow: '#fff176', green: '#a5e8a5', cyan: '#9fe3f5', magenta: '#f8b4e6', lightGray: '#d9d9d9', darkGray: '#a6a6a6', red: '#ff9a9a', blue: '#9ab8ff' };
+const CASO_VW_EST = { titulo1: 'font-size:20px;font-weight:700;', titulo2: 'font-size:16px;font-weight:700;', titulo3: 'font-size:14px;font-weight:700;' };
+async function casoVwComentariosLeer(W) {
+  const f = W.zip.file('word/comments.xml'), out = new Map(); if (!f) return out;
+  const d = new DOMParser().parseFromString(await f.async('string'), 'application/xml');
+  Array.from(d.getElementsByTagName('w:comment')).forEach(c => out.set(c.getAttribute('w:id'), { autor: c.getAttribute('w:author') || '', fecha: c.getAttribute('w:date') || '', texto: Array.from(c.getElementsByTagName('w:p')).map(p => Array.from(p.getElementsByTagName('w:t')).map(t => t.textContent).join('')).join('\n') }));
+  return out;
+}
+// HTML de un párrafo respetando negrita, cursiva, subrayado, resaltado y los tramos comentados. "abiertos" arrastra los comentarios cuyo tramo sigue abierto en el párrafo siguiente.
+// El texto resultante es idéntico a casoTextoP(p): así el visor sabe qué párrafos se editaron.
+function casoVwParrafoHtml(p, abiertos) {
+  let out = '';
+  Array.from(p.getElementsByTagName('*')).forEach(n => {
+    const nm = n.nodeName;
+    if (nm === 'w:commentRangeStart') abiertos.add(n.getAttribute('w:id'));
+    else if (nm === 'w:commentRangeEnd') abiertos.delete(n.getAttribute('w:id'));
+    else if (nm === 'w:r') {
+      const t = Array.from(n.getElementsByTagName('w:t')).map(x => x.textContent).join(''); if (!t) return;
+      const rpr = n.getElementsByTagName('w:rPr')[0]; let st = '';
+      if (rpr) {
+        const on = tag => { const e = rpr.getElementsByTagName(tag)[0]; return !!e && !/^(0|false|none)$/i.test(e.getAttribute('w:val') || ''); };
+        if (on('w:b')) st += 'font-weight:700;'; if (on('w:i')) st += 'font-style:italic;'; if (on('w:u')) st += 'text-decoration:underline;';
+        const hl = rpr.getElementsByTagName('w:highlight')[0], sh = rpr.getElementsByTagName('w:shd')[0];
+        if (hl && hl.getAttribute('w:val') !== 'none') st += 'background:' + (CASO_VW_HL[hl.getAttribute('w:val')] || '#fff176') + ';'; else if (sh && /^[0-9A-Fa-f]{6}$/.test(sh.getAttribute('w:fill') || '')) st += 'background:#' + sh.getAttribute('w:fill') + ';';
+      }
+      let h = esc(t); if (st) h = `<span style="${st}color:#1a1a1a">${h}</span>`;
+      if (abiertos.size) h = `<span class="cw-cm" data-cm="${Array.from(abiertos).join(' ')}">${h}</span>`;
+      out += h;
+    }
+  });
+  return out;
+}
 async function casoVisorWord(nombre, ver) {
   casoVisorMostrar(esc(nombre), '', '<p class="hint">Cargando…</p>');
-  const file = await casoArchivoDeVersion(nombre, ver), W = await casoWordCargar(file), orig = {};
+  const file = await casoArchivoDeVersion(nombre, ver), W = await casoWordCargar(file), orig = {}, coms = await casoVwComentariosLeer(W), abiertos = new Set();
   const html = W.bloques.map((b, i) => {
     const k = i + 1;
     if (b.nodeName === 'w:p') {
-      const t = casoTextoP(b), est = casoEstiloP(b), img = b.getElementsByTagName('w:drawing').length > 0, num = b.getElementsByTagName('w:numPr').length > 0 || /list/i.test(est);
-      const sz = /heading ?1|ttulo ?1|t.tulo ?1/i.test(est) ? 'font-size:20px;font-weight:700;' : /heading ?2|ttulo ?2|t.tulo ?2/i.test(est) ? 'font-size:16px;font-weight:700;' : /heading ?3|ttulo ?3|t.tulo ?3/i.test(est) ? 'font-size:14px;font-weight:700;' : '';
+      const t = casoTextoP(b), est = casoEstiloP(b), img = b.getElementsByTagName('w:drawing').length > 0, num = b.getElementsByTagName('w:numPr').length > 0 || /list/i.test(est), rico = casoVwParrafoHtml(b, abiertos);
+      const sz = /heading ?1|ttulo ?1|t.tulo ?1/i.test(est) ? CASO_VW_EST.titulo1 : /heading ?2|ttulo ?2|t.tulo ?2/i.test(est) ? CASO_VW_EST.titulo2 : /heading ?3|ttulo ?3|t.tulo ?3/i.test(est) ? CASO_VW_EST.titulo3 : '';
       if (img) return `<div class="cw-blk" data-k="${k}"><div class="cw-p" contenteditable="false" style="color:var(--text3)">🖼 [imagen${t.trim() ? ' — ' + esc(casoCorto(t, 80)) : ''}]</div></div>`;
       orig[k] = t;
-      return `<div class="cw-blk" data-k="${k}"><div class="cw-p${num ? ' cw-li' : ''}" contenteditable="true" style="${sz}" data-k="${k}">${esc(t)}</div><div class="cw-act"><button class="btn btn-secondary btn-sm" style="padding:0 6px" title="Insertar un párrafo debajo" onclick="casoVwInsertar(this)">＋</button><button class="btn btn-secondary btn-sm" style="padding:0 6px" title="Borrar este párrafo" onclick="casoVwBorrar(this)">🗑</button></div></div>`;
+      return `<div class="cw-blk" data-k="${k}"><div class="cw-p${num ? ' cw-li' : ''}" contenteditable="true" style="${sz}" data-k="${k}">${rico}</div><div class="cw-act"><button class="btn btn-secondary btn-sm" style="padding:0 6px" title="Comentar todo este párrafo" onclick="casoVwComentar(this)">💬</button><button class="btn btn-secondary btn-sm" style="padding:0 6px" title="Insertar un párrafo debajo" onclick="casoVwInsertar(this)">＋</button><button class="btn btn-secondary btn-sm" style="padding:0 6px" title="Borrar este párrafo" onclick="casoVwBorrar(this)">🗑</button></div></div>`;
     }
     const filas = casoHijosW(b, 'w:tr');
-    return `<div class="cw-blk" data-k="${k}"><table class="cw-t">${filas.map((tr, r) => '<tr>' + casoHijosW(tr, 'w:tc').map((tc, c) => { const ps = Array.from(tc.getElementsByTagName('w:p')), t = ps.map(casoTextoP).join(' / '), ed = ps.length === 1 && !tc.getElementsByTagName('w:drawing').length; if (ed) orig[`${k}:${r + 1}:${c + 1}`] = t; return `<td contenteditable="${ed}" data-t="${k}" data-r="${r + 1}" data-c="${c + 1}" ${ed ? '' : 'title="Celda con varios párrafos o imágenes: se edita en Word" style="color:var(--text3)"'}>${esc(t)}</td>`; }).join('') + '</tr>').join('')}</table></div>`;
+    return `<div class="cw-blk" data-k="${k}"><table class="cw-t">${filas.map((tr, r) => '<tr>' + casoHijosW(tr, 'w:tc').map((tc, c) => { const ps = Array.from(tc.getElementsByTagName('w:p')), t = ps.map(casoTextoP).join(' / '), ed = ps.length === 1 && !tc.getElementsByTagName('w:drawing').length; if (ed) orig[`${k}:${r + 1}:${c + 1}`] = t; return `<td contenteditable="${ed}" data-t="${k}" data-r="${r + 1}" data-c="${c + 1}" ${ed ? '' : 'title="Celda con varios párrafos o imágenes: se edita en Word" style="color:var(--text3)"'}>${ed ? casoVwParrafoHtml(ps[0], abiertos) : esc(t)}</td>`; }).join('') + '</tr>').join('')}</table></div>`;
   }).join('');
-  _casoVisor = { tipo: 'word', nombre, W, orig, dirty: false, ver: ver || 0, borrados: new Set() };
-  casoVisorMostrar(`📝 ${esc(nombre)}`, `${casoVerSelector(nombre, ver || 0)}<button class="btn btn-primary btn-sm" onclick="casoVwGuardar()">💾 Guardar versión</button><button class="btn btn-secondary btn-sm" onclick="casoVwDescargar()">⬇ Descargar</button>`, `<div id="cvw-box" style="max-width:860px;margin:0 auto;padding:8px 12px;font-size:14px;line-height:1.5">${html || '<p class="hint">El documento está vacío.</p>'}</div>`);
+  _casoVisor = { tipo: 'word', nombre, W, orig, dirty: false, ver: ver || 0, borrados: new Set(), coms, nuevos: new Map(), quitar: new Set(), estilos: {}, reemplazos: [], pend: null, cont: 0 };
+  const acciones = `${casoVerSelector(nombre, ver || 0)}<button class="btn btn-secondary btn-sm" onclick="casoVwBuscarToggle()" title="Buscar y reemplazar en el documento">🔍 Buscar</button><button class="btn btn-secondary btn-sm" onclick="casoVwIndice(this)" title="Ir a un título del documento">☰ Índice</button><button class="btn btn-primary btn-sm" onclick="casoVwGuardar()">💾 Guardar versión</button><button class="btn btn-secondary btn-sm" onclick="casoVwDescargar()">⬇ Descargar</button>`;
+  casoVisorMostrar(`📝 ${esc(nombre)}`, acciones, `<div id="cvw-find" style="display:none;gap:6px;align-items:center;flex-wrap:wrap;margin:0 auto 8px;max-width:1160px"><input id="cvw-buscar" placeholder="Buscar…" style="width:200px;font-size:12.5px" onkeydown="if(event.key==='Enter')casoVwBuscar(event.shiftKey?-1:1)" /><button class="btn btn-secondary btn-sm" onclick="casoVwBuscar(-1)">◀</button><button class="btn btn-secondary btn-sm" onclick="casoVwBuscar(1)">▶</button><input id="cvw-por" placeholder="Reemplazar por…" style="width:200px;font-size:12.5px" /><button class="btn btn-secondary btn-sm" onclick="casoVwReemplazarTodo()">Reemplazar todo</button><span class="hint" id="cvw-cuenta" style="margin:0"></span></div><div id="cvw-wrap" style="display:flex;gap:14px;align-items:flex-start;max-width:1160px;margin:0 auto"><div id="cvw-box" style="flex:1;min-width:0;max-width:860px;padding:8px 12px;font-size:14px;line-height:1.5">${html || '<p class="hint">El documento está vacío.</p>'}</div><div id="cvw-panel" style="width:270px;flex-shrink:0;position:sticky;top:0"></div></div>`);
+  casoVwEstilosCss(); casoVwBarraCrear(); casoVwPanel();
   const box = document.getElementById('cvw-box');
   box.oninput = () => { _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); };
   box.onkeydown = e => { if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('cw-p')) { e.preventDefault(); casoVwInsertar(e.target.closest('.cw-blk').querySelector('.cw-act button') || e.target.closest('.cw-blk')); } };
-  casoVisorMsg('Editá el texto directamente (Enter agrega un párrafo, 🗑 lo borra). Es una vista de texto y tablas: el formato fino y las imágenes se conservan pero se retocan en Word.');
+  box.onmouseup = box.onkeyup = () => setTimeout(casoVwBarraMostrar, 0);
+  box.onclick = e => { const c = e.target.closest && e.target.closest('.cw-cm'); if (c) casoVwIrPanel(c.dataset.cm.split(' ')[0]); };
+  casoVisorMsg('Seleccioná texto para resaltarlo, ponerle formato o comentarlo. Editá directamente (Enter agrega un párrafo, 🗑 lo borra). Es una vista de texto y tablas: las imágenes y el formato fino se conservan pero se retocan en Word.');
+}
+function casoVwEstilosCss() {
+  if (document.getElementById('caso-vw-css')) return;
+  const st = document.createElement('style'); st.id = 'caso-vw-css';
+  st.textContent = '.cw-blk{padding-right:84px !important}.cw-p,#cvw-box td{white-space:pre-wrap}.cw-cm{background:rgba(255,193,7,.22);border-bottom:2px solid #e0a800;cursor:pointer}.cw-cm.cw-sel{background:rgba(255,152,0,.45)}.cw-cc{border:1px solid var(--border);border-radius:8px;padding:7px 9px;margin-bottom:8px;background:var(--surface);cursor:pointer}.cw-cc.cw-sel{border-color:#e0a800;box-shadow:0 0 0 2px rgba(224,168,0,.3)}.cw-cc .cw-an{font-size:11px;color:var(--text3);border-left:3px solid #e0a800;padding-left:6px;margin-bottom:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#cvw-barra button{cursor:pointer}';
+  document.head.appendChild(st);
+}
+// ── Barra flotante sobre el texto seleccionado ──
+function casoVwBarraCrear() {
+  let b = document.getElementById('cvw-barra'); if (b) b.remove();
+  const bt = 'class="btn btn-secondary btn-sm" style="padding:0 7px;width:auto;font-size:12px;line-height:22px"';
+  b = document.createElement('div'); b.id = 'cvw-barra';
+  b.style.cssText = 'position:fixed;z-index:1200;display:none;gap:4px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:4px 6px;box-shadow:0 4px 16px rgba(0,0,0,.22)';
+  b.onmousedown = e => e.preventDefault();
+  b.innerHTML = Object.entries(CASO_VW_COLORES).map(([c, h]) => `<button type="button" title="Resaltar en ${c}" style="width:20px;height:20px;border-radius:50%;border:1px solid rgba(0,0,0,.25);background:${h};padding:0" onclick="casoVwResaltar('${c}')"></button>`).join('')
+    + `<button type="button" ${bt} title="Quitar el resaltado" onclick="casoVwResaltar('ninguno')">⌫</button><span style="width:1px;height:18px;background:var(--border)"></span>`
+    + `<button type="button" ${bt} title="Negrita" onclick="casoVwFormato('negrita')"><b>N</b></button><button type="button" ${bt} title="Cursiva" onclick="casoVwFormato('cursiva')"><i>C</i></button><button type="button" ${bt} title="Subrayado" onclick="casoVwFormato('subrayado')"><u>S</u></button><span style="width:1px;height:18px;background:var(--border)"></span>`
+    + `<button type="button" ${bt} title="Título 1" onclick="casoVwEstilo('titulo1')">T1</button><button type="button" ${bt} title="Título 2" onclick="casoVwEstilo('titulo2')">T2</button><button type="button" ${bt} title="Título 3" onclick="casoVwEstilo('titulo3')">T3</button><button type="button" ${bt} title="Texto normal" onclick="casoVwEstilo('normal')">¶</button><button type="button" ${bt} title="Viñeta" onclick="casoVwEstilo('vineta')">•</button><span style="width:1px;height:18px;background:var(--border)"></span>`
+    + `<button type="button" ${bt} title="Agregar un comentario a este texto" onclick="casoVwComentar(null)">💬</button><button type="button" ${bt} title="Preguntarle a la IA sobre este texto (cierra el visor y deja la consulta escrita en el chat)" onclick="casoVwPreguntarIA()">✨</button>`;
+  document.body.appendChild(b);
+}
+function casoVwSel() {
+  const sel = window.getSelection(); if (!sel || sel.isCollapsed || !sel.rangeCount || !_casoVisor || _casoVisor.tipo !== 'word') return null;
+  const r = sel.getRangeAt(0), ed = n => (n.nodeType === 3 ? n.parentElement : n).closest('.cw-p[contenteditable=true], td[contenteditable=true]'), a = ed(r.startContainer), b = ed(r.endContainer);
+  if (!a || a !== b || !a.closest('#cvw-box')) return null;
+  return { r, el: a, txt: sel.toString() };
+}
+function casoVwBarraMostrar() {
+  const bar = document.getElementById('cvw-barra'); if (!bar) return; const s = casoVwSel();
+  if (!s || !s.txt.trim()) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex'; const rc = s.r.getBoundingClientRect();
+  bar.style.left = Math.max(8, Math.min(window.innerWidth - bar.offsetWidth - 8, rc.left + rc.width / 2 - bar.offsetWidth / 2)) + 'px'; bar.style.top = Math.max(8, rc.top - bar.offsetHeight - 8) + 'px';
+}
+function casoVwBarraOcultar() { const b = document.getElementById('cvw-barra'); if (b) b.style.display = 'none'; }
+// Envuelve lo seleccionado en un <span> (funciona aunque la selección cruce otros tramos) y marca el visor como modificado
+function casoVwEnvolver(clase, datos, estilo) {
+  const s = casoVwSel(); if (!s) return null;
+  const span = document.createElement('span'); span.className = clase; Object.entries(datos || {}).forEach(([k, v]) => { span.dataset[k] = v; }); if (estilo) span.style.cssText = estilo;
+  span.appendChild(s.r.extractContents()); s.r.insertNode(span); window.getSelection().removeAllRanges(); casoVwBarraOcultar();
+  _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); return span;
+}
+function casoVwDesenvolver(sp) { const par = sp.parentNode; if (!par) return; while (sp.firstChild) par.insertBefore(sp.firstChild, sp); sp.remove(); par.normalize(); }
+function casoVwResaltar(c) {
+  const quitar = c === 'ninguno', sp = casoVwEnvolver('cw-mk', { f: JSON.stringify({ resaltado: quitar ? 'ninguno' : CASO_VW_COLOR_OP[c] }) }, quitar ? 'background:transparent' : 'background:' + CASO_VW_COLORES[c] + ';color:#1a1a1a');
+  if (sp && quitar) sp.querySelectorAll('span').forEach(x => { x.style.background = 'transparent'; });
+}
+function casoVwFormato(campo) {
+  const s = casoVwSel(); if (!s) return; const par = s.r.startContainer.nodeType === 3 ? s.r.startContainer.parentElement : s.r.startContainer, cs = getComputedStyle(par);
+  const activo = campo === 'negrita' ? Number(cs.fontWeight) >= 600 : campo === 'cursiva' ? cs.fontStyle === 'italic' : /underline/.test(cs.textDecorationLine), val = !activo;
+  casoVwEnvolver('cw-mk', { f: JSON.stringify({ [campo]: val }) }, campo === 'negrita' ? `font-weight:${val ? 700 : 400}` : campo === 'cursiva' ? `font-style:${val ? 'italic' : 'normal'}` : `text-decoration:${val ? 'underline' : 'none'}`);
+}
+function casoVwEstilo(est) {
+  const s = casoVwSel(); if (!s) return; const el = s.el; if (el.tagName === 'TD' || !el.dataset.k) { casoVisorMsg('El estilo de párrafo se cambia en párrafos del texto, no en tablas ni en párrafos nuevos.'); return; }
+  _casoVisor.estilos[el.dataset.k] = est; el.style.fontSize = ''; el.style.fontWeight = '';
+  if (CASO_VW_EST[est]) el.style.cssText += CASO_VW_EST[est]; el.classList.toggle('cw-li', est === 'vineta' || est === 'numerada');
+  _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); casoVwBarraMostrar();
+}
+function casoVwPreguntarIA() {
+  const s = casoVwSel(); if (!s) return; const txt = s.txt.trim().replace(/\s+/g, ' '), k = s.el.dataset.k || s.el.dataset.t, nombre = _casoVisor.nombre;
+  casoVisorCerrar(true); const inp = document.getElementById('caso-input'); if (!inp) return;
+  inp.value = `Sobre el archivo "${nombre}"${k ? ' (bloque [' + k + '])' : ''}, este texto: «${txt}»\n\n`; inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
+}
+// ── Comentarios ──
+function casoVwComentar(btn) {
+  const s = _casoVisor; if (!s) return; if (s.pend) { casoVisorMsg('Terminá primero el comentario que está abierto (panel de la derecha).'); return; }
+  let sp = null;
+  if (btn && btn.closest('.cw-act')) {
+    const p = btn.closest('.cw-blk').querySelector('.cw-p[contenteditable=true]'); if (!p || !p.textContent.trim()) { casoVisorMsg('Ese párrafo no tiene texto para comentar.'); return; }
+    sp = document.createElement('span'); sp.className = 'cw-cm cw-cmn'; while (p.firstChild) sp.appendChild(p.firstChild); p.appendChild(sp);
+  } else if (casoVwSel()) sp = casoVwEnvolver('cw-cm cw-cmn', {}, '');
+  if (!sp) { casoVisorMsg('Seleccioná el texto que querés comentar.'); return; }
+  const id = 'n' + (++s.cont); sp.dataset.cm = id; s.pend = { id, span: sp }; casoVwBarraOcultar(); casoVwPanel();
+  const t = document.getElementById('cvw-ctxt'); if (t) t.focus();
+}
+function casoVwComentarOk() {
+  const s = _casoVisor, t = document.getElementById('cvw-ctxt'), txt = t ? t.value.trim() : ''; if (!s || !s.pend) return; if (!txt) { casoVisorMsg('Escribí el comentario.'); return; }
+  s.nuevos.set(s.pend.id, { texto: txt, autor: casoAutor() || 'MAIA', fecha: new Date().toISOString() }); s.pend = null; s.dirty = true; casoVisorMsg('Cambios sin guardar.'); casoVwPanel();
+}
+function casoVwComentarNo() { const s = _casoVisor; if (!s || !s.pend) return; casoVwDesenvolver(s.pend.span); s.pend = null; casoVwPanel(); }
+function casoVwQuitarCom(id) {
+  const s = _casoVisor; if (!s) return;
+  if (s.nuevos.has(id)) s.nuevos.delete(id); else s.quitar.add(id);
+  document.querySelectorAll('#cvw-box .cw-cm').forEach(sp => { const ids = (sp.dataset.cm || '').split(' ').filter(x => x !== id); if (ids.length === (sp.dataset.cm || '').split(' ').length) return; if (ids.length) sp.dataset.cm = ids.join(' '); else if (sp.classList.contains('cw-cmn')) casoVwDesenvolver(sp); else sp.classList.remove('cw-cm'); });
+  s.dirty = true; casoVisorMsg('Cambios sin guardar.'); casoVwPanel();
+}
+function casoVwIrPanel(id) {
+  document.querySelectorAll('#cvw-panel .cw-cc').forEach(c => c.classList.toggle('cw-sel', c.dataset.id === id));
+  const c = document.querySelector(`#cvw-panel .cw-cc[data-id="${id}"]`); if (c) c.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+function casoVwIrComentario(id) {
+  document.querySelectorAll('#cvw-box .cw-cm').forEach(sp => sp.classList.toggle('cw-sel', (sp.dataset.cm || '').split(' ').includes(id)));
+  const sp = document.querySelector(`#cvw-box .cw-cm[data-cm~="${id}"]`); if (sp) sp.scrollIntoView({ block: 'center', behavior: 'smooth' }); casoVwIrPanel(id);
+}
+function casoVwPanel() {
+  const s = _casoVisor, el = document.getElementById('cvw-panel'); if (!s || !el) return;
+  const ancla = id => { const sp = document.querySelector(`#cvw-box .cw-cm[data-cm~="${id}"]`); return sp ? sp.textContent.trim() : ''; }, items = [];
+  s.coms.forEach((c, id) => { if (!s.quitar.has(id)) items.push({ id, nuevo: false, c }); }); s.nuevos.forEach((c, id) => items.push({ id, nuevo: true, c }));
+  const fecha = f => { const d = new Date(f); return isNaN(d) ? '' : d.toLocaleDateString('es-AR'); };
+  el.innerHTML = `<div class="card" style="padding:10px 12px;margin:0"><div class="card-label" style="margin-bottom:6px">Comentarios (${items.length})</div>`
+    + (s.pend ? `<div class="cw-cc cw-sel" style="cursor:default"><div class="cw-an">${esc(casoCorto(s.pend.span.textContent.trim(), 120))}</div><textarea id="cvw-ctxt" rows="3" placeholder="Escribí el comentario…" style="width:100%;font-size:12.5px;resize:vertical"></textarea><div style="display:flex;gap:6px;margin-top:6px"><button class="btn btn-primary btn-sm" style="width:auto" onclick="casoVwComentarOk()">Agregar</button><button class="btn btn-secondary btn-sm" style="width:auto" onclick="casoVwComentarNo()">Cancelar</button></div></div>` : '')
+    + (items.length ? items.map(({ id, nuevo, c }) => `<div class="cw-cc" data-id="${esc(id)}" onclick="casoVwIrComentario(this.dataset.id)"><div class="cw-an">${esc(casoCorto(ancla(id), 120)) || '(sin texto asociado)'}</div><div style="font-size:12.5px;white-space:pre-wrap">${esc(c.texto)}</div><div style="display:flex;align-items:center;margin-top:4px"><span class="hint" style="margin:0;flex:1;font-size:11px">${esc(c.autor)}${c.fecha ? ' · ' + fecha(c.fecha) : ''}${nuevo ? ' · nuevo' : ''}</span><button class="remove-btn" title="Quitar este comentario" data-id="${esc(id)}" onclick="event.stopPropagation();casoVwQuitarCom(this.dataset.id)">&#x2715;</button></div></div>`).join('') : (s.pend ? '' : '<p class="hint" style="margin:0">Seleccioná un texto y tocá 💬 para comentarlo. Los comentarios quedan en el Word y se ven en Word y en MAIA.</p>')) + '</div>';
+}
+// ── Buscar y reemplazar, índice ──
+function casoVwBuscarToggle() { const f = document.getElementById('cvw-find'); if (!f) return; const ver = f.style.display === 'none'; f.style.display = ver ? 'flex' : 'none'; if (ver) { const i = document.getElementById('cvw-buscar'); i.focus(); i.select(); } }
+function casoVwCuenta(q) { const box = document.getElementById('cvw-box'), t = box ? box.innerText : ''; if (!q) return 0; return t.split(q).length - 1; }
+function casoVwBuscar(dir) {
+  const q = document.getElementById('cvw-buscar').value, c = document.getElementById('cvw-cuenta'); if (!q) return;
+  const n = casoVwCuenta(q); if (c) c.textContent = n ? n + ' coincidencia' + (n === 1 ? '' : 's') : 'sin coincidencias';
+  if (n) { const hallado = window.find(q, false, dir < 0, true, false, false, false); if (!hallado) casoVisorMsg('Llegaste al final: volvé a tocar para empezar de nuevo.'); }
+}
+function casoVwReemplazarTodo() {
+  const s = _casoVisor, q = document.getElementById('cvw-buscar').value, por = document.getElementById('cvw-por').value; if (!s || !q) return;
+  let n = 0;
+  document.querySelectorAll('#cvw-box .cw-p[contenteditable=true], #cvw-box td[contenteditable=true]').forEach(el => {
+    const clave = el.tagName === 'TD' ? `${el.dataset.t}:${el.dataset.r}:${el.dataset.c}` : el.dataset.k, limpio = clave && s.orig[clave] != null && el.innerText.replace(/\n$/, '') === s.orig[clave]; let aqui = 0;
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), nodos = []; while (w.nextNode()) nodos.push(w.currentNode);
+    nodos.forEach(t => { if (t.nodeValue.includes(q)) { aqui += t.nodeValue.split(q).length - 1; t.nodeValue = t.nodeValue.split(q).join(por); } });
+    if (aqui) { n += aqui; if (limpio) s.orig[clave] = el.innerText.replace(/\n$/, ''); }
+  });
+  if (!n) { casoVisorMsg('No encontré "' + q + '" para reemplazar.'); return; }
+  s.reemplazos.push({ buscar: q, por }); s.dirty = true; casoVisorMsg(`${n} reemplazo${n === 1 ? '' : 's'} hecho${n === 1 ? '' : 's'} (se aplican al guardar, conservando el formato).`);
+  const c = document.getElementById('cvw-cuenta'); if (c) c.textContent = '';
+}
+function casoVwIndice(btn) {
+  const titulos = Array.from(document.querySelectorAll('#cvw-box .cw-p')).filter(p => /font-size:(20|16|14)px/.test(p.getAttribute('style') || '') && p.textContent.trim());
+  let m = document.getElementById('cvw-indice'); if (m) { m.remove(); return; }
+  m = document.createElement('div'); m.id = 'cvw-indice'; const rc = btn.getBoundingClientRect();
+  m.style.cssText = `position:fixed;z-index:1200;left:${Math.max(8, rc.left - 120)}px;top:${rc.bottom + 4}px;width:340px;max-height:60vh;overflow:auto;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.22);padding:6px`;
+  m.innerHTML = titulos.length ? titulos.map((p, i) => `<div style="padding:4px 8px;cursor:pointer;font-size:${/20px/.test(p.getAttribute('style')) ? 13 : 12}px;padding-left:${/20px/.test(p.getAttribute('style')) ? 8 : /16px/.test(p.getAttribute('style')) ? 20 : 32}px;border-radius:4px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" data-i="${i}" onclick="casoVwIrTitulo(+this.dataset.i)">${esc(casoCorto(p.textContent.trim(), 70))}</div>`).join('') : '<p class="hint" style="margin:6px">El documento no tiene títulos con estilo (Título 1, 2 o 3).</p>';
+  document.body.appendChild(m); setTimeout(() => document.addEventListener('click', function cerrar(e) { if (!m.contains(e.target)) { m.remove(); document.removeEventListener('click', cerrar); } }), 0);
+}
+function casoVwIrTitulo(i) {
+  const titulos = Array.from(document.querySelectorAll('#cvw-box .cw-p')).filter(p => /font-size:(20|16|14)px/.test(p.getAttribute('style') || '') && p.textContent.trim()), p = titulos[i];
+  const m = document.getElementById('cvw-indice'); if (m) m.remove(); if (p) { p.scrollIntoView({ block: 'start', behavior: 'smooth' }); p.focus(); }
 }
 function casoVwInsertar(el) {
   const blk = el.closest('.cw-blk'); if (!blk) return;
@@ -38991,28 +39167,57 @@ function casoVwInsertar(el) {
   blk.after(n); n.querySelector('.cw-p').focus(); _casoVisor.dirty = true;
 }
 function casoVwBorrar(el) { const blk = el.closest('.cw-blk'); if (!blk) return; if (blk.dataset.k) _casoVisor.borrados.add(Number(blk.dataset.k)); blk.remove(); _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); }
+// Cuántas veces aparece antes, en el párrafo, el mismo texto que el tramo marcado: así el .docx sabe cuál de las apariciones es (misma cuenta que formato_texto / comentario: sin solaparse)
+function casoVwOcurrencia(el, sp) {
+  const pre = document.createRange(); pre.selectNodeContents(el); pre.setEndBefore(sp);
+  const a = pre.toString().length, txt = el.textContent, frag = sp.textContent; let n = 1, i = txt.indexOf(frag);
+  while (i >= 0 && i < a) { n++; i = txt.indexOf(frag, i + frag.length); }
+  return n;
+}
+// Operaciones de lo marcado en pantalla (resaltados, formato, comentarios nuevos), leídas de los <span> que hay en el texto en el momento de guardar
+function casoVwMarcas() {
+  const s = _casoVisor, box = document.getElementById('cvw-box'), ops = [];
+  box.querySelectorAll('.cw-blk[data-k]').forEach(blk => {
+    blk.querySelectorAll('.cw-p[contenteditable=true], td[contenteditable=true]').forEach(el => {
+      const ref = el.tagName === 'TD' ? { tabla: Number(el.dataset.t), fila: Number(el.dataset.r), columna: Number(el.dataset.c) } : { indice: Number(blk.dataset.k) };
+      el.querySelectorAll('.cw-mk, .cw-cmn').forEach(sp => {
+        const frag = sp.textContent; if (!frag.trim()) return; const ocurrencia = casoVwOcurrencia(el, sp);
+        if (sp.classList.contains('cw-mk')) { let f; try { f = JSON.parse(sp.dataset.f || '{}'); } catch (e) { return; } ops.push(Object.assign({ op: 'formato_texto', buscar: frag, ocurrencia }, ref, f)); }
+        else { const c = s.nuevos.get(sp.dataset.cm); if (c) ops.push(Object.assign({ op: 'comentario', texto: c.texto, autor: c.autor, buscar: frag, ocurrencia }, ref)); }
+      });
+    });
+  });
+  Object.entries(s.estilos).forEach(([k, est]) => { if (!s.borrados.has(Number(k))) ops.push({ op: 'estilo_parrafo', indice: Number(k), estilo: est }); });
+  return ops;
+}
 function casoVwOps() {
   const s = _casoVisor, box = document.getElementById('cvw-box'), ops = [], ins = new Map(); let ult = 0;
+  s.reemplazos.forEach(r => ops.push({ op: 'reemplazar', buscar: r.buscar, por: r.por, todas: true }));
   Array.from(box.children).forEach(b => {
     if (b.dataset.k) { ult = Number(b.dataset.k); const p = b.querySelector('.cw-p[contenteditable=true]'); if (p && s.orig[ult] != null && p.innerText.replace(/\n$/, '') !== s.orig[ult]) ops.push({ op: 'editar_parrafo', indice: ult, texto: p.innerText.replace(/\n/g, ' ') });
       b.querySelectorAll('td[contenteditable=true]').forEach(td => { const key = `${td.dataset.t}:${td.dataset.r}:${td.dataset.c}`; if (s.orig[key] != null && td.innerText !== s.orig[key]) ops.push({ op: 'editar_celda', tabla: Number(td.dataset.t), fila: Number(td.dataset.r), columna: Number(td.dataset.c), texto: td.innerText.replace(/\n/g, ' ') }); }); }
     else if (b.dataset.nuevo) { const t = b.querySelector('.cw-p').innerText.replace(/\n/g, ' ').trim(); if (t) { if (!ins.has(ult)) ins.set(ult, []); ins.get(ult).push({ texto: t, estilo: 'normal' }); } }
   });
   ins.forEach((parrafos, despues_de) => ops.push({ op: 'insertar', despues_de, parrafos }));
+  s.quitar.forEach(id => ops.push({ op: 'quitar_comentario', id }));
   s.borrados.forEach(k => { const i = ops.findIndex(o => o.op === 'editar_parrafo' && o.indice === k); if (i >= 0) ops.splice(i, 1); ops.push({ op: 'eliminar', indice: k }); });
   return ops;
 }
+// Lo marcado se aplica una por una: si el texto cambió y alguna marca ya no se encuentra, se cuenta y se sigue con las demás (no se pierde todo el guardado)
 async function casoVwBlob() {
-  const s = _casoVisor, ops = casoVwOps(); if (!ops.length) return null;
-  await casoAplicarOpsWord(s.W, ops); await casoWSerializar(s.W);
+  const s = _casoVisor; if (s.pend) casoVwComentarNo();
+  const ops = casoVwOps(), marcas = casoVwMarcas(); s.marcasFallidas = 0; if (!ops.length && !marcas.length) return null;
+  if (ops.length) await casoAplicarOpsWord(s.W, ops);
+  for (const m of marcas) { try { await casoAplicarOpsWord(s.W, [m]); } catch (e) { s.marcasFallidas++; } }
+  await casoWSerializar(s.W);
   return await s.W.zip.generateAsync({ type: 'blob', mimeType: casoMimeDe('x.docx') });
 }
 async function casoVwGuardar() {
   const s = _casoVisor; if (!s) return; casoVisorMsg('Guardando…');
   try {
     const blob = await casoVwBlob(); if (!blob) { casoVisorMsg('No hay cambios para guardar.'); return; }
-    const row = await casoArchivoSubir(blob, s.nombre, 'editado'); casoSesionPoner(s.nombre, new File([blob], s.nombre, { type: blob.type }));
-    _casoVisor = null; await casoVisorAbrir(s.nombre); casoVisorMsg(row ? `Guardado como versión v${row.version}.` : 'No se pudo guardar en el caso (mirá el aviso en "Archivos del caso"); descargalo con ⬇.');
+    const fallo = s.marcasFallidas || 0, row = await casoArchivoSubir(blob, s.nombre, 'editado'); casoSesionPoner(s.nombre, new File([blob], s.nombre, { type: blob.type }));
+    _casoVisor = null; await casoVisorAbrir(s.nombre); casoVisorMsg(row ? `Guardado como versión v${row.version}.${fallo ? ' ' + fallo + ' marca' + (fallo === 1 ? '' : 's') + ' (resaltado, formato o comentario) no se pudo' + (fallo === 1 ? '' : 'ieron') + ' aplicar porque el texto cambió.' : ''}` : 'No se pudo guardar en el caso (mirá el aviso en "Archivos del caso"); descargalo con ⬇.');
   } catch (e) { casoVisorMsg('No se pudo guardar: ' + e.message); }
 }
 async function casoVwDescargar() {
@@ -39333,7 +39538,8 @@ function casoFormatoRun(doc, run, f) {
   if (f.color_texto) { casoWQuitar(rpr, 'color'); casoWProp(doc, rpr, 'color', { val: casoHex(f.color_texto) }); }
   if (f.tamano) { casoWQuitar(rpr, 'sz'); casoWQuitar(rpr, 'szCs'); casoWProp(doc, rpr, 'sz', { val: String(Math.round(Number(f.tamano) * 2)) }); casoWProp(doc, rpr, 'szCs', { val: String(Math.round(Number(f.tamano) * 2)) }); }
   if (f.fuente) { casoWQuitar(rpr, 'rFonts'); casoWProp(doc, rpr, 'rFonts', { ascii: f.fuente, hAnsi: f.fuente, cs: f.fuente }); }
-  if (f.resaltado) { casoWQuitar(rpr, 'highlight'); casoWQuitar(rpr, 'shd'); const nm = CASO_RESALTADOS[String(f.resaltado).toLowerCase()]; if (nm) casoWProp(doc, rpr, 'highlight', { val: nm }); else casoWProp(doc, rpr, 'shd', { val: 'clear', color: 'auto', fill: casoHex(f.resaltado) }); }
+  if (f.resaltado === 'ninguno') { casoWQuitar(rpr, 'highlight'); casoWQuitar(rpr, 'shd'); }
+  else if (f.resaltado) { casoWQuitar(rpr, 'highlight'); casoWQuitar(rpr, 'shd'); const nm = CASO_RESALTADOS[String(f.resaltado).toLowerCase()]; if (nm) casoWProp(doc, rpr, 'highlight', { val: nm }); else casoWProp(doc, rpr, 'shd', { val: 'clear', color: 'auto', fill: casoHex(f.resaltado) }); }
   casoOrdenarW(rpr, CASO_RPR_ORDEN);
 }
 function casoPartirRun(run, off) { const t = run.getElementsByTagName('w:t')[0], txt = t.textContent, r2 = run.cloneNode(true); t.textContent = txt.slice(0, off); t.setAttribute('xml:space', 'preserve'); const t2 = r2.getElementsByTagName('w:t')[0]; t2.textContent = txt.slice(off); t2.setAttribute('xml:space', 'preserve'); run.parentNode.insertBefore(r2, run.nextSibling); return [run, r2]; }
@@ -39408,6 +39614,7 @@ async function casoWordOpExtra(o, C, resumen) {
   const { W, doc, zip, colocar, bloques } = C;
   const tabla = () => { if (!o._tabla || o._tabla.nodeName !== 'w:tbl') throw new Error(`${o.op}: "tabla" tiene que ser el número de un bloque que sea una tabla (ver_archivo).`); return o._tabla; };
   const filaIdx = (tbl, k) => { const trs = casoHijosW(tbl, 'w:tr'), tr = trs[(k || 1) - 1]; if (!tr) throw new Error(`La tabla no tiene la fila ${k} (tiene ${trs.length}).`); return tr; };
+  const parr = () => { if (o._el && o._el.nodeName === 'w:p') return o._el; if (o.tabla && o.fila && o.columna) { const tc = casoHijosW(filaIdx(tabla(), o.fila), 'w:tc')[o.columna - 1]; return tc ? tc.getElementsByTagName('w:p')[0] : null; } return o._el; };
   switch (o.op) {
     case 'reemplazar_varios': {
       const pares = (o.pares || []).filter(x => x && x.buscar); if (!pares.length) throw new Error('reemplazar_varios: faltan "pares" ({buscar, por}).');
@@ -39417,10 +39624,10 @@ async function casoWordOpExtra(o, C, resumen) {
       resumen.push(`${enc.length} reemplazo(s) hechos` + (faltan.length ? `; NO encontrados: ${faltan.map(x => '"' + casoCorto(x, 25) + '"').join(', ')}` : '')); return true;
     }
     case 'formato_texto': {
-      const p = o._el; if (!p || p.nodeName !== 'w:p') throw new Error('formato_texto: "indice" tiene que ser un párrafo.');
+      const p = parr(); if (!p || p.nodeName !== 'w:p') throw new Error('formato_texto: "indice" tiene que ser un párrafo (o una celda con tabla, fila y columna).');
       const f = { negrita: o.negrita, cursiva: o.cursiva, subrayado: o.subrayado, color_texto: o.color_texto, tamano: o.tamano, fuente: o.fuente, resaltado: o.resaltado }; if (!Object.values(f).some(v => v != null)) throw new Error('formato_texto: indicá qué formato aplicar (negrita, cursiva, subrayado, color_texto, tamano, fuente o resaltado).');
       let n = 0;
-      if (o.buscar) { const txt = casoTextoP(p); let desde = 0, i; const rangos = []; while ((i = txt.indexOf(o.buscar, desde)) >= 0) { rangos.push([i, i + o.buscar.length]); desde = i + o.buscar.length; if (o.ocurrencia === 'primera') break; } if (!rangos.length) throw new Error(`formato_texto: el párrafo [${o.indice}] no contiene "${casoCorto(o.buscar, 40)}".`);
+      if (o.buscar) { const txt = casoTextoP(p); let desde = 0, i, rangos = []; while ((i = txt.indexOf(o.buscar, desde)) >= 0) { rangos.push([i, i + o.buscar.length]); desde = i + o.buscar.length; if (o.ocurrencia === 'primera') break; } if (Number.isInteger(o.ocurrencia)) rangos = rangos.slice(o.ocurrencia - 1, o.ocurrencia); if (!rangos.length) throw new Error(`formato_texto: el párrafo [${o.indice}] no contiene "${casoCorto(o.buscar, 40)}".`);
         rangos.reverse().forEach(([a, b]) => { casoRunsRango(p, a, b).forEach(r => { casoFormatoRun(doc, r, f); n++; }); }); }
       else Array.from(p.getElementsByTagName('w:r')).forEach(r => { casoFormatoRun(doc, r, f); n++; });
       if (!n) throw new Error('formato_texto: el párrafo no tiene texto para formatear.'); resumen.push(`formato de texto en [${o.indice}]${o.buscar ? ' ("' + casoCorto(o.buscar, 25) + '")' : ''}`); return true;
@@ -39490,12 +39697,29 @@ async function casoWordOpExtra(o, C, resumen) {
       if (!hecho) throw new Error('tabla_formato: indicá relleno_encabezado, negrita_encabezado, color_texto_encabezado o bordes.'); resumen.push(`formato de la tabla [${o.tabla}]`); return true;
     }
     case 'comentario': {
-      const p = o._el; if (!p || p.nodeName !== 'w:p') throw new Error('comentario: "indice" tiene que ser un párrafo.'); if (!String(o.texto || '').trim()) throw new Error('comentario: falta "texto".');
-      const nuevo = !W.zip.file('word/comments.xml'), d = await casoWParte(W, 'word/comments.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="${CASO_WNS}"></w:comments>`), id = Math.max(-1, ...Array.from(d.getElementsByTagName('w:comment')).map(x => Number(x.getAttribute('w:id')))) + 1, autor = o.autor || 'IA de MAIA';
-      const [c] = procesosPropuestaParsearFragmento(d, `<w:comment w:id="${id}" w:author="${procesosPropuestaXmlEsc(autor)}" w:date="${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}" w:initials="IA"><w:p><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(String(o.texto))}</w:t></w:r></w:p></w:comment>`); d.documentElement.appendChild(c);
+      const p = parr(); if (!p || p.nodeName !== 'w:p') throw new Error('comentario: "indice" tiene que ser un párrafo (o una celda con tabla, fila y columna).'); if (!String(o.texto || '').trim()) throw new Error('comentario: falta "texto".');
+      let primero = null, ultimo = null;
+      if (o.buscar) {
+        const txt = casoTextoP(p), quiere = Number.isInteger(o.ocurrencia) ? o.ocurrencia : 1; let desde = 0, i, n = 0, pos = -1;
+        while ((i = txt.indexOf(o.buscar, desde)) >= 0) { n++; if (n === quiere) { pos = i; break; } desde = i + o.buscar.length; }
+        if (pos < 0) throw new Error(`comentario: el párrafo no contiene "${casoCorto(o.buscar, 40)}".`);
+        const rs = casoRunsRango(p, pos, pos + o.buscar.length); if (!rs.length) throw new Error('comentario: no se pudo ubicar el texto a comentar.'); primero = rs[0]; ultimo = rs[rs.length - 1];
+      }
+      const nuevo = !W.zip.file('word/comments.xml'), d = await casoWParte(W, 'word/comments.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="${CASO_WNS}"></w:comments>`), id = Math.max(-1, ...Array.from(d.getElementsByTagName('w:comment')).map(x => Number(x.getAttribute('w:id')))) + 1, autor = o.autor || 'IA de MAIA', inic = (String(autor).split(/\s+/).map(w => w[0] || '').join('').slice(0, 2) || 'IA').toUpperCase();
+      const [c] = procesosPropuestaParsearFragmento(d, `<w:comment w:id="${id}" w:author="${procesosPropuestaXmlEsc(autor)}" w:date="${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}" w:initials="${procesosPropuestaXmlEsc(inic)}"><w:p><w:r><w:t xml:space="preserve">${procesosPropuestaXmlEsc(String(o.texto))}</w:t></w:r></w:p></w:comment>`); d.documentElement.appendChild(c);
       if (nuevo) { await casoWRel(W, 'comments', 'comments.xml'); await casoWTipo(W, { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml', parte: '/word/comments.xml' }); }
       const [ini] = procesosPropuestaParsearFragmento(doc, `<w:commentRangeStart w:id="${id}"/>`), [fin, ref] = procesosPropuestaParsearFragmento(doc, `<w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r>`);
-      const ppr = casoHijosW(p, 'w:pPr')[0]; p.insertBefore(ini, ppr ? ppr.nextSibling : p.firstChild); p.appendChild(fin); p.appendChild(ref); resumen.push(`comentario en [${o.indice}]`); return true;
+      if (primero) { primero.parentNode.insertBefore(ini, primero); ultimo.parentNode.insertBefore(fin, ultimo.nextSibling); ultimo.parentNode.insertBefore(ref, fin.nextSibling); }
+      else { const ppr = casoHijosW(p, 'w:pPr')[0]; p.insertBefore(ini, ppr ? ppr.nextSibling : p.firstChild); p.appendChild(fin); p.appendChild(ref); }
+      resumen.push(`comentario en ${o.indice ? '[' + o.indice + ']' : 'una celda'}${o.buscar ? ' ("' + casoCorto(o.buscar, 25) + '")' : ''}`); return true;
+    }
+    case 'quitar_comentario': {
+      const d = W.zip.file('word/comments.xml') ? await casoWParte(W, 'word/comments.xml') : null; if (!d) throw new Error('quitar_comentario: el documento no tiene comentarios.');
+      const id = String(o.id), c = Array.from(d.getElementsByTagName('w:comment')).find(x => x.getAttribute('w:id') === id); if (!c) throw new Error(`quitar_comentario: no existe el comentario #${id} (ver_archivo los lista).`);
+      c.parentNode.removeChild(c);
+      ['w:commentRangeStart', 'w:commentRangeEnd'].forEach(nm => Array.from(doc.getElementsByTagName(nm)).filter(x => x.getAttribute('w:id') === id).forEach(x => x.parentNode.removeChild(x)));
+      Array.from(doc.getElementsByTagName('w:commentReference')).filter(x => x.getAttribute('w:id') === id).forEach(x => { const r = x.parentNode; if (r && r.parentNode) r.parentNode.removeChild(r); });
+      resumen.push(`comentario #${id} quitado`); return true;
     }
   }
   return false;
@@ -39505,11 +39729,12 @@ async function casoWComentariosTxt(W) {
   const f = W.zip.file('word/comments.xml'); if (!f) return '';
   const d = new DOMParser().parseFromString(await f.async('string'), 'application/xml'), com = Array.from(d.getElementsByTagName('w:comment')); if (!com.length) return '';
   const donde = {}; W.bloques.forEach((b, k) => Array.from(b.getElementsByTagName('w:commentReference')).forEach(r => { donde[r.getAttribute('w:id')] = k + 1; }));
-  return '\nCOMENTARIOS DEL DOCUMENTO:\n' + com.map(c => `- en [${donde[c.getAttribute('w:id')] || '?'}] ${c.getAttribute('w:author') || ''}: ${casoCorto(Array.from(c.getElementsByTagName('w:t')).map(t => t.textContent).join(''), 200)}`).join('\n') + '\n';
+  return '\nCOMENTARIOS DEL DOCUMENTO (el #número sirve para quitar_comentario):\n' + com.map(c => `- #${c.getAttribute('w:id')} en [${donde[c.getAttribute('w:id')] || '?'}] ${c.getAttribute('w:author') || ''}: ${casoCorto(Array.from(c.getElementsByTagName('w:t')).map(t => t.textContent).join(''), 200)}`).join('\n') + '\n';
 }
 
 CASO_HERRAMIENTAS[CASO_HERRAMIENTAS.findIndex(t => t.name === 'editar_word')] = { name: 'editar_word', description: 'Modifica un Word (.docx) del caso conservando su formato y baja el resultado como "<nombre> (editado).docx" (el original no se toca; los pedidos siguientes parten de la versión editada; con "guardar_como" se guarda como archivo nuevo y el de origen queda intacto: útil para plantillas). Primero usá ver_archivo: los índices son los del documento original (todos se resuelven antes de aplicar; ver_archivo también muestra los comentarios). Operaciones: reemplazar {buscar, por, todas, en: cuerpo|encabezado|pie|todo}; reemplazar_varios {pares:[{buscar, por}]} (ideal para rellenar una plantilla); editar_parrafo {indice, texto}; insertar {despues_de (0 = al principio; omitido = al final), parrafos:[{texto, estilo: normal|titulo1|titulo2|titulo3|vineta|negrita}]}; insertar_lista {despues_de, items, tipo: vineta|numerada} (listas reales de Word); insertar_tabla {despues_de, encabezados, filas}; insertar_imagen {despues_de, origen: "archivo:<imagen del caso>" | "flowsheet:<id>" | "procesos:<id>", ancho_cm, pie}; salto_pagina {despues_de}; formato_texto {indice, buscar (opcional: solo ese texto), negrita, cursiva, subrayado, color_texto, tamano (pt), fuente, resaltado}; estilo_parrafo {indice, estilo: normal|titulo1|titulo2|titulo3|vineta|numerada, alineacion: izquierda|centro|derecha|justificado, espacio_antes, espacio_despues (pt), interlineado, sangria_cm}; editar_celda {tabla, fila, columna, texto}; tabla_agregar_fila {tabla, despues_de_fila (0 = al principio), valores}; tabla_eliminar_fila {tabla, fila}; tabla_agregar_columna {tabla, despues_de_columna, encabezado, valores}; tabla_eliminar_columna {tabla, columna}; tabla_combinar {tabla, fila, desde_columna, hasta_columna}; tabla_formato {tabla, relleno_encabezado, negrita_encabezado, color_texto_encabezado, bordes: todos|ninguno}; comentario {indice, texto, autor}; eliminar {indice}. Colores: nombre (rojo, azul, gris claro...) o hex RRGGBB. Filas y columnas desde 1.', input_schema: { type: 'object', properties: { archivo: { type: 'string' }, guardar_como: { type: 'string' }, operaciones: { type: 'array', items: { type: 'object', properties: { op: { type: 'string', enum: ['reemplazar', 'reemplazar_varios', 'editar_parrafo', 'insertar', 'insertar_lista', 'insertar_tabla', 'insertar_imagen', 'salto_pagina', 'formato_texto', 'estilo_parrafo', 'editar_celda', 'tabla_agregar_fila', 'tabla_eliminar_fila', 'tabla_agregar_columna', 'tabla_eliminar_columna', 'tabla_combinar', 'tabla_formato', 'comentario', 'eliminar'] }, buscar: { type: 'string' }, por: { type: 'string' }, todas: { type: 'boolean' }, en: { type: 'string', enum: ['cuerpo', 'encabezado', 'pie', 'todo'] }, pares: { type: 'array', items: { type: 'object', properties: { buscar: { type: 'string' }, por: { type: 'string' } }, required: ['buscar'] } }, indice: { type: 'number' }, texto: { type: 'string' }, despues_de: { type: 'number' }, parrafos: { type: 'array', items: { type: 'object', properties: { texto: { type: 'string' }, estilo: { type: 'string', enum: ['normal', 'titulo1', 'titulo2', 'titulo3', 'vineta', 'negrita'] } }, required: ['texto'] } }, items: { type: 'array', items: { type: 'string' } }, tipo: { type: 'string', enum: ['vineta', 'numerada'] }, encabezados: { type: 'array', items: { type: 'string' } }, filas: { type: 'array', items: { type: 'array', items: {} } }, origen: { type: 'string' }, ancho_cm: { type: 'number' }, pie: { type: 'string' }, negrita: { type: 'boolean' }, cursiva: { type: 'boolean' }, subrayado: { type: 'boolean' }, color_texto: { type: 'string' }, tamano: { type: 'number' }, fuente: { type: 'string' }, resaltado: { type: 'string' }, ocurrencia: { type: 'string', enum: ['todas', 'primera'] }, estilo: { type: 'string', enum: ['normal', 'titulo1', 'titulo2', 'titulo3', 'vineta', 'numerada'] }, alineacion: { type: 'string', enum: ['izquierda', 'centro', 'derecha', 'justificado'] }, espacio_antes: { type: 'number' }, espacio_despues: { type: 'number' }, interlineado: { type: 'number' }, sangria_cm: { type: 'number' }, tabla: { type: 'number' }, fila: { type: 'number' }, columna: { type: 'number' }, despues_de_fila: { type: 'number' }, despues_de_columna: { type: 'number' }, valores: { type: 'array', items: {} }, encabezado: { type: 'string' }, desde_columna: { type: 'number' }, hasta_columna: { type: 'number' }, relleno_encabezado: { type: 'string' }, negrita_encabezado: { type: 'boolean' }, color_texto_encabezado: { type: 'string' }, bordes: { type: 'string', enum: ['todos', 'ninguno'] }, autor: { type: 'string' } }, required: ['op'] } } }, required: ['operaciones'] } };
 
+CASO_HERRAMIENTAS.find(t => t.name === 'editar_word').description += ' RESALTAR Y COMENTAR: formato_texto acepta "resaltado" (amarillo, verde, celeste, magenta, gris, o "ninguno" para quitarlo), "buscar" y "ocurrencia" (número: cuál de las apariciones del texto en ese párrafo; también sirve en celdas con tabla, fila y columna); comentario {indice, texto, buscar?, ocurrencia?} comenta el texto exacto "buscar" (o todo el párrafo si se omite); quitar_comentario {id} borra un comentario (ver_archivo muestra los #ids).';
 // ── Casos · edición DIRECTA de DFS, manuales, presentaciones, flowsheets y propuestas + duplicar, comparar y restaurar ──
 // editar_documento le habla al chat de cada módulo (otra IA: más caro y a veces interpreta mal). Estas herramientas aplican cambios exactos, sin IA de por medio, con las mismas
 // funciones que usan los módulos. Siempre se guarda antes una copia "· antes de editar".
