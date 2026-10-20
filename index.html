@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -38520,6 +38520,8 @@ async function casoVerExcel(file, hoja, rango) {
       if (out.length > CASO_MAX_RESULTADO - 300) return out + `… (se corta en la fila ${r}: pedí un rango con "rango", ej. A${r + 1}:Z${r + 60})\n`;
     }
   }
+  const notas = []; hojas.forEach(ws => ws.eachRow({ includeEmpty: true }, (row, r) => row.eachCell({ includeEmpty: true }, (cell, c) => { if (!cell.note) return; const t = casoVxNotaTxt(cell.note); if (t) notas.push(`- ${ws.name}!${casoColLetra(c)}${r}: ${casoCorto(t.replace(/\n+/g, ' '), 220)}`); })));
+  if (notas.length) out += '\nCOMENTARIOS (notas) DE LA PLANILLA (se quitan con quitar_nota {celda}):\n' + notas.join('\n') + '\n';
   return out;
 }
 async function casoVerArchivo(i) {
@@ -38917,35 +38919,212 @@ async function casoArchivoDeVersion(nombre, ver) {
 // ── Excel: hoja editable con fórmulas que se recalculan ──
 const casoRawCelda = c => { if (c.isMerged && c.master && c.master.address !== c.address) return ''; const v = c.value; if (v && typeof v === 'object') { if ('formula' in v || 'sharedFormula' in v) return '=' + (c.formula || v.formula || ''); if (v.richText) return v.richText.map(r => r.text).join(''); if (v instanceof Date) return v.toISOString().slice(0, 10); if (v.text != null) return String(v.text); if (v.error) return v.error; return ''; } return v == null ? '' : v; };
 const casoFmtVx = v => v == null ? '' : (v && typeof v === 'object' && v.value ? '#' + String(v.value).replace(/^#/, '') : (typeof v === 'number' ? String(Number(v.toPrecision(12))) : String(v)));
+// ── Casos · visor de Excel con el formato real de la planilla ──
+// Dibuja cada hoja como se ve en Excel (fuentes, colores de letra y de relleno, bordes, anchos de columna y alto de fila, celdas combinadas, paneles inmovilizados, formatos de número) y permite
+// seleccionar rangos, darles formato (relleno, negrita, alineación, bordes, formato de número), editar valores y fórmulas, comentar celdas (notas de Excel), crear pendientes desde los comentarios y deshacer.
+// Todo se aplica directo sobre la planilla cargada (ExcelJS) y se guarda como una versión nueva del archivo.
+const CASO_VX_RELLENOS = { amarillo: 'FFF176', verde: 'A5E8A5', celeste: '9FE3F5', rosa: 'F8B4E6', naranja: 'FFD59A', gris: 'D9D9D9' };
+const CASO_VX_INDEXED = ['000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF', '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF', '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080', '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF', '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF', '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99', '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696', '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333'];
+let _casoVxZoom = 100;
+function casoVxTema(wb) {
+  const base = ['FFFFFF', '000000', 'E7E6E6', '44546A', '4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47'];
+  try {
+    const xml = Object.values(wb._themes || {}).find(x => typeof x === 'string'); if (!xml) return base;
+    const cs = new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagName('a:clrScheme')[0]; if (!cs) return base;
+    const get = n => { const e = cs.getElementsByTagName('a:' + n)[0], c = e && e.firstElementChild; return c ? (c.getAttribute('val') && c.nodeName === 'a:srgbClr' ? c.getAttribute('val') : c.getAttribute('lastClr')) : null; };
+    return ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6'].map((n, i) => String(get(n) || base[i]).toUpperCase());
+  } catch (e) { return base; }
+}
+function casoVxTint(hex, t) { if (!t) return hex; const n = parseInt(hex, 16), ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => Math.max(0, Math.min(255, Math.round(t > 0 ? v + (255 - v) * t : v * (1 + t))))); return ch.map(v => v.toString(16).padStart(2, '0')).join('').toUpperCase(); }
+function casoVxColor(c, tema) {
+  if (!c) return null; let hex = null;
+  if (c.argb) hex = String(c.argb).slice(-6); else if (c.theme != null) hex = casoVxTint(tema[c.theme] || '000000', c.tint); else if (c.indexed != null) hex = CASO_VX_INDEXED[c.indexed] || null;
+  return hex && /^[0-9A-Fa-f]{6}$/.test(hex) ? '#' + hex : null;
+}
+const CASO_VX_BORDE = { thin: '1px solid', hair: '1px dotted', dotted: '1px dotted', dashed: '1px dashed', dashDot: '1px dashed', dashDotDot: '1px dashed', medium: '2px solid', mediumDashed: '2px dashed', mediumDashDot: '2px dashed', mediumDashDotDot: '2px dashed', slantDashDot: '2px dashed', thick: '3px solid', double: '3px double' };
+function casoVxCss(cell, tema) {
+  const f = cell.font || {}, fl = cell.fill, al = cell.alignment || {}, bd = cell.border || {}; let st = '', conFondo = false;
+  if (f.name) st += `font-family:'${String(f.name).replace(/'/g, '')}',Calibri,Arial,sans-serif;`; if (f.size) st += `font-size:${f.size}pt;`; if (f.bold) st += 'font-weight:700;'; if (f.italic) st += 'font-style:italic;';
+  const deco = [f.underline && f.underline !== 'none' ? 'underline' : '', f.strike ? 'line-through' : ''].filter(Boolean).join(' '); if (deco) st += `text-decoration:${deco};`;
+  const col = casoVxColor(f.color, tema); if (col) st += `color:${col};`;
+  if (fl && fl.type === 'pattern' && fl.pattern === 'solid') { const bg = casoVxColor(fl.fgColor, tema); if (bg) { st += `background:${bg};`; conFondo = true; } }
+  const h = al.horizontal; if (h === 'center' || h === 'centerContinuous') st += 'text-align:center;'; else if (h === 'right') st += 'text-align:right;'; else if (h === 'left' || h === 'fill' || h === 'justify') st += 'text-align:left;';
+  if (al.vertical === 'top') st += 'vertical-align:top;'; else if (al.vertical === 'middle' || al.vertical === 'center') st += 'vertical-align:middle;';
+  if (al.wrapText) st += 'white-space:pre-wrap;word-break:break-word;'; if (al.indent) st += `padding-left:${3 + al.indent * 9}px;`;
+  let conBorde = false;
+  [['top', 'border-top'], ['left', 'border-left'], ['bottom', 'border-bottom'], ['right', 'border-right']].forEach(([k, css]) => { const b = bd[k]; if (b && b.style) { st += `${css}:${CASO_VX_BORDE[b.style] || '1px solid'} ${casoVxColor(b.color, tema) || '#000'};`; conBorde = true; } });
+  return { st, conFondo, conBorde };
+}
+function casoVxTexto(s, ws, r, c) {
+  if (r > Math.max(1, ws.rowCount) || c > Math.max(1, ws.columnCount)) return '';
+  const cell = ws.getCell(r, c); let v; try { v = s.hf.getCellValue({ sheet: s.hf.getSheetId(ws.name), row: r - 1, col: c - 1 }); } catch (e) { return ''; }
+  const fmt = cell.numFmt;
+  if (cell.value instanceof Date) { try { return XLSX.SSF.format(fmt && fmt !== 'General' ? fmt : 'dd/mm/yyyy', cell.value.getTime() / 864e5 + 25569); } catch (e) { return String(v); } }
+  if (typeof v === 'number' && fmt && fmt !== 'General') { try { return XLSX.SSF.format(fmt, v); } catch (e) { /* formato raro: se muestra el número tal cual */ } }
+  return casoFmtVx(v);
+}
+function casoVxNotaTxt(note) {
+  let t = note == null ? '' : (typeof note === 'string' ? note : (note.texts || []).map(x => x.text || '').join(''));
+  if (/\[Threaded comment\]/.test(t)) { const m = /Comment:\s*([\s\S]*)$/.exec(t); t = m ? m[1].replace(/\n\s{2,}/g, '\n').replace(/Reply:\s*/g, '\n↳ ').trim() : t; }
+  return String(t).trim();
+}
+// ExcelJS no tiene forma de quitar una nota: asignarle null deja una nota rota que después hace fallar el guardado. Se la saca del modelo de la celda.
+function casoVxNotaSet(cell, n) {
+  if (n == null || n === '') { cell._comment = undefined; try { if (cell._value && cell._value.model) delete cell._value.model.comment; if (cell._value) cell._value.comment = undefined; } catch (e) { /* sin nota de todos modos */ } }
+  else cell.note = n;
+}
+// Todas las notas (comentarios) del libro: [{hojaIdx, hoja, r, c, ref, autor, texto}]
+function casoVxNotas() {
+  const s = _casoVisor, out = [];
+  s.wb.worksheets.forEach((ws, hi) => ws.eachRow({ includeEmpty: true }, (row, r) => row.eachCell({ includeEmpty: true }, (cell, c) => {
+    if (!cell.note) return; const txt = casoVxNotaTxt(cell.note); if (!txt) return; const m = /^([^\n:]{1,40}):\n([\s\S]*)$/.exec(txt);
+    out.push({ hojaIdx: hi, hoja: ws.name, r, c, ref: casoColLetra(c) + r, autor: m ? m[1] : '', texto: m ? m[2].trim() : txt });
+  })));
+  return out;
+}
 async function casoVisorExcel(nombre, ver) {
   casoVisorMostrar(esc(nombre), '', '<p class="hint">Cargando…</p>');
   await casoCargarExcelJS();
-  const file = await casoArchivoDeVersion(nombre, ver), wb = new ExcelJS.Workbook(); await wb.xlsx.load(await file.arrayBuffer());
+  const file = await casoArchivoDeVersion(nombre, ver), buf = await file.arrayBuffer(), wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf);
   const grids = {}; wb.worksheets.forEach(ws => { const g = []; for (let r = 1; r <= Math.max(1, ws.rowCount); r++) { const fila = []; for (let c = 1; c <= Math.max(1, ws.columnCount); c++) fila.push(casoRawCelda(ws.getCell(r, c))); g.push(fila); } grids[ws.name] = g; });
   if (!wb.worksheets.length) throw new Error('El Excel no tiene hojas.');
   const hf = HyperFormula.buildFromSheets(grids, { licenseKey: 'gpl-v3' });
-  _casoVisor = { tipo: 'excel', nombre, wb, hf, hoja: 0, dirty: false, lim: 300, ver: ver || 0 };
-  casoVxRender(); casoVxCabecera();
+  _casoVisor = { tipo: 'excel', nombre, wb, hf, hoja: 0, dirty: false, lim: 300, ver: ver || 0, tema: casoVxTema(wb), sel: { ar: 1, ac: 1, fr: 1, fc: 1 }, edit: null, hist: [], pendNota: null, pendForm: null, pendDe: new Set(), arrastre: false, notas: [] };
+  casoVxCabecera(); casoVxRender();
 }
 function casoVxCabecera() {
   const s = _casoVisor; if (!s) return;
-  casoVisorMostrar(`📊 ${esc(s.nombre)}`, `${casoVerSelector(s.nombre, s.ver)}<button class="btn btn-primary btn-sm" onclick="casoVxGuardar()">💾 Guardar versión</button><button class="btn btn-secondary btn-sm" onclick="casoVxDescargar()">⬇ Descargar</button>`, `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">${s.wb.worksheets.map((w, i) => `<button class="btn ${i === s.hoja ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="casoVxHoja(${i})">${esc(w.name)}</button>`).join('')}</div><div id="cvx-box" style="overflow:auto;max-height:calc(100vh - 230px)"></div>`);
-  casoVxRender(); casoVisorMsg(s.dirty ? 'Cambios sin guardar.' : 'Hacé clic en una celda para editarla (si tiene fórmula, la ves y la editás). Podés pegar un rango copiado de Excel. Las fórmulas se recalculan solas.');
+  const bt = (t, fn, ttl, extra) => `<button type="button" class="btn btn-secondary btn-sm" style="padding:1px 7px;width:auto;font-size:12px;${extra || ''}" title="${ttl}" onmousedown="event.preventDefault()" onclick="${fn}">${t}</button>`;
+  const rel = Object.entries(CASO_VX_RELLENOS).map(([n, h]) => `<button type="button" title="Rellenar de ${n}" style="width:18px;height:18px;border-radius:50%;border:1px solid rgba(0,0,0,.3);background:#${h};padding:0;cursor:pointer" onmousedown="event.preventDefault()" onclick="casoVxFormato({relleno:'${h}'})"></button>`).join('');
+  const sel = (id, ttl, ops) => `<select id="${id}" title="${ttl}" style="width:auto;font-size:12px;padding:2px 4px" onchange="casoVxSelectFormato(this)">${ops}</select>`;
+  const tools = `<div id="cvx-tools" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-bottom:6px">${rel}${bt('⌫', "casoVxFormato({relleno:'ninguno'})", 'Quitar el relleno')}<span style="width:1px;height:18px;background:var(--border)"></span>`
+    + `${bt('<b>N</b>', "casoVxToggle('negrita')", 'Negrita')}${bt('<i>C</i>', "casoVxToggle('cursiva')", 'Cursiva')}${bt('<u>S</u>', "casoVxToggle('subrayado')", 'Subrayado')}`
+    + sel('cvx-sel-color', 'Color de la letra', '<option value="">A color…</option><option value="000000">Negro</option><option value="C00000">Rojo</option><option value="0070C0">Azul</option><option value="00B050">Verde</option><option value="7F7F7F">Gris</option><option value="FFFFFF">Blanco</option>')
+    + `<span style="width:1px;height:18px;background:var(--border)"></span>${bt('⯇', "casoVxFormato({alineacion:'izquierda'})", 'Alinear a la izquierda')}${bt('≡', "casoVxFormato({alineacion:'centro'})", 'Centrar')}${bt('⯈', "casoVxFormato({alineacion:'derecha'})", 'Alinear a la derecha')}${bt('↵', 'casoVxAjustar()', 'Ajustar el texto dentro de la celda')}`
+    + sel('cvx-sel-num', 'Formato de número', '<option value="">Número…</option><option value="general">General</option><option value="moneda">$ Moneda</option><option value="porcentaje">% Porcentaje</option><option value="miles">Miles (1.234)</option><option value="decimales2">2 decimales</option><option value="fecha">Fecha</option>')
+    + sel('cvx-sel-bordes', 'Bordes', '<option value="">Bordes…</option><option value="todos">Todos</option><option value="exterior">Contorno</option><option value="ninguno">Sin bordes</option>')
+    + `<span style="width:1px;height:18px;background:var(--border)"></span>${bt('💬', 'casoVxComentar()', 'Agregar un comentario (nota) a la celda seleccionada')}${bt('↶', 'casoVxDeshacer()', 'Deshacer el último cambio (Ctrl+Z)')}${bt('✨', 'casoVxPreguntarIA()', 'Preguntarle a la IA sobre lo seleccionado (cierra el visor y deja la consulta en el chat)')}`
+    + `<span style="width:1px;height:18px;background:var(--border)"></span>${bt('❄', 'casoVxCongelar()', 'Inmovilizar filas y columnas hasta la celda seleccionada (otra vez: soltar)')}${bt('↔', 'casoVxAutoajustar()', 'Ajustar el ancho de las columnas al contenido')}${bt('−', 'casoVxZoom(-10)', 'Achicar')}<span class="hint" id="cvx-zoom" style="margin:0;min-width:34px;text-align:center">${_casoVxZoom}%</span>${bt('+', 'casoVxZoom(10)', 'Agrandar')}</div>`;
+  const fx = `<div id="cvx-fxbar" style="display:flex;gap:6px;align-items:center;margin-bottom:6px"><input id="cvx-nb" readonly style="width:84px;font-weight:600;font-size:12px;text-align:center" /><span class="hint" style="margin:0;font-style:italic">fx</span><input id="cvx-fx" style="flex:1;font-size:12.5px;font-family:Consolas,monospace" placeholder="Contenido de la celda (valor o =fórmula)" onkeydown="casoVxFxKey(event)" /></div>`;
+  const busq = `<div id="cvx-find" style="display:none;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><input id="cvx-buscar" placeholder="Buscar…" style="width:180px;font-size:12.5px" onkeydown="if(event.key==='Enter')casoVxBuscar()" /><button class="btn btn-secondary btn-sm" style="width:auto" onclick="casoVxBuscar()">Buscar siguiente</button><input id="cvx-por" placeholder="Reemplazar por…" style="width:180px;font-size:12.5px" /><button class="btn btn-secondary btn-sm" style="width:auto" onclick="casoVxReemplazarTodo()">Reemplazar todo (esta hoja)</button><span class="hint" id="cvx-cuenta" style="margin:0"></span></div>`;
+  casoVisorMostrar(`📊 ${esc(s.nombre)}`, `${casoVerSelector(s.nombre, s.ver)}<button id="cvx-btn-com" class="btn btn-secondary btn-sm" onclick="casoVxComToggle()" title="Mostrar u ocultar la columna de comentarios">💬 Comentarios</button><button class="btn btn-secondary btn-sm" onclick="casoVxBuscarToggle()" title="Buscar y reemplazar">🔍 Buscar</button><button class="btn btn-primary btn-sm" onclick="casoVxGuardar()">💾 Guardar versión</button><button class="btn btn-secondary btn-sm" onclick="casoVxDescargar()">⬇ Descargar</button>`,
+    `${tools}${fx}${busq}<div id="cvx-tabs" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px"></div><div id="cvx-wrap" style="display:flex;gap:12px;align-items:flex-start"><div id="cvx-box" tabindex="0" style="flex:1;min-width:0;overflow:auto;max-height:calc(100vh - 330px)"></div><div id="cvx-panel" style="width:280px;flex-shrink:0;max-height:calc(100vh - 330px);overflow-y:auto;${casoVxComVisible() ? '' : 'display:none'}"></div></div>`);
+  casoVxEstilosCss(); casoVxTabs(); s.notas = casoVxNotas(); casoVxPanel();
+  casoVisorMsg(s.dirty ? 'Cambios sin guardar.' : 'Hacé clic en una celda para seleccionarla (arrastrá o Mayús+flechas para un rango). Escribí o doble clic para editar; las fórmulas se recalculan solas. Con el rango elegido usá la barra de arriba para darle formato o comentarlo.');
 }
-function casoVxHoja(i) { _casoVisor.hoja = i; _casoVisor.lim = 300; casoVxCabecera(); }
-function casoVxValor(r, c) { const s = _casoVisor, ws = s.wb.worksheets[s.hoja]; if (r > Math.max(1, ws.rowCount) || c > Math.max(1, ws.columnCount)) return ''; try { return casoFmtVx(s.hf.getCellValue({ sheet: s.hf.getSheetId(ws.name), row: r - 1, col: c - 1 })); } catch (e) { return ''; } }
+function casoVxEstilosCss() {
+  if (document.getElementById('caso-vx-css')) return;
+  const st = document.createElement('style'); st.id = 'caso-vx-css';
+  st.textContent = '#cvx-box{background:#fff;color:#000;border:1px solid var(--border);outline:none}#cvx-box table.cvx{border-collapse:separate;border-spacing:0;table-layout:fixed;font-family:Calibri,"Segoe UI",Arial,sans-serif;font-size:11pt}'
+    + '#cvx-box td{padding:0 3px;height:20px;overflow:hidden;white-space:nowrap;box-sizing:border-box;vertical-align:bottom;background:#fff;user-select:none}#cvx-box td.cvx-g{border-right:1px solid #e1e1e1;border-bottom:1px solid #e1e1e1}'
+    + '#cvx-box th{background:#f0f0f0;color:#444;font-weight:500;font-size:11px;border-right:1px solid #cfcfcf;border-bottom:1px solid #cfcfcf;position:sticky;top:0;z-index:4;height:22px;padding:0 4px;user-select:none}#cvx-box th.rn{left:0;z-index:5;text-align:center}#cvx-box tbody th.rn{top:auto;z-index:3}'
+    + '#cvx-box td.cvx-s{box-shadow:inset 0 0 0 100px rgba(33,115,70,.16)}#cvx-box td.cvx-a{outline:2px solid #1e7a46;outline-offset:-2px}#cvx-box td.cvx-ed{overflow:visible;white-space:pre;outline:2px solid #1e7a46;outline-offset:-2px;background:#fff !important;color:#000 !important;user-select:text;text-align:left !important;z-index:7;box-shadow:0 2px 8px rgba(0,0,0,.25)}'
+    + '#cvx-box td.cvx-n{position:relative}#cvx-box td.cvx-n::after{content:"";position:absolute;top:0;right:0;border-left:7px solid transparent;border-top:7px solid #d93025;pointer-events:none}'
+    + '#cvx-box td.cvx-flash{animation:cvxflash 1.8s ease-out}@keyframes cvxflash{0%,30%{box-shadow:inset 0 0 0 100px rgba(255,120,0,.55)}100%{box-shadow:inset 0 0 0 100px rgba(255,120,0,0)}}'
+    + '.cvx-cc{border:1px solid var(--border);border-radius:8px;padding:7px 9px;margin-bottom:8px;background:var(--surface);cursor:pointer}.cvx-cc.cvx-sel{border-color:#e0a800;box-shadow:0 0 0 2px rgba(224,168,0,.3)}';
+  document.head.appendChild(st);
+}
+function casoVxTabs() {
+  const s = _casoVisor, el = document.getElementById('cvx-tabs'); if (!s || !el) return;
+  el.innerHTML = s.wb.worksheets.map((w, i) => `<button class="btn ${i === s.hoja ? 'btn-primary' : 'btn-secondary'} btn-sm" style="width:auto" onclick="casoVxHoja(${i})">${esc(w.name)}</button>`).join('');
+}
+function casoVxHoja(i) { const s = _casoVisor; if (!s) return; casoVxCommit(); s.hoja = i; s.lim = 300; s.sel = { ar: 1, ac: 1, fr: 1, fc: 1 }; casoVxTabs(); casoVxRender(); }
+// ── Dibujo de la hoja ──
 function casoVxRender() {
   const s = _casoVisor, box = document.getElementById('cvx-box'); if (!s || !box) return;
-  const ws = s.wb.worksheets[s.hoja], maxR = Math.min(Math.max(ws.rowCount + 15, 30), s.lim), maxC = Math.min(Math.max(ws.columnCount + 3, 8), 60);
-  let h = '<table class="cvx"><thead><tr><th class="rn"></th>' + Array.from({ length: maxC }, (_, c) => `<th>${casoColLetra(c + 1)}</th>`).join('') + '</tr></thead><tbody>';
-  for (let r = 1; r <= maxR; r++) { h += `<tr><th class="rn">${r}</th>`; for (let c = 1; c <= maxC; c++) h += `<td tabindex="0" contenteditable="true" data-r="${r}" data-c="${c}">${esc(casoVxValor(r, c))}</td>`; h += '</tr>'; }
-  h += '</tbody></table>' + (ws.rowCount + 15 > s.lim ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="_casoVisor.lim+=300;casoVxRender()">Mostrar más filas (hay ${ws.rowCount})</button>` : '');
-  box.innerHTML = h;
-  if (!box._cvx) { box._cvx = true; box.addEventListener('focusin', e => { const td = e.target; if (td.tagName !== 'TD') return; const raw = casoVxRaw(+td.dataset.r, +td.dataset.c); td.dataset.orig = String(raw); td.textContent = String(raw); });
-  box.addEventListener('focusout', e => { const td = e.target; if (td.tagName !== 'TD' || td.dataset.orig == null) return; const txt = td.textContent; if (txt !== td.dataset.orig) { casoVxSet(+td.dataset.r, +td.dataset.c, txt); casoVxRefrescar(); } td.textContent = casoVxValor(+td.dataset.r, +td.dataset.c); delete td.dataset.orig; }); }
-  box.onkeydown = e => { const td = e.target; if (td.tagName !== 'TD') return; if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const nr = +td.dataset.r + (e.key === 'ArrowUp' ? -1 : 1); td.blur(); const nx = box.querySelector(`td[data-r="${nr}"][data-c="${td.dataset.c}"]`); if (nx) nx.focus(); } else if (e.key === 'Escape') { td.textContent = td.dataset.orig || ''; td.blur(); } };
-  box.onpaste = e => { const td = e.target; if (td.tagName !== 'TD') return; const t = (e.clipboardData || window.clipboardData).getData('text'); if (!/[\t\n]/.test(t.replace(/\n$/, ''))) return; e.preventDefault(); delete td.dataset.orig; const r0 = +td.dataset.r, c0 = +td.dataset.c; t.replace(/\r/g, '').replace(/\n$/, '').split('\n').forEach((fila, i) => fila.split('\t').forEach((v, j) => casoVxSet(r0 + i, c0 + j, v))); casoVxRender(); };
+  const ws = s.wb.worksheets[s.hoja], tema = s.tema, vista = (ws.views && ws.views[0]) || {}, rejilla = vista.showGridLines !== false;
+  const maxR = Math.min(Math.max(ws.rowCount + 15, 30), s.lim), maxC = Math.min(Math.max(ws.columnCount + 3, 8), 60);
+  const fijoF = vista.state === 'frozen' ? (vista.ySplit || 0) : 0, fijoC = vista.state === 'frozen' ? (vista.xSplit || 0) : 0;
+  const ancho = c => { const col = ws.getColumn(c); return col.hidden ? 0 : (col.width ? Math.round(col.width * 7 + 5) : 64); }, alto = r => { const row = ws.getRow(r); return row.hidden ? 0 : (row.height ? Math.round(row.height * 96 / 72) : 20); };
+  const fusiones = new Map(), tapadas = new Set();
+  (ws.model.merges || []).forEach(rg => { const m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(rg); if (!m) return; const c1 = casoColNum(m[1]), r1 = +m[2], c2 = casoColNum(m[3]), r2 = +m[4]; fusiones.set(r1 * 1000 + c1, { rs: r2 - r1 + 1, cs: c2 - c1 + 1 }); for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (r !== r1 || c !== c1) tapadas.add(r * 1000 + c); });
+  const anchos = Array.from({ length: maxC }, (_, i) => ancho(i + 1)), W0 = 44; let top = 22; const topF = []; for (let r = 1; r <= fijoF; r++) { topF[r] = top; top += alto(r); }
+  let left = W0; const leftF = []; for (let c = 1; c <= fijoC; c++) { leftF[c] = left; left += anchos[c - 1] || 0; }
+  s.fz = { top, left, nF: fijoF, nC: fijoC };
+  const notasPorCelda = new Map(); s.notas.forEach(n => { if (n.hojaIdx === s.hoja) notasPorCelda.set(n.r * 1000 + n.c, n); });
+  let h = `<table class="cvx" style="width:${W0 + anchos.reduce((a, b) => a + b, 0)}px;zoom:${_casoVxZoom}%"><colgroup><col style="width:${W0}px">${anchos.map(w => `<col style="width:${w}px">`).join('')}</colgroup><thead><tr><th class="rn"></th>${anchos.map((w, i) => w ? `<th>${casoColLetra(i + 1)}</th>` : '<th style="display:none"></th>').join('')}</tr></thead><tbody>`;
+  for (let r = 1; r <= maxR; r++) {
+    const ah = alto(r); if (!ah) continue; h += `<tr style="height:${ah}px"><th class="rn" style="${r <= fijoF ? `top:${topF[r]}px;z-index:6;` : ''}">${r}</th>`;
+    for (let c = 1; c <= maxC; c++) {
+      if (!anchos[c - 1] || tapadas.has(r * 1000 + c)) { if (!anchos[c - 1]) h += '<td style="display:none"></td>'; continue; }
+      const cell = ws.getCell(r, c), css = casoVxCss(cell, tema), f = fusiones.get(r * 1000 + c), nota = notasPorCelda.get(r * 1000 + c), txt = casoVxTexto(s, ws, r, c);
+      const num = typeof cell.value === 'number' || (cell.value && typeof cell.value === 'object' && typeof cell.value.result === 'number');
+      let st = css.st + (num && !/text-align/.test(css.st) ? 'text-align:right;' : '');
+      if (r <= fijoF || c <= fijoC) st += `position:sticky;${r <= fijoF ? `top:${topF[r]}px;` : ''}${c <= fijoC ? `left:${leftF[c]}px;` : ''}z-index:${r <= fijoF && c <= fijoC ? 5 : 2};`;
+      if (!css.conFondo && !/background/.test(st)) st += '';
+      h += `<td data-r="${r}" data-c="${c}" class="${rejilla && !css.conBorde ? 'cvx-g' : ''}${nota ? ' cvx-n' : ''}"${f ? ` rowspan="${f.rs}" colspan="${f.cs}"` : ''}${nota ? ` title="${esc(nota.autor ? nota.autor + ': ' : '')}${esc(nota.texto)}"` : ''} style="${st}">${esc(txt)}</td>`;
+    }
+    h += '</tr>';
+  }
+  h += '</tbody></table>' + (ws.rowCount + 15 > s.lim ? `<button class="btn btn-secondary btn-sm" style="margin:6px;width:auto" onclick="_casoVisor.lim+=300;casoVxRender()">Mostrar más filas (hay ${ws.rowCount})</button>` : '');
+  const sc = [box.scrollTop, box.scrollLeft]; box.innerHTML = h; box.scrollTop = sc[0]; box.scrollLeft = sc[1];
+  s.tdMap = new Map(); box.querySelectorAll('td[data-r]').forEach(td => s.tdMap.set(+td.dataset.r * 1000 + +td.dataset.c, td)); s.pintados = [];
+  casoVxEventos(box); casoVxPintar(); casoVxFx();
 }
+const casoVxEl = (r, c) => { const s = _casoVisor; return s && s.tdMap && s.tdMap.get(r * 1000 + c); };
+const casoVxRect = () => { const a = _casoVisor.sel; return { r1: Math.min(a.ar, a.fr), r2: Math.max(a.ar, a.fr), c1: Math.min(a.ac, a.fc), c2: Math.max(a.ac, a.fc) }; };
+function casoVxPintar() {
+  const s = _casoVisor; if (!s || !s.tdMap) return; (s.pintados || []).forEach(td => td.classList.remove('cvx-s', 'cvx-a')); s.pintados = [];
+  const R = casoVxRect(), ws = s.wb.worksheets[s.hoja];
+  for (let r = R.r1; r <= R.r2 && r - R.r1 < 400; r++) for (let c = R.c1; c <= R.c2 && c - R.c1 < 80; c++) { const td = casoVxEl(r, c); if (td) { td.classList.add('cvx-s'); s.pintados.push(td); } }
+  const a = casoVxEl(s.sel.ar, s.sel.ac); if (a) { a.classList.add('cvx-a'); s.pintados.push(a); }
+  const nb = document.getElementById('cvx-nb'); if (nb) nb.value = (R.r1 === R.r2 && R.c1 === R.c2) ? casoColLetra(s.sel.ac) + s.sel.ar : `${casoColLetra(R.c1)}${R.r1}:${casoColLetra(R.c2)}${R.r2}`;
+}
+function casoVxFx() { const s = _casoVisor, fx = document.getElementById('cvx-fx'); if (!s || !fx) return; fx.value = String(casoVxRaw(s.sel.ar, s.sel.ac)); }
+function casoVxSelecciona(r, c, extender) {
+  const s = _casoVisor; if (!extender) { s.sel.ar = r; s.sel.ac = c; } s.sel.fr = r; s.sel.fc = c; casoVxPintar(); casoVxFx();
+  const td = casoVxEl(r, c); if (td) casoVxVisible(td);
+}
+// Mantiene la celda a la vista descontando el encabezado y las filas y columnas inmovilizadas (scrollIntoView no los tiene en cuenta)
+function casoVxVisible(td) {
+  const s = _casoVisor, box = document.getElementById('cvx-box'); if (!s || !box || !s.fz) return;
+  const b = box.getBoundingClientRect(), r = td.getBoundingClientRect(), z = _casoVxZoom / 100, rr = +td.dataset.r, cc = +td.dataset.c, esq = 17;
+  if (rr > s.fz.nF) { const tope = b.top + s.fz.top * z; if (r.top < tope) box.scrollTop -= tope - r.top; else if (r.bottom > b.bottom - esq) box.scrollTop += r.bottom - (b.bottom - esq); }
+  if (cc > s.fz.nC) { const izq = b.left + s.fz.left * z; if (r.left < izq) box.scrollLeft -= izq - r.left; else if (r.right > b.right - esq) box.scrollLeft += r.right - (b.right - esq); }
+}
+// ── Eventos: selección con el mouse y el teclado, edición, copiar y pegar ──
+function casoVxEventos(box) {
+  if (box._cvx) return; box._cvx = true;
+  box.addEventListener('mousedown', e => { const s = _casoVisor, td = e.target.closest && e.target.closest('td[data-r]'); if (!s || !td) return; if (s.edit && td === casoVxEl(s.edit.r, s.edit.c)) return; casoVxCommit(); e.preventDefault(); box.focus(); casoVxSelecciona(+td.dataset.r, +td.dataset.c, e.shiftKey); s.arrastre = true; });
+  box.addEventListener('mouseover', e => { const s = _casoVisor, td = e.target.closest && e.target.closest('td[data-r]'); if (s && s.arrastre && td) casoVxSelecciona(+td.dataset.r, +td.dataset.c, true); });
+  document.addEventListener('mouseup', () => { if (_casoVisor) _casoVisor.arrastre = false; });
+  box.addEventListener('dblclick', e => { const td = e.target.closest && e.target.closest('td[data-r]'); if (td && !(_casoVisor.edit)) casoVxEditar(+td.dataset.r, +td.dataset.c, null); });
+  box.addEventListener('keydown', casoVxTecla);
+  box.addEventListener('copy', e => { const s = _casoVisor; if (!s || s.edit) return; const R = casoVxRect(), ws = s.wb.worksheets[s.hoja], filas = []; for (let r = R.r1; r <= R.r2; r++) { const f = []; for (let c = R.c1; c <= R.c2; c++) f.push(casoVxTexto(s, ws, r, c)); filas.push(f.join('\t')); } e.clipboardData.setData('text/plain', filas.join('\n')); e.preventDefault(); casoVisorMsg('Copiado (' + (R.r2 - R.r1 + 1) + '×' + (R.c2 - R.c1 + 1) + ' celdas).'); });
+  box.addEventListener('paste', e => {
+    const s = _casoVisor; if (!s || s.edit) return; const t = (e.clipboardData || window.clipboardData).getData('text'); if (!t) return; e.preventDefault();
+    const filas = t.replace(/\r/g, '').replace(/\n$/, '').split('\n').map(f => f.split('\t')), r0 = s.sel.ar, c0 = s.sel.ac, celdas = []; filas.forEach((f, i) => f.forEach((v, j) => celdas.push([r0 + i, c0 + j])));
+    casoVxHistoria(celdas); filas.forEach((f, i) => f.forEach((v, j) => casoVxSet(r0 + i, c0 + j, v))); casoVxRender(); casoVisorMsg('Cambios sin guardar.');
+  });
+}
+function casoVxTecla(e) {
+  const s = _casoVisor; if (!s) return;
+  if (s.edit) { if (e.key === 'Enter') { e.preventDefault(); casoVxCommit(1, 0); } else if (e.key === 'Tab') { e.preventDefault(); casoVxCommit(0, e.shiftKey ? -1 : 1); } else if (e.key === 'Escape') { e.preventDefault(); casoVxCancelar(); } return; }
+  const mover = (dr, dc) => { const a = s.sel, r = Math.max(1, (e.shiftKey ? a.fr : a.ar) + dr), c = Math.max(1, Math.min(60, (e.shiftKey ? a.fc : a.ac) + dc)); casoVxSelecciona(r, c, e.shiftKey); };
+  if (e.key === 'ArrowDown') { e.preventDefault(); mover(1, 0); } else if (e.key === 'ArrowUp') { e.preventDefault(); mover(-1, 0); } else if (e.key === 'ArrowLeft') { e.preventDefault(); mover(0, -1); } else if (e.key === 'ArrowRight') { e.preventDefault(); mover(0, 1); }
+  else if (e.key === 'Tab') { e.preventDefault(); mover(0, e.shiftKey ? -1 : 1); } else if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); casoVxEditar(s.sel.ar, s.sel.ac, null); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); const R = casoVxRect(), celdas = []; for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) celdas.push([r, c]); casoVxHistoria(celdas); celdas.forEach(([r, c]) => casoVxSet(r, c, '')); casoVxRefrescar(); }
+  else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); casoVxDeshacer(); }
+  else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); casoVxEditar(s.sel.ar, s.sel.ac, e.key); }
+}
+function casoVxEditar(r, c, inicial) {
+  const s = _casoVisor, td = casoVxEl(r, c); if (!s || !td) return; casoVxCommit(); s.edit = { r, c, orig: String(casoVxRaw(r, c)) };
+  td.classList.add('cvx-ed'); td.contentEditable = 'true'; td.textContent = inicial != null ? inicial : s.edit.orig; td.focus();
+  const rg = document.createRange(); rg.selectNodeContents(td); rg.collapse(false); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(rg);
+}
+function casoVxCommit(dr, dc) {
+  const s = _casoVisor; if (!s || !s.edit) return; const { r, c, orig } = s.edit, td = casoVxEl(r, c), txt = td ? td.textContent : orig; s.edit = null;
+  if (td) { td.contentEditable = 'false'; td.classList.remove('cvx-ed'); }
+  if (txt !== orig) { casoVxHistoria([[r, c]]); casoVxSet(r, c, txt); casoVxRefrescar(); } else if (td) td.textContent = casoVxTexto(s, s.wb.worksheets[s.hoja], r, c);
+  const box = document.getElementById('cvx-box'); if (box) box.focus(); if (dr != null) casoVxSelecciona(Math.max(1, r + dr), Math.max(1, c + dc), false);
+}
+function casoVxCancelar() { const s = _casoVisor; if (!s || !s.edit) return; const { r, c } = s.edit, td = casoVxEl(r, c); s.edit = null; if (td) { td.contentEditable = 'false'; td.classList.remove('cvx-ed'); td.textContent = casoVxTexto(s, s.wb.worksheets[s.hoja], r, c); } const box = document.getElementById('cvx-box'); if (box) box.focus(); }
+function casoVxFxKey(e) {
+  const s = _casoVisor; if (!s) return;
+  if (e.key === 'Enter') { e.preventDefault(); const r = s.sel.ar, c = s.sel.ac, v = e.target.value; if (v !== String(casoVxRaw(r, c))) { casoVxHistoria([[r, c]]); casoVxSet(r, c, v); casoVxRefrescar(); } const box = document.getElementById('cvx-box'); if (box) box.focus(); }
+  else if (e.key === 'Escape') { casoVxFx(); const box = document.getElementById('cvx-box'); if (box) box.focus(); }
+}
+function casoVxValor(r, c) { const s = _casoVisor, ws = s.wb.worksheets[s.hoja]; return casoVxTexto(s, ws, r, c); }
 function casoVxRaw(r, c) { const s = _casoVisor, ws = s.wb.worksheets[s.hoja]; return casoRawCelda(ws.getCell(r, c)); }
 function casoVxSet(r, c, txt) {
   const s = _casoVisor, ws = s.wb.worksheets[s.hoja], t = String(txt), vacio = t.trim() === '', form = !vacio && t.trim().startsWith('=') && t.trim().length > 1, val = vacio ? null : (form ? t.trim() : casoNumEntrada(t));
@@ -38953,14 +39132,133 @@ function casoVxSet(r, c, txt) {
   try { s.hf.setCellContents({ sheet: s.hf.getSheetId(ws.name), row: r - 1, col: c - 1 }, [[val == null ? null : val]]); } catch (e) { /* queda sin recalcular */ }
   s.dirty = true;
 }
-function casoVxRefrescar() { const box = document.getElementById('cvx-box'); if (!box) return; box.querySelectorAll('td').forEach(td => { if (td.dataset.orig == null) td.textContent = casoVxValor(+td.dataset.r, +td.dataset.c); }); casoVisorMsg('Cambios sin guardar.'); }
+function casoVxRefrescar() { const s = _casoVisor, box = document.getElementById('cvx-box'); if (!s || !box) return; const ws = s.wb.worksheets[s.hoja]; s.tdMap.forEach((td, k) => { if (!(s.edit && s.edit.r * 1000 + s.edit.c === k)) td.textContent = casoVxTexto(s, ws, Math.floor(k / 1000), k % 1000); }); casoVxFx(); casoVisorMsg('Cambios sin guardar.'); }
+// ── Deshacer ──
+function casoVxHistoria(celdas) {
+  const s = _casoVisor, ws = s.wb.worksheets[s.hoja]; if (celdas.length > 6000) return;
+  const clon = v => (v instanceof Date ? new Date(v) : (v && typeof v === 'object' ? JSON.parse(JSON.stringify(v)) : v));
+  s.hist.push({ hoja: s.hoja, celdas: celdas.map(([r, c]) => { const cell = ws.getCell(r, c); return { r, c, v: clon(cell.value), st: JSON.stringify(cell.style || {}), n: cell.note == null ? null : cell.note }; }) }); if (s.hist.length > 40) s.hist.shift();
+}
+function casoVxDeshacer() {
+  const s = _casoVisor; if (!s) return; casoVxCommit(); const h = s.hist.pop(); if (!h) { casoVisorMsg('No hay nada para deshacer.'); return; }
+  const ws = s.wb.worksheets[h.hoja]; if (!ws) return;
+  h.celdas.forEach(x => { const cell = ws.getCell(x.r, x.c); cell.value = x.v; try { cell.style = JSON.parse(x.st); } catch (e) { /* sin estilo */ } casoVxNotaSet(cell, x.n); try { const raw = casoRawCelda(cell); s.hf.setCellContents({ sheet: s.hf.getSheetId(ws.name), row: x.r - 1, col: x.c - 1 }, [[raw === '' ? null : raw]]); } catch (e) { /* sin recalcular */ } });
+  if (s.hoja !== h.hoja) { s.hoja = h.hoja; casoVxTabs(); } s.notas = casoVxNotas(); casoVxRender(); casoVxPanel(); casoVisorMsg('Cambio deshecho.');
+}
+// ── Formato ──
+function casoVxRango() { const R = casoVxRect(); return `${casoColLetra(R.c1)}${R.r1}${R.r1 === R.r2 && R.c1 === R.c2 ? '' : ':' + casoColLetra(R.c2) + R.r2}`; }
+function casoVxFormato(o) {
+  const s = _casoVisor; if (!s) return; casoVxCommit(); const R = casoVxRect(), ws = s.wb.worksheets[s.hoja], celdas = [];
+  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) celdas.push([r, c]);
+  casoVxHistoria(celdas);
+  try { casoXlAplicarOps(s.wb, [Object.assign({ op: 'formato', hoja: ws.name, rango: casoVxRango() }, o)]); } catch (e) { s.hist.pop(); casoVisorMsg('No se pudo aplicar el formato: ' + e.message); return; }
+  s.dirty = true; casoVxRender(); casoVisorMsg('Cambios sin guardar.'); const box = document.getElementById('cvx-box'); if (box) box.focus();
+}
+function casoVxToggle(que) {
+  const s = _casoVisor; if (!s) return; const cell = s.wb.worksheets[s.hoja].getCell(s.sel.ar, s.sel.ac), f = cell.font || {};
+  const activo = que === 'negrita' ? !!f.bold : que === 'cursiva' ? !!f.italic : !!(f.underline && f.underline !== 'none'); casoVxFormato({ [que]: !activo });
+}
+function casoVxAjustar() { const s = _casoVisor; if (!s) return; const al = s.wb.worksheets[s.hoja].getCell(s.sel.ar, s.sel.ac).alignment || {}; casoVxFormato({ ajustar_texto: !al.wrapText }); }
+function casoVxSelectFormato(sel) {
+  const v = sel.value; sel.value = ''; if (!v) return;
+  if (sel.id === 'cvx-sel-color') casoVxFormato({ color_texto: v });
+  else if (sel.id === 'cvx-sel-num') casoVxFormato({ formato_numero: v === 'general' ? 'General' : v });
+  else if (sel.id === 'cvx-sel-bordes') casoVxFormato({ bordes: v });
+}
+function casoVxCongelar() {
+  const s = _casoVisor; if (!s) return; const ws = s.wb.worksheets[s.hoja], v = (ws.views && ws.views[0]) || {}, r = s.sel.ar, c = s.sel.ac;
+  if (v.state === 'frozen' || (r === 1 && c === 1)) ws.views = [Object.assign({}, v, { state: 'normal', xSplit: undefined, ySplit: undefined, topLeftCell: undefined })];
+  else ws.views = [Object.assign({}, v, { state: 'frozen', xSplit: c - 1, ySplit: r - 1, topLeftCell: casoColLetra(c) + r })];
+  s.dirty = true; casoVxRender(); casoVisorMsg(ws.views[0].state === 'frozen' ? `Inmovilizadas las ${r - 1} filas y ${c - 1} columnas de arriba y de la izquierda. Cambios sin guardar.` : 'Paneles liberados. Cambios sin guardar.');
+}
+function casoVxAutoajustar() {
+  const s = _casoVisor; if (!s) return; const ws = s.wb.worksheets[s.hoja]; casoVxCommit();
+  try { casoXlAplicarOps(s.wb, [{ op: 'autoajustar_columnas', hoja: ws.name }]); s.dirty = true; casoVxRender(); casoVisorMsg('Columnas ajustadas al contenido. Cambios sin guardar.'); } catch (e) { casoVisorMsg('No se pudo ajustar: ' + e.message); }
+}
+function casoVxZoom(d) { _casoVxZoom = Math.max(50, Math.min(200, _casoVxZoom + d)); const z = document.getElementById('cvx-zoom'); if (z) z.textContent = _casoVxZoom + '%'; const t = document.querySelector('#cvx-box table.cvx'); if (t) t.style.zoom = _casoVxZoom + '%'; }
+// ── Comentarios (notas de Excel) ──
+function casoVxComVisible() { try { return localStorage.getItem('caso_vw_com') !== '0'; } catch (e) { return true; } }
+function casoVxComToggle(mostrar) {
+  const ver = typeof mostrar === 'boolean' ? mostrar : !casoVxComVisible(); try { localStorage.setItem('caso_vw_com', ver ? '1' : '0'); } catch (e) { /* vale para esta sesión */ }
+  const pn = document.getElementById('cvx-panel'); if (pn) pn.style.display = ver ? '' : 'none'; casoVxComBoton();
+}
+function casoVxComBoton() { const b = document.getElementById('cvx-btn-com'), s = _casoVisor; if (!b || !s) return; const n = s.notas.length, ver = casoVxComVisible(); b.textContent = `💬 ${ver ? 'Ocultar' : 'Ver'} comentarios${n ? ' (' + n + ')' : ''}`; b.className = 'btn btn-' + (ver ? 'secondary' : 'primary') + ' btn-sm'; }
+function casoVxComentar() {
+  const s = _casoVisor; if (!s) return; casoVxCommit(); if (s.pendNota) { casoVisorMsg('Terminá primero el comentario que está abierto (panel de la derecha).'); return; }
+  casoVxComToggle(true); s.pendNota = { hoja: s.hoja, r: s.sel.ar, c: s.sel.ac }; casoVxPanel(); const t = document.getElementById('cvx-ctxt'); if (t) t.focus();
+}
+function casoVxComentarOk() {
+  const s = _casoVisor, t = document.getElementById('cvx-ctxt'), txt = t ? t.value.trim() : ''; if (!s || !s.pendNota) return; if (!txt) { casoVisorMsg('Escribí el comentario.'); return; }
+  const { hoja, r, c } = s.pendNota, ws = s.wb.worksheets[hoja], previo = casoVxNotaTxt(ws.getCell(r, c).note); s.hoja === hoja || (s.hoja = hoja);
+  casoVxHistoria([[r, c]]); ws.getCell(r, c).note = (previo ? previo + '\n\n' : '') + `${casoAutor() || 'MAIA'}:\n${txt}`; s.pendNota = null; s.dirty = true; s.notas = casoVxNotas(); casoVxRender(); casoVxPanel(); casoVisorMsg('Cambios sin guardar.');
+}
+function casoVxComentarNo() { const s = _casoVisor; if (!s) return; s.pendNota = null; casoVxPanel(); }
+function casoVxQuitarNota(clave) {
+  const s = _casoVisor, n = s.notas.find(x => x.hojaIdx + ':' + x.ref === clave); if (!n) return; const ws = s.wb.worksheets[n.hojaIdx];
+  const hojaAntes = s.hoja; s.hoja = n.hojaIdx; casoVxHistoria([[n.r, n.c]]); s.hoja = hojaAntes; casoVxNotaSet(ws.getCell(n.r, n.c), null); s.dirty = true; s.notas = casoVxNotas(); casoVxRender(); casoVxPanel(); casoVisorMsg('Cambios sin guardar.');
+}
+// Tocar un comentario lleva a su celda (cambia de hoja si hace falta, la centra y la destella)
+function casoVxIr(clave) {
+  const s = _casoVisor, n = s.notas.find(x => x.hojaIdx + ':' + x.ref === clave); if (!n) return; casoVxCommit();
+  if (s.hoja !== n.hojaIdx) { s.hoja = n.hojaIdx; casoVxTabs(); } s.lim = Math.max(s.lim, n.r + 30); s.sel = { ar: n.r, ac: n.c, fr: n.r, fc: n.c }; casoVxRender();
+  document.querySelectorAll('#cvx-panel .cvx-cc').forEach(c => c.classList.toggle('cvx-sel', c.dataset.k === clave));
+  const td = casoVxEl(n.r, n.c), box = document.getElementById('cvx-box'); if (!td || !box) return;
+  const r = td.getBoundingClientRect(), b = box.getBoundingClientRect(); box.scrollTop += r.top - b.top - b.height / 3; box.scrollLeft += r.left - b.left - b.width / 3;
+  td.classList.add('cvx-flash'); setTimeout(() => td.classList.remove('cvx-flash'), 1800);
+}
+const casoVxMarcaPend = (nombre, clave) => `[Excel:${nombre}#${clave}]`;
+function casoVxTienePend(n) { const s = _casoVisor, k = `${n.hoja}!${n.ref}`; return s.pendDe.has(k) || (_casoPend || []).some(p => (p.detalle || '').includes(casoVxMarcaPend(s.nombre, k))); }
+function casoVxPendForm(clave) { const s = _casoVisor; if (!s) return; s.pendForm = s.pendForm === clave ? null : clave; casoVxPanel(); const t = document.getElementById('cvx-pt'); if (t) { t.focus(); t.select(); } }
+async function casoVxPendCrear1(n, titulo, respId, fecha) {
+  const s = _casoVisor, per = (_casoPerfiles || []).find(x => x.id === respId);
+  await casoPendCrear({ titulo, detalle: `Comentario en "${s.nombre}", hoja "${n.hoja}", celda ${n.ref}${n.autor ? ' de ' + n.autor : ''}:\n${n.texto}\n${casoVxMarcaPend(s.nombre, n.hoja + '!' + n.ref)}`, responsable_id: respId || null, responsable_nombre: per ? per.nombre : null, fecha_limite: fecha || null });
+  s.pendDe.add(`${n.hoja}!${n.ref}`);
+}
+async function casoVxPendCrear(clave) {
+  const s = _casoVisor, n = s.notas.find(x => x.hojaIdx + ':' + x.ref === clave), t = (document.getElementById('cvx-pt').value || '').trim(), r = document.getElementById('cvx-pr').value, f = document.getElementById('cvx-pf').value; if (!n) return; if (!t) { casoVisorMsg('Escribí el título del pendiente.'); return; }
+  try { await casoVxPendCrear1(n, t, r, f); s.pendForm = null; casoVisorMsg('Pendiente creado en el caso.'); casoVxPanel(); } catch (e) { casoVisorMsg(e.message); }
+}
+async function casoVxPendTodos() {
+  const s = _casoVisor; if (!s) return; const faltan = s.notas.filter(n => !casoVxTienePend(n)); if (!faltan.length) { casoVisorMsg('Todos los comentarios ya tienen su pendiente.'); return; }
+  if (!confirm(`Se van a crear ${faltan.length} pendiente${faltan.length === 1 ? '' : 's'} (uno por comentario), a tu nombre y sin fecha. Después los podés reasignar desde "Pendientes" del caso. ¿Crear?`)) return;
+  let k = 0; for (const n of faltan) { try { await casoVxPendCrear1(n, casoCorto(n.texto.split('\n')[0], 100), currentUser && currentUser.id, ''); k++; } catch (e) { casoVisorMsg(e.message); break; } }
+  casoVisorMsg(`${k} pendiente${k === 1 ? '' : 's'} creado${k === 1 ? '' : 's'} en el caso.`); casoVxPanel();
+}
+function casoVxPanel() {
+  const s = _casoVisor, el = document.getElementById('cvx-panel'); if (!s || !el) return; casoVxComBoton();
+  const perfiles = _casoPerfiles || [], yo = currentUser && currentUser.id;
+  const form = n => `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)" onclick="event.stopPropagation()"><input id="cvx-pt" value="${esc(casoCorto(n.texto.split('\n')[0], 100))}" placeholder="Título del pendiente" style="width:100%;font-size:12px;margin-bottom:4px" /><div style="display:flex;gap:4px;margin-bottom:4px"><select id="cvx-pr" style="flex:1;min-width:0;font-size:12px"><option value="">Sin responsable</option>${perfiles.map(p => `<option value="${esc(p.id)}" ${p.id === yo ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select><input id="cvx-pf" type="date" style="width:120px;font-size:12px" /></div><div style="display:flex;gap:6px"><button class="btn btn-primary btn-sm" style="width:auto" data-k="${esc(n.hojaIdx + ':' + n.ref)}" onclick="casoVxPendCrear(this.dataset.k)">Crear pendiente</button><button class="btn btn-secondary btn-sm" style="width:auto" data-k="${esc(n.hojaIdx + ':' + n.ref)}" onclick="casoVxPendForm(this.dataset.k)">Cancelar</button></div></div>`;
+  const nuevo = s.pendNota ? `<div class="cvx-cc cvx-sel" style="cursor:default"><div style="font-size:11px;color:var(--text3);margin-bottom:4px">Comentario en ${esc(s.wb.worksheets[s.pendNota.hoja].name)}!${casoColLetra(s.pendNota.c)}${s.pendNota.r}</div><textarea id="cvx-ctxt" rows="3" placeholder="Escribí el comentario…" style="width:100%;font-size:12.5px;resize:vertical"></textarea><div style="display:flex;gap:6px;margin-top:6px"><button class="btn btn-primary btn-sm" style="width:auto" onclick="casoVxComentarOk()">Agregar</button><button class="btn btn-secondary btn-sm" style="width:auto" onclick="casoVxComentarNo()">Cancelar</button></div></div>` : '';
+  el.innerHTML = `<div class="card" style="padding:10px 12px;margin:0"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><div class="card-label" style="margin:0;flex:1">Comentarios (${s.notas.length})</div>${s.notas.length ? '<button class="btn btn-secondary btn-sm" style="width:auto;padding:1px 7px;font-size:11px" title="Crea un pendiente en el caso por cada comentario" onclick="casoVxPendTodos()">📌 Todos a pendientes</button>' : ''}</div>${nuevo}`
+    + (s.notas.length ? s.notas.map(n => { const k = n.hojaIdx + ':' + n.ref; return `<div class="cvx-cc" data-k="${esc(k)}" onclick="casoVxIr(this.dataset.k)"><div style="font-size:11px;color:var(--text3);border-left:3px solid #e0a800;padding-left:6px;margin-bottom:4px">${esc(n.hoja)} · ${esc(n.ref)}</div><div style="font-size:12.5px;white-space:pre-wrap">${esc(n.texto)}</div><div style="display:flex;align-items:center;gap:4px;margin-top:4px"><span class="hint" style="margin:0;flex:1;font-size:11px">${esc(n.autor)}</span>${casoVxTienePend(n) ? '<span class="hint" style="margin:0;font-size:11px;color:var(--green)">✓ pendiente</span>' : `<button class="btn btn-secondary btn-sm" style="width:auto;padding:0 6px;font-size:11px" data-k="${esc(k)}" onclick="event.stopPropagation();casoVxPendForm(this.dataset.k)">📌 Pendiente</button>`}<button class="remove-btn" title="Quitar este comentario" data-k="${esc(k)}" onclick="event.stopPropagation();casoVxQuitarNota(this.dataset.k)">&#x2715;</button></div>${s.pendForm === k ? form(n) : ''}</div>`; }).join('') : (s.pendNota ? '' : '<p class="hint" style="margin:0">Elegí una celda y tocá 💬 para comentarla. Los comentarios quedan como notas del Excel.</p>')) + '</div>';
+}
+// ── Buscar y reemplazar, preguntar a la IA ──
+function casoVxBuscarToggle() { const f = document.getElementById('cvx-find'); if (!f) return; const ver = f.style.display === 'none'; f.style.display = ver ? 'flex' : 'none'; if (ver) { const i = document.getElementById('cvx-buscar'); i.focus(); i.select(); } }
+function casoVxBuscar() {
+  const s = _casoVisor, q = (document.getElementById('cvx-buscar').value || '').toLowerCase(), cu = document.getElementById('cvx-cuenta'); if (!s || !q) return; casoVxCommit();
+  const ws = s.wb.worksheets[s.hoja], R = Math.max(1, ws.rowCount), C = Math.max(1, ws.columnCount), ini = (s.sel.ar - 1) * C + (s.sel.ac - 1);
+  for (let k = 1; k <= R * C; k++) { const idx = (ini + k) % (R * C), r = Math.floor(idx / C) + 1, c = (idx % C) + 1; if (casoVxTexto(s, ws, r, c).toLowerCase().includes(q) || String(casoVxRaw(r, c)).toLowerCase().includes(q)) { s.lim = Math.max(s.lim, r + 20); if (!casoVxEl(r, c)) casoVxRender(); casoVxSelecciona(r, c, false); if (cu) cu.textContent = casoColLetra(c) + r; return; } }
+  if (cu) cu.textContent = 'sin coincidencias';
+}
+function casoVxReemplazarTodo() {
+  const s = _casoVisor, q = document.getElementById('cvx-buscar').value, por = document.getElementById('cvx-por').value; if (!s || !q) return; casoVxCommit();
+  const ws = s.wb.worksheets[s.hoja], celdas = []; for (let r = 1; r <= ws.rowCount; r++) for (let c = 1; c <= ws.columnCount; c++) { const raw = casoVxRaw(r, c); if (typeof raw === 'string' && !raw.startsWith('=') && raw.includes(q)) celdas.push([r, c, raw]); }
+  if (!celdas.length) { casoVisorMsg('No encontré "' + q + '" en textos de esta hoja (las fórmulas no se tocan).'); return; }
+  casoVxHistoria(celdas.map(x => [x[0], x[1]])); celdas.forEach(([r, c, raw]) => casoVxSet(r, c, raw.split(q).join(por))); casoVxRender(); casoVisorMsg(`${celdas.length} celda${celdas.length === 1 ? '' : 's'} modificada${celdas.length === 1 ? '' : 's'}. Cambios sin guardar.`);
+}
+function casoVxPreguntarIA() {
+  const s = _casoVisor; if (!s) return; casoVxCommit(); const R = casoVxRect(), ws = s.wb.worksheets[s.hoja], vals = [];
+  for (let r = R.r1; r <= Math.min(R.r2, R.r1 + 14); r++) for (let c = R.c1; c <= Math.min(R.c2, R.c1 + 9); c++) { const t = casoVxTexto(s, ws, r, c); if (t) vals.push(`${casoColLetra(c)}${r}: ${t}`); }
+  const nombre = s.nombre, rango = casoVxRango(), hoja = ws.name; casoVisorCerrar(true); const inp = document.getElementById('caso-input'); if (!inp) return;
+  inp.value = `Sobre el Excel "${nombre}", hoja "${hoja}", rango ${rango}${vals.length ? ' (' + casoCorto(vals.join(' | '), 600) + ')' : ''}:\n\n`; inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
+}
 async function casoVxBuffer() { const wb = _casoVisor.wb; wb.calcProperties = Object.assign({}, wb.calcProperties, { fullCalcOnLoad: true }); return new Blob([await wb.xlsx.writeBuffer()], { type: casoMimeDe('x.xlsx') }); }
 async function casoVxGuardar() {
-  const s = _casoVisor; if (!s) return; casoVisorMsg('Guardando…');
+  const s = _casoVisor; if (!s) return; casoVxCommit(); casoVisorMsg('Guardando…');
   try { const blob = await casoVxBuffer(), row = await casoArchivoSubir(blob, s.nombre, 'editado'); casoSesionPoner(s.nombre, new File([blob], s.nombre, { type: blob.type })); s.dirty = false; s.ver = 0; casoVisorMsg(row ? `Guardado como versión v${row.version}.` : 'No se pudo guardar en el caso (mirá el aviso en "Archivos del caso"); descargalo con ⬇ para no perderlo.'); }
   catch (e) { casoVisorMsg('No se pudo guardar: ' + e.message); }
 }
-async function casoVxDescargar() { const s = _casoVisor; if (!s) return; const blob = await casoVxBuffer(), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = casoBase(s.nombre) + ' (editado).xlsx'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
+async function casoVxDescargar() { const s = _casoVisor; if (!s) return; casoVxCommit(); const blob = await casoVxBuffer(), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = casoBase(s.nombre) + ' (editado).xlsx'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
 
 // ── Word: texto y tablas editables ──
 // ── Casos · visor de Word: formato real, resaltar, comentar, pendientes, estilos y buscar/reemplazar ──
@@ -39584,6 +39882,7 @@ function casoXlOpExtra(o, wb, hoja, ctx) {
       const regla = o.regla === 'texto_contiene' ? { type: 'containsText', operator: 'containsText', text: String(v), style: st } : { type: 'cellIs', operator: mapa[o.regla] || (() => { throw new Error('formato_condicional: "regla" debe ser mayor, menor, igual, mayor_igual, menor_igual, distinto, entre o texto_contiene.'); })(), formulae: o.regla === 'entre' ? [v, o.valor2] : [v], style: st };
       ws.addConditionalFormatting({ ref: casoRangoTxt(R), rules: [regla] }); ctx.estructura = true; ctx.cambios.push(`formato condicional (${o.regla} ${v}) en ${casoRangoTxt(R)}`); return true;
     }
+    case 'quitar_nota': { if (!o.celda) throw new Error('quitar_nota: falta "celda".'); if (!ws.getCell(o.celda).note) throw new Error(`quitar_nota: la celda ${o.celda} no tiene nota.`); casoVxNotaSet(ws.getCell(o.celda), null); ctx.estructura = true; ctx.cambios.push(`nota quitada de ${o.celda}`); return true; }
     case 'nota': { if (!o.celda) throw new Error('nota: falta "celda".'); ws.getCell(o.celda).note = String(o.texto || ''); ctx.estructura = true; ctx.cambios.push(`nota en ${o.celda}`); return true; }
     case 'limpiar': { const R = casoRangoXl(o.rango, ws), que = o.que || 'todo'; casoPorCeldas(ws, R, cell => { if (que !== 'formato') cell.value = null; if (que !== 'contenido') { cell.style = {}; } }); ctx.cambios.push(`${que} limpiado en ${casoRangoTxt(R)}`); return true; }
     case 'copiar_formato': { const a = casoRangoXl(o.origen, ws), d = /^([A-Z]+)(\d+)$/i.exec(o.destino || ''); if (!d) throw new Error('copiar_formato: "destino" es la celda superior izquierda (ej. I1).'); const dc = casoColNum(d[1]) - a.c1, dr = +d[2] - a.r1; casoPorCeldas(ws, a, (cell, r, c) => { try { ws.getCell(r + dr, c + dc).style = JSON.parse(JSON.stringify(cell.style || {})); } catch (e) { /* sin estilo */ } }); ctx.cambios.push(`formato copiado de ${casoRangoTxt(a)} a ${o.destino}`); return true; }
@@ -39682,7 +39981,7 @@ async function casoCalcularExcel(i) {
   return out;
 }
 
-const CASO_XL_OPS = ['set', 'set_rango', 'copiar_rango', 'copiar_hoja', 'agregar_hoja', 'eliminar_hoja', 'ancho', 'formato', 'insertar_filas', 'eliminar_filas', 'insertar_columnas', 'eliminar_columnas', 'ordenar', 'autofiltro', 'ocultar_filas', 'ocultar_columnas', 'renombrar_hoja', 'mover_hoja', 'ocultar_hoja', 'congelar', 'combinar', 'separar', 'validacion_lista', 'formato_condicional', 'nota', 'limpiar', 'copiar_formato', 'autoajustar_columnas', 'buscar_reemplazar'];
+const CASO_XL_OPS = ['set', 'set_rango', 'copiar_rango', 'copiar_hoja', 'agregar_hoja', 'eliminar_hoja', 'ancho', 'formato', 'insertar_filas', 'eliminar_filas', 'insertar_columnas', 'eliminar_columnas', 'ordenar', 'autofiltro', 'ocultar_filas', 'ocultar_columnas', 'renombrar_hoja', 'mover_hoja', 'ocultar_hoja', 'congelar', 'combinar', 'separar', 'validacion_lista', 'formato_condicional', 'nota', 'quitar_nota', 'limpiar', 'copiar_formato', 'autoajustar_columnas', 'buscar_reemplazar'];
 {
   const ix = CASO_HERRAMIENTAS.findIndex(t => t.name === 'editar_excel');
   CASO_HERRAMIENTAS[ix] = { name: 'editar_excel', description: 'Modifica un Excel (.xlsx) del caso conservando formatos y fórmulas, y baja el resultado como "<nombre> (editado).xlsx" (el original no se toca; los pedidos siguientes parten de la versión editada; con "guardar_como" se guarda como un archivo nuevo y el de origen queda intacto: útil para plantillas). Se verifica el archivo guardado: informa qué cambió y si quedaron fórmulas con error: contá solo eso. Hacé primero ver_archivo. Operaciones (siempre con "hoja" si hay varias): set {celda, valor} ("=..." es fórmula); set_rango {desde, filas}; copiar_rango {origen, destino, formulas, cambios} (como copiar y pegar, con fórmulas desplazadas, formato y celdas combinadas: usalo para duplicar tablas); copiar_hoja {nuevo_nombre, cambios}; agregar_hoja {filas}; eliminar_hoja; renombrar_hoja {nuevo_nombre} (actualiza las fórmulas); mover_hoja {posicion}; ocultar_hoja {ocultar}; formato {rango, negrita, cursiva, subrayado, color_texto, relleno, tamano, fuente, alineacion, alineacion_vertical, ajustar_texto, formato_numero (ej. 0.00, #,##0, 0%, dd/mm/yyyy o moneda/porcentaje/miles/fecha), bordes (todos|exterior|inferior|superior|izquierdo|derecho|ninguno)}; copiar_formato {origen, destino}; limpiar {rango, que: todo|contenido|formato}; insertar_filas {antes_de, cantidad} / eliminar_filas {desde, cantidad} / insertar_columnas / eliminar_columnas (ajustan las fórmulas y las celdas combinadas solas); ordenar {rango, columna, orden: asc|desc, con_encabezado}; autofiltro {rango} (sin rango lo quita); ocultar_filas {desde, hasta, ocultar} / ocultar_columnas; congelar {filas, columnas}; combinar / separar {rango}; ancho {columna, ancho} / autoajustar_columnas {columnas}; validacion_lista {rango, opciones}; formato_condicional {rango, regla: mayor|menor|igual|mayor_igual|menor_igual|distinto|entre|texto_contiene, valor, valor2, relleno, color_texto}; nota {celda, texto}; buscar_reemplazar {buscar, por}. Colores: nombre (rojo, azul, gris claro...) o hex RRGGBB. No ajusta formatos condicionales ni nombres definidos existentes al insertar o borrar filas. Una llamada no debería escribir más de ~40 filas de datos.', input_schema: { type: 'object', properties: { archivo: { type: 'string' }, guardar_como: { type: 'string', description: 'Nombre del archivo nuevo (sin pisar el de origen).' }, operaciones: { type: 'array', items: { type: 'object', properties: { op: { type: 'string', enum: CASO_XL_OPS }, hoja: { type: 'string' }, celda: { type: 'string' }, valor: {}, desde: { type: ['string', 'number'] }, hasta: { type: ['string', 'number'] }, filas: { type: 'array', items: { type: 'array', items: {} } }, columna: { type: ['string', 'number'] }, columnas: { type: ['string', 'number'] }, ancho: { type: 'number' }, origen: { type: 'string' }, destino: { type: 'string' }, hoja_destino: { type: 'string' }, formulas: { type: 'string', enum: ['locales', 'todas', 'ninguna'] }, cambios: { type: 'object', additionalProperties: {} }, nuevo_nombre: { type: 'string' }, rango: { type: 'string' }, negrita: { type: 'boolean' }, cursiva: { type: 'boolean' }, subrayado: { type: 'boolean' }, color_texto: { type: 'string' }, relleno: { type: 'string' }, tamano: { type: 'number' }, fuente: { type: 'string' }, alineacion: { type: 'string', enum: ['izquierda', 'centro', 'derecha', 'justificado'] }, alineacion_vertical: { type: 'string', enum: ['arriba', 'centro', 'abajo'] }, ajustar_texto: { type: 'boolean' }, formato_numero: { type: 'string' }, bordes: { type: 'string', enum: ['todos', 'exterior', 'inferior', 'superior', 'izquierdo', 'derecho', 'ninguno'] }, antes_de: { type: ['string', 'number'] }, cantidad: { type: 'number' }, orden: { type: 'string', enum: ['asc', 'desc'] }, con_encabezado: { type: 'boolean' }, ocultar: { type: 'boolean' }, posicion: { type: 'number' }, opciones: { type: 'array', items: { type: 'string' } }, regla: { type: 'string' }, valor2: {}, texto: { type: 'string' }, que: { type: 'string', enum: ['todo', 'contenido', 'formato'] }, buscar: { type: 'string' }, por: { type: 'string' } }, required: ['op'] } } }, required: ['operaciones'] } };
@@ -39919,6 +40218,7 @@ async function casoWComentariosTxt(W) {
 CASO_HERRAMIENTAS[CASO_HERRAMIENTAS.findIndex(t => t.name === 'editar_word')] = { name: 'editar_word', description: 'Modifica un Word (.docx) del caso conservando su formato y baja el resultado como "<nombre> (editado).docx" (el original no se toca; los pedidos siguientes parten de la versión editada; con "guardar_como" se guarda como archivo nuevo y el de origen queda intacto: útil para plantillas). Primero usá ver_archivo: los índices son los del documento original (todos se resuelven antes de aplicar; ver_archivo también muestra los comentarios). Operaciones: reemplazar {buscar, por, todas, en: cuerpo|encabezado|pie|todo}; reemplazar_varios {pares:[{buscar, por}]} (ideal para rellenar una plantilla); editar_parrafo {indice, texto}; insertar {despues_de (0 = al principio; omitido = al final), parrafos:[{texto, estilo: normal|titulo1|titulo2|titulo3|vineta|negrita}]}; insertar_lista {despues_de, items, tipo: vineta|numerada} (listas reales de Word); insertar_tabla {despues_de, encabezados, filas}; insertar_imagen {despues_de, origen: "archivo:<imagen del caso>" | "flowsheet:<id>" | "procesos:<id>", ancho_cm, pie}; salto_pagina {despues_de}; formato_texto {indice, buscar (opcional: solo ese texto), negrita, cursiva, subrayado, color_texto, tamano (pt), fuente, resaltado}; estilo_parrafo {indice, estilo: normal|titulo1|titulo2|titulo3|vineta|numerada, alineacion: izquierda|centro|derecha|justificado, espacio_antes, espacio_despues (pt), interlineado, sangria_cm}; editar_celda {tabla, fila, columna, texto}; tabla_agregar_fila {tabla, despues_de_fila (0 = al principio), valores}; tabla_eliminar_fila {tabla, fila}; tabla_agregar_columna {tabla, despues_de_columna, encabezado, valores}; tabla_eliminar_columna {tabla, columna}; tabla_combinar {tabla, fila, desde_columna, hasta_columna}; tabla_formato {tabla, relleno_encabezado, negrita_encabezado, color_texto_encabezado, bordes: todos|ninguno}; comentario {indice, texto, autor}; eliminar {indice}. Colores: nombre (rojo, azul, gris claro...) o hex RRGGBB. Filas y columnas desde 1.', input_schema: { type: 'object', properties: { archivo: { type: 'string' }, guardar_como: { type: 'string' }, operaciones: { type: 'array', items: { type: 'object', properties: { op: { type: 'string', enum: ['reemplazar', 'reemplazar_varios', 'editar_parrafo', 'insertar', 'insertar_lista', 'insertar_tabla', 'insertar_imagen', 'salto_pagina', 'formato_texto', 'estilo_parrafo', 'editar_celda', 'tabla_agregar_fila', 'tabla_eliminar_fila', 'tabla_agregar_columna', 'tabla_eliminar_columna', 'tabla_combinar', 'tabla_formato', 'comentario', 'eliminar'] }, buscar: { type: 'string' }, por: { type: 'string' }, todas: { type: 'boolean' }, en: { type: 'string', enum: ['cuerpo', 'encabezado', 'pie', 'todo'] }, pares: { type: 'array', items: { type: 'object', properties: { buscar: { type: 'string' }, por: { type: 'string' } }, required: ['buscar'] } }, indice: { type: 'number' }, texto: { type: 'string' }, despues_de: { type: 'number' }, parrafos: { type: 'array', items: { type: 'object', properties: { texto: { type: 'string' }, estilo: { type: 'string', enum: ['normal', 'titulo1', 'titulo2', 'titulo3', 'vineta', 'negrita'] } }, required: ['texto'] } }, items: { type: 'array', items: { type: 'string' } }, tipo: { type: 'string', enum: ['vineta', 'numerada'] }, encabezados: { type: 'array', items: { type: 'string' } }, filas: { type: 'array', items: { type: 'array', items: {} } }, origen: { type: 'string' }, ancho_cm: { type: 'number' }, pie: { type: 'string' }, negrita: { type: 'boolean' }, cursiva: { type: 'boolean' }, subrayado: { type: 'boolean' }, color_texto: { type: 'string' }, tamano: { type: 'number' }, fuente: { type: 'string' }, resaltado: { type: 'string' }, ocurrencia: { type: 'string', enum: ['todas', 'primera'] }, estilo: { type: 'string', enum: ['normal', 'titulo1', 'titulo2', 'titulo3', 'vineta', 'numerada'] }, alineacion: { type: 'string', enum: ['izquierda', 'centro', 'derecha', 'justificado'] }, espacio_antes: { type: 'number' }, espacio_despues: { type: 'number' }, interlineado: { type: 'number' }, sangria_cm: { type: 'number' }, tabla: { type: 'number' }, fila: { type: 'number' }, columna: { type: 'number' }, despues_de_fila: { type: 'number' }, despues_de_columna: { type: 'number' }, valores: { type: 'array', items: {} }, encabezado: { type: 'string' }, desde_columna: { type: 'number' }, hasta_columna: { type: 'number' }, relleno_encabezado: { type: 'string' }, negrita_encabezado: { type: 'boolean' }, color_texto_encabezado: { type: 'string' }, bordes: { type: 'string', enum: ['todos', 'ninguno'] }, autor: { type: 'string' } }, required: ['op'] } } }, required: ['operaciones'] } };
 
 CASO_HERRAMIENTAS.find(t => t.name === 'editar_word').description += ' RESALTAR Y COMENTAR: formato_texto acepta "resaltado" (amarillo, verde, celeste, magenta, gris, o "ninguno" para quitarlo), "buscar" y "ocurrencia" (número: cuál de las apariciones del texto en ese párrafo; también sirve en celdas con tabla, fila y columna); comentario {indice, texto, buscar?, ocurrencia?} comenta el texto exacto "buscar" (o todo el párrafo si se omite); quitar_comentario {id} borra un comentario (ver_archivo muestra los #ids).';
+CASO_HERRAMIENTAS.find(t => t.name === 'editar_excel').description += ' COMENTARIOS: ver_archivo lista las notas de la planilla (hoja!celda: texto); "nota" {celda, texto} agrega una y "quitar_nota" {celda} la borra.';
 // ── Casos · edición DIRECTA de DFS, manuales, presentaciones, flowsheets y propuestas + duplicar, comparar y restaurar ──
 // editar_documento le habla al chat de cada módulo (otra IA: más caro y a veces interpreta mal). Estas herramientas aplican cambios exactos, sin IA de por medio, con las mismas
 // funciones que usan los módulos. Siempre se guarda antes una copia "· antes de editar".
