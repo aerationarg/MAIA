@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1293,6 +1293,7 @@
         <div class="sp-selected" style="margin-bottom:8px">
           <span id="cfg-rend-tmpl-label">Cargando...</span>
           <button class="sp-browse-btn" onclick="fbOpen('file','rend-plantilla')">Seleccionar</button>
+          <button class="sp-browse-btn" onclick="rendMapearColumnas()" title="Elegir qué campo va en cada columna de la plantilla actual (sin volver a seleccionarla)">Mapear columnas</button>
         </div>
       </div>
       <div class="card">
@@ -2111,6 +2112,7 @@
       <div class="map-modal-body" id="mapModalBody"></div>
       <div class="map-modal-footer">
         <button class="btn btn-secondary" onclick="mapModalClose()" style="flex:1">Cancelar</button>
+        <button class="btn btn-secondary" onclick="mapModalSugerir()" style="flex:1" title="Vuelve a elegir el campo de cada columna según el nombre del encabezado">↻ Sugerir por nombre</button>
         <button class="btn btn-primary" onclick="mapModalConfirm()" style="flex:2">Confirmar mapeo y subir</button>
       </div>
     </div>
@@ -3736,7 +3738,8 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   const hdrs = rows[0] || [];
   const fields = getRendFields().filter(f => f.name.trim());
   const manualFields = getRendManualFields().filter(f=>f.name.trim());
-  const savedMapping = getMapping(REND_MAPPING_KEY());
+  if (_rendMappingCache === null) await rendLoadMapping();
+  const savedMapping = rendMappingEfectivo(getMapping(REND_MAPPING_KEY()), hdrs);
   const useMapping = Object.keys(savedMapping).length > 0 && hdrs.length > 0;
   // columna donde va el nombre del archivo (la del mapeo "Archivo", o la que diga "archivo" en el encabezado)
   let archivoCol = -1;
@@ -21778,7 +21781,7 @@ async function spConfirm() {
       const fieldNames = fields.map(f => f.name);
       // Append rows
       const manualFields = getRendManualFields().filter(f=>f.name.trim());
-      const savedMapping = getMapping(REND_MAPPING_KEY());
+      const savedMapping = rendMappingEfectivo(getMapping(REND_MAPPING_KEY()), (headers || []).map(String));
       const useMapping = Object.keys(savedMapping).length > 0;
 
       // Find first empty row (don't rebuild sheet — preserve formatting)
@@ -21919,7 +21922,7 @@ async function spConfirm() {
       const totalOrigFormulasTmpl = totalRowNumTmpl ? await spGetRowFormulas(token, excelBaseRendTmpl, totalRowNumTmpl, totalRowWidthTmpl) : null;
 
       const manualFieldsTmpl = getRendManualFields().filter(f=>f.name.trim());
-      const savedMappingTmpl = getMapping(REND_MAPPING_KEY());
+      const savedMappingTmpl = rendMappingEfectivo(getMapping(REND_MAPPING_KEY()), tmplHeaders);
       const useMappingTmpl = Object.keys(savedMappingTmpl).length > 0 && tmplHeaders.length > 0;
 
       // Write each result row starting at row 2
@@ -25166,7 +25169,31 @@ function saveMapping(key, m) {
   }
   localStorage.setItem(key, JSON.stringify(m));
 }
+// Encabezados de la plantilla con los que se confirmó el mapeo de Rendiciones (config global, al lado del mapeo). El mapeo guarda "columna N = campo X": si se agregan o mueven columnas en la plantilla,
+// o se inserta en un Excel armado con una versión anterior, las posiciones dejan de coincidir. Con estos encabezados el mapeo se reubica por NOMBRE de columna.
+const REND_HDRS_KEY = () => 'rend_col_hdrs_' + currentEmpresa;
+let _rendHdrsCache = null;
+const rendNormHdr = h => String(h == null ? '' : h).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+function rendMappingEfectivo(mapping, hdrs) {
+  const snap = _rendHdrsCache; if (!Array.isArray(snap) || !snap.length || !hdrs || !hdrs.length) return mapping;
+  if (snap.length === hdrs.length && snap.every((h, i) => rendNormHdr(h) === rendNormHdr(hdrs[i]))) return mapping;
+  const out = {}, usadas = new Set();
+  Object.entries(mapping).forEach(([idx, campo]) => {
+    const h = rendNormHdr(snap[Number(idx)]); if (!h) return;
+    const j = hdrs.findIndex((x, k) => !usadas.has(k) && rendNormHdr(x) === h); if (j < 0) return;
+    usadas.add(j); out[j] = campo;
+  });
+  return Object.keys(out).length ? out : mapping;
+}
+function rendGuardarHdrs(h) { _rendHdrsCache = (h || []).map(x => String(x == null ? '' : x)); supaConfigSet(REND_HDRS_KEY(), JSON.stringify(_rendHdrsCache)).catch(e => console.log('No se pudieron guardar los encabezados del mapeo:', e.message)); }
+async function rendMapearColumnas() {
+  try {
+    const raw = await supaConfigGet('rend_template'); if (!raw) { alert('Primero seleccioná la plantilla de rendición.'); return; }
+    const t = JSON.parse(raw); await rendLoadMapping(); await loadExcelHeadersAndShowMapping('rend', t.id, t.siteId);
+  } catch (e) { alert('No se pudo abrir el mapeo de columnas: ' + e.message); }
+}
 async function rendLoadMapping() {
+  try { const h = await supaConfigGet(REND_HDRS_KEY()); _rendHdrsCache = h ? JSON.parse(h) : null; } catch (e) { _rendHdrsCache = null; }
   try {
     const key = REND_MAPPING_KEY();
     const raw = await supaConfigGet(key);
@@ -25245,8 +25272,22 @@ function showMappingModal(target, excelHeaders, savedMapping, pendingAction) {
       ...npGetIA(pfx).filter(f=>f.name.trim()).map(f=>f.name)
     ];
   }
-  const mapping = Object.keys(savedMapping).length > 0 ? savedMapping : autoSuggestMapping(excelHeaders, availableFields);
+  let mapping = Object.keys(savedMapping).length > 0 ? savedMapping : autoSuggestMapping(excelHeaders, availableFields), aviso = '';
+  if (target === 'rend' && Object.keys(savedMapping).length > 0) {
+    const snap = _rendHdrsCache;
+    if (!(Array.isArray(snap) && snap.length === excelHeaders.length && snap.every((h, i) => rendNormHdr(h) === rendNormHdr(excelHeaders[i])))) {
+      // las columnas del Excel no son las de la última vez que se confirmó: lo ya confirmado se reubica por nombre de columna y el resto se sugiere por nombre
+      const reubicado = Array.isArray(snap) && snap.length ? rendMappingEfectivo(savedMapping, excelHeaders) : {};
+      mapping = Object.assign({}, autoSuggestMapping(excelHeaders, availableFields), reubicado);
+      aviso = 'Las columnas del Excel cambiaron desde la última vez que confirmaste el mapeo (se agregaron, quitaron o movieron). Se reubicó lo que ya tenías por el nombre de cada columna y se sugirió el resto: revisalo antes de confirmar.';
+    }
+  }
   mapContext = { target, headers: excelHeaders, fields: availableFields, mapping, pendingAction, autoFieldNames };
+  mapModalPintar(aviso);
+}
+function mapModalSugerir() { if (!mapContext) return; mapContext.mapping = autoSuggestMapping(mapContext.headers, mapContext.fields); mapModalPintar('Sugerido por el nombre de cada columna del Excel: revisalo y confirmá.'); }
+function mapModalPintar(aviso) {
+  const { headers: excelHeaders, fields: availableFields, mapping } = mapContext;
   const specialOpts = [
     {value:'__none__', label:'— No mapear —'},
     {value:'__archivo__', label:'📎 Nombre del archivo'},
@@ -25254,7 +25295,7 @@ function showMappingModal(target, excelHeaders, savedMapping, pendingAction) {
     {value:'__fecha_analisis__', label:'🕐 Fecha de análisis'},
   ];
   const body = document.getElementById('mapModalBody');
-  body.innerHTML = excelHeaders.map((header, i) => {
+  body.innerHTML = (aviso ? `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12.5px">${esc(aviso)}</div>` : '') + excelHeaders.map((header, i) => {
     const current = mapping[i] || '__none__';
     const isMatched = current !== '__none__';
     const allOpts = [...specialOpts, ...availableFields.map(f => ({
@@ -25263,7 +25304,7 @@ function showMappingModal(target, excelHeaders, savedMapping, pendingAction) {
     }))];
     const options = allOpts.map(o => `<option value="${esc(o.value)}" ${o.value===current?'selected':''}>${esc(o.label)}</option>`).join('');
     return `<div class="map-row">
-      <span class="map-col-idx">${String.fromCharCode(65+i)}</span>
+      <span class="map-col-idx">${rendColLetra(i)}</span>
       <span class="map-col-name" title="${esc(String(header))}">${esc(String(header||'(vacío)'))}</span>
       <span class="map-arrow">→</span>
       <select class="map-select ${isMatched?'matched':'unmatched'}"
@@ -25278,6 +25319,7 @@ async function mapModalConfirm() {
   const target = mapContext.target;
   const mapKey = target === 'rend' ? REND_MAPPING_KEY() : (NP_KEYS(target)?.map || NP_MAPPING_KEY);
   saveMapping(mapKey, mapContext.mapping);
+  if (target === 'rend') rendGuardarHdrs(mapContext.headers);
   mapModalClose();
   if (mapContext.pendingAction) await mapContext.pendingAction(mapContext.mapping);
   // Re-calc auto fields using the confirmed mapping
