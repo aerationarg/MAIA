@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -37914,15 +37914,23 @@ function casoConCache(messages) {
   if (bloques.length) bloques[bloques.length - 1] = Object.assign({}, bloques[bloques.length - 1], { cache_control: { type: 'ephemeral' } });
   m[m.length - 1] = { role: u.role, content: bloques }; return m;
 }
-async function casoLlamar(messages) {
+// Cuando el filtro de seguridad de Anthropic rechaza un pedido en el modelo elegido, se reintenta UNA vez con este (un rechazo del filtro suele ser un falso positivo y otro modelo normalmente lo responde)
+const CASO_MODELO_RESPALDO = 'claude-opus-4-8';
+async function casoLlamar(messages, idOverride) {
   const apiKey = getApiKey(); if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
-  const mod = CASO_MODELOS[_casoModelo] || CASO_MODELOS.estandar, tools = CASO_HERRAMIENTAS.map((t, i) => i === CASO_HERRAMIENTAS.length - 1 ? Object.assign({}, t, { cache_control: { type: 'ephemeral' } }) : t);
+  const mod = CASO_MODELOS[_casoModelo] || CASO_MODELOS.estandar, modeloId = idOverride || mod.id, tools = CASO_HERRAMIENTAS.map((t, i) => i === CASO_HERRAMIENTAS.length - 1 ? Object.assign({}, t, { cache_control: { type: 'ephemeral' } }) : t);
   const resp = await procesosFetchConReintento('https://api.anthropic.com/v1/messages', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify({ model: mod.id, max_tokens: 8192, system: [{ type: 'text', text: CASO_SISTEMA, cache_control: { type: 'ephemeral' } }, { type: 'text', text: casoContexto(), cache_control: { type: 'ephemeral' } }], tools, messages: casoConCache(messages) })
+    body: JSON.stringify({ model: modeloId, max_tokens: 8192, system: [{ type: 'text', text: CASO_SISTEMA, cache_control: { type: 'ephemeral' } }, { type: 'text', text: casoContexto(), cache_control: { type: 'ephemeral' } }], tools, messages: casoConCache(messages) })
   });
   if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error((e.error && e.error.message) || 'HTTP ' + resp.status); }
-  return resp.json();
+  return Object.assign(await resp.json(), { _modelo: modeloId });
+}
+// Costo de una llamada: un rechazo antes de escribir nada no se cobra salvo en algunas categorías; si respondió el modelo de respaldo se usan sus precios
+function casoCostoLlamada(d, modeloKey) {
+  const cat = d.stop_details && d.stop_details.category;
+  if (d.stop_reason === 'refusal' && !(d.content || []).length && !/^(bio|frontier_llm|reasoning_extraction)$/.test(String(cat))) return 0;
+  return d._modelo && !Object.values(CASO_MODELOS).some(m => m.id === d._modelo) ? casoCostoModelo(d.usage, d._modelo) : casoCosto(d.usage, modeloKey);
 }
 function casoCosto(uso, modeloKey) {
   let m = typeof modeloKey === 'object' ? modeloKey : (CASO_MODELOS[modeloKey] || CASO_MODELOS.estandar); if (!uso) return 0;
@@ -37944,16 +37952,20 @@ async function casoEnviar() {
     const hist = _casoMsgs.slice(0, -1).slice(-14).map(m => ({ role: m.rol === 'user' ? 'user' : 'assistant', content: casoRespSinHerr(m) ? CASO_AVISO_SIN_HERR + m.contenido : m.contenido }));
     while (hist.length && hist[0].role !== 'user') hist.shift();
     const messages = hist.concat([{ role: 'user', content: bloquesAdj.concat([{ type: 'text', text: texto || '(ver adjuntos)' }]) }]);
-    let fallos = 0, ultimoErr = '', mutoOk = false, nudged = false, continuaciones = 0; const acum = [];
+    let fallos = 0, ultimoErr = '', mutoOk = false, nudged = false, continuaciones = 0, respaldo = null, respaldoProbado = false; const acum = [];
     for (let ronda = 0; ronda < 10; ronda++) {
-      const data = await casoLlamar(messages); costo += casoCosto(data.usage, modeloKey);
+      let data = await casoLlamar(messages, respaldo); costo += casoCostoLlamada(data, modeloKey);
+      if (data.stop_reason === 'refusal' && !respaldo) {
+        casoRenderMsgs('El modelo elegido rechazó el pedido (filtro de seguridad); probando con otro modelo…');
+        respaldoProbado = true; try { const d2 = await casoLlamar(messages, CASO_MODELO_RESPALDO); costo += casoCostoLlamada(d2, modeloKey); if (d2.stop_reason !== 'refusal') { data = d2; respaldo = CASO_MODELO_RESPALDO; usos.push('respondió el modelo de respaldo (Opus 4.8): el elegido rechazó el pedido'); } } catch (e) { /* se muestra el rechazo original */ }
+      }
       messages.push({ role: 'assistant', content: data.content });
       const tus = (data.content || []).filter(c => c.type === 'tool_use');
       const txt = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n').trim();   // el texto que la IA escribe junto a las herramientas también es parte de la respuesta
       if (!tus.length) {
         const miente = !mutoOk && casoPidioCambio(texto) && casoAfirmaAccion(txt);
         if (miente && !nudged) { nudged = true; casoRenderMsgs('Verificando que el cambio se haya hecho…'); messages.push({ role: 'user', content: [{ type: 'text', text: CASO_NUDGE }] }); continue; }
-        if (data.stop_reason === 'refusal') { final = acum.concat([txt]).filter(Boolean).join('\n\n') + '\n\n✕ El modelo se negó a responder este pedido (filtro de seguridad de Anthropic). Reformulalo o probá con otro modelo.'; break; }
+        if (data.stop_reason === 'refusal') { final = acum.concat([txt]).filter(Boolean).join('\n\n') + '\n\n✕ El modelo se negó a responder este pedido (filtro de seguridad de Anthropic)' + (data.stop_details && data.stop_details.category ? ' — categoría: ' + data.stop_details.category : '') + (respaldoProbado ? ' (también se probó con otro modelo y lo rechazó)' : '') + '. Suele ser un falso positivo: probá reformulando, mandando menos archivos juntos, o eligiendo otro modelo.'; break; }
         if (data.stop_reason === 'max_tokens' && continuaciones < 3) { continuaciones++; acum.push(txt); casoRenderMsgs('Continuando la respuesta…'); messages.push({ role: 'user', content: [{ type: 'text', text: 'Continuá exactamente donde quedaste, sin repetir lo que ya escribiste.' }] }); continue; }
         final = acum.concat([txt]).filter(Boolean).join('\n\n') + (data.stop_reason === 'max_tokens' ? '\n\n(La respuesta se cortó por largo: pedime que siga.)' : '') + (miente ? '\n\n⚠ MAIA: en esta respuesta no se ejecutó ninguna herramienta que modifique algo, así que NO cambió nada. Pedímelo de nuevo, más específico (por ejemplo, el nombre exacto del equipo).' : '');
         break;
