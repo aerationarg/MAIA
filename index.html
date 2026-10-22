@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -27443,7 +27443,7 @@ function cotizArmadoRender() {
         <div style="flex:2;min-width:220px">
           <textarea rows="2" placeholder="Descripción" style="width:100%;resize:vertical;font-size:13px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)">${esc(it.descripcion)}</textarea>
           ${it.catalogo_id || it.observaciones ? `<textarea rows="1" placeholder="Observaciones (se agregan debajo del detalle en la cotización)" style="width:100%;resize:vertical;font-size:12px;margin-top:3px" onchange="cotizArmadoSetItemCampo('${it.id}','observaciones',this.value)">${esc(it.observaciones || '')}</textarea>` : ''}
-          ${it.origen_ia ? `<span style="font-size:11px;color:${it.origen_ia === 'sin coincidencia' ? 'var(--red)' : 'var(--blue)'}">🤖 ${esc(it.origen_ia === 'stock' ? 'Coincide con un producto de Stock' : it.origen_ia === 'vendido' ? 'Coincide con algo vendido antes' : 'Sin coincidencia en Stock ni ventas — revisalo')}</span>` : ''}
+          ${it.origen_ia ? `<span style="font-size:11px;color:${it.origen_ia === 'sin coincidencia' ? 'var(--red)' : 'var(--blue)'}">🤖 ${esc(it.origen_ia === 'stock' ? 'Coincide con un producto de Stock' : it.origen_ia === 'stock nuevo' ? 'Agregado a Stock' + (it.codigo_nuevo ? ' como ' + it.codigo_nuevo : '') : it.origen_ia === 'vendido' ? 'Coincide con algo vendido antes' : 'Sin coincidencia en Stock ni ventas — revisalo')}</span>` : ''}
         </div>
         <div style="width:110px"><input value="${esc(String(it.precio_base != null && it.precio_base !== '' ? it.precio_base : it.precio_unitario))}" placeholder="Precio unit." style="width:100%" title="Precio unitario (de lista)" onchange="cotizArmadoSetItemCampo('${it.id}','precio_unitario',this.value)" /></div>
         <div style="width:64px;display:flex;align-items:center;gap:2px"><input value="${esc(String(Number(it.dto_item)||''))}" placeholder="Dto" style="width:44px" title="Descuento propio de este ítem (%)" onchange="cotizArmadoSetItemCampo('${it.id}','dto_item',this.value)" /><span style="font-size:12px">%</span></div>
@@ -28006,6 +28006,7 @@ async function cotizArmadoDesdeArchivos() {
     if (obs && !(st.observaciones || '').includes(obs)) st.observaciones = ((st.observaciones || '').trim() + '\n' + obs).trim();
     // Ítems
     const cuentas = { cat: 0, hist: 0, nada: 0 };
+    const candStock = []; // ítems que no están en Stock: se ofrece cargarlos (con IA) al terminar
     const lista = (ex.items || []).filter(x => String(x.descripcion || x.modelo || '').trim());
     let n = 0;
     for (const x of lista) {
@@ -28032,17 +28033,141 @@ async function cotizArmadoDesdeArchivos() {
         item = { id: procesosNuevoId(), descripcion: cotizDescripcionItem(x), cantidad, precio_unitario: precioArchivo, marca: x.marca || null, modelo: x.modelo || null, catalogo_id: null, origen_ia: 'sin coincidencia' };
       }
       st.items.push(item);
+      if (!item.catalogo_id) candStock.push({ itemId: item.id, x, hist: m && m.origen === 'hist' ? m.row : null });
     }
     cotizArmadoOrdenarItems(st);
     cotizArmadoRecalcularTotales();
     _cotizIa.archivos = []; _cotizIa.texto = '';
     cotizArmadoRender();
+    if (candStock.length) { showMsg(sid, 'loading', 'La IA está sugiriendo los datos para cargar los ítems nuevos a Stock...'); await cotizStockIaSugerir(candStock); }
     const partes = [`${lista.length} ítem(s): ${cuentas.cat} de Stock, ${cuentas.hist} de lo vendido antes, ${cuentas.nada} sin coincidencia`];
     if (resumen.length) partes.unshift(resumen.join(', '));
-    showMsg(sid, cuentas.nada ? 'warning' : 'success', '✓ Cargué ' + partes.join(' — ') + '. Revisá los ítems marcados con 🤖 (precio y coincidencia) antes de generar.');
+    showMsg(sid, cuentas.nada ? 'warning' : 'success', '✓ Cargué ' + partes.join(' — ') + '. Revisá los ítems marcados con 🤖 (precio y coincidencia) antes de generar.' + (candStock.length ? ' Te propongo cargar ' + candStock.length + ' a Stock.' : ''));
+    if (candStock.length) cotizStockIaAbrir(candStock);
   } catch (e) {
     showMsg(sid, 'error', '✕ ' + e.message);
   } finally { _cotizIa.ocupado = false; const b2 = document.getElementById('cotiz-ia-btn'); if (b2) b2.disabled = false; }
+}
+
+// ── Ítems del análisis con IA que no están en Stock: se ofrece cargarlos como artículos nuevos ──
+// Primero se busca en Stock (si está, se usa); si no, en lo vendido antes. Esté vendido o no, se pregunta si se lo quiere en Stock
+// (aclarando cuál es el caso). La IA propone marca, modelo, descripción y observaciones; el código es AAXXXX automático.
+const COTIZ_TOOL_SUGERIR_STOCK = {
+  name: 'sugerir_articulos_stock',
+  description: 'Sugiere los datos con los que cargar cada ítem como artículo nuevo del catálogo de Stock.',
+  input_schema: { type: 'object', properties: { articulos: { type: 'array', items: { type: 'object', properties: {
+    n: { type: 'number', description: 'Número del ítem, tal como figura en la lista.' },
+    marca: { type: 'string', description: 'Fabricante / marca ("" si no se sabe). Si coincide con una marca ya cargada, escribila igual que esa.' },
+    modelo: { type: 'string', description: 'Modelo o código de fabricante ("" si no figura).' },
+    descripcion: { type: 'string', description: 'Qué es el producto, corto y genérico (ej. "Bomba sumergible para efluentes"), SIN repetir marca ni modelo.' },
+    observaciones: { type: 'string', description: 'Detalles técnicos o aclaraciones que figuran (potencia, tensión, materiales, medidas, normas...). "" si no hay.' },
+  }, required: ['n', 'marca', 'modelo', 'descripcion', 'observaciones'] } } }, required: ['articulos'] },
+};
+let _cotizStockIa = null;
+const cotizMonedaLista = m => /^(ars|peso|pesos|\$)/i.test(String(m || '').trim()) ? 'ARS' : 'USD';
+async function cotizStockIaSugerir(cands) {
+  const st = cotizArmadoInit();
+  const monedaPedido = st.moneda === 'Peso' ? 'ARS' : 'USD';
+  // base sin IA: lo que se leyó del archivo (y, si ya se vendió, el precio de la última venta como precio de lista sugerido)
+  cands.forEach(c => {
+    const h = c.hist, x = c.x;
+    c.sug = {
+      marca: String(x.marca || (h && h.marca) || '').trim(), modelo: String(x.modelo || x.codigo || (h && h.modelo) || '').trim(),
+      descripcion: String(x.descripcion || (h && h.descripcion) || '').trim(), observaciones: '',
+      moneda: h ? cotizMonedaLista(h.moneda) : monedaPedido,
+      precio: h && Number(h.precio_unitario) > 0 ? Number(h.precio_unitario) : (Number(x.precio_unitario) > 0 ? Number(x.precio_unitario) : ''),
+      precioDe: h && Number(h.precio_unitario) > 0 ? 'último precio vendido' : (Number(x.precio_unitario) > 0 ? 'precio que figura en el archivo' : ''),
+    };
+  });
+  try {
+    const marcas = (await cotizMarcasCargar()).slice(0, 250);
+    const lista = cands.map((c, i) => `${i + 1}. marca: ${c.x.marca || ''} | modelo: ${c.x.modelo || ''} | código: ${c.x.codigo || ''} | descripción: ${c.x.descripcion || ''}${c.hist ? ' | (ya se vendió antes como: ' + String(c.hist.descripcion || '').slice(0, 160) + ')' : ''}`).join('\n');
+    const prompt = `Estos productos aparecieron en un pedido de cotización y NO están en el catálogo de Stock de Aeration. Para cargarlos como artículos nuevos, proponé los datos de cada uno.\n\nCriterio:\n- marca: el fabricante. Expandí abreviaturas (ej. "TSU" = Tsurumi). Si es una de las marcas ya cargadas, escribila exactamente igual.\n- modelo: modelo o número de parte del fabricante; vacío si no figura.\n- descripcion: qué es el producto, corto y genérico, sin repetir marca ni modelo.\n- observaciones: los detalles técnicos o aclaraciones que SÍ figuran (potencia, tensión, caudal, materiales, medidas...). Si no hay, vacío.\nNo inventes datos que no estén en el texto.\n\nMarcas ya cargadas: ${marcas.join(', ') || '(ninguna)'}\n\nProductos:\n${lista}`;
+    const r = await propLlamarForzado(COTIZ_TOOL_SUGERIR_STOCK, prompt, 3000);
+    (r.articulos || []).forEach(a => {
+      const c = cands[Number(a.n) - 1]; if (!c) return;
+      ['marca', 'modelo', 'descripcion', 'observaciones'].forEach(k => { if (typeof a[k] === 'string' && (a[k].trim() || k === 'observaciones' || k === 'modelo')) c.sug[k] = a[k].trim(); });
+    });
+    cands.ia = true;
+  } catch (e) { cands.ia = false; console.warn('Sugerencia de Stock con IA falló, se usan los datos leídos:', e.message); }
+  return cands;
+}
+function cotizStockIaCerrar() { const m = document.getElementById('cotiz-stock-ia-modal'); if (m) m.remove(); _cotizStockIa = null; }
+async function cotizStockIaAbrir(cands) {
+  cotizStockIaCerrar();
+  _cotizStockIa = { cands, guardando: false };
+  let marcas = []; try { marcas = await cotizMarcasCargar(); } catch (e) { /* sin sugerencias */ }
+  const fld = (i, k, label, val, extra) => `<div style="flex:${extra && extra.flex || 1};min-width:${extra && extra.min || 130}px"><label style="font-size:11px;color:var(--text2)">${label}</label>${extra && extra.area ? `<textarea id="csi-${i}-${k}" rows="2" style="width:100%;font-size:12px;resize:vertical">${esc(val)}</textarea>` : `<input id="csi-${i}-${k}" value="${esc(val)}" ${extra && extra.list ? `list="${extra.list}"` : ''} style="width:100%;font-size:12px" />`}</div>`;
+  const tarjetas = cands.map((c, i) => {
+    const h = c.hist, sg = c.sug;
+    const estado = h
+      ? `<span style="color:var(--blue)">🕘 Ya se vendió antes${h.q_numero ? ' (Q-' + esc(String(h.q_numero).replace(/^q-?\s*/i, '')) + ')' : ''} a ${esc(h.cliente || '—')}${h.fecha ? ' · ' + esc(h.fecha) : ''} — pero no está en Stock</span>`
+      : '<span style="color:var(--red)">🆕 No está en Stock ni se vendió antes</span>';
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="csi-${i}-ok" checked style="width:auto;margin-top:3px" /><span style="font-size:12.5px"><b>${esc(String(c.x.descripcion || c.x.modelo || 'Ítem'))}</b><br>${estado}</span></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${fld(i, 'marca', 'Marca', sg.marca, { list: 'csi-marcas' })}${fld(i, 'modelo', 'Modelo', sg.modelo)}
+      </div>
+      <div style="margin-top:6px">${fld(i, 'descripcion', 'Descripción', sg.descripcion, { min: 260 })}</div>
+      <div style="margin-top:6px">${fld(i, 'obs', 'Observaciones (texto libre; salen en la cotización, no en la búsqueda)', sg.observaciones, { area: true, min: 260 })}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:flex-end">
+        <div style="width:90px"><label style="font-size:11px;color:var(--text2)">Moneda lista</label><select id="csi-${i}-moneda" style="width:100%;font-size:12px"><option ${sg.moneda === 'USD' ? 'selected' : ''}>USD</option><option ${sg.moneda === 'ARS' ? 'selected' : ''}>ARS</option></select></div>
+        ${fld(i, 'precio', 'Precio de lista (opcional)' + (sg.precioDe ? ' — ' + sg.precioDe : ''), sg.precio === '' ? '' : String(sg.precio), { flex: 1, min: 160 })}
+        <div style="font-size:11px;color:var(--text2);padding-bottom:6px">Código: automático (AAXXXX)</div>
+      </div>
+    </div>`;
+  }).join('');
+  const ov = document.createElement('div');
+  ov.id = 'cotiz-stock-ia-modal'; ov.className = 'map-modal-overlay'; ov.style.alignItems = 'center';
+  ov.onclick = e => { if (e.target === ov) cotizStockIaCerrar(); };
+  ov.innerHTML = `<div class="map-modal" style="max-width:760px;border-radius:var(--radius)">
+    <div class="map-modal-header"><h2>📦 ¿Agregar estos ítems a Stock?</h2><p>${cands.length === 1 ? 'Este ítem no estaba' : 'Estos ' + cands.length + ' ítems no estaban'} en Stock. ${cands.ia === false ? 'La IA no pudo sugerir los datos: están los que se leyeron del pedido. ' : 'Los datos los sugirió la IA: '}Revisalos, destildá lo que no quieras cargar y confirmá. Los ítems quedan vinculados al artículo nuevo.</p></div>
+    <div class="map-modal-body"><datalist id="csi-marcas">${marcas.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>${tarjetas}</div>
+    <div class="map-modal-footer"><button class="btn btn-secondary" onclick="cotizStockIaCerrar()" style="flex:1">Ahora no</button><button class="btn btn-primary" id="csi-confirmar" onclick="cotizStockIaConfirmar()" style="flex:2">Agregar a Stock los tildados</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+}
+async function cotizStockIaConfirmar() {
+  const e = _cotizStockIa; if (!e || e.guardando) return;
+  const sel = e.cands.map((c, i) => ({ c, i })).filter(({ i }) => document.getElementById(`csi-${i}-ok`)?.checked);
+  if (!sel.length) { cotizStockIaCerrar(); return; }
+  const val = (i, k) => (document.getElementById(`csi-${i}-${k}`)?.value || '').trim();
+  const btn = document.getElementById('csi-confirmar');
+  e.guardando = true; if (btn) { btn.disabled = true; btn.textContent = 'Agregando...'; }
+  const sid = 'cotiz-ia-status';
+  try {
+    const codigos = await cotizCatalogoProximosCodigos(sel.length);
+    if (codigos.length !== sel.length) throw new Error('No pude calcular los códigos nuevos (no se pudo leer el catálogo).');
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const post = body => supaFetch('/rest/v1/cotizaciones_catalogo', { method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'}, body: JSON.stringify(body) });
+    const st = cotizArmadoInit();
+    const hechos = [], fallos = [];
+    let sinObs = false;
+    for (let k = 0; k < sel.length; k++) {
+      const { c, i } = sel[k];
+      const precioTxt = val(i, 'precio').replace(/\s/g, '').replace(',', '.');
+      const base = { empresa: currentEmpresa, marca: val(i, 'marca'), modelo: val(i, 'modelo'), codigo: codigos[k], descripcion: val(i, 'descripcion'), moneda_lista: val(i, 'moneda') === 'ARS' ? 'ARS' : 'USD', precio_lista: precioTxt !== '' && isFinite(Number(precioTxt)) ? Number(precioTxt) : null };
+      const obs = val(i, 'obs');
+      let res = await post(obs ? Object.assign({}, base, { observaciones: obs }) : base);
+      if (!res.ok && obs) { res = await post(base); if (res.ok) sinObs = true; } // la tabla todavía no tiene la columna observaciones
+      const nuevo = res.ok ? (await res.json().catch(() => []))[0] : null;
+      if (!nuevo) { fallos.push(base.descripcion || base.modelo || 'ítem ' + (i + 1)); continue; }
+      st.items = st.items.map(it => it.id !== c.itemId ? it : Object.assign({}, it, {
+        catalogo_id: nuevo.id, marca: nuevo.marca || null, modelo: nuevo.modelo || null, descripcion: cotizDescripcionItem(nuevo),
+        origen_ia: 'stock nuevo', codigo_nuevo: nuevo.codigo, lista_vacia: nuevo.precio_lista == null || Number(nuevo.precio_lista) === 0,
+        ...(obs ? { observaciones: obs } : {}),
+      }));
+      hechos.push(nuevo.codigo);
+    }
+    _cotizMarcasCache = null;
+    cotizStockIaCerrar();
+    cotizArmadoRecalcularTotales();
+    cotizArmadoRender();
+    showMsg(sid, fallos.length ? 'warning' : 'success', (hechos.length ? `✓ Agregué ${hechos.length} artículo(s) a Stock (${hechos.join(', ')}) y los vinculé a los ítems.` : 'No se agregó nada a Stock.') + (fallos.length ? ` No pude agregar: ${fallos.join('; ')}.` : '') + (sinObs && hechos.length ? ' Las observaciones no se guardaron en Stock porque falta correr docs/cotizaciones_stock.sql (sí quedaron en los ítems de la cotización).' : ''));
+  } catch (err) {
+    e.guardando = false; if (btn) { btn.disabled = false; btn.textContent = 'Agregar a Stock los tildados'; }
+    alert('No se pudo agregar a Stock: ' + err.message);
+  }
 }
 
 let _cotizBuscarItemsTimeout = null;
