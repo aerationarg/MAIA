@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -26533,25 +26533,26 @@ function cotizFiltroPalabras(texto, campos) {
   if (!pals.length) return '';
   return 'and=(' + pals.map(x => 'or(' + campos.map(c => `${c}.ilike."*${encodeURIComponent(x)}*"`).join(',') + ')').join(',') + ')';
 }
-// Código sugerido para un producto nuevo: "AA" + (el mayor número de código AA que ya exista + 1)
-async function cotizCatalogoProximoCodigo() {
-  try {
-    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-    let maxN = -1, maxDigitos = '', maxPrefijo = 'AA';
-    for (let off = 0; off < 50000; off += 1000) {
-      const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=codigo&empresa=eq.${currentEmpresa}&codigo=ilike.AA*&order=id&limit=1000&offset=${off}`, {headers:{Authorization:'Bearer '+session.token}});
-      const rows = res.ok ? await res.json() : [];
-      rows.forEach(r => {
-        const m = /^(AA[\s\-_.]*)(\d+)$/i.exec(String(r.codigo || '').trim());
-        if (m && Number(m[2]) > maxN) { maxN = Number(m[2]); maxDigitos = m[2]; maxPrefijo = m[1]; }
-      });
-      if (rows.length < 1000) break;
-    }
-    if (maxN < 0) return 'AA1';
-    const ancho = /^0/.test(maxDigitos) ? maxDigitos.length : 0;
-    return maxPrefijo + String(maxN + 1).padStart(ancho, '0');
-  } catch (e) { return ''; }
+// Código de un producto nuevo de Stock: "AA" + 4 dígitos (AA0001, AA0002…), siempre el siguiente al mayor número AA que ya exista.
+// Los códigos que ya existen con otro formato (AA-12, AA7…) cuentan por su número; los que no empiezan con AA no se tocan.
+async function cotizCatalogoUltimoNumeroAA() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  let maxN = 0;
+  for (let off = 0; off < 50000; off += 1000) {
+    const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?select=codigo&empresa=eq.${currentEmpresa}&codigo=ilike.AA*&order=id&limit=1000&offset=${off}`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = res.ok ? await res.json() : [];
+    rows.forEach(r => { const m = /^AA[\s\-_.]*(\d+)$/i.exec(String(r.codigo || '').trim()); if (m && Number(m[1]) > maxN) maxN = Number(m[1]); });
+    if (rows.length < 1000) break;
+  }
+  return maxN;
 }
+const cotizCodigoAA = n => 'AA' + String(n).padStart(4, '0');
+// Los n códigos siguientes, consecutivos (para crear varios artículos de una sola vez). Si no se puede consultar la base devuelve [].
+async function cotizCatalogoProximosCodigos(n) {
+  try { const mx = await cotizCatalogoUltimoNumeroAA(); return Array.from({ length: n }, (_, i) => cotizCodigoAA(mx + 1 + i)); }
+  catch (e) { return []; }
+}
+async function cotizCatalogoProximoCodigo() { return (await cotizCatalogoProximosCodigos(1))[0] || ''; }
 // "Marca Modelo — Descripción" (sin repetir si la descripción ya empieza con marca y modelo)
 function cotizDescripcionItem(r) {
   const mm = [r.marca, r.modelo].map(x => String(x || '').trim()).filter(Boolean).join(' ');
@@ -26563,6 +26564,7 @@ function cotizDescripcionItem(r) {
 function cotizAutoAltura(el) { if (!el) return; el.style.height = 'auto'; el.style.height = (el.scrollHeight + 2) + 'px'; }
 function cotizAutoAlturaTodos(raiz) { (raiz || document).querySelectorAll('textarea.cc-area').forEach(cotizAutoAltura); }
 const COTIZ_CATALOGO_LIMITE = 150;
+let _cotizStockObsOk = null; // null = todavía no se sabe; false = la tabla no tiene la columna observaciones
 async function cotizCatalogoRender() {
   const el = document.getElementById('cotiz-catalogo-list');
   if (!el) return;
@@ -26608,6 +26610,8 @@ async function cotizCatalogoRender() {
     // tipear, sin red ni recargar la lista.
     // Al pasar el mouse por un campo cuyo texto no entra en su ancho, se
     // muestra el texto completo (mismo tooltip que usa Procesos IA).
+    // Si la tabla todavía no tiene la columna "observaciones" (falta correr docs/cotizaciones_stock.sql) la solapa sigue funcionando sin ella
+    const obsOk = 'observaciones' in rows[0]; _cotizStockObsOk = obsOk;
     const hov = 'onmouseenter="procesosHoverTexto(this)" onmouseleave="procesosHoverTextoOcultar()" onfocus="procesosHoverTextoOcultar()"';
     const areaTxt = (r, campo, w) => `<textarea id="cc-${r.id}-${campo}" class="cc-area" rows="1" style="width:${typeof w === 'number' ? w + 'px' : w};${typeof w === 'number' ? '' : 'min-width:260px;'}resize:none;overflow:hidden;line-height:1.3;font-size:12px;padding:4px 6px;box-sizing:border-box;display:block;text-align:center" oninput="cotizAutoAltura(this)">${esc(r[campo]||'')}</textarea>`;
     const inputNum = (r, campo, w) => `<input id="cc-${r.id}-${campo}" value="${esc(String(r[campo]||0))}" style="width:${w||38}px;text-align:center;padding:4px 3px" oninput="cotizCatalogoRecalcularTotalFila('${r.id}')" ${hov} />`;
@@ -26618,6 +26622,7 @@ async function cotizCatalogoRender() {
               <td style="padding:2px;vertical-align:top">${areaTxt(r,'modelo',200)}</td>
               <td style="padding:2px;vertical-align:top">${areaTxt(r,'codigo',86)}</td>
               <td style="padding:2px;vertical-align:top;width:100%">${areaTxt(r,'descripcion','100%')}</td>
+              ${obsOk ? `<td style="padding:2px;vertical-align:top">${areaTxt(r,'observaciones',240)}</td>` : ''}
               ${COTIZ_STOCK_COLS.map(([campo]) => campo === 'cantidad_reserva' ? `<td style="padding:2px;white-space:nowrap;vertical-align:top">${inputNum(r,campo)}${(reservasPorProducto[r.id]||[]).length ? ` <span style="cursor:help;color:var(--blue)" title="${esc(reservasPorProducto[r.id].map(x=>`${x.q?'Q-'+x.q:'(sin Nº)'} — ${x.cliente||''}: ${x.cantidad}`).join('\n'))}">ⓘ</span>` : ''}</td>` : `<td style="padding:2px;vertical-align:top">${inputNum(r,campo)}</td>`).join('')}
               <td id="cc-${r.id}-total" style="padding:8px 6px 2px;text-align:center;font-weight:600;vertical-align:top">${esc(String(total))}</td>
               <td style="padding:2px;vertical-align:top"><div style="display:flex;gap:4px;flex-wrap:nowrap"><button class="btn btn-primary btn-sm" style="width:auto;padding:5px 9px" onclick="cotizCatalogoGuardarFila('${r.id}')" title="Guardar los cambios de esta fila">💾</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:5px 9px" onclick="cotizCatalogoEliminar('${r.id}')" title="Eliminar este producto">✕</button></div></td>
@@ -26625,6 +26630,7 @@ async function cotizCatalogoRender() {
     };
     _cotizCatalogoEstado = { urlBase: url, offset: rows.length, total: isNaN(totalCr) ? null : totalCr, hayMas: rows.length >= COTIZ_CATALOGO_LIMITE, filaHtml, cargando: false };
     el.innerHTML = `
+      ${obsOk ? '' : '<p class="hint" style="color:var(--red)">Falta la columna Observaciones en la tabla de Stock: corré el SQL de docs/cotizaciones_stock.sql en Supabase y recargá.</p>'}
       <div style="overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="border-bottom:2px solid var(--border)">
@@ -26632,6 +26638,7 @@ async function cotizCatalogoRender() {
           <th style="text-align:center;padding:4px 6px;color:var(--text2);font-weight:600">Modelo</th>
           <th style="text-align:center;padding:4px 6px;color:var(--text2);font-weight:600">Código</th>
           <th style="text-align:center;padding:4px 6px;color:var(--text2);font-weight:600">Descripción</th>
+          ${obsOk ? '<th style="text-align:center;padding:4px 6px;color:var(--text2);font-weight:600" title="Texto libre: no aparece al buscar ítems en Cotizaciones, pero sí al insertar el ítem en la cotización">Observaciones</th>' : ''}
           ${COTIZ_STOCK_COLS.map(([,label]) => `<th style="text-align:center;padding:4px 3px;color:var(--text2);font-weight:600;font-size:11px">${esc(label)}</th>`).join('')}
           <th style="text-align:center;padding:4px 6px;color:var(--text2);font-weight:600">Total</th>
           <th></th>
@@ -26691,7 +26698,7 @@ async function cotizCatalogoVerMas(todo) {
 }
 async function cotizCatalogoAdd() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const codigoSugerido = await cotizCatalogoProximoCodigo(); // AA + último + 1 (se puede cambiar en la fila)
+  const codigoSugerido = await cotizCatalogoProximoCodigo(); // AAXXXX: el siguiente al último (se puede cambiar en la fila)
   const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
     method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
     body: JSON.stringify({ empresa: currentEmpresa, marca:'', modelo:'', codigo: codigoSugerido, descripcion:'', moneda_lista:'USD' })
@@ -26709,6 +26716,7 @@ async function cotizCatalogoGuardarFila(id) {
   const body = {
     marca: val('marca') || '', modelo: val('modelo') || '', codigo: val('codigo') || '', descripcion: val('descripcion') || '',
   };
+  if (_cotizStockObsOk && document.getElementById(`cc-${id}-observaciones`)) body.observaciones = val('observaciones') || '';
   COTIZ_STOCK_COLS.forEach(([campo]) => { body[campo] = Number(val(campo)) || 0; });
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   const res = await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${id}`, {
@@ -27434,6 +27442,7 @@ function cotizArmadoRender() {
         <input value="${esc(String(it.cantidad))}" placeholder="Cant." style="width:56px" onchange="cotizArmadoSetItemCampo('${it.id}','cantidad',this.value)" />
         <div style="flex:2;min-width:220px">
           <textarea rows="2" placeholder="Descripción" style="width:100%;resize:vertical;font-size:13px" onchange="cotizArmadoSetItemCampo('${it.id}','descripcion',this.value)">${esc(it.descripcion)}</textarea>
+          ${it.catalogo_id || it.observaciones ? `<textarea rows="1" placeholder="Observaciones (se agregan debajo del detalle en la cotización)" style="width:100%;resize:vertical;font-size:12px;margin-top:3px" onchange="cotizArmadoSetItemCampo('${it.id}','observaciones',this.value)">${esc(it.observaciones || '')}</textarea>` : ''}
           ${it.origen_ia ? `<span style="font-size:11px;color:${it.origen_ia === 'sin coincidencia' ? 'var(--red)' : 'var(--blue)'}">🤖 ${esc(it.origen_ia === 'stock' ? 'Coincide con un producto de Stock' : it.origen_ia === 'vendido' ? 'Coincide con algo vendido antes' : 'Sin coincidencia en Stock ni ventas — revisalo')}</span>` : ''}
         </div>
         <div style="width:110px"><input value="${esc(String(it.precio_base != null && it.precio_base !== '' ? it.precio_base : it.precio_unitario))}" placeholder="Precio unit." style="width:100%" title="Precio unitario (de lista)" onchange="cotizArmadoSetItemCampo('${it.id}','precio_unitario',this.value)" /></div>
@@ -27683,7 +27692,7 @@ async function cotizArmadoAgregarManual() {
   if (confirm('¿Este ítem es un producto que también querés agregar al catálogo de Stock?')) {
     const marca = (prompt('Marca:') || '').trim();
     const modelo = (prompt('Modelo:') || '').trim();
-    const codigo = (prompt('Código (sugerido, podés cambiarlo):', await cotizCatalogoProximoCodigo()) || '').trim();
+    const codigo = await cotizCatalogoProximoCodigo(); // automático: AAXXXX, el siguiente al último
     const descripcion = (prompt('Descripción:') || '').trim();
     const precioStr = (prompt('Precio de lista (opcional, sin moneda):') || '').trim();
     const monedaLista = /^ars$/i.test((prompt('Moneda del precio de lista — USD o ARS:', 'USD') || 'USD').trim()) ? 'ARS' : 'USD';
@@ -27744,6 +27753,7 @@ function cotizArmadoSetItemCampo(id, campo, val) {
     if (it.id !== id) return it;
     const n = Object.assign({}, it);
     if (campo === 'descripcion') n.descripcion = val;
+    else if (campo === 'observaciones') n.observaciones = val;
     else if (campo === 'precio_unitario' && it.tipo !== 'descuento') { n.precio_base = val === '' ? '' : Number(val); n.precio_unitario = n.precio_base; } // el precio que se escribe es el de lista; el neto (con el dto del ítem) lo calcula cotizArmadoRecalcularTotales
     else if (campo === 'dto_item') { if (n.precio_base == null || n.precio_base === '') n.precio_base = Number(it.precio_unitario) || 0; n.dto_item = val === '' ? 0 : Math.max(0, Math.min(100, Number(val) || 0)); }
     else n[campo] = val === '' ? '' : Number(val);
@@ -28090,13 +28100,7 @@ async function cotizArmadoBuscarItems() {
     const hist = histCliente.concat(histGeneral.filter(r => !vistos.has(r.id))).slice(0, 40);
     _cotizUltimaBusqueda = { hist, cat };
     let html = '';
-    if (hist.length) {
-      html += '<p class="hint" style="margin:6px 0 4px">Vendido antes:</p>' + hist.map(r => `
-        <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('hist','${r.id}')">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}${r.catalogo_id?' <span style="color:var(--blue)">· Producto de Stock</span>':''}${clienteActual && r.cliente===clienteActual?' <span style="color:var(--green)">· Este cliente</span>':''}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
-          <span class="result-val" style="background:var(--surface2);border:none">${esc(r.moneda)} ${procesosFormatearNumero(r.precio_unitario)}</span>
-        </div>`).join('');
-    }
+    // Primero lo que hay en Stock (con todos sus datos menos costo y observaciones: las observaciones recién aparecen al insertar el ítem en la cotización)
     if (cat.length) {
       html += '<p class="hint" style="margin:6px 0 4px">Stock — elegí qué precio usar:</p>' + cat.map(r => {
         const moneda = r.moneda_lista || 'USD';
@@ -28106,19 +28110,28 @@ async function cotizArmadoBuscarItems() {
           ['dto2', 'PV 2', cotizPVCalc(r.precio_lista, _cotizDescuentos.dto2)],
           ['dtoAS', 'PV AS', cotizPVCalc(r.precio_lista, _cotizDescuentos.dtoAS)],
         ];
+        const totalCant = COTIZ_STOCK_COLS.reduce((a, [c]) => a + (Number(r[c]) || 0), 0);
         return `
         <div class="result-field" style="flex-direction:column;align-items:flex-start;gap:4px">
-          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' '))} <span style="color:var(--text2)">· En stock: ${esc(String(r.cantidad_stock??0))}</span><br><span style="color:var(--text2);font-weight:400">${esc(r.descripcion||'')}</span></span>
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ') || '(sin marca ni modelo)')}${r.codigo ? ` <span style="color:var(--text2)">· Código ${esc(r.codigo)}</span>` : ''}<br><span style="color:var(--text2);font-weight:400">${esc(r.descripcion||'')}</span></span>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--text2)">${COTIZ_STOCK_COLS.map(([c, l]) => `<span>${esc(l)}: <b style="color:var(--text)">${esc(String(r[c] ?? 0))}</b></span>`).join('')}<span>Total: <b style="color:var(--text)">${esc(String(totalCant))}</b></span><span>Moneda lista: <b style="color:var(--text)">${esc(moneda)}</b></span></div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             ${r.precio_lista!=null ? precios.map(([tipo,label,valor]) => `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','${tipo}')" title="Agregar con ${esc(label)}">${esc(label)}: ${esc(moneda)} ${procesosFormatearNumero(valor)}</span>`).join('') : `<span class="result-val" style="cursor:pointer;background:var(--surface2);border:none" onclick="cotizArmadoAgregarDesde('cat','${r.id}','venta')" title="Agregarlo sin precio y definirlo después">Sin precio — agregar igual</span>`}
           </div>
         </div>`;
       }).join('');
     }
+    if (hist.length) {
+      html += '<p class="hint" style="margin:6px 0 4px">Vendido antes:</p>' + hist.map(r => `
+        <div class="result-field" style="cursor:pointer" onclick="cotizArmadoAgregarDesde('hist','${r.id}')">
+          <span class="result-key" style="font-size:12px">${esc([r.marca,r.modelo].filter(Boolean).join(' ')||r.descripcion)}${r.catalogo_id?' <span style="color:var(--blue)">· Producto de Stock</span>':''}${clienteActual && r.cliente===clienteActual?' <span style="color:var(--green)">· Este cliente</span>':''}<br><span style="color:var(--text2);font-weight:400">${esc(r.cliente)} · ${esc(r.fecha)}</span></span>
+          <span class="result-val" style="background:var(--surface2);border:none">${esc(r.moneda)} ${procesosFormatearNumero(r.precio_unitario)}</span>
+        </div>`).join('');
+    }
     el.innerHTML = html || '<p class="hint">Sin resultados.</p>';
   } catch(e) { el.innerHTML = '<p class="hint">Error al buscar.</p>'; }
 }
-function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
+async function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   const st = cotizArmadoInit();
   const row = (origen==='hist' ? _cotizUltimaBusqueda.hist : _cotizUltimaBusqueda.cat).find(r => r.id === id);
   if (!row) return;
@@ -28139,7 +28152,16 @@ function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   // ventas en vez de quedar vacíos. catalogo_id solo se guarda cuando el
   // ítem vino de Stock (no del historial ni cargado a mano) — es lo que
   // permite descontar stock automáticamente al marcar vendida.
-  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null, lista_vacia: origen==='cat' && (row.precio_lista == null || Number(row.precio_lista) === 0) });
+  // Las observaciones del artículo de Stock viajan al ítem (en la búsqueda no se muestran). Si se eligió algo vendido antes que viene de Stock, se buscan en el artículo.
+  let observaciones = origen === 'cat' ? String(row.observaciones || '') : '';
+  if (origen === 'hist' && row.catalogo_id) {
+    try {
+      const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+      const r = await supaFetch(`/rest/v1/cotizaciones_catalogo?id=eq.${row.catalogo_id}&select=observaciones`, {headers:{Authorization:'Bearer '+session.token}});
+      if (r.ok) observaciones = String(((await r.json())[0] || {}).observaciones || '');
+    } catch (e) { /* sin observaciones */ }
+  }
+  st.items.push({ id: procesosNuevoId(), descripcion, cantidad: origen==='hist' ? (row.cantidad||1) : 1, precio_unitario: precio, marca: row.marca||null, modelo: row.modelo||null, catalogo_id: origen==='cat' ? row.id : null, lista_vacia: origen==='cat' && (row.precio_lista == null || Number(row.precio_lista) === 0), ...(observaciones ? { observaciones } : {}) });
   cotizArmadoOrdenarItems(st);
   const buscarEl = document.getElementById('cotiz-armado-buscar');
   if (buscarEl) buscarEl.value = '';
@@ -28251,7 +28273,7 @@ async function cotizGenerarXlsxBlob(st) {
     sumaItems += totalItem;
     sheetXml = cotizXlsxSetCelda(sheetXml, `A${fila}`, cotizXlsxNumero(idx + 1));
     sheetXml = cotizXlsxSetCelda(sheetXml, `B${fila}`, cotizXlsxNumero(cantidad));
-    sheetXml = cotizXlsxSetCelda(sheetXml, `C${fila}`, cotizXlsxTexto(it.descripcion || ''));
+    sheetXml = cotizXlsxSetCelda(sheetXml, `C${fila}`, cotizXlsxTexto((it.descripcion || '') + (String(it.observaciones || '').trim() ? '\n' + String(it.observaciones).trim() : '')));
     sheetXml = cotizXlsxSetCelda(sheetXml, `D${fila}`, cotizXlsxNumero(precio));
     // "fv" (fórmula + valor ya calculado): así se ve bien tanto en Excel de
     // escritorio (formula viva, recalcula si se toca algo) como en
