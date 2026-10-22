@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -563,6 +563,7 @@
         <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
       </div>
       <button class="btn btn-primary" id="analyzeBtn" onclick="analyzeAll()" disabled>✦ Analizar con IA</button>
+      <button class="btn btn-secondary" id="rendManualBtn" onclick="rendAgregarManual()" style="margin-top:8px" title="Carga un comprobante completando los campos vos, sin analizar ningún archivo con IA">✍ Cargar un comprobante a mano (sin IA)</button>
       <div class="gap"></div>
       <div id="rendResultsArea"></div>
       <div id="rendHistorialArea"></div>
@@ -2876,6 +2877,10 @@ function renderFileList() {
 function removeFile(i) {
   const item = files[i];
   if (!item) return;
+  if (item.manual) { // adjunto de un comprobante cargado a mano: se saca el archivo, el comprobante queda
+    results.forEach(r => { if (r.__manual_sin_ia__ && r['__archivo__'] === item.file.name) r['__archivo__'] = ''; });
+    saveResults(); files.splice(i, 1); renderFileList(); renderRendResults(); return;
+  }
   // Un mismo archivo puede haber generado varios comprobantes (varias filas en results) —
   // hay que sacarlos todos, no solo el primero que matchee.
   const before = results.length;
@@ -2884,6 +2889,54 @@ function removeFile(i) {
   files.splice(i, 1);
   renderFileList();
   renderRendResults();
+}
+
+// ── Comprobante cargado a mano (sin analizar con IA) ──
+// Agrega una tarjeta vacía con los mismos campos que deja el análisis; de ahí en más es un comprobante como cualquier otro (mismos campos manuales, advertencias,
+// Insertar en última / Generar nueva). El archivo del comprobante es opcional: se adjunta sin analizarlo y se sube a SharePoint igual que los demás.
+function rendAgregarManual() {
+  const activeFields = getRendFields().filter(f => f.name.trim());
+  if (!activeFields.length) { alert('Configurá al menos un campo en Config Rendiciones.'); switchPanel('cfg-rend'); return; }
+  const r = { '__archivo__': '', '__fecha_analisis__': new Date().toLocaleString('es-AR'), '__manual_sin_ia__': true };
+  activeFields.forEach(f => { r[f.name] = ''; });
+  results.push(r); saveResults(); renderRendResults();
+  const cards = document.querySelectorAll('#rendResultsArea .result-card');
+  const ultima = cards[cards.length - 1];
+  if (ultima) { ultima.scrollIntoView({ block: 'center' }); const inp = ultima.querySelector('input.result-val'); if (inp) inp.focus(); }
+}
+function rendAdjuntarManual(ri, input) {
+  const f = input.files && input.files[0]; input.value = '';
+  const r = results[ri]; if (!f || !r) return;
+  if (files.some(x => x.file.name === f.name) || results.some((x, k) => k !== ri && x['__archivo__'] === f.name)) { alert(`Ya hay un archivo llamado "${f.name}" en la lista. Renombralo antes de adjuntarlo.`); return; }
+  files.push({ file: f, status: 'done', error: null, manual: true });
+  r['__archivo__'] = f.name; saveResults(); renderFileList(); renderRendResults();
+}
+function rendQuitarAdjuntoManual(ri) {
+  const r = results[ri]; if (!r) return;
+  const i = files.findIndex(x => x.manual && x.file.name === r['__archivo__']);
+  if (i >= 0) files.splice(i, 1);
+  r['__archivo__'] = ''; saveResults(); renderFileList(); renderRendResults();
+}
+function rendQuitarManual(ri) {
+  const r = results[ri]; if (!r || !confirm('¿Quitar este comprobante?')) return;
+  const i = files.findIndex(x => x.manual && x.file.name === r['__archivo__']);
+  if (i >= 0) files.splice(i, 1);
+  results.splice(ri, 1); saveResults(); renderFileList(); renderRendResults();
+}
+// Fecha escrita a mano: se pasa a DD/MM/AAAA (el formato que espera el Excel); si no se entiende, se marca
+function rendNormFechaInput(ri, fi, el) {
+  const f = getRendFields().filter(x => x.name.trim())[fi], r = results[ri]; if (!f || !r) return;
+  const v = el.value.trim(); if (!v) { el.style.borderColor = ''; el.title = ''; return; }
+  const n = rendNormalizarFecha(v);
+  if (n) { r[f.name] = n; el.value = n; el.style.borderColor = ''; el.title = ''; saveResults(); }
+  else { el.style.borderColor = 'var(--red)'; el.title = 'No reconozco esa fecha: usá DD/MM/AAAA'; }
+}
+// Los comprobantes cargados a mano no pasan por el análisis, así que sus controles (cuentas y CUIT por proveedor) se hacen al enviar
+function rendRevisarManuales() {
+  const manuales = results.filter(r => r['__manual_sin_ia__']);
+  if (!manuales.length) return;
+  manuales.forEach(r => { delete r['__advertencia__']; delete r['__sugerencias__']; rendChequearAritmetica(r); rendChequearConsistenciaProveedor(r, results); });
+  saveResults(); renderRendResults();
 }
 
 async function fileToBase64(file) {
@@ -3318,10 +3371,10 @@ function renderRendResults() {
   const fields = getRendFields().filter(f => f.name.trim());
 
   const cards = results.map((r, ri) => {
-    const fieldRows = fields.map(f => `
+    const fieldRows = fields.map((f, fi) => `
       <div class="result-field">
         <span class="result-key">${esc(f.name)}</span>
-        <input class="result-val" value="${esc(r[f.name]!=null?String(r[f.name]):'')}" oninput="results[${ri}]['${f.name.replace(/'/g,"\\'")}'] = this.value; saveResults()" />
+        <input class="result-val" value="${esc(r[f.name]!=null?String(r[f.name]):'')}" ${r['__manual_sin_ia__'] && rendEsCampoFecha(f.name) ? `placeholder="DD/MM/AAAA" onchange="rendNormFechaInput(${ri},${fi},this)"` : ''} oninput="results[${ri}]['${f.name.replace(/'/g,"\\'")}'] = this.value; saveResults()" />
       </div>`).join('');
     const manualRows = perFileManualFields.map((f, fi) => {
       const key = rendManualKey(f.name);
@@ -3370,9 +3423,13 @@ function renderRendResults() {
     const nombreEmpresaIncorrecta = r.__empresa_incorrecta__ === 'AA' ? 'Aeration Argentina (AA)' : r.__empresa_incorrecta__ === 'AS' ? 'Aeration Servicios (AS)' : '';
     const botonMover = nombreEmpresaIncorrecta ? `<button class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="rendMoverComprobanteAOtraEmpresa(${ri})">↪ Pasar a ${nombreEmpresaIncorrecta}</button>` : '';
     const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
+    const btnChico = 'width:auto;padding:2px 8px;margin:0';
+    const cabecera = r['__manual_sin_ia__']
+      ? `<div class="result-filename" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">✍ Comprobante cargado a mano ${r['__archivo__'] ? `· 📄 ${esc(r['__archivo__'])} <button class="btn btn-secondary btn-sm" style="${btnChico}" onclick="rendQuitarAdjuntoManual(${ri})">Quitar archivo</button>` : `<label class="btn btn-secondary btn-sm" style="${btnChico};cursor:pointer" title="El archivo no se analiza: solo se sube a la carpeta de la rendición">📎 Adjuntar el comprobante (opcional)<input type="file" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="rendAdjuntarManual(${ri},this)" /></label>`} <button class="btn btn-secondary btn-sm" style="${btnChico};margin-left:auto" onclick="rendQuitarManual(${ri})" title="Quitar este comprobante">✕</button></div>`
+      : `<div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>`;
     return `
       <div class="result-card"${r.__advertencia__ ? ' style="border-color:var(--red)"' : ''}>
-        <div class="result-filename">📄 ${esc(r['__archivo__']||'')}${esc(comprobanteLabel)} <span style="color:var(--text3);font-size:11px">${esc(r['__fecha_analisis__']||'')}</span></div>
+        ${cabecera}
         ${advertencia}
         ${sugerencias}
         ${botonMover}
@@ -3388,6 +3445,7 @@ function renderRendResults() {
     <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
       <button class="btn btn-primary btn-sm" onclick="rendInsertarUltima()">📥 Insertar en última rendición</button>
       <button class="btn btn-primary btn-sm" onclick="rendGenerarNueva()">✨ Generar nueva rendición</button>
+      <button class="btn btn-secondary btn-sm" onclick="rendAgregarManual()" title="Sumar otro comprobante completando los campos a mano, sin IA">✍ Agregar otro a mano</button>
       <button class="btn btn-secondary btn-sm" onclick="clearResults()">🗑</button>
     </div>
     <div id="rend-save-status" class="status-msg" style="display:none;margin-bottom:12px"></div>
@@ -3616,6 +3674,7 @@ function rendComboPick(comboId, value) {
 // Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
 // campos manuales lo son solo si se marcó "Obligatorio" en Cfg Rendiciones.
 function rendConfirmarAdvertencias() {
+  rendRevisarManuales();
   const conAdvertencia = results.filter(r => r.__advertencia__);
   if (!conAdvertencia.length) return true;
   const lista = conAdvertencia.map(r => `• ${r['__archivo__']}: ${r.__advertencia__}`).join('\n');
@@ -3932,7 +3991,7 @@ async function rendFinalizarLote(token, siteId, folderId, excelId, sheetName, do
 }
 
 async function rendInsertarUltima() {
-  if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  if (!results.length) { alert('No hay comprobantes para guardar: analizá archivos con IA o cargá uno a mano.'); return; }
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
@@ -3974,7 +4033,7 @@ async function rendInsertarUltima() {
 }
 
 async function rendGenerarNueva() {
-  if (!results.length) { alert('No hay comprobantes analizados para guardar.'); return; }
+  if (!results.length) { alert('No hay comprobantes para guardar: analizá archivos con IA o cargá uno a mano.'); return; }
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
