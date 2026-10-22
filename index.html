@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1282,7 +1282,7 @@
       </div>
       <div class="card">
         <div class="card-label">Carpeta base — Rendiciones y facturas</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Adentro se crean solas las subcarpetas: Empresa (Aeration Argentina / Servicios) → Persona → Método de pago → Mes. Esta configuración es la misma para todos los usuarios.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Adentro se crean solas las subcarpetas: Empresa (Aeration Argentina / Servicios) → Persona → Método de pago → Mes. Cada empresa (AA / AS) tiene la suya; es la misma para todos los usuarios de esa empresa.</p>
         <div class="sp-selected" style="margin-bottom:8px">
           <span id="cfg-rend-base-label">Cargando...</span>
           <button class="sp-browse-btn" onclick="fbOpen('folder','rend-base-folder')">Seleccionar</button>
@@ -1290,7 +1290,7 @@
       </div>
       <div class="card">
         <div class="card-label">Plantilla de Rendición</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Archivo .xlsx que se copia al generar una nueva rendición. Misma configuración para todos.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Archivo .xlsx que se copia al generar una nueva rendición. Cada empresa (AA / AS) tiene la suya. Si tiene una columna "Código", en Mapear columnas se asigna a "Código de la planta imputada".</p>
         <div class="sp-selected" style="margin-bottom:8px">
           <span id="cfg-rend-tmpl-label">Cargando...</span>
           <button class="sp-browse-btn" onclick="fbOpen('file','rend-plantilla')">Seleccionar</button>
@@ -1314,7 +1314,7 @@
     <div class="panel" id="panel-cfg-comercial">
       <div class="card">
         <div class="card-label">Fuentes de Imputación</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usan para precargar el campo "Imputación" (u otro que configures) en Rendiciones. Misma configuración para todas las empresas.</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Se usan para precargar el campo "Imputación" (u otro que configures) en Rendiciones. Cada empresa (AA / AS) tiene su propio Excel de Clientes y de Q.</p>
       </div>
       <div class="card">
         <div class="card-label">Exportar la base comercial</div>
@@ -1324,7 +1324,7 @@
       </div>
       <div class="card">
         <div class="card-label">Excel de Clientes</div>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Se toma la columna C de la hoja "Hoja1".</p>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Hoja "Hoja1": columna C = nombre (lo que se elige en Imputación) y columna A = código, que va a la columna Código de la rendición si la plantilla la tiene.</p>
         <div class="sp-selected" style="margin-bottom:8px">
           <span id="cfg-rend-clientes-excel-label">Cargando...</span>
           <button class="sp-browse-btn" onclick="fbOpen('file','rend-clientes-excel')">Seleccionar</button>
@@ -2396,6 +2396,30 @@ async function supaConfigSet(key, value) {
   if (!res.ok) throw new Error('No se pudo guardar en app_config (HTTP ' + res.status + '). Verificá que la tabla tenga una restricción UNIQUE en "key" y permisos de escritura.');
 }
 
+// ── Config de Rendiciones y Cfg Comercial POR EMPRESA ──
+// Antes la carpeta base, la plantilla, los tipos de cambio y los Excel de Clientes y de Q eran una sola configuración compartida por AA y AS. Ahora cada empresa tiene
+// la suya (clave "<nombre>_<empresa>"). La primera vez que una empresa la lee y todavía no tiene la propia, se le COPIA la que había (la clave vieja queda
+// como está): así nada cambia hasta que alguien la modifique en una de las dos empresas.
+async function supaConfigGetSeguro(key) { // como supaConfigGet, pero distingue "no existe" (null) de "no se pudo leer" (tira error)
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token) throw new Error('No autenticado.');
+  const res = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${encodeURIComponent(key)}`, { headers: { Authorization: 'Bearer ' + session.token } });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  return data[0]?.value != null ? data[0].value : null;
+}
+async function rendCfgGet(base) {
+  const propia = base + '_' + currentEmpresa;
+  try {
+    const v = await supaConfigGetSeguro(propia);
+    if (v != null) return v;
+    const heredada = await supaConfigGet(base);
+    if (heredada != null) { try { await supaConfigSet(propia, heredada); } catch (e) { /* queda leída de la compartida; se copia en la próxima */ } }
+    return heredada;
+  } catch (e) { return null; } // no se pudo leer: igual que antes, se comporta como "sin configurar" (y no se pisa nada)
+}
+function rendCfgSet(base, value) { return supaConfigSet(base + '_' + currentEmpresa, value); }
+
 function getPin()               { return localStorage.getItem(ADMIN_PIN_KEY) || ''; }
 function savePin(p)             { localStorage.setItem(ADMIN_PIN_KEY, p); }
 // Campos manuales de Rendiciones (Método de pago, Imputación, etc.) — config global en Supabase,
@@ -2631,7 +2655,7 @@ async function cfgRendLoadAll() {
   if (tmplLbl) tmplLbl.textContent = 'Cargando...';
   try {
     const [baseRaw, tmplRaw, fxRaw, fxFieldsRaw] = await Promise.all([
-      supaConfigGet('rend_base_folder'), supaConfigGet('rend_template'), supaConfigGet('rend_exchange_rates'), supaConfigGet('rend_fx_fields')
+      rendCfgGet('rend_base_folder'), rendCfgGet('rend_template'), rendCfgGet('rend_exchange_rates'), rendCfgGet('rend_fx_fields')
     ]);
     const base = baseRaw ? JSON.parse(baseRaw) : null;
     const tmpl = tmplRaw ? JSON.parse(tmplRaw) : null;
@@ -2685,7 +2709,7 @@ function cfgRendFxUpdate(i,key,val) { _rendFxRates[i][key] = val; }
 function cfgRendFxAdd() { _rendFxRates.push({moneda:'',modo:'manual',tc:''}); cfgRendRenderFx(); }
 function cfgRendFxRemove(i) { _rendFxRates.splice(i,1); cfgRendRenderFx(); cfgRendFxSave(); }
 async function cfgRendFxSave() {
-  try { await supaConfigSet('rend_exchange_rates', JSON.stringify(_rendFxRates)); }
+  try { await rendCfgSet('rend_exchange_rates', JSON.stringify(_rendFxRates)); }
   catch(e) { alert('No se pudo guardar el tipo de cambio: ' + e.message); }
 }
 function cfgRendRenderFxFields() {
@@ -2701,13 +2725,14 @@ function cfgRendRenderFxFields() {
 function cfgRendFxFieldToggle(name, checked) {
   if (checked && !_rendFxFields.includes(name)) _rendFxFields.push(name);
   else if (!checked) _rendFxFields = _rendFxFields.filter(n=>n!==name);
-  supaConfigSet('rend_fx_fields', JSON.stringify(_rendFxFields)).catch(e=>alert('No se pudo guardar: '+e.message));
+  rendCfgSet('rend_fx_fields', JSON.stringify(_rendFxFields)).catch(e=>alert('No se pudo guardar: '+e.message));
 }
 
 // ── Imputación: Clientes (Excel, global) / Q (Excel, global) / Personas (Supabase, solo AS) ──
 // Personas — para cargar una rendición a nombre de otra persona.
 function PERSONAS_KEY() { return 'rend_personas_' + currentEmpresa; }
 let _rendClientesExcelCache = []; // strings (columna C)
+let _rendClientesCodigos = new Map(); // nombre normalizado (col. C) → código (col. A) del Excel de Clientes
 let _rendQCache = [];             // [{num, ref}] (columnas E/D de la hoja "Q-")
 let _rendPersonasCache = [];
 let _rendClientesQLoaded = false; // si ya se intentó leer los Excel esta sesión
@@ -2718,7 +2743,7 @@ async function cfgClientesLoad() {
   if (clLbl) clLbl.textContent = 'Cargando...';
   if (qLbl) qLbl.textContent = 'Cargando...';
   try {
-    const [clRaw, qRaw, personasRaw] = await Promise.all([supaConfigGet('rend_clientes_excel'), supaConfigGet('rend_q_excel'), supaConfigGet(PERSONAS_KEY())]);
+    const [clRaw, qRaw, personasRaw] = await Promise.all([rendCfgGet('rend_clientes_excel'), rendCfgGet('rend_q_excel'), supaConfigGet(PERSONAS_KEY())]);
     const cl = clRaw ? JSON.parse(clRaw) : null;
     const q = qRaw ? JSON.parse(qRaw) : null;
     _rendPersonasCache = personasRaw ? JSON.parse(personasRaw) : [];
@@ -2763,14 +2788,26 @@ async function rendFetchExcelUsedRange(token, siteId, itemId, sheetName) {
 // Lee Clientes (col. C, hoja "Hoja1") y Q (col. D/E, hoja "Q-") desde los Excel configurados.
 // Requiere sesión de Microsoft — si ya hay una activa se hace en silencio; si no, quien la
 // llame debe estar preparado para que pida login (ver rendComboFilter).
+const rendNormNombre = x => String(x ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+// Código de la planta a la que se imputa la rendición: se busca lo cargado en Imputación en la columna C del Excel de Clientes y se toma la columna A
+function rendCodigoPara(r) {
+  if (String(spMetodoPagoValue() || '').trim().toLowerCase() === 'rendiciones de iva') return '';
+  const f = getRendManualFields().find(x => isImputacionFieldName(x.name));
+  if (!f) return '';
+  const n = rendNormNombre(rendManualValueFor(f, r));
+  return n ? (_rendClientesCodigos.get(n) || '') : '';
+}
+const rendCodigoActivo = () => Object.values(getMapping(REND_MAPPING_KEY()) || {}).includes('__codigo__'); // ¿la plantilla de esta empresa tiene una columna Código mapeada?
 async function rendLoadClientesYQ() {
-  const [clRaw, qRaw] = await Promise.all([supaConfigGet('rend_clientes_excel'), supaConfigGet('rend_q_excel')]);
+  const [clRaw, qRaw] = await Promise.all([rendCfgGet('rend_clientes_excel'), rendCfgGet('rend_q_excel')]);
   const token = await getMsToken();
   if (clRaw) {
     const ref = JSON.parse(clRaw);
     const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Hoja1');
     _rendClientesExcelCache = rows.slice(1).map(r => String(r[2] ?? '').trim()).filter(Boolean);
-  } else { _rendClientesExcelCache = []; }
+    _rendClientesCodigos = new Map();
+    rows.slice(1).forEach(r => { const n = rendNormNombre(r[2]), c = String(r[0] ?? '').trim(); if (n && c && !_rendClientesCodigos.has(n)) _rendClientesCodigos.set(n, c); });
+  } else { _rendClientesExcelCache = []; _rendClientesCodigos = new Map(); }
   if (qRaw) {
     const ref = JSON.parse(qRaw);
     const rows = await rendFetchExcelUsedRange(token, ref.siteId, ref.id, 'Q-');
@@ -3422,6 +3459,11 @@ function renderRendResults() {
     }).join('');
     const nombreEmpresaIncorrecta = r.__empresa_incorrecta__ === 'AA' ? 'Aeration Argentina (AA)' : r.__empresa_incorrecta__ === 'AS' ? 'Aeration Servicios (AS)' : '';
     const botonMover = nombreEmpresaIncorrecta ? `<button class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="rendMoverComprobanteAOtraEmpresa(${ri})">↪ Pasar a ${nombreEmpresaIncorrecta}</button>` : '';
+    let lineaCodigo = '';
+    if (rendCodigoActivo() && _rendClientesCodigos.size) {
+      const cod = rendCodigoPara(r), fImp = getRendManualFields().find(x => isImputacionFieldName(x.name)), vImp = fImp ? String(rendManualValueFor(fImp, r) || '').trim() : '';
+      lineaCodigo = cod ? `<div class="hint" style="margin-bottom:8px">🔖 Código: <b>${esc(cod)}</b></div>` : (vImp ? `<div class="hint" style="margin-bottom:8px">🔖 Sin código: «${esc(vImp)}» no figura en el Excel de Clientes.</div>` : '');
+    }
     const comprobanteLabel = r.__comprobante_total__ > 1 ? ` · Comprobante ${r.__comprobante_num__} de ${r.__comprobante_total__}` : '';
     const btnChico = 'width:auto;padding:2px 8px;margin:0';
     const cabecera = r['__manual_sin_ia__']
@@ -3434,6 +3476,7 @@ function renderRendResults() {
         ${sugerencias}
         ${botonMover}
         ${convNote}
+        ${lineaCodigo}
         ${manualRows}
         ${fieldRows}
       </div>`;
@@ -3669,6 +3712,7 @@ function rendComboPick(comboId, value) {
   if (input) input.value = value;
   const box = document.getElementById('rend-combo-list-' + comboId);
   if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+  if (entry.field && isImputacionFieldName(entry.field.name) && rendCodigoActivo()) renderRendResults();
 }
 
 // Método de pago siempre es obligatorio (de él depende la carpeta destino); los demás
@@ -3716,7 +3760,7 @@ async function rendFetchDolarOficial() {
 async function rendGetFxRatesMap() {
   const map = {};
   try {
-    const raw = await supaConfigGet('rend_exchange_rates');
+    const raw = await rendCfgGet('rend_exchange_rates');
     const list = raw ? JSON.parse(raw) : [];
     for (const r of list) {
       if (!r.moneda) continue;
@@ -3736,7 +3780,7 @@ async function rendGetFxRatesMap() {
 }
 async function rendGetFxFieldNames() {
   try {
-    const raw = await supaConfigGet('rend_fx_fields');
+    const raw = await rendCfgGet('rend_fx_fields');
     return raw ? JSON.parse(raw) : [];
   } catch(e) { return []; }
 }
@@ -3765,7 +3809,7 @@ function rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNa
 // ── Rendiciones: guardar en SharePoint — carpeta y plantilla fijas (Cfg Rendiciones) ──
 // Carpeta final = base (Cfg) / Empresa / Persona / Método de pago / Año-Mes
 async function rendResolveDestFolder(token) {
-  const baseRaw = await supaConfigGet('rend_base_folder');
+  const baseRaw = await rendCfgGet('rend_base_folder');
   if (!baseRaw) throw new Error('No hay carpeta base configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
   const base = JSON.parse(baseRaw);
   const siteId = base.siteId;
@@ -3800,6 +3844,12 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   if (_rendMappingCache === null) await rendLoadMapping();
   const savedMapping = rendMappingEfectivo(getMapping(REND_MAPPING_KEY()), hdrs);
   const useMapping = Object.keys(savedMapping).length > 0 && hdrs.length > 0;
+  // Columna Código (plantilla de AS): sale del Excel de Clientes según la planta imputada — si no se puede leer, no se escribe nada (mejor que dejarla vacía sin avisar)
+  const usaCodigo = useMapping && Object.values(savedMapping).includes('__codigo__');
+  if (usaCodigo && !_rendClientesCodigos.size) {
+    try { await rendLoadClientesYQ(); _rendClientesQLoaded = true; } catch (e) { throw new Error('No pude leer el Excel de Clientes para sacar el Código: ' + e.message); }
+    if (!_rendClientesCodigos.size) throw new Error('La plantilla tiene una columna Código, pero el Excel de Clientes (Cfg Comercial) no está vinculado o no tiene códigos en la columna A.');
+  }
   // columna donde va el nombre del archivo (la del mapeo "Archivo", o la que diga "archivo" en el encabezado)
   let archivoCol = -1;
   if (useMapping) { const e = Object.entries(savedMapping).find(([, f]) => f === '__archivo__'); if (e) archivoCol = parseInt(e[0]); }
@@ -3823,7 +3873,7 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
     const r = results[ri];
     let newRow;
     if (useMapping) {
-      newRow = buildRowFromMapping(savedMapping, hdrs, r, rendManualValues, manualFields, fields);
+      newRow = buildRowFromMapping(savedMapping, hdrs, usaCodigo ? Object.assign({}, r, { '__codigo__': rendCodigoPara(r) }) : r, rendManualValues, manualFields, fields);
     } else {
       newRow = new Array(Math.max(hdrs.length, fields.length + 2 + manualFields.length)).fill('');
       hdrs.forEach((x, i) => {
@@ -4048,7 +4098,7 @@ async function rendGenerarNueva() {
     const sesionMaia = JSON.parse(localStorage.getItem('daia_session')||'null');
     if (!sesionMaia?.token) throw new Error('Tu sesión de MAIA venció o no es válida — recargá la página e iniciá sesión de nuevo antes de reintentar.');
     const token = await getMsToken();
-    const tmplRaw = await supaConfigGet('rend_template');
+    const tmplRaw = await rendCfgGet('rend_template');
     if (!tmplRaw) throw new Error('No hay plantilla configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
     const tmpl = JSON.parse(tmplRaw);
     const { siteId, folderId } = await rendResolveDestFolder(token);
@@ -22408,7 +22458,7 @@ function fbSelectCurrent() {
   } else if (fbTarget === 'rend-base-folder') {
     document.getElementById('cfg-rend-base-label').textContent = label;
     fbClose();
-    supaConfigSet('rend_base_folder', JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label }))
+    rendCfgSet('rend_base_folder', JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label }))
       .catch(e => alert('No se pudo guardar la carpeta base: ' + e.message));
     return;
   } else if (fbTarget === 'concil-banco-folder') {
@@ -22451,7 +22501,7 @@ async function fbSelectFile(item, relativePath) {
     document.getElementById('cfg-rend-tmpl-label').textContent = item.name;
     fbClose();
     try {
-      await supaConfigSet('rend_template', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+      await rendCfgSet('rend_template', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
     } catch(e) { alert('No se pudo guardar la plantilla: ' + e.message); }
     // Reutiliza el mismo mapeo de columnas que ya usaban existing/template
     await loadExcelHeadersAndShowMapping('rend', item.id, fbCurrentSiteId);
@@ -22460,14 +22510,14 @@ async function fbSelectFile(item, relativePath) {
     fbClose();
     _rendClientesQLoaded = false; // fuerza releer del Excel nuevo la próxima vez que haga falta
     try {
-      await supaConfigSet('rend_clientes_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+      await rendCfgSet('rend_clientes_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
     } catch(e) { alert('No se pudo guardar el Excel de Clientes: ' + e.message); }
   } else if (fbTarget === 'rend-q-excel') {
     document.getElementById('cfg-rend-q-excel-label').textContent = item.name;
     fbClose();
     _rendClientesQLoaded = false;
     try {
-      await supaConfigSet('rend_q_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
+      await rendCfgSet('rend_q_excel', JSON.stringify({ path: relativePath, id: item.id, siteId: fbCurrentSiteId, label: item.name }));
     } catch(e) { alert('No se pudo guardar el Excel de Q: ' + e.message); }
   } else if (fbTarget === 'cotiz-plantilla') {
     document.getElementById('cotiz-plantilla-label').textContent = item.name;
@@ -25247,7 +25297,7 @@ function rendMappingEfectivo(mapping, hdrs) {
 function rendGuardarHdrs(h) { _rendHdrsCache = (h || []).map(x => String(x == null ? '' : x)); supaConfigSet(REND_HDRS_KEY(), JSON.stringify(_rendHdrsCache)).catch(e => console.log('No se pudieron guardar los encabezados del mapeo:', e.message)); }
 async function rendMapearColumnas() {
   try {
-    const raw = await supaConfigGet('rend_template'); if (!raw) { alert('Primero seleccioná la plantilla de rendición.'); return; }
+    const raw = await rendCfgGet('rend_template'); if (!raw) { alert('Primero seleccioná la plantilla de rendición.'); return; }
     const t = JSON.parse(raw); await rendLoadMapping(); await loadExcelHeadersAndShowMapping('rend', t.id, t.siteId);
   } catch (e) { alert('No se pudo abrir el mapeo de columnas: ' + e.message); }
 }
@@ -25282,7 +25332,7 @@ function strSimilarity(a, b) {
   return 0;
 }
 
-function autoSuggestMapping(excelHeaders, availableFields) {
+function autoSuggestMapping(excelHeaders, availableFields, permitirCodigo) {
   const mapping = {};
   const usedFields = new Set();
   excelHeaders.forEach((header, colIdx) => {
@@ -25292,6 +25342,7 @@ function autoSuggestMapping(excelHeaders, availableFields) {
     const h = String(header).toLowerCase();
     if (h.includes('archivo') || h.includes('file')) { mapping[colIdx] = '__archivo__'; return; }
     if (h.includes('fecha anal')) { mapping[colIdx] = '__fecha_analisis__'; return; }
+    if (permitirCodigo && /^c[oó]digo$/.test(h.trim())) { mapping[colIdx] = '__codigo__'; return; }
     if ((h.includes('fecha') && (h.includes('hoy') || h.includes('solicitud') || h.includes('np')))) {
       mapping[colIdx] = '__fecha_hoy__'; return;
     }
@@ -25331,20 +25382,20 @@ function showMappingModal(target, excelHeaders, savedMapping, pendingAction) {
       ...npGetIA(pfx).filter(f=>f.name.trim()).map(f=>f.name)
     ];
   }
-  let mapping = Object.keys(savedMapping).length > 0 ? savedMapping : autoSuggestMapping(excelHeaders, availableFields), aviso = '';
+  let mapping = Object.keys(savedMapping).length > 0 ? savedMapping : autoSuggestMapping(excelHeaders, availableFields, target === 'rend'), aviso = '';
   if (target === 'rend' && Object.keys(savedMapping).length > 0) {
     const snap = _rendHdrsCache;
     if (!(Array.isArray(snap) && snap.length === excelHeaders.length && snap.every((h, i) => rendNormHdr(h) === rendNormHdr(excelHeaders[i])))) {
       // las columnas del Excel no son las de la última vez que se confirmó: lo ya confirmado se reubica por nombre de columna y el resto se sugiere por nombre
       const reubicado = Array.isArray(snap) && snap.length ? rendMappingEfectivo(savedMapping, excelHeaders) : {};
-      mapping = Object.assign({}, autoSuggestMapping(excelHeaders, availableFields), reubicado);
+      mapping = Object.assign({}, autoSuggestMapping(excelHeaders, availableFields, target === 'rend'), reubicado);
       aviso = 'Las columnas del Excel cambiaron desde la última vez que confirmaste el mapeo (se agregaron, quitaron o movieron). Se reubicó lo que ya tenías por el nombre de cada columna y se sugirió el resto: revisalo antes de confirmar.';
     }
   }
   mapContext = { target, headers: excelHeaders, fields: availableFields, mapping, pendingAction, autoFieldNames };
   mapModalPintar(aviso);
 }
-function mapModalSugerir() { if (!mapContext) return; mapContext.mapping = autoSuggestMapping(mapContext.headers, mapContext.fields); mapModalPintar('Sugerido por el nombre de cada columna del Excel: revisalo y confirmá.'); }
+function mapModalSugerir() { if (!mapContext) return; mapContext.mapping = autoSuggestMapping(mapContext.headers, mapContext.fields, mapContext.target === 'rend'); mapModalPintar('Sugerido por el nombre de cada columna del Excel: revisalo y confirmá.'); }
 function mapModalPintar(aviso) {
   const { headers: excelHeaders, fields: availableFields, mapping } = mapContext;
   const specialOpts = [
@@ -25352,7 +25403,7 @@ function mapModalPintar(aviso) {
     {value:'__archivo__', label:'📎 Nombre del archivo'},
     {value:'__fecha_hoy__', label:'📅 Fecha de hoy (automático)'},
     {value:'__fecha_analisis__', label:'🕐 Fecha de análisis'},
-  ];
+  ].concat(mapContext.target === 'rend' ? [{value:'__codigo__', label:'🔖 Código de la planta imputada (Excel de Clientes)'}] : []);
   const body = document.getElementById('mapModalBody');
   body.innerHTML = (aviso ? `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12.5px">${esc(aviso)}</div>` : '') + excelHeaders.map((header, i) => {
     const current = mapping[i] || '__none__';
@@ -25448,6 +25499,7 @@ function buildRowFromMapping(mapping, excelHeaders, record, manualValues, manual
     if (fieldName === '__none__') return;
     if (fieldName === '__fecha_hoy__') { row[i] = today(); return; }
     if (fieldName === '__archivo__') { row[i] = record.__archivo__ || ''; return; }
+    if (fieldName === '__codigo__') { row[i] = record.__codigo__ || ''; return; }
     if (fieldName === '__fecha_analisis__') { row[i] = record.__fecha_analisis__ || ''; return; }
     // Check manual fields (includes values set by user). Los campos de Rendiciones
     // tienen "scope" (global/por-archivo) y usan rendManualValueFor; los de NP no
@@ -25943,7 +25995,7 @@ async function clientesImportarAbrir() {
   wrap.style.display = 'block';
   el.innerHTML = 'Cargando el Excel de Clientes (Cfg Imputación)...';
   try {
-    const raw = await supaConfigGet('rend_clientes_excel');
+    const raw = await rendCfgGet('rend_clientes_excel');
     if (!raw) throw new Error('No hay ningún Excel de Clientes vinculado — andá a Cfg Imputación y vinculalo primero.');
     const ref = JSON.parse(raw);
     const token = await getMsToken();
@@ -25964,7 +26016,7 @@ async function clientesImportarAbrir() {
     }
     const nombresNormExistentes = new Set(nombresExistentes.map(c => clientesNormalizarNombre(c.nombre_empresa)));
 
-    const savedMapRaw = await supaConfigGet('clientes_excel_mapping');
+    const savedMapRaw = await rendCfgGet('clientes_excel_mapping');
     const savedMap = savedMapRaw ? JSON.parse(savedMapRaw) : {};
     const adivinar = patrones => { const i = headers.findIndex(h => patrones.some(p => h.toLowerCase().includes(p))); return i >= 0 ? i : 0; };
     const nombreGuess = savedMap.nombreCol ?? (headers.length > 2 ? 2 : adivinar(['cliente','empresa','nombre']));
@@ -26031,7 +26083,7 @@ async function clientesImportarConfirmar() {
   const nombreCol = Number(document.getElementById('clientes-import-col-nombre').value);
   showMsg(statusId, 'loading', 'Creando...');
   try {
-    await supaConfigSet('clientes_excel_mapping', JSON.stringify({ nombreCol }));
+    await rendCfgSet('clientes_excel_mapping', JSON.stringify({ nombreCol }));
     const nuevos = clientesImportarCalcularNuevos();
     if (!nuevos.length) throw new Error('No hay clientes nuevos para crear.');
     const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -27364,7 +27416,7 @@ function cotizArmadoNueva() {
 // Q cargado (columna E) y devuelve el siguiente, como string.
 async function cotizArmadoObtenerProximoQNumero() {
   try {
-    const raw = await supaConfigGet('rend_q_excel');
+    const raw = await rendCfgGet('rend_q_excel');
     if (!raw) return null;
     const ref = JSON.parse(raw);
     const token = await getMsToken();
@@ -27555,7 +27607,7 @@ function cotizArmadoSetCampo(campo, val) {
 async function cotizQYaUsado(qNumero) {
   const buscado = String(qNumero == null ? '' : qNumero).replace(/\D/g, '');
   if (!buscado) return null;
-  const raw = await supaConfigGet('rend_q_excel');
+  const raw = await rendCfgGet('rend_q_excel');
   if (!raw) return null;
   const ref = JSON.parse(raw);
   const rows = await rendFetchExcelUsedRange(await getMsToken(), ref.siteId, ref.id, 'Q-');
@@ -28929,7 +28981,7 @@ async function cotizExcelCopiarFormatoFila(token, excelBase, filaOrigen, filaDes
 // generó y guardó igual) — el error se le muestra al usuario para que lo cargue
 // a mano si hace falta.
 async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
-  const raw = await supaConfigGet('rend_q_excel');
+  const raw = await rendCfgGet('rend_q_excel');
   if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
   const ref = JSON.parse(raw);
   const token = await getMsToken();
@@ -28978,7 +29030,7 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
 // fila nueva ni es fatal si no la encuentra (puede ser que la cotización
 // nunca se haya llegado a registrar ahí) — solo avisa.
 async function cotizArmadoActualizarEnExcelQ(st, qNumeroCompleto) {
-  const raw = await supaConfigGet('rend_q_excel');
+  const raw = await rendCfgGet('rend_q_excel');
   if (!raw) throw new Error('No hay Excel de Q vinculado en Cfg Imputación.');
   const ref = JSON.parse(raw);
   const token = await getMsToken();
