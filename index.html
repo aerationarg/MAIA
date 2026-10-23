@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -11995,7 +11995,13 @@ async function procesosStep2TrenAplicar(opts) {
   dd.orden = orden;
   st.trenPropuesto = null; st.trenChat = []; st.trenHistorial = []; st.trenDesdeActual = false; st.trenEdicionManual = false; st.trenAlternativa = null;
   await procesosSaveProyecto({ diseno_data: dd }, p);
-  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); if (!(opts && opts.sinLibres)) procesosStep2LibresGenerarPendientes().catch(e => console.warn('Unidades libres:', e.message)); }
+  if (procesosCurrentProyecto === p) {
+    renderProcesosStepContent();
+    if (!(opts && opts.sinLibres)) {
+      procesosStep2LibresGenerarPendientes().catch(e => console.warn('Unidades libres:', e.message));
+      procesosPCOfrecerModeloAlConfirmarTren().catch(e => console.warn('Modelo de planta compacta:', e.message));
+    }
+  }
 }
 
 // Id del slot del DOM para el panel de una hoja — a partir del NOMBRE, no de
@@ -12711,8 +12717,23 @@ async function procesosPCCaudalPlanta() {
     if (!st.balance) st.balance = await procesosStep2CalcularBalance();
     const us = ((st.balance && st.balance.unidades) || []).filter(u => !u.esLodos && u.q > 0);
     const r = us.find(u => procesosPCTipoUnidad(u.nombre, u.hojaBase) === 'reactor');
-    return r ? r.q : (us.length ? Math.max(...us.map(u => u.q)) : null);
+    if (r || us.length) return r ? r.q : Math.max(...us.map(u => u.q));
+    return procesosPCCaudalCorrientes(procesosCurrentProyecto); // sin balance (faltan parámetros en el Paso 1): lo que entra, sumando las corrientes
   } catch (e) { return null; }
+}
+// Suma de los caudales (m3/d) cargados en las corrientes del Paso 1 (el "medio" o "promedio" si hay varios); null si no hay ninguno
+function procesosPCCaudalCorrientes(p) {
+  let total = 0, hay = false;
+  ((p && p.info_cliente && p.info_cliente.corrientes) || []).forEach(c => {
+    let q = null, medio = false;
+    Object.entries(c.campos || {}).forEach(([nombre, campo]) => {
+      const val = (campo && typeof campo === 'object') ? campo.valor : campo, unidad = (campo && typeof campo === 'object') ? (campo.unidad || '') : '', tn = procesosNormTxt(nombre);
+      if (typeof val !== 'number' || !isFinite(val) || !/caudal/.test(tn)) return;
+      const m = /medio|prom/.test(tn); if (q == null || (m && !medio)) { q = procesosCaudalM3d(val, unidad); medio = m; }
+    });
+    if (q > 0) { total += q; hay = true; }
+  });
+  return hay ? total : null;
 }
 // Importa el Excel de dimensiones (hoja 1: dos filas de encabezado, una fila por modelo, notas al final)
 async function procesosPCImportar(file) {
@@ -13085,6 +13106,61 @@ async function procesosStep2AplicarPlantaCompacta(nombre, modeloNombre, silencio
   p.diseno_data = dd;
   await procesosSaveProyecto({ diseno_data: dd }, p);
   procesosStep2RenderHojaPanel();
+}
+// ── Planta compacta: el modelo se define al confirmar el tren ──
+// Al aplicar el tren, si hay unidades de planta compacta sin modelo, se sugiere el más chico que cubre el caudal de la planta y se puede confirmar o elegir otro.
+// Elegido el modelo, se aplica a TODAS las unidades compactas del tren (dimensiones de fábrica en sus celdas): después "Definir todas" o ir unidad por unidad
+// ya lo encuentran definido. Si se elige "Ahora no", queda como antes (se sugiere al abrir cada unidad).
+let _procesosPCTren = null;
+function procesosPCTrenCerrar() { const m = document.getElementById('pc-tren-modal'); if (m) m.remove(); _procesosPCTren = null; }
+async function procesosPCOfrecerModeloAlConfirmarTren() {
+  const p = procesosCurrentProyecto; if (!p) return;
+  const dd = p.diseno_data || {}, hojas = dd.hojas || {};
+  const nombres = (dd.orden || []).filter(n => procesosPCEsMiembro(hojas[n]) && !hojas[n].plantaCompacta);
+  if (!nombres.length) return;
+  const cfg = await procesosPCCargar();
+  const modelos = cfg.modelos.filter(m => Number(m.caudal) > 0).sort((a, b) => Number(a.caudal) - Number(b.caudal));
+  if (!modelos.length) return; // sin tabla de modelos en Cfg Procesos IA no hay nada que sugerir
+  procesosStep2State.balance = null; // el tren cambió: se recalcula
+  const q = await procesosPCCaudalPlanta();
+  if (procesosCurrentProyecto !== p) return;
+  const previo = dd.pcModeloId && modelos.find(m => m.id === dd.pcModeloId);
+  const rec = previo || procesosPCRecomendado(modelos, q);
+  const alcanza = rec && q > 0 && Number(rec.caudal) >= q;
+  _procesosPCTren = { nombres, modelos, aplicando: false };
+  const ov = document.createElement('div');
+  ov.id = 'pc-tren-modal'; ov.className = 'map-modal-overlay'; ov.style.alignItems = 'center';
+  ov.onclick = e => { if (e.target === ov) procesosPCTrenCerrar(); };
+  ov.innerHTML = `<div class="map-modal" style="max-width:640px;border-radius:var(--radius)">
+    <div class="map-modal-header"><h2>🏭 Planta compacta: elegí el modelo</h2><p>El tren incluye ${nombres.length === 1 ? 'una unidad' : nombres.length + ' unidades'} de planta compacta: <b>${nombres.map(esc).join(', ')}</b>. El modelo se aplica a todas (sus dimensiones de fábrica quedan cargadas), así después no hay que definirlo unidad por unidad.</p></div>
+    <div class="map-modal-body">
+      <p style="font-size:13px;margin-bottom:8px">${q > 0 ? `Caudal de la planta ≈ <b>${Math.round(q)} m³/d</b>. ` : '<span style="color:var(--red)">No pude calcular el caudal (faltan datos de caudal en el Paso 1): elegí el modelo a mano.</span> '}${previo ? `Ya hay un modelo elegido para esta planta: <b>${esc(procesosPCEtiqueta(previo))}</b>.` : (rec ? (alcanza ? `Recomendado (el más chico que lo cubre): <b>${esc(procesosPCEtiqueta(rec))}</b>.` : `Ningún modelo de la tabla cubre ese caudal: se propone el más grande, <b>${esc(procesosPCEtiqueta(rec))}</b>.`) : '')}</p>
+      <label style="font-size:12px">Modelo</label>
+      <select id="pc-tren-modelo" style="width:100%">${modelos.map(m => `<option value="${esc(m.id)}" ${rec && rec.id === m.id ? 'selected' : ''}>${esc(procesosPCEtiqueta(m))}${rec && rec.id === m.id ? ' ★' : ''}</option>`).join('')}</select>
+      <p class="hint" style="margin-top:8px">Las dimensiones salen de la tabla de Cfg Procesos IA. Si más adelante cambiás una, MAIA te pregunta si querés guardarla en el modelo.</p>
+    </div>
+    <div class="map-modal-footer"><button class="btn btn-secondary" style="flex:1" onclick="procesosPCTrenCerrar()" title="Queda como antes: se sugiere al abrir cada unidad">Ahora no</button><button class="btn btn-primary" id="pc-tren-confirmar" style="flex:2" onclick="procesosPCConfirmarModeloTren()">✓ Aplicar este modelo a la planta</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+}
+async function procesosPCConfirmarModeloTren() {
+  const e = _procesosPCTren; if (!e || e.aplicando) return;
+  const id = (document.getElementById('pc-tren-modelo') || {}).value; if (!id) return;
+  const p = procesosCurrentProyecto;
+  e.aplicando = true;
+  const btn = document.getElementById('pc-tren-confirmar'); if (btn) { btn.disabled = true; btn.textContent = 'Aplicando...'; }
+  const sinDims = []; let ok = 0;
+  for (const n of e.nombres) {
+    if (procesosCurrentProyecto !== p) break; // el usuario se fue del proyecto
+    try { procesosStep2GetHF(n); } catch (_e) { /* arma la planilla de la unidad si todavía no estaba */ }
+    try { await procesosStep2AplicarPlantaCompacta(n, 'cfg:' + id, true); } catch (err) { console.warn('No se pudo aplicar el modelo a "' + n + '":', err.message); }
+    const h = (procesosCurrentProyecto.diseno_data?.hojas?.[n]) || {};
+    if (h.plantaCompacta) ok++; else sinDims.push(n);
+  }
+  procesosPCTrenCerrar();
+  if (procesosCurrentProyecto !== p) return;
+  renderProcesosStepContent();
+  showMsg('procesos-step2-status', sinDims.length ? 'error' : 'success', `✓ Modelo aplicado a ${ok} unidad${ok === 1 ? '' : 'es'} de planta compacta.` + (sinDims.length ? ` Sin dimensiones en el modelo (o la unidad no se reconoce como reactor, sedimentador, digestor o cloración), quedan para definir a mano: ${sinDims.join(', ')}.` : ''));
 }
 // Si la unidad es planta compacta y todavía no tiene modelo, se aplica el de la planta (el ya elegido, o el que cubre el caudal)
 async function procesosPCAutoAplicar(nombre) {
