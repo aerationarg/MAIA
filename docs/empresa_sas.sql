@@ -17,3 +17,10 @@ where coalesce(qual, '') ilike '%''AS''%' or coalesce(with_check, '') ilike '%''
 select t.typname as tipo, e.enumlabel as valor
 from pg_type t join pg_enum e on e.enumtypid = t.oid
 where t.typname ilike '%empresa%' or e.enumlabel = 'AS';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- RESULTADO DEL CHEQUEO (23/10/2026): la consulta 1 encontró UNA restricción que solo admite AA y AS:
+--   conciliacion_bancos.conciliacion_bancos_empresa_check → CHECK (empresa = ANY (ARRAY['AA','AS']))
+-- Las consultas 2 y 3 (políticas RLS y tipos enumerados) no devolvieron nada. Para poder cargar bancos de SAS en Conciliación bancaria, correr esto UNA vez:
+alter table conciliacion_bancos drop constraint if exists conciliacion_bancos_empresa_check;
+alter table conciliacion_bancos add constraint conciliacion_bancos_empresa_check check (empresa = any (array['AA'::text, 'AS'::text, 'SAS'::text]));
