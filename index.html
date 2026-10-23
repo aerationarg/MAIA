@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10649,6 +10649,7 @@ function procesosStep2HojaDesactualizada(nombre) {
   const mapeosHoja = (dd.mapeos?.[nombre]) || [];
   const hojasOrigen = new Set();
   mapeosHoja.forEach(m => (m.fuentes || []).forEach(f => { if (f.origen === 'hoja' && f.hoja) hojasOrigen.add(f.hoja); }));
+  procesosStep2UnidadesReferidas(nombre, dd).forEach(n => hojasOrigen.add(n)); // también las unidades que usan sus fórmulas propias
   for (const hojaOrigen of hojasOrigen) {
     const hOrigen = dd.hojas?.[hojaOrigen];
     if (hOrigen && hOrigen.confirmada_at && new Date(hOrigen.confirmada_at) > new Date(h.confirmada_at)) return true;
@@ -10669,6 +10670,9 @@ function procesosStep2PropagarCadena(hastaHoja) {
   const mapeos = dd.mapeos || {};
   const ponderaciones = {};
   const idxHasta = hastaHoja ? orden.indexOf(hastaHoja) : orden.length - 1;
+  // Si alguna unidad tiene fórmulas que usan valores de OTRA unidad, se arman las planillas de todo el tren (si no, la referencia a una unidad que todavía no se abrió daría #REF!)
+  const conReferencias = orden.some(n => procesosStep2UnidadesReferidas(n, dd).length);
+  if (conReferencias) orden.forEach(n => { try { procesosStep2GetHF(n); } catch (_e) { /* se sigue con las que se puedan */ } });
   for (let i = 0; i <= idxHasta && i < orden.length; i++) {
     const nombre = orden[i];
     // procesosStep2GetHF resuelve tanto una hoja real del Excel como una
@@ -10707,6 +10711,7 @@ function procesosStep2PropagarCadena(hastaHoja) {
       hf.setCellContents({ sheet: 0, row: cell.row, col: cell.col }, [[val]]);
     });
   }
+  if (conReferencias && procesosStep2State.hfShared) { try { procesosStep2State.hfShared.rebuildAndRecalculate(); } catch (_e) { /* queda con lo calculado */ } } // para que las fórmulas que usan otras unidades tomen sus valores
   return ponderaciones;
 }
 
@@ -12757,6 +12762,7 @@ function procesosStep2RenderHojaPanel() {
     const infoLineas = [];
     if (mapeo) { const ch = procesosFuenteChips(fuentes.filter(f => f.origen === 'paso1').map(f => { const cc = ((p.info_cliente && p.info_cliente.corrientes) || []).find(x => x.nombre === f.corriente), cf = cc && cc.campos && cc.campos[f.campo]; return cf && typeof cf === 'object' ? cf.fuente : ''; }).join(' ')); infoLineas.push(`🔗 ${esc(origenTxt)}${ch ? ' ' + ch : ''}`); }
     if (enPlantaCompacta) infoLineas.push(`🏭 ${esc(h.plantaCompacta.modelo)}`);
+    { const usa = typeof formulaRaw === 'string' && formulaRaw[0] === '=' ? procesosStep2UnidadesReferidas(nombre, { hojas: Object.assign({}, (p.diseno_data || {}).hojas, { [nombre]: { formulas: { x: formulaRaw } } }) }) : []; if (usa.length) infoLineas.push(`🔗 usa valores de: ${usa.map(esc).join(', ')}`); }
     if (rangoTxt) infoLineas.push(esc(rangoTxt));
     if (c.notaLibre) infoLineas.push('💬 ' + esc(c.notaLibre));
     (h.chequeoReq && h.chequeoReq.items || []).filter(it => it.celda === c.ref).forEach(it => {
@@ -12779,7 +12785,7 @@ function procesosStep2RenderHojaPanel() {
       : `<span class="ps2-formula" style="padding:3px 0"><input class="ps2-fin${propia ? ' propia' : ''}" value="${esc(formulaRaw)}" placeholder="ƒ  =fórmula" onchange="procesosStep2SetFormula('${safe}','${c.ref}',this.value)" title="Fórmula de esta fila: se puede editar o escribir una nueva, como en Excel (ej. =C5*C7). Vale solo para este proyecto. Vaciarla vuelve a la original." /></span>`;
     const acc = `<span class="ps2-acc">${oculta
       ? `<button class="ps2-ab" onclick="procesosStep2FilaOcultar('${safe}','${c.ref}',false)" title="Volver a mostrar esta fila">👁‍🗨 Mostrar</button>`
-      : `<button class="ps2-ab" onclick="procesosStep2FilaAgregar('${safe}','${c.ref}')" title="Agregar una fila propia debajo de esta">＋</button><button class="ps2-ab" onclick="procesosStep2FilaOcultar('${safe}','${c.ref}',true)" title="Ocultar esta fila (sigue calculándose, solo no se muestra ni pasa a los pasos siguientes)">👁</button>`}${c.extra ? `<button class="ps2-ab" onclick="procesosStep2FilaEliminar('${safe}','${c.id}')" title="Eliminar esta fila propia">🗑</button>` : ''}${c.formulaEditada ? `<button class="ps2-ab" onclick="procesosStep2RestaurarFormula('${safe}','${c.ref}')" title="Volver a la fórmula original del Excel">↺</button>` : ''}</span>`;
+      : `<button class="ps2-ab" onclick="procesosStep2FilaAgregar('${safe}','${c.ref}')" title="Agregar una fila propia debajo de esta">＋</button>${h.libre ? '' : `<button class="ps2-ab" onclick="procesosStep2PickerAbrir('${safe}','${c.ref}')" title="Usar un valor de otra unidad del tren en la fórmula de esta fila">🔗</button>`}<button class="ps2-ab" onclick="procesosStep2FilaOcultar('${safe}','${c.ref}',true)" title="Ocultar esta fila (sigue calculándose, solo no se muestra ni pasa a los pasos siguientes)">👁</button>`}${c.extra ? `<button class="ps2-ab" onclick="procesosStep2FilaEliminar('${safe}','${c.id}')" title="Eliminar esta fila propia">🗑</button>` : ''}${c.formulaEditada ? `<button class="ps2-ab" onclick="procesosStep2RestaurarFormula('${safe}','${c.ref}')" title="Volver a la fórmula original del Excel">↺</button>` : ''}</span>`;
     return `
     <div class="ps2-row"${oculta ? ' style="opacity:.5"' : ''}>
       <span class="ps2-key">${refTag}${c.extra ? `<input class="ps2-edit" style="width:calc(100% - 52px)" value="${esc(c.label)}" placeholder="Nombre de la fila" onchange="procesosStep2FilaCampo('${safe}','${c.id}','label',this.value)" />` : esc(c.label)}</span>
@@ -14105,6 +14111,84 @@ async function procesosStep2GuardarCambioHoja(nombre, mutar) {
   return h;
 }
 const procesosStep2MotivoManual = txt => ({ motivo: txt, origen: 'edición manual', fecha: new Date().toLocaleDateString('es-AR') });
+// ── Fórmulas que usan valores de OTRA unidad ──
+// Una fórmula puede apuntar a una celda de otra unidad del tren con la forma ='Nombre de la unidad'!C5 (el nombre entre comillas simples; si tiene una comilla simple se duplica).
+// Para no escribirlo a mano está el selector "🔗 Valor de otra unidad" de cada fila. La unidad que usa el valor de otra queda marcada como "desactualizada" si esa otra se guarda después.
+const procesosStep2RefHoja = (unidad, direccion) => `'${String(unidad).replace(/'/g, "''")}'!${direccion}`;
+// Nombres de unidades (las del tren, distintas de esta) a las que apuntan las fórmulas propias de una unidad
+function procesosStep2UnidadesReferidas(nombre, dd) {
+  dd = dd || (procesosCurrentProyecto && procesosCurrentProyecto.diseno_data) || {};
+  const h = (dd.hojas && dd.hojas[nombre]) || {}, nombres = Object.keys(dd.hojas || {}), out = new Set();
+  const textos = Object.values(h.formulas || {}).concat((h.filasExtra || []).map(fe => fe.contenido)).filter(t => typeof t === 'string' && t[0] === '=');
+  const porMinus = new Map(nombres.map(n => [n.toLowerCase(), n]));
+  textos.forEach(t => {
+    const re = /'((?:[^']|'')+)'!|([A-Za-z_][\w.]*)!/g; let m;
+    while ((m = re.exec(t))) { const n = (m[1] != null ? m[1].replace(/''/g, "'") : m[2]).toLowerCase(), real = porMinus.get(n); if (real && real !== nombre) out.add(real); }
+  });
+  return [...out];
+}
+// Celdas de una unidad (por si se quiere elegir una): la dirección que se usa en la fórmula es la de la planilla de cálculo (fila y columna), no la etiqueta
+function procesosStep2CeldasDeUnidad(unidad) {
+  const hf = procesosStep2GetHF(unidad), model = procesosStep2State.hojaModels[unidad];
+  if (!hf || !model) return [];
+  const h = (procesosCurrentProyecto.diseno_data.hojas || {})[unidad] || {}, ocultas = h.filasOcultas || [];
+  return model.cells.filter(c => !ocultas.includes(c.ref)).map(c => {
+    const v = procesosStep2ValorTexto(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
+    return { ref: c.ref, direccion: XLSX.utils.encode_cell({ r: c.row, c: c.col }), label: c.label || c.ref, unidad: c.unidad || '', valor: v };
+  });
+}
+let _procesosPick = null;
+function procesosStep2PickerCerrar() { const m = document.getElementById('ps2-pick-modal'); if (m) m.remove(); _procesosPick = null; }
+function procesosStep2PickerAbrir(nombre, ref) {
+  const p = procesosCurrentProyecto, dd = p.diseno_data || {}, model = procesosStep2State.hojaModels[nombre], c = model && model.cells.find(x => x.ref === ref);
+  if (!c) return;
+  const otras = (dd.orden || []).filter(n => n !== nombre && dd.hojas && dd.hojas[n] && dd.hojas[n].seleccionada);
+  if (!otras.length) { alert('No hay otras unidades en el tren para tomar un valor.'); return; }
+  const h = (dd.hojas || {})[nombre] || {};
+  const actual = c.formulaEditada ? String((h.formulas || {})[ref] || '') : (c.extra ? (typeof c.contenido === 'string' && c.contenido[0] === '=' ? c.contenido : '') : (c.isFormula ? String((model.grid[c.row] && model.grid[c.row][c.col]) || '') : ''));
+  _procesosPick = { nombre, ref, otras };
+  procesosStep2PickerCerrar(); _procesosPick = { nombre, ref, otras };
+  const ov = document.createElement('div');
+  ov.id = 'ps2-pick-modal'; ov.className = 'map-modal-overlay'; ov.style.alignItems = 'center';
+  ov.onclick = e => { if (e.target === ov) procesosStep2PickerCerrar(); };
+  ov.innerHTML = `<div class="map-modal" style="max-width:640px;border-radius:var(--radius)">
+    <div class="map-modal-header"><h2>🔗 Valor de otra unidad</h2><p>Para <b>${esc(c.label || ref)}</b> de "${esc(nombre)}": elegí la unidad y la celda, insertala en la fórmula y guardala. Se mantiene al día: si cambia el valor en la otra unidad, cambia acá.</p></div>
+    <div class="map-modal-body">
+      <label style="font-size:12px">Unidad</label>
+      <select id="ps2-pick-unidad" style="width:100%;margin-bottom:8px" onchange="procesosStep2PickerUnidad()">${otras.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}</select>
+      <label style="font-size:12px">Celda</label>
+      <select id="ps2-pick-celda" style="width:100%;margin-bottom:8px"></select>
+      <button class="btn btn-secondary btn-sm" style="width:auto;margin-bottom:12px" onclick="procesosStep2PickerInsertar()">⬇ Insertar en la fórmula</button>
+      <label style="font-size:12px">Fórmula de esta fila <span class="hint" style="display:inline">(podés agregar operaciones: por ejemplo <code>=${esc(procesosStep2RefHoja('Otra unidad', 'C5'))}*2</code>)</span></label>
+      <textarea id="ps2-pick-formula" rows="3" style="width:100%;font-family:monospace;font-size:12px">${esc(actual || '=')}</textarea>
+    </div>
+    <div class="map-modal-footer"><button class="btn btn-secondary" style="flex:1" onclick="procesosStep2PickerCerrar()">Cancelar</button><button class="btn btn-primary" style="flex:2" onclick="procesosStep2PickerGuardar()">✓ Guardar fórmula</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  procesosStep2PickerUnidad();
+}
+function procesosStep2PickerUnidad() {
+  const u = (document.getElementById('ps2-pick-unidad') || {}).value, sel = document.getElementById('ps2-pick-celda'); if (!u || !sel) return;
+  let celdas = []; try { celdas = procesosStep2CeldasDeUnidad(u); } catch (e) { celdas = []; }
+  const fmt = v => typeof v === 'number' ? procesosFormatearNumero(v) : (v == null || v === '' ? 'sin valor' : String(v));
+  sel.innerHTML = celdas.length ? celdas.map(x => `<option value="${esc(x.direccion)}">${esc(x.ref)} · ${esc(x.label)} = ${esc(fmt(x.valor))}${x.unidad ? ' ' + esc(x.unidad) : ''}</option>`).join('') : '<option value="">(esa unidad no tiene celdas todavía)</option>';
+}
+function procesosStep2PickerInsertar() {
+  const u = (document.getElementById('ps2-pick-unidad') || {}).value, d = (document.getElementById('ps2-pick-celda') || {}).value, ta = document.getElementById('ps2-pick-formula');
+  if (!u || !d || !ta) return;
+  const txt = procesosStep2RefHoja(u, d), ini = typeof ta.selectionStart === 'number' ? ta.selectionStart : ta.value.length, fin = typeof ta.selectionEnd === 'number' ? ta.selectionEnd : ini;
+  // si la fórmula está vacía (solo "="), la referencia va sola; si no, en el lugar del cursor
+  ta.value = ta.value.slice(0, ini) + txt + ta.value.slice(fin);
+  ta.focus(); try { ta.selectionStart = ta.selectionEnd = ini + txt.length; } catch (e) { /* sin selección */ }
+}
+async function procesosStep2PickerGuardar() {
+  const e = _procesosPick, ta = document.getElementById('ps2-pick-formula'); if (!e || !ta) return;
+  const texto = ta.value.trim();
+  procesosStep2PickerCerrar();
+  if (texto.length < 2 || texto[0] !== '=') { alert('La fórmula tiene que empezar con "=" y tener algo más (por ejemplo la referencia a la otra unidad).'); return; }
+  await procesosStep2SetFormula(e.nombre, e.ref, texto);
+}
+
 async function procesosStep2SetFormula(nombre, ref, texto) {
   texto = String(texto == null ? '' : texto).trim();
   const model = procesosStep2State.hojaModels[nombre], c = model && model.cells.find(x => x.ref === ref);
@@ -14112,13 +14196,14 @@ async function procesosStep2SetFormula(nombre, ref, texto) {
   if (texto === '') { if (c.formulaEditada) return procesosStep2RestaurarFormula(nombre, ref); procesosStep2RenderHojaPanel(); return; }
   if (texto[0] !== '=') return procesosStep2SetValor(nombre, ref, texto); // un número o texto fijo
   const hf = procesosStep2GetHF(nombre), addr = { sheet: 0, row: c.row, col: c.col }, shf = procesosStep2State.hfShared;
+  try { ((procesosCurrentProyecto.diseno_data || {}).orden || []).forEach(n => procesosStep2GetHF(n)); } catch (_e) { /* si alguna no se puede armar, la fórmula se valida igual */ } // así una fórmula puede apuntar a cualquier unidad del tren
   const previo = hf.getCellSerialized(addr);
   hf.setCellContents(addr, [[texto]]);
   shf.rebuildAndRecalculate();
   const v = hf.getCellValue(addr);
   if (procesosStep2EsError(v) && ['#NAME?', '#ERROR!', '#CYCLE!', '#REF!'].includes(v.value)) {
     hf.setCellContents(addr, [[previo == null ? null : previo]]); shf.rebuildAndRecalculate();
-    alert('La fórmula no es válida (' + v.value + (v.message ? ': ' + v.message : '') + ') — se dejó la anterior.\n\nUsá referencias tipo C5 o \'Otra hoja\'!C5 y nombres de función en inglés (SUM, IF, ROUND, MAX, MIN, AVERAGE…), con coma como separador.');
+    alert('La fórmula no es válida (' + v.value + (v.message ? ': ' + v.message : '') + ')' + (v.value === '#REF!' ? ' — si querés usar un valor de OTRA unidad, tocá el botón 🔗 de la fila y elegila de la lista (el nombre tiene que ir exacto, entre comillas simples)' : '') + ' — se dejó la anterior.\n\nUsá referencias tipo C5 o \'Otra hoja\'!C5 y nombres de función en inglés (SUM, IF, ROUND, MAX, MIN, AVERAGE…), con coma como separador.');
     procesosStep2RenderHojaPanel(); return;
   }
   await procesosStep2GuardarCambioHoja(nombre, h => {
