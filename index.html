@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13814,12 +13814,12 @@ function procesosPCModuloContextoTxt(nombre, h) {
   if (!procesosPCEsMiembro(h) || h.plantaCompacta) return '';
   const fijas = (dd.orden || []).filter(n => n !== nombre && procesosPCEsMiembro(hojas[n]) && hojas[n].plantaCompacta && (hojas[n].plantaCompacta.celdas || []).length).map(n => {
     const m = procesosStep2State.hojaModels[n], hh = hojas[n], pc = hh.plantaCompacta, hfN = (() => { try { return procesosStep2GetHF(n); } catch (e) { return null; } })();
-    const dims = m && hfN ? (pc.celdas || []).map(r => { const c = m.cells.find(x => x.ref === r), v = c && hfN.getCellValue({ sheet: 0, row: c.row, col: c.col }); return c && typeof v === 'number' ? `${c.label} = ${procesosFormatearNumero(v)}${c.unidad ? ' ' + c.unidad : ''}` : null; }).filter(Boolean).join('; ') : '';
+    const dims = m && hfN ? (pc.celdas || []).map(r => { const c = m.cells.find(x => x.ref === r), v = c && hfN.getCellValue({ sheet: 0, row: c.row, col: c.col }); return c && typeof v === 'number' ? `${c.label} = ${procesosFormatearNumero(v)}${c.unidad ? ' ' + c.unidad : ''} (se referencia ${procesosStep2RefHoja(n, XLSX.utils.encode_cell({ r: c.row, c: c.col }))})` : null; }).filter(Boolean).join('; ') : '';
     return dims ? `- «${n}» (${pc.modelo}): ${dims}` : null;
   }).filter(Boolean);
   if (!fijas.length) return '';
   const enl = (h.moduloEnlaces || []).length ? ` Ya están enlazadas a esos valores (no se tocan): ${h.moduloEnlaces.join(', ')}.` : '';
-  return `PLANTA COMPACTA — ESTA UNIDAD FORMA PARTE DEL MÓDULO: el modelo ya está elegido para toda la planta y las dimensiones de las otras unidades del módulo son FIJAS de fábrica:\n${fijas.join('\n')}\nSi esta hoja tiene una celda que represente una de esas dimensiones (por ejemplo el volumen del reactor, que hace falta para fijar el volumen de esta unidad como un % del reactor), tomala EXACTAMENTE de esa unidad (de la lista de arriba o con una fórmula que apunte a ella) y NUNCA la cambies ni uses el valor de otro modelo, aunque con él no se cumpla algún requerimiento del pliego: en ese caso decí claramente qué no se cumple.${enl}\n\n`;
+  return `PLANTA COMPACTA — ESTA UNIDAD FORMA PARTE DEL MÓDULO: el modelo ya está elegido para toda la planta y las dimensiones de las otras unidades del módulo son FIJAS de fábrica:\n${fijas.join('\n')}\nSi esta hoja tiene una celda que represente una de esas dimensiones (por ejemplo el volumen del reactor, que hace falta para fijar el volumen de esta unidad como un % del reactor), tomala EXACTAMENTE de esa unidad, VINCULADA con la acción "formula" usando la referencia indicada arriba (por ejemplo =0.2*'Unidad'!C5 si esta unidad vale el 20 % del volumen de esa), y NUNCA la cambies ni uses el valor de otro modelo, aunque con él no se cumpla algún requerimiento del pliego: en ese caso decí claramente qué no se cumple.${enl}\n\n`;
 }
 // Celdas de dimensiones que le vienen de fábrica a una unidad con modelo de planta compacta aplicado (null si no tiene)
 function procesosPCFijas(nombre, h) {
@@ -13870,13 +13870,15 @@ function procesosStep2ExtraerJsonAcciones(txt) {
 
 // Valores actuales de las OTRAS unidades del proyecto, para el chat de una unidad: solo lectura (las acciones solo modifican la unidad del chat), pero
 // la IA los puede consultar y copiar a esta unidad con "set" (las celdas de una unidad duplicada tienen las mismas referencias que su hoja base).
-function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas, soloHermanas) {
+function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas, soloHermanas, compacto) {
   const dd = p.diseno_data || {}, st = procesosStep2State;
   const nombres = (dd.orden || []).filter(n => n !== nombre && dd.hojas?.[n]?.seleccionada !== false && (!soloHermanas || hermanas.includes(n)));
   if (!nombres.length) return '';
-  const MAX_CELDAS = soloHermanas ? 90 : 60;
+  const yoMiembro = procesosPCEsMiembro((dd.hojas || {})[nombre]);
   const bloques = nombres.map(n => {
     const h = dd.hojas[n] || {};
+    // compacto (pedidos del sistema): solo valores numéricos y menos celdas por unidad, salvo las del mismo módulo de planta compacta (de ahí suelen salir los valores que se toman)
+    const MAX_CELDAS = compacto ? ((yoMiembro && procesosPCEsMiembro(h)) ? 60 : 25) : (soloHermanas ? 90 : 60);
     let lineas = null;
     try {
       const model = st.hojaModels[n] || (h.hojaBase && st.hojaModels[h.hojaBase]);
@@ -13884,6 +13886,7 @@ function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas, soloHermanas) {
       const mod = st.hojaModels[n] || model;
       if (hf && mod) lineas = mod.cells.filter(c => !(h.filasOcultas || []).includes(c.ref)).map(c => {
         const v = procesosStep2ValorTexto(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
+        if (compacto && typeof v !== 'number') return null;
         return (v === '' || v == null) ? null : `${c.ref} ${c.label}${c.unidad ? ' (' + c.unidad + ')' : ''}: ${v}`;
       }).filter(Boolean);
     } catch (_e) { lineas = null; }
@@ -13892,7 +13895,7 @@ function procesosStep2OtrasUnidadesTxt(p, nombre, hermanas, soloHermanas) {
     const rel = hermanas.includes(n) ? ' [hermana del grupo' + (h.disposicion ? ', ' + h.disposicion : '') + ']' : '';
     return `### "${n}"${h.hojaBase && h.hojaBase !== n ? ' (planilla ' + h.hojaBase + ')' : ''}${rel}${h.confirmada ? ' ✓ confirmada' : ''}\n${recorte.length ? recorte.join('\n') : '(sin valores todavía)'}`;
   });
-  return `VALORES ACTUALES DE LAS OTRAS UNIDADES DEL PROYECTO (solo lectura: tus acciones solo modifican "${nombre}", pero podés consultar estos valores y copiarlos/igualarlos a esta unidad con "set" — por ejemplo si el usuario pide "poné lo mismo que en la otra unidad" o compararlas; las unidades duplicadas de la misma planilla comparten las mismas referencias de celda):\n${bloques.join('\n\n')}\n\n`;
+  return `VALORES ACTUALES DE LAS OTRAS UNIDADES DEL PROYECTO (solo lectura: tus acciones solo modifican "${nombre}", pero podés consultar estos valores y usarlos en esta unidad. Si un valor de esta unidad se DEFINE A PARTIR de uno de otra unidad (un % de su volumen, un múltiplo, que sea igual), VINCULALO con la acción "formula" usando el nombre de la unidad entre comillas simples y la referencia de celda de la lista, por ejemplo =0.2*'NOMBRE DE LA UNIDAD'!C5 — así se actualiza solo cuando esa otra cambia; no lo copies como número. Si solo se trata de copiar un valor puntual por pedido del usuario, alcanza con "set". Las unidades duplicadas de la misma planilla comparten las mismas referencias de celda):\n${bloques.join('\n\n')}\n\n`;
 }
 
 const _procesosStep2ChatEnviando = {};
@@ -14010,7 +14013,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     // Valores de TODAS las demás unidades del proyecto (solo lectura): para poder copiar/igualar valores de otra unidad (ej. dos reactores en paralelo), comparar, etc.
     // (en pedidos que arma el sistema, o si el mensaje no se refiere a otras unidades, solo viajan las hermanas del grupo: mandar TODAS en cada mensaje encarece mucho)
     const pideOtras = !esAuto && /(otra|otras|otro|otros|demas|resto|mismo|misma|mismos|mismas|igual|iguales|compar\w*|como en|como la|como el|paralel\w*)/.test(procesosNormTxt(msg)) || (p.diseno_data && Object.keys(p.diseno_data.hojas || {}).some(n => n !== nombre && n.length > 3 && procesosNormTxt(msg).includes(procesosNormTxt(n))));
-    const otrasUnidadesTxt = procesosStep2OtrasUnidadesTxt(p, nombre, hermanasGrupo, !pideOtras);
+    const otrasUnidadesTxt = procesosStep2OtrasUnidadesTxt(p, nombre, hermanasGrupo, !pideOtras && msgOverride == null, msgOverride != null); // pedidos del sistema (definir valores...): catálogo compacto de TODAS las otras unidades, para que pueda vincular valores
     const criteriosTxt = criteriosBlocks.length ? 'Adjunto el/los documento(s) de criterios de selección de Aeration, con rangos de eficiencia de remoción esperados por etapa y por parámetro — usalos para proponer/validar valores realistas de esta etapa.\n\n' : '';
     const plantasCompactasTxt = plantasCompactasBlocks.length ? 'Adjunto documentos de referencia de plantas compactas (modelos ya fabricados, con capacidad/volumen ya definidos) — si el usuario pregunta por esa alternativa, o te parece que aplica razonablemente para esta etapa según el caudal, mencionalo en "reply" (todavía no hay una acción automática para fijar los valores del modelo, eso el usuario lo tiene que hacer a mano por ahora).\n\n' : '';
     const archivosProyectoTxt = archivosProyectoBlocks.length ? 'Adjunto archivos propios de este proyecto (subidos a mano en el chat general, o traídos de mails categorizados) — tenelos en cuenta si aportan algo a esta unidad.\n\n' : '';
@@ -14025,7 +14028,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     // "de memoria" (o del estado previo a sus propios cambios) el texto no
     // coincide con lo que después se ve en las celdas — se lo aclaramos.
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
-    const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el valor sale de un dato del Paso 1 o de los requerimientos del cliente que trae una referencia a un archivo entre corchetes (ej. [Pliego.pdf — pág. 12]), copiá esa referencia TAL CUAL al final del "motivo": así el usuario puede abrir el archivo en esa página.\n- Si un valor se DEFINE A PARTIR DE OTRA CELDA (un volumen que es un % del de otra unidad, un múltiplo o cociente de otro dato, un valor que tiene que ser igual al de otra celda), NO calcules el número y lo fijes con "set": usá la acción "formula" con la ecuación (ej. =0.25*\'Reactor biológico LA\'!C5 o =0.25*C7), así se actualiza solo si esa otra celda cambia. Usá "set" solo para datos que se adoptan por sí mismos, sin depender de otra celda.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
+    const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el valor sale de un dato del Paso 1 o de los requerimientos del cliente que trae una referencia a un archivo entre corchetes (ej. [Pliego.pdf — pág. 12]), copiá esa referencia TAL CUAL al final del "motivo": así el usuario puede abrir el archivo en esa página.\n- Si un valor se DEFINE A PARTIR DE OTRA CELDA (un volumen que es un % del de otra unidad, un múltiplo o cociente de otro dato, un valor que tiene que ser igual al de otra celda), NO calcules el número y lo fijes con "set": usá la acción "formula" con la ecuación (ej. =0.25*\'Reactor biológico LA\'!C5 o =0.25*C7), así se actualiza solo si esa otra celda cambia. Usá "set" solo para datos que se adoptan por sí mismos, sin depender de otra celda.\n- Si en tu "reply" decís que conviene VINCULAR o fijar una celda a otra celda o unidad (por ejemplo "conviene dejar el volumen vinculado al del reactor"), HACELO en esta misma respuesta con la acción "formula": no lo dejes como una sugerencia para después.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
     const plantaCompactaTxt = await procesosPCPromptTxt(nombre, hActual);
     const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, plantaCompactaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : PROCESOS_FILAS_PROPIAS_TXT });
     const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
