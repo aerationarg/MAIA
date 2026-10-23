@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8679,6 +8679,105 @@ async function procesosDescargarCarpetaComoContentBlocks(folder, token, onFile) 
   return items;
 }
 
+// ── Referencias a los archivos del cliente ("Pliego.pdf — pág. 12"): se muestran como enlaces que abren el archivo en esa página ──
+// La IA las escribe al extraer el Paso 1 (campo "fuente" de cada parámetro y, entre corchetes, al final de los datos de los campos de texto) y las copia al "motivo" de los valores del Paso 2.
+// Solo se enlaza lo que coincide con un archivo que MAIA conoce del proyecto (los analizados, los de la carpeta de SharePoint o los subidos en esta sesión).
+const procesosEscRe = x => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function procesosFuenteNombres() {
+  const p = (typeof procesosCurrentProyecto !== 'undefined' && procesosCurrentProyecto) || null, info = (p && p.info_cliente) || {}, mapa = new Map();
+  const agregar = n => { const t = String(n || '').trim(); if (t) mapa.set(t.toLowerCase(), t); };
+  (info.archivos_analizados || []).forEach(a => agregar(a && a.nombre));
+  ((info.carpeta_cliente && info.carpeta_cliente.archivos_cache) || []).forEach(a => agregar(a && a.nombre));
+  ((typeof procesosStep1Files !== 'undefined' && procesosStep1Files) || []).forEach(i => agregar(i && i.file && i.file.name));
+  return [...mapa.values()];
+}
+// Referencias encontradas en un texto: [{ start, end, nombre, pagina }] (nombre = el del archivo real; pagina = '' si no se indica)
+function procesosFuenteRefs(texto, nombres) {
+  const t = String(texto == null ? '' : texto); nombres = nombres || procesosFuenteNombres();
+  if (!t || !nombres.length) return [];
+  const variantes = new Map(); // texto escrito → nombre real del archivo (también sin la extensión, que la IA a veces omite)
+  nombres.forEach(n => { variantes.set(n.toLowerCase(), n); const sin = n.replace(/\.[A-Za-z0-9]{2,5}$/, ''); if (sin.length >= 4 && !variantes.has(sin.toLowerCase())) variantes.set(sin.toLowerCase(), n); });
+  const alt = [...variantes.keys()].sort((a, b) => b.length - a.length).map(procesosEscRe).join('|');
+  const re = new RegExp('\\[?\\s*(' + alt + ')(?:\\s*[—–,:\\-]?\\s*(?:p[aá]ginas?|p[aá]gs?\\.?|p\\.)\\s*(\\d{1,4}))?(?:\\s*\\])?', 'gi');
+  const out = []; let m;
+  while ((m = re.exec(t))) { out.push({ start: m.index, end: m.index + m[0].length, nombre: variantes.get(m[1].toLowerCase()) || m[1], pagina: m[2] || '' }); if (m[0].length === 0) re.lastIndex++; }
+  return out;
+}
+function procesosFuenteChip(nombre, pagina) {
+  const corto = nombre.length > 34 ? nombre.slice(0, 31) + '…' : nombre;
+  return `<a href="#" class="ps-fuente-link" style="color:var(--blue);text-decoration:underline;cursor:pointer;white-space:nowrap" data-a="${esc(nombre)}" data-p="${esc(pagina || '')}" onclick="procesosAbrirFuente(this.dataset.a,this.dataset.p);return false" title="Abrir ${esc(nombre)}${pagina ? ' en la página ' + esc(pagina) : ''}">📄 ${esc(corto)}${pagina ? ' · pág. ' + esc(pagina) : ''}</a>`;
+}
+// El texto con sus referencias convertidas en enlaces (el resto, escapado)
+function procesosFuenteHtml(texto) {
+  const t = String(texto == null ? '' : texto), refs = procesosFuenteRefs(t);
+  if (!refs.length) return esc(t);
+  let out = '', i = 0;
+  refs.forEach(r => { out += esc(t.slice(i, r.start)) + procesosFuenteChip(r.nombre, r.pagina); i = r.end; });
+  return out + esc(t.slice(i));
+}
+// Solo los enlaces de un texto (sin repetir), para ponerlos al lado de un valor o un motivo
+function procesosFuenteChips(texto) {
+  const vistos = new Set(), out = [];
+  procesosFuenteRefs(texto).forEach(r => { const k = r.nombre.toLowerCase() + '|' + r.pagina; if (!vistos.has(k)) { vistos.add(k); out.push(procesosFuenteChip(r.nombre, r.pagina)); } });
+  return out.join(' ');
+}
+// Lo que se le agrega al pedido de análisis del Paso 1 para que cite archivo y página
+function procesosFuenteInstruccion(nombres) {
+  const lista = (nombres || []).filter(Boolean);
+  if (!lista.length) return '';
+  return `\n\nREFERENCIAS A LOS ARCHIVOS (muy importante: el usuario va a abrir cada archivo en la página que cites para verificar el dato). Los archivos adjuntos se llaman: ${lista.map(n => '"' + n + '"').join(', ')}.\n- En "fuente" de cada parámetro escribí SIEMPRE el nombre EXACTO del archivo y la página donde está el dato, con este formato: "NombreExacto.pdf — pág. 12" (si el dato está en varias páginas, la principal; si el archivo es una imagen o no tiene páginas, solo el nombre). Si lo estimaste o inferiste, aclaralo después: "NombreExacto.pdf — pág. 12 (estimado a partir de ...)".\n- En los campos generales de texto, cada dato o frase que salga de un documento lleva AL FINAL, entre corchetes, su referencia con el mismo formato: [NombreExacto.pdf — pág. 12]. Si sale de más de una página: [NombreExacto.pdf — pág. 12, 14].\n- Contá las páginas como las numera el visor de PDF (la primera página es la 1), no por el número impreso al pie de la hoja.`;
+}
+
+// Vista previa: busca el archivo (memoria de esta sesión → archivos subidos → carpeta de SharePoint del cliente → que lo elija el usuario) y lo muestra en la página indicada
+let _procesosFuenteBlobs = {};
+function procesosFuenteCerrar() { const m = document.getElementById('procesos-fuente-modal'); if (m) m.remove(); }
+async function procesosFuenteObtenerBlob(nombre) {
+  const k = String(nombre).toLowerCase();
+  if (_procesosFuenteBlobs[k]) return _procesosFuenteBlobs[k];
+  const local = ((typeof procesosStep1Files !== 'undefined' && procesosStep1Files) || []).find(i => i && i.file && String(i.file.name).toLowerCase() === k);
+  if (local) return (_procesosFuenteBlobs[k] = local.file);
+  const p = procesosCurrentProyecto, carpeta = (typeof procesosStep1SpFolder !== 'undefined' && procesosStep1SpFolder) || (p && p.info_cliente && p.info_cliente.carpeta_cliente);
+  if (carpeta && carpeta.siteId && carpeta.itemId) {
+    const token = await getMsToken();
+    const rl = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${carpeta.itemId}/children?$top=200`, { headers: { Authorization: 'Bearer ' + token } });
+    const lista = rl.ok ? ((await rl.json()).value || []) : [];
+    const f = lista.find(x => x.file && String(x.name).toLowerCase() === k);
+    if (f) {
+      // lo que no es PDF ni imagen se convierte a PDF, igual que cuando lo leyó la IA: así la página coincide
+      const conv = !/\.(pdf|jpe?g|png)$/i.test(f.name);
+      const rd = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${f.id}/content${conv ? '?format=pdf' : ''}`, { headers: { Authorization: 'Bearer ' + token } });
+      if (rd.ok) { const b = await rd.blob(); const tipo = conv || /\.pdf$/i.test(f.name) ? 'application/pdf' : (/\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg'); return (_procesosFuenteBlobs[k] = new Blob([b], { type: tipo })); }
+    }
+  }
+  return null;
+}
+function procesosFuenteMostrar(nombre, pagina, blob) {
+  const cuerpo = document.getElementById('procesos-fuente-cuerpo'); if (!cuerpo) return;
+  const esPdf = /pdf/i.test(blob.type) || /\.pdf$/i.test(nombre), esImg = /^image\//i.test(blob.type) || /\.(jpe?g|png)$/i.test(nombre);
+  const url = URL.createObjectURL(esPdf ? new Blob([blob], { type: 'application/pdf' }) : blob);
+  const destino = esPdf ? url + '#page=' + (Number(pagina) > 0 ? Number(pagina) : 1) + '&view=FitH' : url;
+  const abrir = document.getElementById('procesos-fuente-abrir'); if (abrir) { abrir.href = destino; abrir.style.display = ''; }
+  cuerpo.innerHTML = esPdf ? `<iframe src="${destino}" style="width:100%;height:100%;border:0"></iframe>` : esImg ? `<div style="height:100%;overflow:auto;text-align:center"><img src="${url}" style="max-width:100%" /></div>` : `<p class="hint" style="padding:16px">Este tipo de archivo no se puede mostrar acá. <a href="${url}" download="${esc(nombre)}">Descargarlo</a>.</p>`;
+}
+async function procesosAbrirFuente(nombre, pagina) {
+  procesosFuenteCerrar();
+  const ov = document.createElement('div');
+  ov.id = 'procesos-fuente-modal'; ov.className = 'map-modal-overlay'; ov.style.alignItems = 'center';
+  ov.onclick = e => { if (e.target === ov) procesosFuenteCerrar(); };
+  ov.innerHTML = `<div class="map-modal" style="max-width:1100px;width:96%;height:90dvh;border-radius:var(--radius)">
+    <div class="map-modal-header" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h2 style="flex:1;min-width:200px;margin:0">📄 ${esc(nombre)}${pagina ? ' — pág. ' + esc(pagina) : ''}</h2><a id="procesos-fuente-abrir" class="btn btn-secondary btn-sm" style="display:none;width:auto" href="#" target="_blank" rel="noopener">Abrir en otra pestaña</a><button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosFuenteCerrar()">✕ Cerrar</button></div>
+    <div id="procesos-fuente-cuerpo" class="map-modal-body" style="padding:0;flex:1;min-height:0"><p class="hint" style="padding:16px">⏳ Buscando el archivo...</p></div></div>`;
+  document.body.appendChild(ov);
+  let blob = null;
+  try { blob = await procesosFuenteObtenerBlob(nombre); } catch (e) { console.warn('No se pudo traer el archivo:', e.message); }
+  if (!document.getElementById('procesos-fuente-modal')) return; // se cerró mientras buscaba
+  if (blob) { procesosFuenteMostrar(nombre, pagina, blob); return; }
+  // no está a mano: que lo elija el usuario (queda en memoria para las próximas veces de esta sesión)
+  const cuerpo = document.getElementById('procesos-fuente-cuerpo');
+  cuerpo.innerHTML = `<div style="padding:16px"><p class="hint" style="margin-bottom:10px">No encontré "${esc(nombre)}" para abrirlo (puede que se haya subido desde tu computadora en otra sesión, o que ya no esté en la carpeta de SharePoint). Elegilo desde tu computadora para verlo en la página ${esc(pagina || '1')}:</p><input type="file" accept=".pdf,.jpg,.jpeg,.png" id="procesos-fuente-input" /></div>`;
+  document.getElementById('procesos-fuente-input').onchange = ev => { const f = ev.target.files && ev.target.files[0]; if (f) { _procesosFuenteBlobs[String(nombre).toLowerCase()] = f; procesosFuenteMostrar(nombre, pagina, f); } };
+}
+
 // ── Paso 1: analizar cliente ───────────────────────────
 function procesosStep1HandleFiles(fileList) {
   Array.from(fileList).forEach(f => {
@@ -8752,7 +8851,7 @@ function procesosStep1Html(p) {
         <div class="result-field">
           <span class="result-key">${esc(f.name)}</span>
           <input class="result-val" value="${esc(campos[f.name]!=null?String(campos[f.name]):'')}" oninput="procesosUpdateCampoCliente('${f.name.replace(/'/g,"\\'")}',this.value)" />
-        </div>`).join('')}
+        </div>${(() => { const ch = procesosFuenteChips(campos[f.name]); return ch ? `<div class="hint" style="margin:-4px 0 8px;display:flex;gap:10px;flex-wrap:wrap">Fuentes: ${ch}</div>` : ''; })()}`).join('')}
 
       <div class="gap"></div>
       <div class="card-label">Corrientes de efluente</div>
@@ -8779,7 +8878,7 @@ function procesosStep1Html(p) {
               <input class="ps1-val" placeholder="Valor" value="${esc(v.valor!=null?procesosFormatearNumero(v.valor):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','valor',this.value)" />
               <input class="ps1-val" style="text-align:left" placeholder="Unidad" value="${esc(v.unidad!=null?String(v.unidad):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','unidad',this.value)" />
               <input class="ps1-val" placeholder="Límite normativo" value="${esc(v.limite_normativo!=null?procesosFormatearNumero(v.limite_normativo):'')}" oninput="procesosUpdateCampoCorriente(${ci},'${fKey}','limite_normativo',this.value)" />
-              ${v.fuente ? `<span class="ps1-fuente" title="Para verificar — no es una fuente confirmada, revisala si es un dato crítico">📎 ${esc(v.fuente)}</span>` : ''}
+              ${v.fuente ? `<span class="ps1-fuente" title="Para verificar — no es una fuente confirmada, revisala si es un dato crítico">📎 ${procesosFuenteHtml(v.fuente)}</span>` : ''}
             </div>`;
             }).join('')}
           </div>
@@ -9228,6 +9327,7 @@ async function procesosStep1Analizar(modo) {
     const DEFAULT_TEMPLATE_STEP1 = `Analizá toda la información adjunta sobre este cliente/proyecto (incluida la información general de la empresa, si está adjunta).\n\nPrimero identificá cuántas CORRIENTES de efluente distintas hay (por ejemplo "Cloacal", "Industrial" — puede haber más de una industrial, ej. "Industrial línea 1" e "Industrial línea 2"). Si solo hay una, listala igual como una corriente con el nombre que corresponda.\n\nPara CADA corriente, extraé por separado estos parámetros numéricos (dejá null en los que no encuentres información específica para ESA corriente — no repitas ni asumas el valor de otra corriente):\n{{paramPrompt}}\n\nAdemás, extraé esta información general del proyecto (no varía por corriente, se extrae una sola vez):\n{{textoPrompt}}\n\nRespondé SOLO con JSON válido (sin backticks ni texto extra), con esta forma exacta:\n{"corrientes":[{"nombre":"...","campos":{"NombreDelParametro":{"valor":<número o null>,"unidad":"<unidad o null>","limite_normativo":<string o null>,"fuente":"<de dónde salió, o null>"}}}],"campos_generales":{"NombreDelCampoTexto":"<string o null>"}}\n\nPara "limite_normativo": esta llamada NO tiene adjunto el documento de normativa externa (eso se resuelve después, en un paso aparte) — así que ACÁ solo completá "limite_normativo" si el propio CLIENTE ya lo trae indicado explícitamente en sus propios documentos (a veces el cliente ya trae su propia normativa o el límite que le exigen a él directamente — eso siempre prevalece sobre cualquier normativa externa; si adjuntó una TABLA de límites, revisala fila por fila con cuidado, recorré la tabla completa hasta el final aunque tenga muchas filas, no te quedes solo con las primeras, y no mezcles el valor de una fila/columna con el de otra). Si el cliente no trae un límite explícito propio, dejá "limite_normativo" en null — NUNCA lo completes de memoria ni infiriendo qué normativa aplicaría, ni aunque te parezca reconocer la ubicación o el tipo de vuelco: sin el documento de normativa adjunto en este paso, cualquier límite que no venga literal de los documentos del cliente es una invención. IMPORTANTE: "limite_normativo" es un STRING, no lo fuerces a un solo número — copiá el valor tal cual figura en el documento del cliente, incluyendo si es un rango ("5-10", "6 a 9") o una desigualdad ("≤50", "<1", ">=0.5", "menor a 35"); no lo simplifiques ni te quedes solo con un extremo del rango. Para "unidad", usá la unidad tal como aparece o se infiere razonablemente (ej. 'm3/h', 'mg/L'). Para "fuente", indicá de dónde salió el "valor" (y el "limite_normativo" si lo completaste) — ej. "Planilla de datos del cliente, pág. X" — si inferiste o estimaste el valor en vez de que estuviera explícito, decilo (ej. "Estimado a partir de..."); si no podés precisarlo, dejalo null. Si no encontrás un valor explícito de un parámetro o campo general pero podés inferirlo razonablemente con la información disponible, hacelo con tu mejor criterio (pero eso no aplica a "limite_normativo", que solo puede salir de un documento real del cliente en este paso, nunca de tu criterio o memoria).`;
     const templateStep1 = await procesosPromptText('step1_analizar', DEFAULT_TEMPLATE_STEP1);
     let prompt = procesosPromptFill(templateStep1, { paramPrompt, textoPrompt });
+    prompt += procesosFuenteInstruccion(contentItems.map(c => c.nombre).filter(n => n && n !== 'Descripción escrita a mano'));
     if (modo === 'sumar') {
       const yaNombres = (p.info_cliente.corrientes || []).map(c => c.nombre).filter(Boolean);
       prompt += '\n\nANÁLISIS INCREMENTAL: este cliente ya fue analizado antes con otros documentos; ahora se agrega información NUEVA. Extraé SOLO lo que figure en los documentos adjuntos ahora (dejá null lo que no aparezca — lo ya cargado se conserva aparte).' + (yaNombres.length ? ' Corrientes que ya existen: ' + yaNombres.map(n => '"' + n + '"').join(', ') + '. Si lo adjuntado corresponde a una de ellas, usá EXACTAMENTE ese nombre; solo creá una corriente nueva si es realmente otra distinta.' : '');
@@ -12440,6 +12540,7 @@ const PROCESOS_REQ_TOOL = {
           properties: {
             requerimiento: { type: 'string', description: 'El parámetro pedido, citado breve y fiel al pliego (ej. "θc 20-30 días", "TRH sedimentador > 3 h").' },
             celda: { type: ['string', 'null'], description: 'Referencia (ej. "C16") de la celda de ESTA hoja que representa ese parámetro, o null si la hoja no tiene una celda equivalente.' },
+            fuente: { type: ['string', 'null'], description: 'Referencia al archivo y página de donde sale este requerimiento, copiada TAL CUAL del texto original (ej. "Pliego.pdf — pág. 12"); null si el texto no trae ninguna.' },
             minimo: { type: ['number', 'null'], description: 'Valor mínimo requerido, convertido a la UNIDAD de la celda. null si no hay mínimo.' },
             maximo: { type: ['number', 'null'], description: 'Valor máximo requerido, convertido a la UNIDAD de la celda. null si no hay máximo.' },
           },
@@ -12492,7 +12593,7 @@ async function procesosStep2RelacionarRequerimientos(nombre, model, p, raw) {
   const refs = new Set(model.cells.map(c => c.ref));
   return ((tu.input && tu.input.items) || [])
     .filter(it => it && it.requerimiento && (it.minimo != null || it.maximo != null))
-    .map(it => ({ requerimiento: String(it.requerimiento), celda: it.celda && refs.has(it.celda) ? it.celda : null, minimo: it.minimo != null ? Number(it.minimo) : null, maximo: it.maximo != null ? Number(it.maximo) : null }));
+    .map(it => ({ requerimiento: String(it.requerimiento), fuente: it.fuente ? String(it.fuente) : null, celda: it.celda && refs.has(it.celda) ? it.celda : null, minimo: it.minimo != null ? Number(it.minimo) : null, maximo: it.maximo != null ? Number(it.maximo) : null }));
 }
 // Se asegura de que la hoja tenga relacionados los requerimientos (la IA se
 // llama solo si cambió el pliego o la estructura de la hoja, o si se fuerza).
@@ -12540,7 +12641,7 @@ function procesosStep2ReqPanelHtml(nombre, model, hf, h, safe, p) {
       const pedido = procesosStep2ReqRangoTxt(it);
       const icono = r.estado === 'cumple' ? '<span style="color:var(--green);font-weight:700">✓</span>' : r.estado === 'no_cumple' ? '<span style="color:var(--red);font-weight:700">✗</span>' : '<span style="color:var(--text2);font-weight:700">?</span>';
       const det = r.c ? `${esc(r.c.ref)} ${esc(r.c.label)}${r.v != null ? ': <b>' + esc(String(procesosFormatearNumero(r.v))) + (r.c.unidad ? ' ' + esc(r.c.unidad) : '') + '</b>' : ': sin valor'} · pedido ${esc(pedido)}${r.estado === 'no_cumple' ? (r.bajo ? ' — queda por debajo' : ' — se pasa') : ''}` : `pedido ${esc(pedido)} — la hoja no tiene una celda para verificarlo`;
-      return `<div style="display:flex;gap:8px;font-size:13px;padding:3px 0"><span style="width:16px">${icono}</span><span><b>${esc(it.requerimiento)}</b><br><span style="font-size:12px;color:${r.estado === 'no_cumple' ? 'var(--red)' : 'var(--text2)'}">${det}</span></span></div>`;
+      return `<div style="display:flex;gap:8px;font-size:13px;padding:3px 0"><span style="width:16px">${icono}</span><span><b>${procesosFuenteHtml(it.requerimiento)}</b>${it.fuente && !procesosFuenteChips(it.requerimiento) ? ' ' + procesosFuenteChips(it.fuente) : ''}<br><span style="font-size:12px;color:${r.estado === 'no_cumple' ? 'var(--red)' : 'var(--text2)'}">${det}</span></span></div>`;
     }).join('');
     const nNo = chq.items.filter(it => procesosStep2EvaluarReq(hf, model, it).estado === 'no_cumple').length;
     cuerpo = filas + (nNo ? `<p style="font-size:13px;color:var(--red);margin:6px 0 0"><b>${nNo} requerimiento${nNo === 1 ? '' : 's'} del pliego no se cumple${nNo === 1 ? '' : 'n'} con los valores actuales.</b></p>` : '<p style="font-size:13px;color:var(--green);margin:6px 0 0">✓ Se cumplen todos los requerimientos del pliego que se pueden verificar en esta hoja.</p>');
@@ -12652,17 +12753,17 @@ function procesosStep2RenderHojaPanel() {
     // una fila que tenga fórmula Y rango a la vez, sin que una tape a la otra.
     const enPlantaCompacta = h.plantaCompacta && (h.plantaCompacta.celdas||[]).includes(c.ref);
     const infoLineas = [];
-    if (mapeo) infoLineas.push(`🔗 ${esc(origenTxt)}`);
+    if (mapeo) { const ch = procesosFuenteChips(fuentes.filter(f => f.origen === 'paso1').map(f => { const cc = ((p.info_cliente && p.info_cliente.corrientes) || []).find(x => x.nombre === f.corriente), cf = cc && cc.campos && cc.campos[f.campo]; return cf && typeof cf === 'object' ? cf.fuente : ''; }).join(' ')); infoLineas.push(`🔗 ${esc(origenTxt)}${ch ? ' ' + ch : ''}`); }
     if (enPlantaCompacta) infoLineas.push(`🏭 ${esc(h.plantaCompacta.modelo)}`);
     if (rangoTxt) infoLineas.push(esc(rangoTxt));
     if (c.notaLibre) infoLineas.push('💬 ' + esc(c.notaLibre));
     (h.chequeoReq && h.chequeoReq.items || []).filter(it => it.celda === c.ref).forEach(it => {
       const r = procesosStep2EvaluarReq(hf, model, it);
-      if (r.estado === 'cumple') infoLineas.push(`<span style="color:var(--green)" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✓ pliego ${esc(procesosStep2ReqRangoTxt(it))}</span>`);
-      else if (r.estado === 'no_cumple') infoLineas.push(`<span style="color:var(--red);font-weight:600" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✗ pliego pide ${esc(procesosStep2ReqRangoTxt(it))}</span>`);
+      if (r.estado === 'cumple') infoLineas.push(`<span style="color:var(--green)" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✓ pliego ${esc(procesosStep2ReqRangoTxt(it))}</span> ${procesosFuenteChips((it.requerimiento || '') + ' ' + (it.fuente || ''))}`);
+      else if (r.estado === 'no_cumple') infoLineas.push(`<span style="color:var(--red);font-weight:600" title="Requerimiento del pliego: ${esc(it.requerimiento)}">✗ pliego pide ${esc(procesosStep2ReqRangoTxt(it))}</span> ${procesosFuenteChips((it.requerimiento || '') + ' ' + (it.fuente || ''))}`);
     });
     const moCelda = (h.motivos || {})[c.ref];
-    if (moCelda) infoLineas.push(`<span title="${esc(moCelda.motivo + ' — ' + moCelda.origen + ', ' + moCelda.fecha)}">📝 ${esc(moCelda.motivo.length > 90 ? moCelda.motivo.slice(0, 88) + '…' : moCelda.motivo)}</span>`);
+    if (moCelda) infoLineas.push(`<span title="${esc(moCelda.motivo + ' — ' + moCelda.origen + ', ' + moCelda.fecha)}">📝 ${esc(moCelda.motivo.length > 90 ? moCelda.motivo.slice(0, 88) + '…' : moCelda.motivo)}</span> ${procesosFuenteChips(moCelda.motivo)}`);
     const refTag = `<span style="font-family:monospace;font-size:11px;font-weight:600;color:var(--text2);background:var(--surface2);border-radius:4px;padding:0 4px;margin-right:5px">${esc(c.ref)}</span>`;
     const valorHtml = forzada
       ? `<span class="ps2-val" style="background:#fff3cd;color:#8a6d00;display:flex;align-items:center;justify-content:flex-end;gap:4px;cursor:default" title="Pisado a mano solo en este proyecto (el Excel no cambia) — ya NO se recalcula solo aunque cambien sus datos de entrada"><span>🔒</span><input value="${valTxt!=null?esc(valTxt):''}" onchange="procesosStep2SetValor('${safe}','${c.ref}',this.value)" style="flex:1;min-width:0;text-align:right;font:inherit;color:inherit;background:transparent;border:none;outline:none;padding:0" /><button class="btn btn-secondary btn-sm" style="padding:1px 5px;font-size:10px" onclick="procesosStep2RestaurarFormula('${safe}','${c.ref}')" title="${c.isFormula ? 'Restaurar la fórmula para que vuelva a recalcularse sola' : 'Volver al valor original (conexión / planilla)'}">↺</button></span>`
@@ -13763,7 +13864,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     // "de memoria" (o del estado previo a sus propios cambios) el texto no
     // coincide con lo que después se ve en las celdas — se lo aclaramos.
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
-    const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
+    const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el valor sale de un dato del Paso 1 o de los requerimientos del cliente que trae una referencia a un archivo entre corchetes (ej. [Pliego.pdf — pág. 12]), copiá esa referencia TAL CUAL al final del "motivo": así el usuario puede abrir el archivo en esa página.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
     const plantaCompactaTxt = await procesosPCPromptTxt(nombre, hActual);
     const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, plantaCompactaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
     const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
