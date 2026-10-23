@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10153,10 +10153,10 @@ function procesosStep2Html(p) {
           <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',-1)" ${opts.esPrimera?'disabled':''}>&#9650;</button>
           <button class="reorder-btn" onclick="procesosStep2ReorderHoja('${safe}',1)" ${opts.esUltima?'disabled':''}>&#9660;</button>
         </div>` : ''}
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);flex:1;min-width:160px">
-          <input type="checkbox" ${h.seleccionada?'checked':''} onchange="procesosStep2ToggleHoja('${safe}',this.checked)" />
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);flex:1;min-width:160px">
+          <input type="checkbox" ${h.seleccionada?'checked':''} onchange="procesosStep2ToggleHoja('${safe}',this.checked)" title="Incluir / sacar esta unidad del tren" />
           <span>${opts.numero!=null?`<b>${opts.numero}.</b> `:''}<b>${esc(nombre)}</b>${h.motivo?' — '+esc(h.motivo):''}${h.confirmada?(desactualizada?' <span style="color:var(--red)" title="Una hoja de la que toma datos se actualizó después de guardar esta — revisala de nuevo">⚠ desactualizada</span>':' <span style="color:var(--green)">✓ definida</span>'):''}</span>
-        </label>
+        </div>
         ${badges}
         ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2AbrirHoja('${safe}')">${h.confirmada?'Editar':'Definir'} valores →</button>` : ''}
         ${h.seleccionada ? `<button class="btn btn-secondary btn-sm" onclick="procesosStep2DuplicarHoja('${safe}')" title="Crear otra unidad independiente con esta misma hoja de cálculo">⧉ Duplicar</button>` : ''}
@@ -10180,6 +10180,7 @@ function procesosStep2Html(p) {
       <button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2ReintentarSugerencia()" title="Le vuelve a pedir a la IA que proponga el tren completo (cantidad, corriente y disposición de cada unidad) — no se aplica hasta que lo confirmes">↻ Volver a sugerir con IA</button>
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2TrenAbrirDesdeActual()" title="Abre el tren actual para preguntarle a la IA por qué está armado así o modificarlo por chat (agregar/sacar unidades, serie/paralelo, etc.) — no se aplica hasta que lo confirmes">💬 Revisar / modificar el tren con chat</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2ToggleBalanceTren()" title="Calcula cómo entra y cómo sale cada parámetro (DBO, DQO, SST...) en cada unidad y en todo el tren, con las eficiencias de remoción">📊 Balance de parámetros del tren</button>` : ''}
+      ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2ExportarExcel()" title="Baja un Excel con una hoja por unidad del tren, con los valores que tiene definidos en este momento (y su unidad, origen, motivo y fórmula)">📥 Descargar valores (Excel)</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2DefinirTodas()" title="Define los valores de las unidades que todavía no están definidas, en orden y en una sola pasada por unidad">✦ Definir valores de todas las unidades</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto;color:var(--red)" onclick="procesosStep2BorrarValores()" title="Borra los valores definidos de todas las unidades para poder volver a definirlos desde cero (se conservan el tren, las conexiones, las fórmulas y filas propias)">🗑 Borrar valores definidos</button>` : ''}
     </div>
@@ -12239,6 +12240,80 @@ async function procesosStep2BorrarValores(nombreUnica) {
   await procesosSaveProyecto({ diseno_data: nd }, p);
   await procesosStep2CargarPlanilla(false);        // vuelve a armar las planillas desde cero con lo que quedó guardado
   if (procesosCurrentProyecto === p) { renderProcesosStepContent(); showMsg('procesos-step2-status', 'success', `✓ Valores borrados (${nombres.length} unidad${nombres.length === 1 ? '' : 'es'}). Ya podés volver a definirlos.`); }
+}
+
+// ── Descargar los valores del Paso 2 en un Excel (una hoja por unidad) ──
+// Las filas salen en el mismo orden que en pantalla (las del Excel de la planilla con las propias debajo de la fila a la que se agregaron), sin las filas ocultas.
+function procesosStep2FilasDeUnidad(nombre) {
+  const hf = procesosStep2GetHF(nombre), model = procesosStep2State.hojaModels[nombre];
+  if (!hf || !model) return null;
+  const p = procesosCurrentProyecto, h = (p.diseno_data && p.diseno_data.hojas && p.diseno_data.hojas[nombre]) || {};
+  const mapaPorCelda = {}; (((p.diseno_data || {}).mapeos || {})[nombre] || []).forEach(m => { mapaPorCelda[m.celda] = m; });
+  const extrasPorAncla = {};
+  model.cells.filter(c => c.extra).forEach(c => { (extrasPorAncla[c.despuesDe || ''] = extrasPorAncla[c.despuesDe || ''] || []).push(c); });
+  const orden = [], poner = c => { if (orden.includes(c)) return; orden.push(c); (extrasPorAncla[c.ref] || []).slice().sort((a, b) => b.slot - a.slot).forEach(poner); };
+  model.cells.filter(c => !c.extra).forEach(poner);
+  model.cells.filter(c => c.extra && !orden.includes(c)).sort((a, b) => a.slot - b.slot).forEach(poner);
+  const ocultas = h.filasOcultas || [];
+  const filas = orden.filter(c => !ocultas.includes(c.ref)).map(c => {
+    const v = procesosStep2ValorTexto(hf.getCellValue({ sheet: 0, row: c.row, col: c.col }));
+    const mapeo = mapaPorCelda[c.ref], fuentes = (mapeo && mapeo.fuentes) || [];
+    const origen = fuentes.length ? fuentes.map(f => f.origen === 'paso1' ? `${f.corriente}: ${f.campo}` : f.hoja).join(fuentes.length > 1 ? ' + ' : '') + (fuentes.length > 1 ? ' (ponderado por caudal)' : '') : '';
+    const mo = (h.motivos || {})[c.ref];
+    const origenMotivo = [origen && ('Conexión: ' + origen), h.plantaCompacta && (h.plantaCompacta.celdas || []).includes(c.ref) ? 'Planta compacta: ' + h.plantaCompacta.modelo : '', mo ? `${mo.motivo} (${mo.origen}, ${mo.fecha})` : '', c.notaLibre || ''].filter(Boolean).join(' · ');
+    const pliego = ((h.chequeoReq && h.chequeoReq.items) || []).filter(it => it.celda === c.ref).map(it => {
+      const r = procesosStep2EvaluarReq(hf, model, it);
+      return (r.estado === 'cumple' ? 'Cumple ' : r.estado === 'no_cumple' ? 'NO cumple ' : '') + procesosStep2ReqRangoTxt(it) + ' — ' + it.requerimiento;
+    }).join(' | ');
+    const rawGrid = (model.grid[c.row] && model.grid[c.row][c.col] != null) ? String(model.grid[c.row][c.col]) : '';
+    const formula = c.formulaEditada ? String((h.formulas || {})[c.ref] || '') : (c.extra ? (typeof c.contenido === 'string' && c.contenido[0] === '=' ? c.contenido : '') : (c.isFormula ? rawGrid : ''));
+    return { ref: c.ref, parametro: c.label || '', simbolo: c.simbolo || '', valor: v == null ? '' : v, unidad: c.unidad || '', origen: origenMotivo, rango: c.rango || '', limite: c.rango_limite || '', pliego, formula: c.formulaLegible || formula, propia: !!c.extra };
+  });
+  return { h, filas };
+}
+async function procesosStep2ExportarExcel() {
+  const p = procesosCurrentProyecto, st = procesosStep2State, dd = (p && p.diseno_data) || {};
+  const nombres = (dd.orden || []).filter(n => dd.hojas && dd.hojas[n] && dd.hojas[n].seleccionada);
+  if (!nombres.length) { alert('No hay unidades en el tren para descargar.'); return; }
+  if (!st.workbook) { alert('Todavía no se cargó la planilla de diseño: esperá a que termine de cargar y probá de nuevo.'); return; }
+  const sid = 'procesos-step2-status';
+  showMsg(sid, 'loading', 'Armando el Excel...');
+  try {
+    await casoCargarExcelJS();
+    try { procesosStep2PropagarCadena(); } catch (_e) { /* si falla la propagación se usa lo que ya hay */ }
+    const wb = new ExcelJS.Workbook(); wb.creator = 'MAIA'; wb.created = new Date();
+    const usados = new Set(), sinHoja = [];
+    const nombreHoja = n => { let base = String(n).replace(/[\\/*?:\[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 31) || 'Unidad', t = base, k = 2; while (usados.has(t.toLowerCase())) { const suf = ' (' + k++ + ')'; t = base.slice(0, 31 - suf.length) + suf; } usados.add(t.toLowerCase()); return t; };
+    const cols = [['Ref', 8], ['Parámetro', 44], ['Símbolo', 10], ['Valor', 16], ['Unidad', 12], ['Origen / motivo', 70], ['Rango', 16], ['Límite', 16], ['Requerimiento del pliego', 48], ['Fórmula', 30]];
+    for (const nombre of nombres) {
+      let datos = null; try { datos = procesosStep2FilasDeUnidad(nombre); } catch (e) { datos = null; }
+      const ws = wb.addWorksheet(nombreHoja(nombre));
+      const h = (datos && datos.h) || (dd.hojas[nombre] || {});
+      const estado = h.confirmada ? 'definida' : 'sin guardar';
+      const extra = [h.tipo === 'auxiliar' ? 'cálculo auxiliar' : '', h.material ? (PROCESOS_MATERIALES[h.material] || h.material) : '', h.geometria ? (PROCESOS_GEOMETRIAS[h.geometria] || h.geometria) : '', h.plantaCompacta ? h.plantaCompacta.modelo : ''].filter(Boolean).join(' · ');
+      ws.getCell('A1').value = nombre; ws.getCell('A1').font = { bold: true, size: 14 };
+      ws.getCell('A2').value = `${p.nombre || ''} — unidad ${estado}${extra ? ' — ' + extra : ''} — descargado el ${new Date().toLocaleString('es-AR')}`; ws.getCell('A2').font = { italic: true, color: { argb: 'FF666666' } };
+      ws.columns = cols.map(c => ({ width: c[1] }));
+      const hr = ws.getRow(4); cols.forEach((c, i) => { hr.getCell(i + 1).value = c[0]; });
+      hr.font = { bold: true, color: { argb: 'FFFFFFFF' } }; hr.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } }; c.alignment = { vertical: 'middle', wrapText: true }; });
+      ws.views = [{ state: 'frozen', ySplit: 4 }];
+      if (!datos) { sinHoja.push(nombre); ws.getCell('A5').value = 'No se pudo leer la planilla de esta unidad.'; continue; }
+      datos.filas.forEach((f, i) => {
+        const r = ws.getRow(5 + i);
+        [f.ref, f.parametro, f.simbolo, f.valor, f.unidad, f.origen, f.rango, f.limite, f.pliego, f.formula || ''].forEach((v, j) => { r.getCell(j + 1).value = v; }); // (un texto que empieza con "=" queda como texto, no como fórmula viva)
+        r.getCell(4).alignment = { horizontal: 'right', vertical: 'top' }; if (typeof f.valor === 'number') r.getCell(4).numFmt = Math.abs(f.valor) >= 1000 ? '#,##0.##' : '0.####';
+        r.eachCell(c => { if (c.col !== 4) c.alignment = { vertical: 'top', wrapText: true }; });
+        if (/^ERROR/.test(String(f.valor))) r.getCell(4).font = { color: { argb: 'FFC00000' } };
+        if (/NO cumple/.test(f.pliego)) r.getCell(9).font = { color: { argb: 'FFC00000' }, bold: true };
+        if (f.propia) r.getCell(2).font = { italic: true };
+      });
+      if (!datos.filas.length) ws.getCell('A5').value = 'La unidad no tiene filas.';
+    }
+    const buf = await wb.xlsx.writeBuffer();
+    const nombreArch = `${cotizSanitizeNombre(p.nombre || 'Proyecto')} - Paso 2 valores.xlsx`;
+    cotizDescargarBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArch);
+    showMsg(sid, sinHoja.length ? 'error' : 'success', `✓ Excel descargado: ${nombres.length} hoja${nombres.length === 1 ? '' : 's'} (una por unidad).` + (sinHoja.length ? ` No se pudo leer: ${sinHoja.join(', ')}.` : ''));
+  } catch (e) { showMsg(sid, 'error', '✕ No se pudo armar el Excel: ' + e.message); }
 }
 
 async function procesosStep2DefinirTodas() {
