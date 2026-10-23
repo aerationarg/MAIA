@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -13438,8 +13438,8 @@ async function procesosPCAutoAplicar(nombre) {
 async function procesosPCPromptTxt(nombre, h) {
   try {
     if (!(h.material === 'planta_compacta' || h.plantaCompacta)) return '';
-    const cfg = await procesosPCCargar(); if (!cfg.modelos.length) return '';
-    const tipo = procesosPCTipoUnidad(nombre, h.hojaBase); if (!tipo) return '';
+    const cfg = await procesosPCCargar(); if (!cfg.modelos.length) return procesosPCModuloContextoTxt(nombre, h);
+    const tipo = procesosPCTipoUnidad(nombre, h.hojaBase); if (!tipo) return procesosPCModuloContextoTxt(nombre, h);
     const modTxt = (() => { const mod = procesosPCModulo(procesosCurrentProyecto); return mod && mod.miembros.length > 1 ? `Forma parte de UN módulo compacto junto con ${mod.miembros.map(x => x.nombre).filter(n => n !== nombre).join(', ')} (compartimentos que comparten ancho y altura: si se agrega una unidad al módulo, el módulo se agranda; si se le saca volumen a una para dárselo a otra, el módulo no cambia de tamaño). ` : ''; })();
     if (h.plantaCompacta && h.plantaCompacta.cfgId) {
       const m = cfg.modelos.find(x => x.id === h.plantaCompacta.cfgId);
@@ -13568,6 +13568,7 @@ function procesosConCache(blocks) {
 // puede responder en texto cuando solo se le pregunta algo); para el
 // autocompletado automático de datos faltantes se mantiene la herramienta
 // forzada (sin razonamiento), para que siempre devuelva acciones aplicables.
+const PROCESOS_FILAS_PROPIAS_TXT = `ESTA HOJA VIENE DE LA PLANILLA DE LA EMPRESA: sus filas originales no se modifican, pero SÍ podés agregar filas PROPIAS de este proyecto (un cálculo nuevo o un dato extra) con "estructura": {"op":"agregar_fila","clave":"símbolo corto y único (ej. Vtot)","etiqueta":"nombre de la fila","tipo":"entrada"|"calculo","valor":número (entrada),"formula":"=C5*C7/1000" (cálculo: referenciá celdas de la lista de arriba por su dirección, ej. C5; de OTRA unidad así: ='Nombre de la unidad'!C4; o a otra fila que agregues en el mismo pedido por su símbolo entre corchetes, ej. =[Vtot]*2),"unidad":"...","despues_de":"C7" (opcional: la celda tras la cual va, si no va al final),"motivo":"por qué"}. También "editar_fila" y "quitar_fila" (clave = el símbolo de la fila propia), SOLO para las filas propias que ya agregaste. Usalo cuando el usuario pida agregar celdas, filas o un cálculo nuevo a esta unidad: NO digas que no se puede en hojas de la planilla. Si una fórmula quedara con error, el sistema descarta todo el cambio de estructura.\n\n`;
 const PROCESOS_STEP2_TOOL = {
   name: 'aplicar_cambios',
   description: 'Aplica los cambios de diseño a la planilla de esta unidad y devuelve la respuesta conversacional para el usuario.',
@@ -13596,7 +13597,7 @@ const PROCESOS_STEP2_TOOL = {
       },
       estructura: {
         type: 'array',
-        description: 'SOLO para hojas libres (creadas por IA): cambios de estructura de la hoja. Vacío o ausente en hojas de la planilla.',
+        description: 'Cambios de estructura de la hoja. En una hoja LIBRE (creada por IA): agregar/editar/quitar filas de la hoja. En una hoja de la PLANILLA de la empresa: agregar filas PROPIAS de este proyecto (cálculos o datos extra, la planilla original no se toca) y editar/quitar solo las propias ya agregadas. Vacío o ausente si no hay que cambiar la estructura.',
         items: {
           type: 'object',
           properties: {
@@ -13606,7 +13607,8 @@ const PROCESOS_STEP2_TOOL = {
             valor: { type: 'number', description: 'Valor de una fila de entrada.' },
             formula: { type: 'string', description: 'Fórmula de una fila de cálculo, sin "=", referenciando filas por su símbolo entre corchetes.' },
             unidad: { type: 'string' }, rango: { type: 'string' }, nota: { type: 'string' },
-            despues_de: { type: 'string', description: 'agregar_fila: símbolo de la fila tras la cual insertarla.' },
+            despues_de: { type: 'string', description: 'agregar_fila: símbolo (hoja libre) o referencia de celda, ej. "C7" (hoja de la planilla), de la fila tras la cual insertarla.' },
+            motivo: { type: 'string', description: 'Hojas de la planilla: por qué se agrega o cambia la fila (queda registrado junto a la celda).' },
           },
           required: ['op', 'clave'],
         },
@@ -13616,6 +13618,62 @@ const PROCESOS_STEP2_TOOL = {
     required: ['reply', 'acciones'],
   },
 };
+
+// Filas propias en una hoja de la PLANILLA (pedidas por el chat): mismas filas propias que se agregan con el botón "＋ Agregar fila" (h.filasExtra). Si alguna fórmula nueva da error, no se aplica NADA de la estructura.
+function procesosStep2AplicarEstructuraFija(nombre, hPrev, ops) {
+  const st = procesosStep2State, model = st.hojaModels[nombre], res = { aplicadas: 0, avisos: [], filas: [] };
+  if (!model || !st.hfShared || !Array.isArray(ops) || !ops.length) return res;
+  const base = model.grid.length, col = model.valorCol != null ? model.valorCol : 1;
+  const refDeSlot = slot => XLSX.utils.encode_cell({ r: (model.r0 || 0) + base + slot, c: (model.c0 || 0) + col });
+  const prevFilas = hPrev.filasExtra, prevSlot = hPrev.slotNext || 0;
+  const filas = (prevFilas || []).map(f => Object.assign({}, f)), claves = new Map(); let slotNext = prevSlot;
+  filas.forEach(f => { if (f.simbolo) claves.set(String(f.simbolo).trim().toLowerCase(), refDeSlot(f.slot)); });
+  const celdaValida = r => { const t = String(r || '').trim().toUpperCase(); return model.cells.find(c => c.ref === t) ? t : (filas.some(f => refDeSlot(f.slot) === t) ? t : null); };
+  const buscarPropia = k => { const t = String(k || '').trim().toLowerCase(); return filas.find(f => (f.simbolo && String(f.simbolo).trim().toLowerCase() === t) || refDeSlot(f.slot).toLowerCase() === t); };
+  const sustituir = f => String(f).replace(/\[([^\[\]]+)\]/g, (m, k) => claves.get(k.trim().toLowerCase()) || m);
+  const contenidoDe = o => { if (o.tipo === 'calculo' || (o.formula && String(o.formula).trim())) { let f = String(o.formula || '').trim(); if (!f) return undefined; if (f[0] !== '=') f = '=' + f; return sustituir(f); } if (o.valor != null && o.valor !== '' && isFinite(Number(o.valor))) return Number(o.valor); return undefined; };
+  const nuevas = [], quitadas = [], motivos = {};
+  ops.slice(0, 30).forEach(o => {
+    if (!o || !o.op) return;
+    const clave = String(o.clave || '').trim();
+    if (o.op === 'agregar_fila') {
+      if (!clave) { res.avisos.push('Una fila a agregar no tenía símbolo (clave): se omitió.'); return; }
+      if (claves.has(clave.toLowerCase())) { res.avisos.push(`Ya existe una fila con el símbolo "${clave}": no se agregó otra.`); return; }
+      const slot = slotNext++; claves.set(clave.toLowerCase(), refDeSlot(slot)); nuevas.push({ o, slot, clave });
+    }
+  });
+  nuevas.forEach(({ o, slot, clave }) => {
+    const cont = contenidoDe(o), ref = refDeSlot(slot);
+    filas.push({ id: 'fx_' + procesosNuevoId(), slot, label: String(o.etiqueta || clave), simbolo: clave, unidad: String(o.unidad || ''), contenido: cont === undefined ? '' : cont, despuesDe: o.despues_de ? celdaValida(o.despues_de) : null });
+    motivos[ref] = String(o.motivo || 'fila agregada a pedido en el chat').slice(0, 300); res.aplicadas++; res.filas.push(`${ref} ${o.etiqueta || clave}`);
+  });
+  ops.slice(0, 30).forEach(o => {
+    if (!o || (o.op !== 'editar_fila' && o.op !== 'quitar_fila')) return;
+    const f = buscarPropia(o.clave);
+    if (!f) { res.avisos.push(`"${o.clave}": solo se pueden ${o.op === 'editar_fila' ? 'editar' : 'quitar'} las filas propias que se agregaron (no las de la planilla).`); return; }
+    if (o.op === 'quitar_fila') { filas.splice(filas.indexOf(f), 1); quitadas.push(f); res.aplicadas++; return; }
+    if (o.etiqueta) f.label = String(o.etiqueta); if (o.unidad != null) f.unidad = String(o.unidad);
+    const cont = contenidoDe(o); if (cont !== undefined) f.contenido = cont;
+    motivos[refDeSlot(f.slot)] = String(o.motivo || 'fila editada a pedido en el chat').slice(0, 300); res.aplicadas++; res.filas.push(`${refDeSlot(f.slot)} ${f.label}`);
+  });
+  if (!res.aplicadas) return res;
+  const deshacer = () => {
+    hPrev.filasExtra = prevFilas; hPrev.slotNext = prevSlot;
+    const hf0 = procesosStep2GetHF(nombre); for (let sl = prevSlot; sl < slotNext; sl++) { try { hf0.setCellContents({ sheet: 0, row: base + sl, col }, [[null]]); } catch (e) { /* ya estaba vacía */ } }
+    procesosStep2AplicarPersonalizacion(nombre);
+  };
+  hPrev.filasExtra = filas; hPrev.slotNext = slotNext;
+  procesosStep2AplicarPersonalizacion(nombre);
+  const hf = procesosStep2GetHF(nombre);
+  quitadas.forEach(f => { try { hf.setCellContents({ sheet: 0, row: base + f.slot, col }, [[null]]); } catch (e) { /* sin contenido */ } });
+  if (quitadas.length) st.hfShared.rebuildAndRecalculate();
+  const malas = model.cells.filter(c => c.extra).filter(c => { const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); return procesosStep2EsError(v) && ['#NAME?', '#ERROR!', '#CYCLE!', '#REF!'].includes(v.value); });
+  if (malas.length) { deshacer(); return { aplicadas: 0, filas: [], avisos: res.avisos.concat(`El cambio de estructura dejaba fórmulas con error (${malas.map(c => c.label || c.ref).slice(0, 3).join(', ')}); no se aplicó nada.`) }; }
+  hPrev.motivos = Object.assign({}, hPrev.motivos);
+  Object.entries(motivos).forEach(([ref, m]) => { hPrev.motivos[ref] = { motivo: m, origen: 'chat con la IA', fecha: new Date().toLocaleDateString('es-AR') }; });
+  quitadas.forEach(f => { delete hPrev.motivos[refDeSlot(f.slot)]; if (hPrev.valores) { hPrev.valores = Object.assign({}, hPrev.valores); delete hPrev.valores[refDeSlot(f.slot)]; } });
+  return res;
+}
 
 // ── Probar valores antes de aplicarlos ──
 // La IA no puede calcular la planilla de memoria: antes la hacían "adivinar" valores y recién después se veía si cumplían. Ahora, en los pedidos que
@@ -13665,7 +13723,9 @@ let _procesosStep2Bloqueadas = null; // { refs:Set, modelo } mientras corre un p
 function procesosStep2EjecutarAcciones(model, hf, acciones, cb) {
   const res = { fallidas: [], tocadas: [] }, porRef = r => model.cells.find(c => c.ref === r), blq = _procesosStep2Bloqueadas;
   const bloqueada = c => !!(blq && blq.refs.has(c.ref));
-  const avisoBloqueo = (tipo, c) => `"${tipo}" ${c.ref} ${c.label}: es una dimensión fija de fábrica de la planta compacta (${blq.modelo}) y no se modifica — dejala como está y, si con ese valor algo no se cumple, aclaralo en tu respuesta`;
+  const avisoBloqueo = (tipo, c) => blq.enlazadas && blq.enlazadas.has(c.ref)
+    ? `"${tipo}" ${c.ref} ${c.label}: es un valor que se toma de otra unidad del módulo de planta compacta (${blq.modelo}) y no se modifica — dejalo como está y, si con ese valor algo no se cumple, aclaralo en tu respuesta`
+    : `"${tipo}" ${c.ref} ${c.label}: es una dimensión fija de fábrica de la planta compacta (${blq.modelo}) y no se modifica — dejala como está y, si con ese valor algo no se cumple, aclaralo en tu respuesta`;
   (Array.isArray(acciones) ? acciones : []).forEach(a => {
     try {
       if (a.tipo === 'set') {
@@ -13692,17 +13752,69 @@ function procesosStep2EjecutarAcciones(model, hf, acciones, cb) {
   return res;
 }
 
+// Una unidad del módulo compacto que NO tiene dimensiones propias en el modelo (ej. el anóxico) pero necesita una de otra unidad del módulo (ej. el volumen del reactor, para fijar su volumen como
+// un % del del reactor): la celda que representa esa dimensión se enlaza con una fórmula a la celda fija de la otra unidad, así siempre vale lo del modelo elegido y no se la puede cambiar.
+// Conservador: solo se enlaza si en esta hoja hay UNA SOLA celda que coincida (dimensión + tipo de unidad por su nombre); lo que no se pueda saber con seguridad queda para la IA, con la regla en el pedido.
+const PROC_PC_KW_TIPO = { reactor: /reactor|aireacion|aerob|lodos activ|biolog|mbr|mbbr|\bla\b/, sed: /sediment|clarific/, dig: /digest/, clor: /clorac|desinfec|contacto|laberinto/ };
+const PROC_PC_KW_DIM = { volumen: /volumen|\bvol\b/, largo: /\blargo\b/, ancho: /\bancho\b/, altura: /altura|profundidad|h util/, superficie: /superficie|\barea\b/ };
+function procesosPCEnlazarModulo(nombre, hPrev, model, hf) {
+  const p = procesosCurrentProyecto, dd = (p && p.diseno_data) || {}, hojas = dd.hojas || {};
+  if (!procesosPCEsMiembro(hPrev)) return [];
+  const otras = (dd.orden || []).filter(n => n !== nombre && procesosPCEsMiembro(hojas[n]) && hojas[n].plantaCompacta && (hojas[n].plantaCompacta.celdas || []).length);
+  if (!otras.length) return [];
+  const yaEnlazadas = new Set(hPrev.moduloEnlaces || []);
+  const propios = procesosNormTxt((nombre || '') + ' ' + (hPrev.hojaBase || '')).split(' ').filter(t => t.length >= 5);
+  const soloReferencia = c => { const g = model.grid[c.row] && model.grid[c.row][c.col]; return !c.isFormula || (typeof g === 'string' && /^=\s*(?:'[^']+'!|[\w.]+!)?\$?[A-Z]{1,3}\$?\d+\s*$/.test(g)); };
+  const hechas = [];
+  otras.forEach(u => {
+    const hu = hojas[u], pc = hu.plantaCompacta, mu = procesosStep2State.hojaModels[u], tipoU = pc.tipo || procesosPCTipoUnidad(u, hu.hojaBase);
+    if (!mu || !PROC_PC_KW_TIPO[tipoU]) return;
+    try { procesosStep2GetHF(u); } catch (e) { return; }
+    (pc.celdas || []).forEach(refF => {
+      const dim = (pc.campos || {})[refF], cF = mu.cells.find(c => c.ref === refF);
+      if (!cF || !PROC_PC_KW_DIM[dim]) return;
+      const cands = model.cells.filter(c => !c.extra && !yaEnlazadas.has(c.ref) && !(hPrev.formulas || {})[c.ref] && !(hPrev.celdasForzadas || []).includes(c.ref) && soloReferencia(c) && (t => PROC_PC_KW_DIM[dim].test(t) && PROC_PC_KW_TIPO[tipoU].test(t) && !propios.some(w => t.includes(w)))(procesosNormTxt(c.label)));
+      if (cands.length !== 1) return;
+      const c = cands[0], f = '=' + procesosStep2RefHoja(u, XLSX.utils.encode_cell({ r: cF.row, c: cF.col })), addr = { sheet: 0, row: c.row, col: c.col }, previo = hf.getCellSerialized(addr);
+      hf.setCellContents(addr, [[f]]); procesosStep2State.hfShared.rebuildAndRecalculate();
+      const v = hf.getCellValue(addr);
+      if (typeof v !== 'number') { hf.setCellContents(addr, [[previo == null ? null : previo]]); procesosStep2State.hfShared.rebuildAndRecalculate(); return; }
+      c.isFormula = true; c.formulaEditada = true; yaEnlazadas.add(c.ref);
+      hPrev.formulas = Object.assign({}, hPrev.formulas, { [c.ref]: f });
+      hPrev.valores = Object.assign({}, hPrev.valores); delete hPrev.valores[c.ref];
+      hPrev.motivos = Object.assign({}, hPrev.motivos, { [c.ref]: { motivo: `Se toma de «${u}» (${pc.modelo}): es una dimensión fija del módulo de planta compacta, no se modifica`, origen: 'planta compacta', fecha: new Date().toLocaleDateString('es-AR') } });
+      hechas.push({ ref: c.ref, label: c.label, desde: u, valor: v });
+    });
+  });
+  if (hechas.length) hPrev.moduloEnlaces = [...yaEnlazadas];
+  return hechas;
+}
+// Texto para el chat de una unidad del módulo que no tiene dimensiones propias (ej. el anóxico): qué es fijo del módulo y que lo use tal cual
+function procesosPCModuloContextoTxt(nombre, h) {
+  const p = procesosCurrentProyecto, dd = (p && p.diseno_data) || {}, hojas = dd.hojas || {};
+  if (!procesosPCEsMiembro(h) || h.plantaCompacta) return '';
+  const fijas = (dd.orden || []).filter(n => n !== nombre && procesosPCEsMiembro(hojas[n]) && hojas[n].plantaCompacta && (hojas[n].plantaCompacta.celdas || []).length).map(n => {
+    const m = procesosStep2State.hojaModels[n], hh = hojas[n], pc = hh.plantaCompacta, hfN = (() => { try { return procesosStep2GetHF(n); } catch (e) { return null; } })();
+    const dims = m && hfN ? (pc.celdas || []).map(r => { const c = m.cells.find(x => x.ref === r), v = c && hfN.getCellValue({ sheet: 0, row: c.row, col: c.col }); return c && typeof v === 'number' ? `${c.label} = ${procesosFormatearNumero(v)}${c.unidad ? ' ' + c.unidad : ''}` : null; }).filter(Boolean).join('; ') : '';
+    return dims ? `- «${n}» (${pc.modelo}): ${dims}` : null;
+  }).filter(Boolean);
+  if (!fijas.length) return '';
+  const enl = (h.moduloEnlaces || []).length ? ` Ya están enlazadas a esos valores (no se tocan): ${h.moduloEnlaces.join(', ')}.` : '';
+  return `PLANTA COMPACTA — ESTA UNIDAD FORMA PARTE DEL MÓDULO: el modelo ya está elegido para toda la planta y las dimensiones de las otras unidades del módulo son FIJAS de fábrica:\n${fijas.join('\n')}\nSi esta hoja tiene una celda que represente una de esas dimensiones (por ejemplo el volumen del reactor, que hace falta para fijar el volumen de esta unidad como un % del reactor), tomala EXACTAMENTE de esa unidad (de la lista de arriba o con una fórmula que apunte a ella) y NUNCA la cambies ni uses el valor de otro modelo, aunque con él no se cumpla algún requerimiento del pliego: en ese caso decí claramente qué no se cumple.${enl}\n\n`;
+}
 // Celdas de dimensiones que le vienen de fábrica a una unidad con modelo de planta compacta aplicado (null si no tiene)
 function procesosPCFijas(nombre, h) {
-  const pc = h && h.plantaCompacta;
-  if (!pc || !(pc.celdas || []).length) return null;
-  return { refs: new Set(pc.celdas), modelo: pc.modelo || 'modelo de planta compacta', campos: pc.campos || {} };
+  const pc = h && h.plantaCompacta, enl = (h && h.moduloEnlaces) || [];
+  const propias = pc ? (pc.celdas || []) : [];
+  if (!propias.length && !enl.length) return null;
+  const mod = ((procesosCurrentProyecto && procesosCurrentProyecto.diseno_data) || {}).moduloCompacto || {};
+  return { refs: new Set(propias.concat(enl)), enlazadas: new Set(enl), modelo: (pc && pc.modelo) || mod.etiqueta || 'módulo de planta compacta', campos: (pc && pc.campos) || {} };
 }
 // Párrafo para los pedidos del sistema (definir valores, corregir pliego): las dimensiones del modelo mandan por encima del resto
 function procesosPCFijasTxt(nombre, h, model, hf) {
   const f = procesosPCFijas(nombre, h); if (!f) return '';
   const dims = model.cells.filter(c => f.refs.has(c.ref)).map(c => { const v = hf.getCellValue({ sheet: 0, row: c.row, col: c.col }); return `${c.ref} ${c.label} = ${typeof v === 'number' ? procesosFormatearNumero(v) : '(sin valor)'}${c.unidad ? ' ' + c.unidad : ''}`; }).join('; ');
-  return `PLANTA COMPACTA — DIMENSIONES FIJAS (regla de MÁXIMA prioridad, por encima de todo lo demás de este pedido): esta unidad usa el ${f.modelo} y sus dimensiones son de fábrica: ${dims}. NO las modifiques bajo ningún concepto (ni con "set" ni con "buscar_objetivo" ni probándolas): el sistema las rechaza. Si con esas dimensiones algún requerimiento del pliego o rango NO se cumple (por ejemplo un tiempo de retención menor al pedido), NO cambies el volumen ni otra dimensión para cumplirlo: dejá ese resultado como está y decilo explícitamente en "reply" ("con el volumen del ${f.modelo} no se cumple <requerimiento>: da <valor> y pide <valor>"). Lo demás (datos de entrada que no son dimensiones del modelo) sí podés ajustarlo para cumplir lo máximo posible.`;
+  return `PLANTA COMPACTA — DIMENSIONES FIJAS (regla de MÁXIMA prioridad, por encima de todo lo demás de este pedido): ${h.plantaCompacta ? `esta unidad usa el ${f.modelo} y sus dimensiones son de fábrica` : `esta unidad forma parte del módulo de planta compacta (${f.modelo}) y estos valores se toman de otras unidades del módulo, que son de fábrica`}: ${dims}. NO las modifiques bajo ningún concepto (ni con "set" ni con "buscar_objetivo" ni probándolas): el sistema las rechaza. Si con esas dimensiones algún requerimiento del pliego o rango NO se cumple (por ejemplo un tiempo de retención menor al pedido), NO cambies el volumen ni otra dimensión para cumplirlo: dejá ese resultado como está y decilo explícitamente en "reply" ("con el volumen del ${f.modelo} no se cumple <requerimiento>: da <valor> y pide <valor>"). Lo demás (datos de entrada que no son dimensiones del modelo) sí podés ajustarlo para cumplir lo máximo posible.`;
 }
 
 // Prueba temporal: aplica las acciones, mide y devuelve la planilla a como estaba. valoresPrev = valores de las celdas antes de cualquier cambio (para mostrar qué se movió).
@@ -13795,6 +13907,10 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     let model = procesosStep2State.hojaModels[nombre];
     procesosStep2PropagarCadena(nombre);
     let hf = procesosStep2GetHF(nombre);
+    let avisoModulo = '';
+    if (msgOverride != null) { // pedido del sistema: las celdas que representan dimensiones de otras unidades del módulo compacto se enlazan a ellas antes de que la IA mire la hoja
+      try { const en = procesosPCEnlazarModulo(nombre, hPrev, model, hf); if (en.length) avisoModulo = '\n\n🔗 Tomé del módulo de planta compacta (valores fijos, no se modifican):\n' + en.map(x => `• ${x.ref} ${x.label} = ${procesosFormatearNumero(x.valor)} (de «${x.desde}»)`).join('\n'); } catch (eMod) { console.warn('No se pudieron enlazar las dimensiones del módulo:', eMod.message); }
+    }
     const valoresPrompt = {}; // lo que la IA ve en este mensaje, para mostrar después qué cambió de verdad
     const estadoActual = model.cells.map(c => {
       const val = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
@@ -13892,7 +14008,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     const precisionTxt = 'IMPORTANTE sobre los números que menciones: los resultados de las celdas calculadas los recalcula la planilla DESPUÉS de aplicar tus acciones — vos no los podés calcular de memoria. Cuando cites el valor de una celda calculada, usá EXACTAMENTE su "valor actual" de la lista de arriba (que es el valor ANTES de tus cambios) y aclará que es el valor previo si tus acciones modifican datos de los que depende; NO inventes ni estimes cuánto va a dar después ni cites números que no estén en la lista. Al terminar, el sistema le muestra al usuario los valores reales que quedaron.';
     const motivosGuiaTxt = 'CÓMO RESPONDER Y REGISTRAR MOTIVOS:\n- Cada "set" o "buscar_objetivo" tiene que llevar su "motivo" (razón de diseño concreta, con números y celdas): queda guardado junto a la celda.\n- Si el usuario pregunta POR QUÉ una celda tiene cierto valor: (1) si la lista de arriba trae "motivo registrado" para esa celda, citalo; (2) si no lo trae, NO sabés por qué quedó así — rastreá la fórmula y las celdas de las que depende y explicá con las cuentas reales y los números de la lista, aclarando que es una deducción y no la razón original; (3) nunca inventes una justificación ni la presentes como si fuera la razón con la que se fijó el valor.\n- Antes de explicar o justificar un valor, verificá que sea coherente con las demás celdas (ej. un volumen adoptado muy distinto del calculado, un redondeo que no cierra). Si encontrás una inconsistencia o algo que no tiene explicación, decilo claramente y proponé corregirlo, en vez de defenderlo.\n- Si el valor sale de un dato del Paso 1 o de los requerimientos del cliente que trae una referencia a un archivo entre corchetes (ej. [Pliego.pdf — pág. 12]), copiá esa referencia TAL CUAL al final del "motivo": así el usuario puede abrir el archivo en esa página.\n- Si el usuario solo pregunta o pide una explicación, no cambies nada (acciones vacías).\n\n';
     const plantaCompactaTxt = await procesosPCPromptTxt(nombre, hActual);
-    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, plantaCompactaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : '' });
+    const prompt = procesosPromptFill(templateStep2Chat, { nombre, estadoActual, motivosGuiaTxt, plantaCompactaTxt, requerimientosTxt: procesosRequerimientosDisenoTxt(p, 'unidad'), reqTrenTxt: procesosRequerimientoTrenTxt(p), resumenCampos: procesosResumenCampos(p), materialGeometriaUnidadTxt, corrientesEtapaTxt, grupoTxt: grupoTxt + otrasUnidadesTxt, criteriosTxt, plantasCompactasTxt, archivosProyectoTxt, leccionesTxt, chatGeneralTxt, fichasTxt, historialTxt, msg, precisionTxt, libreTxt: hActual.libre ? PROCESOS_LIBRE_CHAT_TXT : PROCESOS_FILAS_PROPIAS_TXT });
     const contenidoMsg = [...procesosConCache([...criteriosBlocks.map(x=>x.block), ...plantasCompactasBlocks.map(x=>x.block), ...archivosProyectoBlocks.map(x=>x.block)]), { type: 'text', text: prompt }];
     // Pedidos que arma el sistema (definir valores, corregir pliego): la IA puede PROBAR valores con el cálculo real (probar_valores) las veces que haga falta y recién
     // después aplicarlos (aplicar_cambios). Mensajes que escribe el usuario: una respuesta, con razonamiento; si queda sin aplicar lo que dijo que iba a cambiar, se lo pide.
@@ -13975,6 +14091,16 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
       if (r.avisos.length) avisoEstructura += '\n\n(' + r.avisos.join(' ') + ')';
     }
 
+    // Hoja de la planilla: la IA puede agregar / editar / quitar filas PROPIAS (las mismas que el botón "＋ Agregar fila")
+    if (!hActual.libre) {
+      if (typeof parsed.estructura === 'string') { try { parsed.estructura = JSON.parse(parsed.estructura); } catch (_e) { parsed.estructura = []; } }
+      if (Array.isArray(parsed.estructura) && parsed.estructura.length) {
+        const rf = procesosStep2AplicarEstructuraFija(nombre, hPrev, parsed.estructura);
+        if (rf.aplicadas) { model = procesosStep2State.hojaModels[nombre]; hf = procesosStep2GetHF(nombre); avisoEstructura = `\n\n🧮 Agregué o cambié ${rf.aplicadas} fila${rf.aplicadas === 1 ? '' : 's'} propia${rf.aplicadas === 1 ? '' : 's'} en esta unidad:\n` + rf.filas.map(x => '• ' + x).join('\n'); }
+        if (rf.avisos.length) avisoEstructura += '\n\n(' + rf.avisos.join(' ') + ')';
+      }
+    }
+
     const cellByRef = r => model.cells.find(c => c.ref === r);
     const celdasForzadas = new Set(); // celdas de fórmula que el chat pisó a mano — hay que guardarlas igual que un dato editable, si no se pierden al refrescar
     // Registro de POR QUÉ cada celda tiene su valor (lo usa después el propio chat
@@ -14018,13 +14144,14 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
       (restantes.length ? '\n\n⚠ Quedan fuera de rango (revisalos):\n' + restantes.slice(0, 10).map(x => `• ${x.ref} ${x.label}: ${x.tipo === 'error' ? x.valorTxt : x.valorTxt + (x.unidad ? ' ' + x.unidad : '') + ' (' + (x.tipo === 'limite' ? 'límite ' : 'normal ') + x.rango + ')'}`).join('\n') + (restantes.length > 10 ? `\n(+${restantes.length - 10} más)` : '') : '');
     // Unidad con modelo de planta compacta: lo que no se cumple por tener dimensiones de fábrica se aclara siempre (en la respuesta y en el motivo del volumen), sin depender de la IA
     let pcAvisoTxt = '';
-    if (pcFijas && hPrev.plantaCompacta && (hPrev.plantaCompacta.celdas || []).length) { // (solo en pedidos del sistema: en una charla normal con el usuario no se repite en cada respuesta)
+    if (pcFijas) { // (solo en pedidos del sistema: en una charla normal con el usuario no se repite en cada respuesta)
+      const pcNombreModelo = (hPrev.plantaCompacta && hPrev.plantaCompacta.modelo) || pcFijas.modelo, pcCeldas = pcFijas.refs;
       const noCumple = ((hPrev.chequeoReq && hPrev.chequeoReq.items) || []).map(it => ({ it, r: procesosStep2EvaluarReq(hf, model, it) })).filter(x => x.r.estado === 'no_cumple');
       if (noCumple.length) {
         const lineas = noCumple.map(({ it, r }) => `• ${it.requerimiento}: ${r.c.ref} ${r.c.label} = ${procesosFormatearNumero(r.v)}${r.c.unidad ? ' ' + r.c.unidad : ''} (pedido ${procesosStep2ReqRangoTxt(it)})`);
-        pcAvisoTxt = `\n\n🏭 Se respetaron las dimensiones del ${hPrev.plantaCompacta.modelo} (planta compacta). Con ellas NO se cumple:\n` + lineas.join('\n');
-        const campos = hPrev.plantaCompacta.campos || {}, refsVol = (hPrev.plantaCompacta.celdas || []).filter(r => campos[r] === 'volumen');
-        (refsVol.length ? refsVol : hPrev.plantaCompacta.celdas).forEach(ref => { nuevosMotivos[ref] = { motivo: `Dimensión fija del ${hPrev.plantaCompacta.modelo} (planta compacta), no se modifica. Con este valor no se cumple: ${noCumple.map(({ it, r }) => `${it.requerimiento} (da ${procesosFormatearNumero(r.v)}, pedido ${procesosStep2ReqRangoTxt(it)})`).join('; ')}`.slice(0, 500), origen: 'planta compacta', fecha: new Date().toLocaleDateString('es-AR') }; });
+        pcAvisoTxt = `\n\n🏭 Se respetaron las dimensiones del ${pcNombreModelo} (planta compacta). Con ellas NO se cumple:\n` + lineas.join('\n');
+        const campos = pcFijas.campos || {}, listaCeldas = [...pcCeldas], refsVol = listaCeldas.filter(r => campos[r] === 'volumen');
+        (refsVol.length ? refsVol : listaCeldas).forEach(ref => { nuevosMotivos[ref] = { motivo: `Dimensión fija del ${pcNombreModelo} (planta compacta), no se modifica. Con este valor no se cumple: ${noCumple.map(({ it, r }) => `${it.requerimiento} (da ${procesosFormatearNumero(r.v)}, pedido ${procesosStep2ReqRangoTxt(it)})`).join('; ')}`.slice(0, 500), origen: 'planta compacta', fecha: new Date().toLocaleDateString('es-AR') }; });
       }
     }
     const nuevosValores = Object.assign({}, hPrev.valores);
@@ -14057,7 +14184,7 @@ async function procesosStep2ChatSend(nombre, msgOverride, modoUsuario) {
     const dd = Object.assign({}, p.diseno_data);
     dd.hojas = Object.assign({}, dd.hojas);
     const h = Object.assign({}, dd.hojas[nombre], hPrev, { valores: nuevosValores, celdasForzadas: celdasForzadasFinal, formulas: formulasNuevas, motivos: nuevosMotivos, chequeoReq: (dd.hojas[nombre] || {}).chequeoReq || hPrev.chequeoReq, confirmada: false });
-    h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + diffTxt + extraTxt + pcAvisoTxt }]);
+    h.chat = hPrev.chat.concat([{ role: 'assistant', content: (parsed.reply || '(sin respuesta)') + avisoEstructura + avisoModulo + diffTxt + extraTxt + pcAvisoTxt }]);
     dd.hojas[nombre] = h;
     await procesosSaveProyecto({ diseno_data: dd }, p);
 
