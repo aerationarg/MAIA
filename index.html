@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -507,6 +507,7 @@
         <div id="empresa-selector" style="display:none;align-items:center;background:var(--surface2);border-radius:var(--radius-sm);padding:3px;gap:2px;flex-shrink:0">
           <button id="empresa-btn-AA" class="empresa-toggle-btn" onclick="switchEmpresa('AA')">AA</button>
           <button id="empresa-btn-AS" class="empresa-toggle-btn" onclick="switchEmpresa('AS')">AS</button>
+          <button id="empresa-btn-SAS" class="empresa-toggle-btn" onclick="switchEmpresa('SAS')" title="Aeration Uruguay">SAS</button>
         </div>
         <button id="msLoginBtn" onclick="toggleMsLogin()">Iniciar sesión</button>
         <div style="position:relative">
@@ -2124,6 +2125,15 @@
 // ── Global session/empresa state (must be declared first - used by code that runs at module load time) ──
 let currentUser = null;
 let currentSector = null;
+// Empresas (entornos) de MAIA. SAS = Aeration Uruguay: arranca con una COPIA de la configuración de AA (ver supaConfigHeredarSAS) y desde ahí se modifica por separado.
+// El logo de SAS es provisorio (el de AA) hasta tener el de Uruguay: reemplazar 'logo' acá cuando esté el archivo en icons/.
+const EMPRESAS_TODAS = ['AA', 'AS', 'SAS'];
+const EMPRESA_INFO = {
+  AA:  { nombre: 'Aeration Argentina', logo: 'icons/logo-aeration.png' },
+  AS:  { nombre: 'Aeration Servicios', logo: 'icons/logo-aeration-servicios.png', logoFix: true },
+  SAS: { nombre: 'Aeration Uruguay',   logo: 'icons/logo-aeration.png', logoProvisorio: true },
+};
+const empresaNombre = e => (EMPRESA_INFO[e] || {}).nombre || e;
 let currentEmpresas = ['AA','AS'];
 let currentEmpresa = localStorage.getItem('daia_empresa_activa') || 'AA';
 
@@ -2384,7 +2394,15 @@ async function supaConfigGet(key) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  return data[0]?.value != null ? data[0].value : null;
+  if (data[0]?.value != null) return data[0].value;
+  return /_SAS$/.test(key) ? await supaConfigHeredarSAS(key).catch(() => null) : null;
+}
+// Aeration Uruguay (SAS) arranca con la MISMA configuración que AA: la primera vez que se lee una clave "<algo>_SAS" que todavía no existe, se le copia la "<algo>_AA"
+// (una copia: desde ahí cada empresa cambia la suya sin tocar la otra). Las claves por usuario (historiales) no terminan en _SAS, así que no se heredan.
+async function supaConfigHeredarSAS(key) {
+  const aa = await supaConfigGetSeguro(key.replace(/_SAS$/, '_AA'));
+  if (aa != null) { try { await supaConfigSet(key, aa); } catch (e) { /* queda leída de AA; se copia en la próxima */ } }
+  return aa;
 }
 async function supaConfigSet(key, value) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -2407,7 +2425,8 @@ async function supaConfigGetSeguro(key) { // como supaConfigGet, pero distingue 
   const res = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${encodeURIComponent(key)}`, { headers: { Authorization: 'Bearer ' + session.token } });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const data = await res.json();
-  return data[0]?.value != null ? data[0].value : null;
+  if (data[0]?.value != null) return data[0].value;
+  return /_SAS$/.test(key) ? await supaConfigHeredarSAS(key) : null; // (SAS: hereda de AA; si no se puede leer AA, tira error y no se escribe nada)
 }
 async function rendCfgGet(base) {
   const propia = base + '_' + currentEmpresa;
@@ -3229,7 +3248,7 @@ async function analyzeAll() {
         headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
         body: JSON.stringify({
           model: CASO_MODELOS.estandar.id, max_tokens: 2000,
-          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__", "__percepciones_iibb__". Si no encontrás un valor usá null. FECHAS: todas las fechas van en formato DD/MM/AAAA (día/mes/año, formato argentino): en un comprobante argentino la fecha es SIEMPRE día/mes/año, nunca la interpretes como mes/día. IMPUESTOS Y PERCEPCIONES: no mezcles jurisdicciones. "CABA", "C.F.", "CF", "Capital Federal", "Ciudad Autónoma de Buenos Aires" y "AGIP" son la Ciudad de Buenos Aires (CABA), que NO es la provincia de Buenos Aires; "Buenos Aires", "Bs. As.", "PBA", "ARBA" y "Provincia de Buenos Aires" son la provincia de Buenos Aires; cualquier otra provincia (Neuquén, Córdoba, Santa Fe, Mendoza, Río Negro, etc.) es "otras jurisdicciones" y nunca va en el campo de Buenos Aires ni en el de CABA. Para "__percepciones_iibb__": array con TODAS las percepciones o retenciones de Ingresos Brutos (IIBB) que figuren en el comprobante, cada una como {"jurisdiccion":"<texto literal tal como figura, ej. 'Perc. IIBB C.F.', 'IIBB Bs.As.', 'Neuquén'>","monto":<número>}; [] si no hay ninguna. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si no aparece ninguna de las dos razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
+          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__", "__percepciones_iibb__". Si no encontrás un valor usá null. FECHAS: todas las fechas van en formato DD/MM/AAAA (día/mes/año, formato argentino): en un comprobante argentino la fecha es SIEMPRE día/mes/año, nunca la interpretes como mes/día. IMPUESTOS Y PERCEPCIONES: no mezcles jurisdicciones. "CABA", "C.F.", "CF", "Capital Federal", "Ciudad Autónoma de Buenos Aires" y "AGIP" son la Ciudad de Buenos Aires (CABA), que NO es la provincia de Buenos Aires; "Buenos Aires", "Bs. As.", "PBA", "ARBA" y "Provincia de Buenos Aires" son la provincia de Buenos Aires; cualquier otra provincia (Neuquén, Córdoba, Santa Fe, Mendoza, Río Negro, etc.) es "otras jurisdicciones" y nunca va en el campo de Buenos Aires ni en el de CABA. Para "__percepciones_iibb__": array con TODAS las percepciones o retenciones de Ingresos Brutos (IIBB) que figuren en el comprobante, cada una como {"jurisdiccion":"<texto literal tal como figura, ej. 'Perc. IIBB C.F.', 'IIBB Bs.As.', 'Neuquén'>","monto":<número>}; [] si no hay ninguna. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si es "Aeration Uruguay" (o variación cercana, ej. "Aeration Uruguay S.A.S."), devolvé "SAS". Si no aparece ninguna de estas razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
           messages: [{ role:'user', content:[
             isPdf ? {type:'document',source:{type:'base64',media_type:mediaType,data:b64}} : {type:'image',source:{type:'base64',media_type:mediaType,data:b64}},
             {type:'text',text:`Extraé estos campos para cada comprobante distinto que encuentres en el archivo:\n${fieldPrompt}\nRespondé solo con el array JSON.`}
@@ -3257,9 +3276,9 @@ async function analyzeAll() {
       // (AA/AS) distinta de la que está seleccionada arriba en MAIA ahora.
       extractedList.forEach(extracted => {
         const receptora = extracted['__empresa_receptora__'];
-        if (receptora && (receptora === 'AA' || receptora === 'AS') && receptora !== currentEmpresa) {
-          const nombreReceptora = receptora === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
-          const nombreActual = currentEmpresa === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
+        if (receptora && EMPRESAS_TODAS.includes(receptora) && receptora !== currentEmpresa) {
+          const nombreReceptora = empresaNombre(receptora);
+          const nombreActual = empresaNombre(currentEmpresa);
           rendAgregarAdvertencia(extracted, `⚠ Este comprobante parece ser de ${nombreReceptora} (${receptora}), pero estás cargando en ${nombreActual} (${currentEmpresa}).`);
           extracted['__empresa_incorrecta__'] = receptora;
         }
@@ -3461,7 +3480,8 @@ function renderRendResults() {
         <button class="btn btn-primary btn-sm" onclick="rendAplicarSugerencia(${ri}, '${campoEsc}', '${valorEsc}')">✓ Aplicar</button>
       </div>`;
     }).join('');
-    const nombreEmpresaIncorrecta = r.__empresa_incorrecta__ === 'AA' ? 'Aeration Argentina (AA)' : r.__empresa_incorrecta__ === 'AS' ? 'Aeration Servicios (AS)' : '';
+    // el botón "Pasar a…" solo existe entre AA y AS (la traducción de campos está confirmada solo para ese par); con SAS se muestra la advertencia pero se corrige a mano
+    const nombreEmpresaIncorrecta = (['AA', 'AS'].includes(r.__empresa_incorrecta__) && ['AA', 'AS'].includes(currentEmpresa)) ? `${empresaNombre(r.__empresa_incorrecta__)} (${r.__empresa_incorrecta__})` : '';
     const botonMover = nombreEmpresaIncorrecta ? `<button class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="rendMoverComprobanteAOtraEmpresa(${ri})">↪ Pasar a ${nombreEmpresaIncorrecta}</button>` : '';
     let lineaCodigo = '';
     if (rendCodigoActivo() && _rendClientesCodigos.size) {
@@ -3559,7 +3579,7 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
   const r = results[ri];
   if (!r) return;
   const destino = r.__empresa_incorrecta__ === 'AA' || r.__empresa_incorrecta__ === 'AS' ? r.__empresa_incorrecta__ : (currentEmpresa === 'AA' ? 'AS' : 'AA');
-  const nombreDestino = destino === 'AA' ? 'Aeration Argentina' : 'Aeration Servicios';
+  const nombreDestino = empresaNombre(destino);
   if (!confirm(`¿Pasar este comprobante ("${r['__archivo__']||''}") a ${nombreDestino} (${destino})? Se va a sacar de este entorno.`)) return;
 
   const statusId = 'rend-save-status';
@@ -3818,7 +3838,7 @@ async function rendResolveDestFolder(token) {
   const base = JSON.parse(baseRaw);
   const siteId = base.siteId;
   let folderId = base.id || await spGetFolderIdByPath(token, siteId, base.path||'');
-  const empresaName = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
+  const empresaName = empresaNombre(currentEmpresa);
   folderId = await spEnsureFolder(token, siteId, folderId, empresaName);
   const personName = (currentEmpresa === 'AS' && rendPersonaOverrideEnabled && rendPersonaOverrideValue)
     ? rendPersonaOverrideValue.trim()
@@ -25114,7 +25134,7 @@ async function calcAutoFields(target, excelRows, excelHeaders, savedMapping) {
     if (f.formula === 'hoy') {
       values[f.name] = today();
     } else if (f.formula === 'empresa') {
-      values[f.name] = currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
+      values[f.name] = empresaNombre(currentEmpresa);
     } else if (f.formula === 'fijo') {
       values[f.name] = f.value || '';
     } else if (f.formula === 'ultimo+1') {
@@ -34429,6 +34449,7 @@ async function concilBancosCfgRender() {
           <select onchange="concilBancoUpdate('${b.id}','empresa',this.value)">
             <option value="AA" ${b.empresa === 'AA' ? 'selected' : ''}>AA</option>
             <option value="AS" ${b.empresa === 'AS' ? 'selected' : ''}>AS</option>
+            <option value="SAS" ${b.empresa === 'SAS' ? 'selected' : ''}>SAS</option>
           </select>
         </div>
         <div><label style="font-size:12px">Nombre</label><input value="${esc(b.nombre || '')}" onchange="concilBancoUpdate('${b.id}','nombre',this.value)" /></div>
@@ -34735,7 +34756,7 @@ const PPT_ESTILOS = {
     c: { titulo: '0056A1', texto: '09283F', blanco: 'FFFFFF', th: '0056A1', fila1: 'EAF1F8', fila2: 'FFFFFF', borde: 'FFFFFF' } }
 };
 const pptEstilo = dt => { const e = PPT_ESTILOS[(dt && dt.estilo) || 'aeration']; return currentEmpresa === 'AS' && e.fondosAS ? Object.assign({}, e, { fondos: e.fondosAS }) : e; };
-const pptEmpresa = () => currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina';
+const pptEmpresa = () => empresaNombre(currentEmpresa);
 const pptRubro = () => currentEmpresa === 'AS' ? 'operación y mantenimiento de plantas de tratamiento de aguas y efluentes' : 'tratamiento de aguas y efluentes';
 const pptGuia = dt => { let g = (PPT_TIPOS_PRES[dt.tipo] || {}).guia || ''; if (currentEmpresa === 'AS') g = g.replace(/\(Aeration Argentina, tratamiento de aguas y efluentes\)/, '(Aeration Servicios, operación y mantenimiento de plantas de tratamiento de aguas y efluentes)'); return g.replace(/Aeration Argentina/g, pptEmpresa()); };
 const PPT_TIPOS_PRES = {
@@ -38422,7 +38443,7 @@ function casoContexto() {
   const c = _caso, hoy = new Date().toLocaleDateString('es-AR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const vinc = c.vinculos.map(v => `- [${v.tipo}] id=${v.id} "${v.nombre}"`).join('\n') || '(ninguno todavía)';
   const notas = c.notas.slice(-30).map(n => `- [${CASO_TIPOS_NOTA[n.tipo] || n.tipo}] ${n.texto}`).join('\n') || '(sin notas)';
-  return `Hoy es ${hoy}. Empresa: ${currentEmpresa === 'AS' ? 'Aeration Servicios' : 'Aeration Argentina'}.\nCASO: "${c.nombre}"${c.cliente ? ' — cliente: ' + c.cliente : ''} — estado: ${c.estado || 'activo'}\n\nESTADO DEL CASO (memoria):\n${c.resumen || '(vacío)'}\n\nVÍNCULOS (se leen con leer_registro; módulos: procesos→procesos_proyectos, flowsheet→flowsheet_proyectos, dfs/manual/presentacion/simulacion→doc_documentos):\n${vinc}\n\nNOTAS Y LECCIONES DEL CASO:\n${notas}\n\nPENDIENTES ABIERTOS DEL CASO (ids para actualizar_pendiente):\n${_casoPend.filter(x => x.estado !== 'hecho').slice(0, 25).map(x => `- id=${x.id} | ${x.titulo} | ${x.estado} | resp: ${x.responsable_nombre || 'sin asignar'} | ${x.fecha_limite || 'sin fecha'} | ${x.prioridad}`).join('\n') || '(ninguno)'}${casoNombresArchivos().length ? '\n\nARCHIVOS ADJUNTADOS EN ESTE CASO, disponibles para ver_archivo / editar_word / editar_excel (la última versión editada de cada uno): ' + casoNombresArchivos().map(n => '"' + n + '"' + (_casoLista.some(x => x.nombre === n) ? '' : ' (solo en memoria: NO se guardó en el caso)')).join(', ') : ''}`;
+  return `Hoy es ${hoy}. Empresa: ${empresaNombre(currentEmpresa)}.\nCASO: "${c.nombre}"${c.cliente ? ' — cliente: ' + c.cliente : ''} — estado: ${c.estado || 'activo'}\n\nESTADO DEL CASO (memoria):\n${c.resumen || '(vacío)'}\n\nVÍNCULOS (se leen con leer_registro; módulos: procesos→procesos_proyectos, flowsheet→flowsheet_proyectos, dfs/manual/presentacion/simulacion→doc_documentos):\n${vinc}\n\nNOTAS Y LECCIONES DEL CASO:\n${notas}\n\nPENDIENTES ABIERTOS DEL CASO (ids para actualizar_pendiente):\n${_casoPend.filter(x => x.estado !== 'hecho').slice(0, 25).map(x => `- id=${x.id} | ${x.titulo} | ${x.estado} | resp: ${x.responsable_nombre || 'sin asignar'} | ${x.fecha_limite || 'sin fecha'} | ${x.prioridad}`).join('\n') || '(ninguno)'}${casoNombresArchivos().length ? '\n\nARCHIVOS ADJUNTADOS EN ESTE CASO, disponibles para ver_archivo / editar_word / editar_excel (la última versión editada de cada uno): ' + casoNombresArchivos().map(n => '"' + n + '"' + (_casoLista.some(x => x.nombre === n) ? '' : ' (solo en memoria: NO se guardó en el caso)')).join(', ') : ''}`;
 }
 function casoConCache(messages) {
   const m = messages.slice(), u = m[m.length - 1]; if (!u) return m;
@@ -41631,20 +41652,13 @@ function onLoginSuccess(isFreshLogin) {
 
 function showEmpresaSelectScreen() {
   const el = document.getElementById('empresa-select-options');
-  const cards = [];
-  if (currentEmpresas.includes('AA')) {
-    cards.push(`
-      <div class="empresa-select-card has-transparent-logo" onclick="confirmEmpresaSelection('AA')">
-        <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-      </div>`);
-  }
-  if (currentEmpresas.includes('AS')) {
-    cards.push(`
-      <div class="empresa-select-card has-transparent-logo" onclick="confirmEmpresaSelection('AS')">
-        <img src="icons/logo-aeration-servicios.png" alt="Aeration Servicios" />
-      </div>`);
-  }
-  el.innerHTML = cards.join('');
+  el.innerHTML = EMPRESAS_TODAS.filter(e => currentEmpresas.includes(e)).map(e => {
+    const info = EMPRESA_INFO[e];
+    return `
+      <div class="empresa-select-card has-transparent-logo" onclick="confirmEmpresaSelection('${e}')">
+        <img src="${info.logo}" alt="${esc(info.nombre)}" />${info.logoProvisorio ? `<div style="text-align:center;font-weight:600;margin-top:6px">${esc(info.nombre)}</div>` : ''}
+      </div>`;
+  }).join('');
   document.getElementById('empresaSelectScreen').style.display = 'flex';
 }
 
@@ -41763,8 +41777,10 @@ if (localStorage.getItem('daia_sidebar_collapsed') === '1') {
 function applyEmpresaSelector() {
   const logoImg = document.getElementById('sidebar-logo-img');
   if (logoImg) {
-    logoImg.src = currentEmpresa === 'AS' ? 'icons/logo-aeration-servicios.png' : 'icons/logo-aeration.png';
-    logoImg.classList.toggle('temp-bg-fix', currentEmpresa === 'AS');
+    const info = EMPRESA_INFO[currentEmpresa] || EMPRESA_INFO.AA;
+    logoImg.src = info.logo;
+    logoImg.classList.toggle('temp-bg-fix', !!info.logoFix);
+    logoImg.alt = info.nombre;
   }
 
   const sel = document.getElementById('empresa-selector');
@@ -41774,10 +41790,11 @@ function applyEmpresaSelector() {
     return;
   }
   sel.style.display = 'flex';
-  document.getElementById('empresa-btn-AA').style.display = currentEmpresas.includes('AA') ? '' : 'none';
-  document.getElementById('empresa-btn-AS').style.display = currentEmpresas.includes('AS') ? '' : 'none';
-  document.getElementById('empresa-btn-AA').classList.toggle('active', currentEmpresa === 'AA');
-  document.getElementById('empresa-btn-AS').classList.toggle('active', currentEmpresa === 'AS');
+  EMPRESAS_TODAS.forEach(e => {
+    const b = document.getElementById('empresa-btn-' + e); if (!b) return;
+    b.style.display = currentEmpresas.includes(e) ? '' : 'none';
+    b.classList.toggle('active', currentEmpresa === e);
+  });
 }
 
 function switchEmpresa(empresa) {
@@ -42245,6 +42262,9 @@ async function adminLoadUsers() {
           <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer">
             <input type="checkbox" ${emp.includes('AS')?'checked':''} onchange="adminToggleEmpresa('${u.id}','AS',this.checked)" /> AS
           </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer" title="Aeration Uruguay">
+            <input type="checkbox" ${emp.includes('SAS')?'checked':''} onchange="adminToggleEmpresa('${u.id}','SAS',this.checked)" /> SAS
+          </label>
           <label style="display:flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer;margin-left:auto">
             <input type="checkbox" ${u.coordinador?'checked':''} onchange="adminToggleCoordinador('${u.id}',this.checked)" /> Coordinador
           </label>
@@ -42266,10 +42286,12 @@ async function adminToggleEmpresa(userId, empresa, checked) {
   if (checked && !emp.includes(empresa)) emp.push(empresa);
   if (!checked) emp = emp.filter(e=>e!==empresa);
   if (!emp.length) emp = [empresa]; // never allow zero empresas
-  await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
-    method:'PATCH', headers:{Authorization:'Bearer '+session.token},
+  const r = await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
+    method:'PATCH', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
     body: JSON.stringify({empresas: emp.join(',')})
   });
+  const filas = await r.json().catch(() => null);
+  if (!r.ok || !filas || !filas.length) { alert('No se pudo guardar la empresa "' + empresa + '": ' + (filas?.message || 'la fila no se actualizó. Puede ser una restricción en la columna empresas de profiles que todavía no admite este valor — revisalo en Supabase (docs/empresa_sas.sql).')); adminLoadUsers(); }
 }
 
 async function adminUpdateSector(userId, sector) {
@@ -42326,8 +42348,9 @@ async function adminCreateUser() {
   const sector= document.getElementById('admin-new-sector').value;
   const empAA = document.getElementById('admin-new-empresa-aa').checked;
   const empAS = document.getElementById('admin-new-empresa-as').checked;
+  const empSAS = !!document.getElementById('admin-new-empresa-sas')?.checked;
   const coordinador = document.getElementById('admin-new-coordinador').checked;
-  const empresas = [empAA?'AA':null, empAS?'AS':null].filter(Boolean).join(',') || 'AA,AS';
+  const empresas = [empAA?'AA':null, empAS?'AS':null, empSAS?'SAS':null].filter(Boolean).join(',') || 'AA,AS';
   const st = document.getElementById('admin-create-status');
   if (!email||!pass||!nombre||!sector) { showMsg('admin-create-status','error','Completá todos los campos.'); return; }
   if (pass.length < 6) { showMsg('admin-create-status','error','Contraseña mínimo 6 caracteres.'); return; }
@@ -42391,6 +42414,9 @@ function renderAdmin() {
           </label>
           <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer">
             <input type="checkbox" id="admin-new-empresa-as" checked /> Aeration Servicios (AS)
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px;margin-top:4px;cursor:pointer">
+            <input type="checkbox" id="admin-new-empresa-sas" /> Aeration Uruguay (SAS)
           </label>
         </div>
         <label style="display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer;margin-bottom:12px">
