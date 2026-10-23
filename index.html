@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -572,6 +572,12 @@
 
     <!-- ═══ PANEL: Viajes ═══ -->
     <div class="panel" id="panel-viajes">
+      <div class="card">
+        <div class="card-label">Viaje en grupo</div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px"><input type="checkbox" id="viajes-grupo" style="width:auto" onchange="viajesToggleGrupo(this.checked)" /> Viajan varias personas: completo un solo formulario para todos</label>
+        <div id="viajes-grupo-detalle"></div>
+      </div>
+
       <div class="card">
         <div class="card-label">Fechas del viaje <span style="color:#e05" title="Obligatorio">*</span></div>
         <label>Fecha de inicio</label>
@@ -4370,8 +4376,9 @@ function getViajesDraft() {
   const d = JSON.parse(localStorage.getItem(VIAJES_DRAFT_KEY()) || 'null') || {
     fechaInicio:'', fechaFin:'', destinos:[{pais:'',desde:'',hasta:''}],
     imputacion:'', tarjeta:'', anticipo:'', anticipoMedio:'', anticipoMoneda:'', anticipoImporte:'',
-    seguro:'', pasaporte:'', pasajes:[], hoteles:[]
+    seguro:'', pasaporte:'', pasajes:[], hoteles:[], grupo:false, viajeros:[]
   };
+  if (!d.viajeros) d.viajeros = [];
   if (!d.pasajes) d.pasajes = [];
   if (!d.hoteles) d.hoteles = [];
   return d;
@@ -4412,6 +4419,50 @@ function renderViajesDestinos() {
         <input type="date" value="${esc(dest.hasta)}" style="flex:1" oninput="viajesUpdateDestino(${i},'hasta',this.value)" />
       </div>
     </div>`).join('');
+}
+
+// ── Viaje en grupo: un solo formulario para varias personas ──
+// Las respuestas de Tarjeta, Anticipo, Seguro y Pasaporte valen para todo el grupo (si cambian según la persona se aclara en Pasaporte y visado). Las personas se eligen entre
+// los usuarios de MAIA de esta empresa (sugerencias) o se escriben a mano (por si viaja alguien que no usa MAIA).
+let _viajesPersonas = null;
+async function viajesCargarPersonas() {
+  if (_viajesPersonas) return _viajesPersonas;
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch('/rest/v1/profiles?select=nombre,empresas&order=nombre', { headers:{Authorization:'Bearer '+session.token} });
+    const rows = res.ok ? await res.json() : [];
+    _viajesPersonas = [...new Set(rows.filter(r => r.nombre && String(r.nombre).trim() && (r.empresas || 'AA,AS').split(',').map(e => e.trim()).includes(currentEmpresa)).map(r => String(r.nombre).trim()))];
+  } catch (e) { _viajesPersonas = []; }
+  return _viajesPersonas;
+}
+const viajesViajeros = d => (d.grupo ? (d.viajeros || []) : []).map(x => String(x || '').trim()).filter(Boolean);
+function viajesToggleGrupo(on) {
+  const d = getViajesDraft();
+  d.grupo = !!on;
+  if (on && !(d.viajeros || []).some(x => String(x || '').trim())) d.viajeros = [currentUser?.nombre || currentUser?.email || '', ''];
+  saveViajesDraft(d);
+  renderViajesGrupo();
+}
+function viajesViajeroAdd() { const d = getViajesDraft(); d.viajeros.push(''); saveViajesDraft(d); renderViajesGrupo(); }
+function viajesViajeroRemove(i) { const d = getViajesDraft(); d.viajeros.splice(i, 1); saveViajesDraft(d); renderViajesGrupo(); }
+function viajesViajeroUpdate(i, val) { const d = getViajesDraft(); d.viajeros[i] = val; saveViajesDraft(d); }
+async function renderViajesGrupo() {
+  const d = getViajesDraft();
+  const chk = document.getElementById('viajes-grupo'); if (chk) chk.checked = !!d.grupo;
+  const el = document.getElementById('viajes-grupo-detalle'); if (!el) return;
+  if (!d.grupo) { el.innerHTML = ''; return; }
+  const personas = await viajesCargarPersonas();
+  const n = viajesViajeros(d).length;
+  el.innerHTML = `
+    <datalist id="viajes-personas-datalist">${personas.map(p => `<option value="${esc(p)}"></option>`).join('')}</datalist>
+    <p class="hint" style="margin:10px 0 8px">Quiénes viajan (incluí a todos, vos también si viajás). Elegí de la lista o escribí el nombre${personas.length ? '' : ' (no pude cargar la lista de usuarios)'}.</p>
+    ${(d.viajeros || []).map((v, i) => `
+      <div class="field-row-top" style="margin-bottom:6px">
+        <input list="viajes-personas-datalist" value="${esc(v)}" placeholder="Nombre y apellido" oninput="viajesViajeroUpdate(${i},this.value)" />
+        <button class="remove-btn" onclick="viajesViajeroRemove(${i})" title="Quitar">&#x2715;</button>
+      </div>`).join('')}
+    <button class="btn btn-secondary" onclick="viajesViajeroAdd()" style="margin-top:4px">+ Agregar persona</button>
+    <p class="hint" style="margin-top:10px">${n} persona${n === 1 ? '' : 's'} en el grupo. Tarjeta, anticipo, seguro y pasaporte se responden una sola vez para todo el grupo: si cambian según la persona, detallalo en "Pasaporte y visado" (una línea por persona).</p>`;
 }
 
 // ── Pasajes / Hoteles: listas de texto libre, opcionales ──
@@ -4475,6 +4526,7 @@ function renderViajesForm() {
   set('viajes-anticipo', d.anticipo);
   set('viajes-seguro', d.seguro);
   set('viajes-pasaporte', d.pasaporte);
+  renderViajesGrupo();
   renderViajesDestinos();
   renderViajesListField('pasajes');
   renderViajesListField('hoteles');
@@ -4494,10 +4546,12 @@ function viajesBuildEmailHtml(d, nombre, sector) {
   const listRows = (items) => (items||[]).filter(x=>x&&x.trim()).map(x=>esc(x).replace(/\n/g,'<br>')).join('<hr style="border:none;border-top:1px solid #eee;margin:6px 0">');
   const pasajesTxt = listRows(d.pasajes) || '—';
   const hotelesTxt = listRows(d.hoteles) || '—';
+  const viajeros = viajesViajeros(d);
   return `
-    <h2 style="margin:0 0 4px">Solicitud de viaje — ${esc(nombre)}</h2>
+    <h2 style="margin:0 0 4px">Solicitud de viaje${viajeros.length ? ' en grupo' : ''} — ${esc(nombre)}</h2>
     <p style="margin:0 0 16px;color:#666">${esc(sector||'')}</p>
     <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
+      ${viajeros.length ? row('Viaje en grupo', `${viajeros.length} persona${viajeros.length === 1 ? '' : 's'}:<br>${viajeros.map(v => esc(v)).join('<br>')}`) : ''}
       ${row('Fecha de inicio', esc(d.fechaInicio||'—'))}
       ${row('Fecha de finalización', esc(d.fechaFin||'—'))}
       ${row('Destinos', `<table style="border-collapse:collapse">${destinosRows}</table>`)}
@@ -4516,6 +4570,7 @@ async function viajesSubmit() {
   const statusEl = document.getElementById('viajes-status');
   if (!d.fechaInicio || !d.fechaFin) { showMsg('viajes-status','error','Completá las fechas de inicio y finalización.'); return; }
   if (!d.destinos.some(x=>x.pais.trim())) { showMsg('viajes-status','error','Completá al menos un destino.'); return; }
+  if (d.grupo && viajesViajeros(d).length < 2) { showMsg('viajes-status','error','Es un viaje en grupo: indicá al menos 2 personas que viajan (o destildá "Viaje en grupo").'); return; }
   if (!String(d.imputacion||'').trim()) { showMsg('viajes-status','error','Completá la imputación del viaje.'); return; }
   if (!d.tarjeta) { showMsg('viajes-status','error','Indicá si tenés Tarjeta Corporativa.'); return; }
   if (!d.anticipo) { showMsg('viajes-status','error','Indicá si requerís anticipo.'); return; }
@@ -4541,7 +4596,7 @@ async function viajesSubmit() {
       headers: { Authorization:'Bearer '+token, 'Content-Type':'application/json' },
       body: JSON.stringify({
         message: {
-          subject: `Solicitud de viaje — ${nombre} — ${d.fechaInicio} a ${d.fechaFin}`,
+          subject: `Solicitud de viaje${viajesViajeros(d).length ? ' en grupo (' + viajesViajeros(d).length + ' personas)' : ''} — ${nombre} — ${d.fechaInicio} a ${d.fechaFin}`,
           body: { contentType: 'HTML', content: html },
           toRecipients: recipients.map(email => ({ emailAddress: { address: email } }))
         },
@@ -4602,7 +4657,7 @@ async function viajesLoadHistorial() {
         ? ' · Editada: ' + new Date(row.updated_at).toLocaleDateString('es-AR') : '';
       return `
       <div class="result-card">
-        <div class="result-filename">✈ ${esc(d.fechaInicio||'—')} a ${esc(d.fechaFin||'—')} — ${esc(destinosTxt)}</div>
+        <div class="result-filename">✈ ${esc(d.fechaInicio||'—')} a ${esc(d.fechaFin||'—')} — ${esc(destinosTxt)}${viajesViajeros(d).length ? ` · 👥 ${viajesViajeros(d).length} personas` : ''}</div>
         <div class="hint">Enviada: ${new Date(row.created_at).toLocaleDateString('es-AR')}${editada}</div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button class="btn btn-secondary btn-sm" onclick="viajesEditar('${row.id}')">✎ Editar y reenviar</button>
