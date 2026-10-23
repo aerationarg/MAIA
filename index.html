@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1442,6 +1442,7 @@
       <div class="card">
         <div class="card-label">Campos IA — Análisis de cliente (Paso 1)</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Qué campos extrae la IA al analizar la info de un cliente nuevo. La descripción de cada campo es la instrucción que recibe la IA — por ejemplo, para "Normativa aplicable" podés pedirle explícitamente que la infiera según ubicación y tipo de vuelco.</p>
+        <div id="procesos-ia-compartida" class="hint" style="margin-bottom:10px"></div>
         <div id="procesos-ia-field-list"></div>
         <button class="btn btn-secondary" onclick="procesosIAAddField()" style="margin-top:4px">+ Agregar campo</button>
       </div>
@@ -2211,20 +2212,66 @@ const DEFAULT_PROCESOS_IA_FIELDS = [
   { name: 'Modelos o marcas de equipos', desc: 'Marcas, modelos o proveedores de equipos que el cliente nombra, sugiere o exige (por ejemplo "sopladores Kaeser", "bombas Grundfos", "difusores de membrana EPDM") y, si se puede saber, para qué equipo o etapa aplica cada uno. Dejalo vacío si no menciona ninguno.', tipo: 'texto' },
 ];
 function PROCESOS_IA_KEY() { return 'procesos_ia_fields_' + currentEmpresa; }
-// A quienes ya tenían su lista de campos guardada se les suman, una sola vez, los dos campos nuevos (si no los tienen ya): después se pueden editar o borrar con libertad.
-function getProcesosIAFields() {
-  const guardado = JSON.parse(localStorage.getItem(PROCESOS_IA_KEY()) || 'null');
-  if (!guardado) return DEFAULT_PROCESOS_IA_FIELDS;
+// Los campos que extrae la IA en el Paso 1 son configuración COMPARTIDA (app_config en la base), la misma para todos los usuarios de la empresa. Antes cada navegador tenía la suya:
+// quien no la había armado (o la armaba distinta) no tenía, por ejemplo, el campo de caudal. Referencia: la lista del Admin — se sube sola desde su navegador la primera vez; si todavía
+// no hay una compartida, el resto sigue con la suya (o la de fábrica) y puede publicarla a mano desde Cfg Procesos IA.
+let _procesosIACache = null, _procesosIAEmp = null, _procesosIATimer = null, _procesosIAPendiente = false, _procesosIAEstado = 'desconocido', _procesosIACargadoEn = 0; // estado: 'compartida' | 'local' | 'defecto'
+function procesosIAEmpresa() { if (_procesosIAEmp !== currentEmpresa) { _procesosIACache = null; _procesosIAEmp = currentEmpresa; _procesosIAEstado = 'desconocido'; _procesosIACargadoEn = 0; } } // la copia en memoria es de una sola empresa
+// Lo que haya guardado en este navegador (con la migración de siempre: a las listas viejas se les suman, una sola vez, los dos campos nuevos si no los tienen)
+function procesosIALocal() {
+  let guardado = null; try { guardado = JSON.parse(localStorage.getItem(PROCESOS_IA_KEY()) || 'null'); } catch (e) { guardado = null; }
+  if (!guardado) return null;
   const flag = 'procesos_ia_fields_nuevos1_' + currentEmpresa;
   if (!localStorage.getItem(flag)) {
-    const norm = s => String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const norm = s => String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
     const tiene = re => guardado.some(f => re.test(norm(f.name)));
     DEFAULT_PROCESOS_IA_FIELDS.slice(-2).forEach((d, i) => { if (!tiene(i === 0 ? /requerim.*tren|tren.*requerim/ : /(modelo|marca).*equipo|equipo.*(modelo|marca)/)) guardado.push(Object.assign({}, d)); });
     localStorage.setItem(PROCESOS_IA_KEY(), JSON.stringify(guardado)); localStorage.setItem(flag, '1');
   }
   return guardado;
 }
-function saveProcesosIAFields(f){ localStorage.setItem(PROCESOS_IA_KEY(), JSON.stringify(f)); }
+function getProcesosIAFields() { procesosIAEmpresa(); return _procesosIACache || procesosIALocal() || DEFAULT_PROCESOS_IA_FIELDS; }
+async function procesosIACargar(forzar) {
+  procesosIAEmpresa();
+  if (_procesosIAPendiente) return _procesosIAEstado; // hay un cambio sin guardar: no se pisa con lo que haya en la base
+  if (!forzar && _procesosIAEstado !== 'desconocido' && Date.now() - _procesosIACargadoEn < 60000) return _procesosIAEstado;
+  try {
+    const raw = await supaConfigGetSeguro(PROCESOS_IA_KEY());
+    if (raw != null) { _procesosIACache = JSON.parse(raw); _procesosIAEstado = 'compartida'; }
+    else {
+      const local = procesosIALocal();
+      if (local) {
+        _procesosIACache = local; _procesosIAEstado = 'local';
+        if (currentSector === 'Admin') { await supaConfigSet(PROCESOS_IA_KEY(), JSON.stringify(local)); _procesosIAEstado = 'compartida'; } // la del Admin es la referencia
+      } else { _procesosIAEstado = 'defecto'; }
+    }
+    _procesosIACargadoEn = Date.now();
+  } catch (e) { if (!_procesosIACache) { _procesosIACache = procesosIALocal(); } } // sin conexión con la base: se usa la copia de este navegador, sin pisar lo compartido
+  return _procesosIAEstado;
+}
+function saveProcesosIAFields(f) {
+  procesosIAEmpresa(); _procesosIACache = f;
+  try { localStorage.setItem(PROCESOS_IA_KEY(), JSON.stringify(f)); } catch (e) { /* sin espacio */ }
+  // Con una lista compartida (o si es el Admin quien la arma por primera vez) se guarda para todos; si todavía no hay una compartida, la de otra persona queda en su navegador hasta que la publique
+  if (_procesosIAEstado === 'compartida' || (currentSector === 'Admin' && _procesosIAEstado !== 'local')) { _procesosIAEstado = 'compartida'; _procesosIAPendiente = true; clearTimeout(_procesosIATimer); _procesosIATimer = setTimeout(procesosIAGuardarYa, 800); }
+  procesosIAPintarEstado();
+}
+async function procesosIAGuardarYa() {
+  clearTimeout(_procesosIATimer);
+  try { await supaConfigSet(PROCESOS_IA_KEY(), JSON.stringify(getProcesosIAFields())); _procesosIAPendiente = false; _procesosIACargadoEn = Date.now(); procesosIAPintarEstado('✓ Guardado para todos.'); }
+  catch (e) { _procesosIAPendiente = false; procesosIAPintarEstado('✕ No se pudo guardar para todos: ' + e.message, true); }
+}
+async function procesosIAPublicar() {
+  if (!confirm('Esto reemplaza la lista de campos del Paso 1 de TODOS los usuarios de ' + empresaNombre(currentEmpresa) + ' por la de este navegador. ¿Publicarla?')) return;
+  _procesosIAEstado = 'compartida'; await procesosIAGuardarYa(); procesosIAPintarEstado('✓ Publicada: ahora es la misma para todos.');
+}
+function procesosIAPintarEstado(msg, error) {
+  const el = document.getElementById('procesos-ia-compartida'); if (!el) return;
+  if (msg) { el.innerHTML = `<span style="color:${error ? 'var(--red)' : 'var(--text2)'}">${esc(msg)}</span>`; return; }
+  el.innerHTML = _procesosIAEstado === 'compartida' ? '<span style="color:var(--text2)">Esta lista es la misma para todos los usuarios de esta empresa: lo que cambies acá lo ven todos.</span>'
+    : _procesosIAEstado === 'local' ? '<span style="color:var(--red)">⚠ Esta lista está guardada solo en este navegador, y todavía no hay una compartida.</span> <button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosIAPublicar()">Publicar para todos</button>'
+    : _procesosIAEstado === 'defecto' ? '<span style="color:var(--text2)">Se usa la lista de fábrica (nadie armó una todavía).</span> <button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosIAPublicar()">Publicar esta lista para todos</button>' : '';
+}
 
 const DEFAULT_REND_FIELDS = [
   { name: 'Fecha',               desc: 'Fecha del comprobante (DD/MM/AAAA)' },
@@ -6032,6 +6079,8 @@ const PROCESOS_STEP_LABEL = { 1:'Analizar cliente', 2:'Diseñar el proyecto', 3:
 let _procesosIAFieldsState = { filtro: '', modo: 'oculto', expandedIdx: null }; // modo: 'oculto' | 'todos' | 'buscando'
 
 function renderProcesosIAFields() {
+  procesosIACargar().then(() => { if (_procesosIAFieldsState.__cargada !== _procesosIAEstado) { _procesosIAFieldsState.__cargada = _procesosIAEstado; renderProcesosIAFields(); } }); // la primera vez trae la lista compartida y se vuelve a pintar
+  procesosIAPintarEstado();
   const fields = getProcesosIAFields();
   const el = document.getElementById('procesos-ia-field-list');
   if (!el) return;
@@ -9114,6 +9163,7 @@ function procesosStep1Fusionar(prev, ext) {
 }
 
 async function procesosStep1Analizar(modo) {
+  await procesosIACargar(true); // la lista compartida más reciente de campos
   const p = procesosCurrentProyecto;
   const statusId = 'procesos-step1-status';
   const hayPrevio = !!(p.info_cliente && (Object.keys(p.info_cliente.campos || {}).length || (p.info_cliente.corrientes || []).length));
@@ -31818,6 +31868,7 @@ async function propuestasCrear() {
 // Núcleo de "Armar propuesta" (lo usa la solapa Propuestas y también Casos): lee lo que se mandó, arma el proyecto, lo guarda y genera el contenido del Paso 4.
 // opt.navegar = false: no cambia de solapa; opt.esperarGeneracion = true: espera a que termine el contenido del Paso 4. Devuelve el id del proyecto.
 async function propuestasCrearCore(nombre, texto, archivos, opt) {
+  await procesosIACargar();
   opt = opt || {}; const st = opt.st || 'propuestas-status';
   {
     showMsg(st, 'loading', 'Leyendo los archivos...');
@@ -41974,6 +42025,7 @@ function refreshAllForEmpresa() {
   rendLoadSpDefaults().then(()=>{ spDefaults = getSpDefaults(); });
   rendLoadFields().then(()=>{ if (typeof renderRendFields === 'function') renderRendFields(); });
   rendLoadMapping();
+  procesosIACargar().then(() => { if (typeof renderProcesosIAFields === 'function') renderProcesosIAFields(); });
   rendLoadAutoFields().then(()=>{ if (typeof renderAutoFields === 'function') renderAutoFields('rend'); });
 
   // Re-render whichever panel is currently visible
