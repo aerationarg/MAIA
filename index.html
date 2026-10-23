@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4627,9 +4627,30 @@ async function viajesEliminar(id) {
 
 // ── Hallazgos (SGI) ───────────────────────────────────────
 function HALLAZGOS_CFG_KEY() { return 'hallazgos_cfg_' + currentEmpresa; }
-function getHallazgosCfg() { return JSON.parse(localStorage.getItem(HALLAZGOS_CFG_KEY()) || 'null') || {}; }
-function saveHallazgosCfg(cfg) { localStorage.setItem(HALLAZGOS_CFG_KEY(), JSON.stringify(cfg)); }
-function renderCfgHallazgos() {
+// El Excel de Hallazgos vinculado es configuración COMPARTIDA en Supabase (app_config), igual para todos los usuarios de la empresa. Antes se guardaba solo en el navegador de
+// quien lo vinculaba (localStorage) y al resto les decía "No hay Excel configurado". Lo que ya había vinculado en un navegador se sube solo la primera vez.
+let _hallazgosCfgCache = null, _hallazgosCfgEmp = null;
+function hallazgosCfgEmpresa() { if (_hallazgosCfgEmp !== currentEmpresa) { _hallazgosCfgCache = null; _hallazgosCfgEmp = currentEmpresa; } } // la copia en memoria es de una sola empresa
+const hallazgosCfgLocal = () => { try { return JSON.parse(localStorage.getItem(HALLAZGOS_CFG_KEY()) || 'null') || {}; } catch (e) { return {}; } };
+function getHallazgosCfg() { hallazgosCfgEmpresa(); return _hallazgosCfgCache || hallazgosCfgLocal(); }
+async function hallazgosLoadCfg() {
+  hallazgosCfgEmpresa();
+  try {
+    const raw = await supaConfigGetSeguro(HALLAZGOS_CFG_KEY());
+    if (raw != null) { _hallazgosCfgCache = JSON.parse(raw); return _hallazgosCfgCache; }
+    const local = hallazgosCfgLocal(); // todavía no hay nada compartido: se sube lo que haya en este navegador
+    _hallazgosCfgCache = local;
+    if (local.excelId) { try { await supaConfigSet(HALLAZGOS_CFG_KEY(), JSON.stringify(local)); } catch (e) { /* se vuelve a intentar la próxima vez */ } }
+  } catch (e) { if (!_hallazgosCfgCache) _hallazgosCfgCache = hallazgosCfgLocal(); } // sin conexión con la base: se usa la última copia de este navegador, sin pisar lo compartido
+  return _hallazgosCfgCache;
+}
+function saveHallazgosCfg(cfg) { // devuelve la promesa de guardado en la base (quien lo llama avisa si falla)
+  hallazgosCfgEmpresa(); _hallazgosCfgCache = cfg;
+  try { localStorage.setItem(HALLAZGOS_CFG_KEY(), JSON.stringify(cfg)); } catch (e) { /* sin espacio */ }
+  return supaConfigSet(HALLAZGOS_CFG_KEY(), JSON.stringify(cfg));
+}
+async function renderCfgHallazgos() {
+  await hallazgosLoadCfg();
   const el = document.getElementById('cfg-hallazgos-excel-label');
   if (el) el.textContent = getHallazgosCfg().excelLabel || 'Sin seleccionar';
 }
@@ -4894,6 +4915,7 @@ async function hallazgosPatchCell(token, excelBase, cellAddress, value) {
 let _hallazgosExistingCache = null; // [{id:'HA-778', row: 42}, ...] en orden natural de la hoja
 async function hallazgosLoadExistingList(forceRefresh) {
   if (_hallazgosExistingCache && !forceRefresh) return _hallazgosExistingCache;
+  await hallazgosLoadCfg();
   const cfg = getHallazgosCfg();
   if (!cfg.excelId) throw new Error('No hay Excel configurado en Cfg Hallazgos.');
   const token = await getMsToken();
@@ -4914,6 +4936,7 @@ async function hallazgosLoadExistingList(forceRefresh) {
 // guardado), reutiliza esa misma fila; si es la primera vez, genera el próximo HA-### y usa
 // una fila nueva — nunca se pide elegir manualmente en cuál insertar.
 async function hallazgosInsertarEnExcel(id, hRow, fields) {
+  await hallazgosLoadCfg();
   const cfg = getHallazgosCfg();
   if (!cfg.excelId) throw new Error('No hay Excel configurado. Pedile a un Admin que lo seleccione en Cfg Hallazgos.');
   const token = await getMsToken();
@@ -5018,6 +5041,7 @@ async function hallazgosEliminarConfirmado(id) {
     // igual seguimos con el borrado en MAIA (mejor eso que dejarlo sin poder eliminar).
     if (h?.ha_row) {
       try {
+        await hallazgosLoadCfg();
         const cfg = getHallazgosCfg();
         const token = await getMsToken();
         const excelBase = `https://graph.microsoft.com/v1.0/sites/${cfg.excelS}/drive/items/${cfg.excelId}/workbook/worksheets('Hallazgos')/`;
@@ -22520,11 +22544,12 @@ async function fbSelectFile(item, relativePath) {
     // Load headers from template and show mapping modal (reuses REND_MAPPING_KEY)
     await loadExcelHeadersAndShowMapping('rend', item.id, fbCurrentSiteId);
   } else if (fbTarget === 'hallazgos-excel') {
-    const cfg = getHallazgosCfg();
+    await hallazgosLoadCfg();
+    const cfg = Object.assign({}, getHallazgosCfg());
     cfg.excelPath = relativePath; cfg.excelId = item.id; cfg.excelS = fbCurrentSiteId; cfg.excelLabel = item.name;
-    saveHallazgosCfg(cfg);
     document.getElementById('cfg-hallazgos-excel-label').textContent = item.name;
     fbClose();
+    try { await saveHallazgosCfg(cfg); } catch (e) { alert('El Excel quedó vinculado solo en este navegador: no se pudo guardar para todos (' + e.message + ').'); }
   } else if (fbTarget === 'rend-plantilla') {
     document.getElementById('cfg-rend-tmpl-label').textContent = item.name;
     fbClose();
