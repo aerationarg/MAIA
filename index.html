@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1395,7 +1395,8 @@
       <div class="card">
         <div class="card-label">Destinatarios del mail de Viajes</div>
         <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Cada vez que alguien envía el formulario de Viajes, se manda un mail (vía Microsoft) con toda la info a estas direcciones. Una por línea o separadas por coma.</p>
-        <textarea id="cfg-viajes-recipients" rows="4" placeholder="admin@aeration.com.ar&#10;compras@aeration.com.ar" oninput="cfgViajesSaveRecipients(this.value)"></textarea>
+        <textarea id="cfg-viajes-recipients" rows="4" placeholder="admin@aeration.com.ar&#10;compras@aeration.com.ar" oninput="cfgViajesSaveRecipients(this.value)" onblur="cfgViajesGuardarYa()"></textarea>
+        <p class="hint" id="cfg-viajes-status" style="margin-top:6px">Se guarda para todos los usuarios de esta empresa (AA / AS tienen su propia lista).</p>
       </div>
     </div>
 
@@ -4310,12 +4311,35 @@ function historialModalClose() { document.getElementById('historialModal').class
 
 // ── Viajes ──────────────────────────────────────────────
 function VIAJES_CFG_KEY() { return 'viajes_cfg_' + currentEmpresa; }
-function getViajesCfg() { return JSON.parse(localStorage.getItem(VIAJES_CFG_KEY()) || 'null') || { recipients: '' }; }
-function saveViajesCfg(cfg) { localStorage.setItem(VIAJES_CFG_KEY(), JSON.stringify(cfg)); }
-function cfgViajesSaveRecipients(val) { saveViajesCfg({ recipients: val }); }
-function renderCfgViajes() {
+// Destinatarios del mail de Viajes: configuración COMPARTIDA en Supabase (app_config), igual para todos los usuarios de la empresa. Antes se guardaba solo en el navegador
+// de quien la cargaba, así que al resto les decía "No hay destinatarios configurados". Lo que ya había cargado en un navegador se sube solo la primera vez.
+let _viajesCfgCache = null, _viajesCfgTimer = null, _viajesCfgEmp = null;
+function viajesCfgEmpresa() { if (_viajesCfgEmp !== currentEmpresa) { _viajesCfgCache = null; _viajesCfgEmp = currentEmpresa; } } // la copia en memoria es de una sola empresa
+const viajesCfgLocal = () => { try { return JSON.parse(localStorage.getItem(VIAJES_CFG_KEY()) || 'null') || { recipients: '' }; } catch (e) { return { recipients: '' }; } };
+function getViajesCfg() { viajesCfgEmpresa(); return _viajesCfgCache || viajesCfgLocal(); }
+async function viajesLoadCfg() {
+  viajesCfgEmpresa();
+  try {
+    const raw = await supaConfigGetSeguro(VIAJES_CFG_KEY());
+    if (raw != null) { _viajesCfgCache = JSON.parse(raw); return _viajesCfgCache; }
+    const local = viajesCfgLocal(); // todavía no hay nada compartido: se sube lo que haya en este navegador
+    _viajesCfgCache = local;
+    if (String(local.recipients || '').trim()) { try { await supaConfigSet(VIAJES_CFG_KEY(), JSON.stringify(local)); } catch (e) { /* se vuelve a intentar la próxima vez */ } }
+  } catch (e) { if (!_viajesCfgCache) _viajesCfgCache = viajesCfgLocal(); } // sin conexión con la base: se usa la última copia de este navegador, sin pisar lo compartido
+  return _viajesCfgCache;
+}
+function saveViajesCfg(cfg) { viajesCfgEmpresa(); _viajesCfgCache = cfg; try { localStorage.setItem(VIAJES_CFG_KEY(), JSON.stringify(cfg)); } catch (e) { /* sin espacio */ } }
+async function cfgViajesGuardarYa() {
+  clearTimeout(_viajesCfgTimer);
+  const empresaAlEscribir = currentEmpresa;
+  try { await supaConfigSet(VIAJES_CFG_KEY(), JSON.stringify(getViajesCfg())); showMsg('cfg-viajes-status', 'success', '✓ Guardado para todos los usuarios' + (empresaAlEscribir ? ' de ' + empresaAlEscribir : '') + '.'); }
+  catch (e) { showMsg('cfg-viajes-status', 'error', '✕ No se pudo guardar: ' + e.message); }
+}
+function cfgViajesSaveRecipients(val) { saveViajesCfg({ recipients: val }); clearTimeout(_viajesCfgTimer); _viajesCfgTimer = setTimeout(cfgViajesGuardarYa, 800); }
+async function renderCfgViajes() {
+  await viajesLoadCfg();
   const el = document.getElementById('cfg-viajes-recipients');
-  if (el) el.value = getViajesCfg().recipients || '';
+  if (el && document.activeElement !== el) el.value = getViajesCfg().recipients || '';
 }
 function viajesRecipientList() {
   return (getViajesCfg().recipients || '').split(/[,\n]/).map(s=>s.trim()).filter(Boolean);
@@ -4480,6 +4504,7 @@ async function viajesSubmit() {
   }
   if (!d.seguro) { showMsg('viajes-status','error','Indicá el estado del seguro al viajero.'); return; }
   if (!String(d.pasaporte||'').trim()) { showMsg('viajes-status','error','Completá el estado de pasaporte y visado.'); return; }
+  await viajesLoadCfg(); // siempre la lista compartida más reciente, no la copia de este navegador
   const recipients = viajesRecipientList();
   if (!recipients.length) { showMsg('viajes-status','error','No hay destinatarios configurados. Pedile a un Admin que los complete en Cfg Viajes.'); return; }
 
