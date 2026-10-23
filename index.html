@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8780,7 +8780,7 @@ function procesosUpdateCampoCorriente(idx, fieldName, subkey, val) {
   const c = Object.assign({}, corrientes[idx]);
   const campos = Object.assign({}, c.campos);
   const current = (campos[fieldName] && typeof campos[fieldName]==='object') ? campos[fieldName] : {valor:'', unidad:'', limite_normativo:'', fuente:''};
-  const cambios = { [subkey]: val };
+  const cambios = { [subkey]: (subkey === 'valor' && /^\s*-?[\d.,]+\s*$/.test(String(val)) && procesosNumeroDe(val) != null) ? procesosNumeroDe(val) : val }; // un valor numérico tipeado se guarda como número (antes quedaba como texto y los cálculos lo ignoraban)
   if (subkey === 'valor') cambios.fuente = ''; // editado a mano: la fuente extraída ya no aplica
   campos[fieldName] = Object.assign({}, current, cambios);
   c.campos = campos;
@@ -10438,7 +10438,7 @@ function procesosStep2GetValorFuente(fuente) {
     const corrientes = p.info_cliente?.corrientes || [];
     const c = corrientes.find(x => x.nombre === fuente.corriente);
     const campo = c && c.campos && c.campos[fuente.campo];
-    const val = (campo && typeof campo === 'object') ? campo.valor : campo;
+    const val = procesosNumeroDe((campo && typeof campo === 'object') ? campo.valor : campo);
     return (typeof val === 'number') ? val : null;
   }
   if (fuente.origen === 'hoja' && fuente.hoja && fuente.celda_origen) {
@@ -10467,7 +10467,7 @@ function procesosStep2GetPeso(fuente) {
     const c = corrientes.find(x => x.nombre === fuente.corriente);
     if (!c) return 1;
     const entry = Object.entries(c.campos || {}).find(([k]) => k.toLowerCase().includes('caudal'));
-    const val = entry && entry[1] && typeof entry[1] === 'object' ? entry[1].valor : null;
+    const val = entry && entry[1] && typeof entry[1] === 'object' ? procesosNumeroDe(entry[1].valor) : null;
     return (typeof val === 'number' && val > 0) ? val : 1;
   }
   if (fuente.origen === 'hoja' && fuente.hoja) {
@@ -10869,6 +10869,19 @@ function procesosClaveParametro(txt) {
   for (const [clave, re] of PROCESOS_PARAM_ALIAS) if (re.test(t)) return clave;
   return null;
 }
+// Número de un valor del Paso 1: los extraídos por la IA vienen como número, pero los que se tipean a mano quedaban como TEXTO ("120", "1.200", "50,5", "50 m3/h") y los cálculos
+// los ignoraban. Acepta formato argentino (coma decimal, punto de miles) y toma el número del comienzo del texto. null si no hay número.
+function procesosNumeroDe(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (v == null) return null;
+  const m = /^-?[\d.,]+/.exec(String(v).trim().replace(/\s/g, '')); if (!m) return null;
+  let s = m[0].replace(/[.,]+$/, '');
+  const c = s.lastIndexOf(','), d = s.lastIndexOf('.');
+  if (c > -1 && d > -1) s = c > d ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (c > -1) s = s.replace(',', '.');
+  else if (d > -1 && /^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, ''); // "1.200" = mil doscientos
+  const n = parseFloat(s); return isFinite(n) ? n : null;
+}
 // Caudal a m3/día para poder ponderar corrientes que vengan en unidades distintas.
 function procesosCaudalM3d(valor, unidad) {
   if (typeof valor !== 'number' || !isFinite(valor)) return null;
@@ -10936,7 +10949,7 @@ async function procesosStep2CalcularBalance() {
   (p.info_cliente?.corrientes || []).forEach(c => {
     const conc = {}; let q = null, qEsMedio = false;
     Object.entries(c.campos || {}).forEach(([nombre, campo]) => {
-      const val = (campo && typeof campo === 'object') ? campo.valor : campo;
+      const val = procesosNumeroDe((campo && typeof campo === 'object') ? campo.valor : campo);
       const unidad = (campo && typeof campo === 'object') ? (campo.unidad || '') : '';
       if (typeof val !== 'number' || !isFinite(val)) return;
       const tn = procesosNormTxt(nombre);
@@ -12724,16 +12737,27 @@ async function procesosPCCaudalPlanta() {
 // Suma de los caudales (m3/d) cargados en las corrientes del Paso 1 (el "medio" o "promedio" si hay varios); null si no hay ninguno
 function procesosPCCaudalCorrientes(p) {
   let total = 0, hay = false;
-  ((p && p.info_cliente && p.info_cliente.corrientes) || []).forEach(c => {
+  const info = (p && p.info_cliente) || {};
+  (info.corrientes || []).forEach(c => {
     let q = null, medio = false;
     Object.entries(c.campos || {}).forEach(([nombre, campo]) => {
-      const val = (campo && typeof campo === 'object') ? campo.valor : campo, unidad = (campo && typeof campo === 'object') ? (campo.unidad || '') : '', tn = procesosNormTxt(nombre);
-      if (typeof val !== 'number' || !isFinite(val) || !/caudal/.test(tn)) return;
-      const m = /medio|prom/.test(tn); if (q == null || (m && !medio)) { q = procesosCaudalM3d(val, unidad); medio = m; }
+      const tn = procesosNormTxt(nombre); if (!/caudal/.test(tn)) return;
+      const v = procesosNumeroDe((campo && typeof campo === 'object') ? campo.valor : campo); if (!(v > 0)) return;
+      const m = /medio|prom/.test(tn);
+      if (q == null || (m && !medio)) { q = procesosCaudalM3d(v, (campo && typeof campo === 'object') ? (campo.unidad || '') : ''); medio = m; }
     });
     if (q > 0) { total += q; hay = true; }
   });
-  return hay ? total : null;
+  if (hay) return total;
+  // sin corrientes con caudal: la información general del Paso 1 (texto libre, ej. "Caudal de diseño: 50 m3/h")
+  let q = null, medio = false;
+  Object.entries(info.campos || {}).forEach(([nombre, texto]) => {
+    const tn = procesosNormTxt(nombre); if (!/caudal/.test(tn) || texto == null) return;
+    const t = String(texto), v = procesosNumeroDe(t); if (!(v > 0)) return;
+    const m = /medio|prom/.test(tn);
+    if (q == null || (m && !medio)) { q = procesosCaudalM3d(v, t.replace(/^\s*-?[\d.,]+\s*/, '')); medio = m; }
+  });
+  return q > 0 ? q : null;
 }
 // Importa el Excel de dimensiones (hoja 1: dos filas de encabezado, una fila por modelo, notas al final)
 async function procesosPCImportar(file) {
