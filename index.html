@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -36604,6 +36604,54 @@ function simPozoOpciones(d, e) {
   return { horas: 24 * dias, qin: t => { const base = simQ(g, pat, t, null); if (t < 0) return base; return simAfluenteInst(g, pat, t, simFactores(t, dd), qm, dqo0).q; }, bombasF: t => (t < 0 ? 1 : simFactores(t, dd).pozoOn) };
 }
 
+// ═══ BOMBAS PROGRAMADAS (recirculación, purga, extracción del digestor, deshidratación) ═══
+// Una bomba entrega SIEMPRE el mismo caudal (el de su punto de trabajo): lo que cambia es CUÁNDO está encendida. Tres modos:
+// auto (según los datos de diseño), ciclos (X min encendida / Y min apagada, dentro de una ventana horaria) y hora a hora (24 valores).
+function simBombaParams(pfx, quien, autoTxt, o) {
+  o = o || {}; const ciclos = p => p[pfx + '_modo'] === 'ciclos';
+  const l = [
+    { k: pfx + '_modo', l: quien + ': cómo trabaja', u: '', texto: true, opts: [['auto', autoTxt], ['ciclos', 'Por ciclos: X min encendida / Y min apagada'], ['horario', o.horarioTxt || 'Hora a hora (24 valores)']], tipico: 'auto', alias: [], ayuda: 'La bomba entrega siempre el mismo caudal; lo que se programa es cuándo está encendida. "Por ciclos" repite X minutos encendida y Y minutos apagada.' }];
+  if (o.qb !== false) l.push({ k: pfx + '_qb', l: quien + ': caudal de la bomba (fijo mientras está encendida)', u: 'm3/h', dim: 'flow', alias: [], vis: ciclos, ayuda: 'Vacío: se calcula para que, con los ciclos, el caudal medio sea el de diseño.' });
+  l.push({ k: pfx + '_on', l: quien + ': minutos encendida en cada ciclo', u: 'min', tipico: 30, alias: [], vis: ciclos }, { k: pfx + '_off', l: quien + ': minutos apagada en cada ciclo', u: 'min', tipico: 30, alias: [], vis: ciclos });
+  if (o.ventana !== false) l.push({ k: pfx + '_desde', l: quien + ': los ciclos funcionan desde las', u: 'h', tipico: 0, alias: [], vis: ciclos, ayuda: 'Fuera de esta ventana la bomba está apagada. 0 a 24 = todo el día.' }, { k: pfx + '_hasta', l: quien + ': los ciclos funcionan hasta las', u: 'h', tipico: 24, alias: [], vis: ciclos });
+  if (o.serie) l.push(Object.assign({ k: pfx + '_horaria', u: 'm3/h', serie24: true, opcional: true, alias: [], vis: p => p[pfx + '_modo'] === 'horario' }, o.serie));
+  return l;
+}
+// Especificación de la bomba a partir de los parámetros numéricos (null = automático)
+function simBombaSpec(p, pfx, serieK) {
+  const modo = String(p[pfx + '_modo'] || 'auto');
+  if (modo === 'horario') { const h = sim24(p[serieK || (pfx + '_horaria')]); return h ? { modo, prog: h } : null; }
+  if (modo !== 'ciclos') return null;
+  const on = simPos(p[pfx + '_on']), off = simNum(p[pfx + '_off']); if (!on) return null;
+  const d = simNum(p[pfx + '_desde']), h = simNum(p[pfx + '_hasta']);
+  const sp = { modo, on, off: Math.max(0, off == null ? 0 : off), desde: d == null ? 0 : (((d % 24) + 24) % 24), hasta: h == null ? 24 : h, qb: simPos(p[pfx + '_qb']) };
+  sp.duty = simBombaEstad(sp).horas / 24; return sp.duty > 0 ? sp : null;
+}
+// 1 si la bomba está encendida a la hora t (horas desde el inicio), 0 si no; el ciclo arranca cuando se abre la ventana
+function simBombaOn(sp, t) {
+  const h = ((t % 24) + 24) % 24; let rel = h - sp.desde; if (rel < 0) rel += 24;
+  const ancho = (((sp.hasta - sp.desde) % 24) + 24) % 24 || 24; if (rel >= ancho - 1e-9) return 0;
+  const per = (sp.on + sp.off) / 60; return (rel % per) < sp.on / 60 - 1e-9 ? 1 : 0;
+}
+// Caudal de la bomba a la hora t; qMedio = caudal medio de diseño (si no se fijó el de la bomba, se calcula para sostener ese medio)
+function simBombaQ(sp, t, qMedio) {
+  if (sp.prog) return sp.prog[Math.floor((((t % 24) + 24) % 24))];
+  return (sp.qb || qMedio / sp.duty) * simBombaOn(sp, t);
+}
+function simBombaHoras(sp, qMedio) { return Array.from({ length: 24 }, (_, h) => { let a = 0; for (let m = 0; m < 12; m++) a += simBombaQ(sp, h + (m + 0.5) / 12, qMedio); return a / 12; }); }
+// Horas encendida y arranques por día (el ciclo se muestrea cada minuto)
+function simBombaEstad(sp) {
+  let n = 0, arr = 0, prev = sp.prog ? 0 : simBombaOn(sp, -1 / 60 + 1e-6);
+  for (let m = 0; m < 1440; m++) { const o = sp.prog ? (sp.prog[Math.floor(m / 60)] > 0 ? 1 : 0) : simBombaOn(sp, m / 60 + 1e-6); n += o; if (o && !prev) arr++; prev = o; }
+  return { horas: n / 60, arranques: arr };
+}
+function simBombaModoTxt(p, pfx, serieK, autoTxt) {
+  const sp = simBombaSpec(p, pfx, serieK); if (!sp) return autoTxt;
+  if (sp.modo === 'horario') return 'Hora a hora (24 valores cargados)';
+  const f2 = x => String(+x.toFixed(1)), todo = sp.desde === 0 && (sp.hasta === 24 || sp.hasta === 0);
+  return `Ciclos: ${f2(sp.on)} min encendida / ${f2(sp.off)} min apagada${todo ? '' : ' entre las ' + f2(sp.desde) + ' y las ' + f2(sp.hasta % 24) + ' h'}`;
+}
+
 // ═══ SEDIMENTADOR SECUNDARIO ═══
 // Velocidad de sedimentación zonal (Vesilind: v = v0·exp(-n·X), X en kg/m3). Sin ensayo de columna, v0 y n se estiman del IVL con una
 // relación aproximada propia (calibrada con valores típicos: ~2,3 m/h a 3 g/L con IVL 100, ~0,9 m/h con IVL 200). Reemplazar por datos medidos.
@@ -36633,9 +36681,10 @@ function simRangoR(A, Q, Xf, ves) {
 }
 function simSedParams(p, g) {
   const nl = Math.max(1, Math.round(simNum(p.n_lineas) || 1)), A1 = simPos(p.area) || (simPos(p.diametro) ? Math.PI * p.diametro * p.diametro / 4 : null), A = A1 ? A1 * nl : null, Q = simPos(g.q_med), Qp = simPos(g.q_pico) || (Q ? Q * Math.max(...simPatron(g)) : null);
-  const prog = sim24(p.rec_horaria), Qr = simPos(p.q_rec) || (simPos(p.relacion_rec) && Q ? p.relacion_rec * Q : null) || (prog ? simMedia(prog) : null), X = simPos(p.mlss) ? p.mlss / 1000 : null;
+  const rec = simBombaSpec(p, 'rec', 'rec_horaria'), prog0 = rec && rec.prog ? rec.prog : null, QrNom = simPos(p.q_rec) || (simPos(p.relacion_rec) && Q ? p.relacion_rec * Q : null) || (prog0 ? simMedia(prog0) : null);
+  const Qr = rec && rec.modo === 'ciclos' ? (rec.qb ? rec.qb * rec.duty : QrNom) : QrNom, prog = rec && rec.modo === 'ciclos' && Qr ? simBombaHoras(rec, Qr) : prog0, X = simPos(p.mlss) ? p.mlss / 1000 : null;
   const prop = String(p.rec_proporcional || 'no').toLowerCase().startsWith('s'), QrP = Qr ? (prop && Q ? Qr / Q * Qp : Qr) : null;
-  return { A, Q, Qp, Qr, QrP, prop, prog, X, H: simPos(p.profundidad), ivl: simPos(p.ivl), ves: simVesilind(p.ivl, p) };
+  return { A, Q, Qp, Qr, QrP, prop, prog, rec, X, H: simPos(p.profundidad), ivl: simPos(p.ivl), ves: simVesilind(p.ivl, p) };
 }
 // Simulación dinámica del sedimentador: modelo de capas 1-D (10 capas), con flujo límite entre capas. Alimentación MLSS constante.
 function simSedDin(p, g, ev, qfun) {
@@ -36692,6 +36741,7 @@ function simVerificarSed(p, g, ev, conDin) {
   ];
   if (lv) ind.splice(6, 0, simInd('Carga sobre vertedero (caudal medio)', s.Q * 24 / lv, 'm3/m·d', null, 250, 'Típico 125 a 250 m3/m·d (hasta 375 en plantas chicas).'));
   if (s.prog) ind.splice(7, 0, simInd('Recirculación programada: relación mínima (Qr/Q medio)', Math.min(...s.prog) / s.Q, '', crit.R[0], null, `La hora de menor recirculación (${Math.min(...s.prog).toFixed(1)} m3/h): con poca recirculación el lodo se acumula en el sedimentador.`), simInd('Recirculación programada: relación máxima (Qr/Q medio)', Math.max(...s.prog) / s.Q, '', null, crit.R[1], `La hora de mayor recirculación (${Math.max(...s.prog).toFixed(1)} m3/h). Los indicadores de arriba usan el caudal promedio de la programación (${s.Qr.toFixed(1)} m3/h).`));
+  if (s.rec && s.rec.modo === 'ciclos') { const est = simBombaEstad(s.rec), qb = s.rec.qb || s.Qr / s.rec.duty; ind.splice(7, 0, simInd('Bomba de recirculación por ciclos: caudal cuando está encendida', qb, 'm3/h', null, null, `Encendida ${est.horas.toFixed(1)} h por día, ${est.arranques} arranques por día; el caudal medio es ${s.Qr.toFixed(1)} m3/h. Los indicadores de carga de sólidos usan ese medio.`)); }
   const res = { faltan: [], ind, flujo: f, flujoPico: fp, mlssMax: mm, mlssMaxPico: mmP, rangoR: rr, s };
   if (conDin) { res.din = simSedDin(p, g, ev); res.ind.push(simInd('Manto de lodos máximo (simulación 24 h)', res.din.mantoMax, 'm', null, 0.33 * s.H, 'Se pide mantenerlo por debajo de ~1/3 de la profundidad lateral.'), simInd('SST máximo en el efluente (simulación 24 h)', res.din.tssMax, 'mg/L', null, simPos(g.sst_vuelco) || 30, 'Valor orientativo; el que vale es el límite de vuelco del proyecto.')); }
   return res;
@@ -36724,8 +36774,14 @@ function simVerificarLA(p, g) {
     simInd('Caudal de purga necesario para esa edad de lodos', Qw, 'm3/d', null, null, 'Estimado purgando desde la recirculación (si no se informa su concentración, se supone ≈2,2 × MLSS).'),
     simInd('Demanda de oxígeno (promedio)', AOR, 'kg O2/h', null, null, `Carbonosa ${(AORc / 24).toFixed(1)}${nitrifica && ntk ? ` + nitrificación ${(AORn / 24).toFixed(1)}` : ''} kg O2/h.`)
   ];
-  const pgH = sim24(p.purga_horaria);
-  if (pgH) { const qd = pgH.reduce((a, b) => a + b, 0), Xr = simPos(p.mlss_recirc) || X * 2.2, srtR = qd > 0 ? V * X / (qd * Xr) : Infinity; ind.push(simInd('Purga programada por día', qd, 'm3/d', null, null, `Para la edad de lodos de diseño hacen falta ${Qw.toFixed(1)} m3/d (con ${Xr.toFixed(0)} mg/L en la recirculación).`), simInd('Edad de lodos con la purga programada', srtR, 'd', cr.srt[0], cr.srt[1], 'V × MLSS / (purga × concentración del lodo purgado). Si se aparta de la edad de diseño, el MLSS sube o baja con los días.')); }
+  const pSp = simBombaSpec(p, 'purga', 'purga_horaria'), pgH = pSp && pSp.prog ? pSp.prog : null;
+  if (pgH || (pSp && pSp.modo === 'ciclos')) {
+    let qd, extra = '';
+    if (pgH) qd = pgH.reduce((a, b) => a + b, 0);
+    else { const qNom = simPos(p.q_purga) || Qw / 24, qb = pSp.qb || qNom / pSp.duty, est = simBombaEstad(pSp); qd = qb * pSp.duty * 24; extra = ` La bomba entrega ${qb.toFixed(1)} m3/h cuando está encendida (${est.horas.toFixed(1)} h por día, ${est.arranques} arranques).`; }
+    const Xr = simPos(p.mlss_recirc) || X * 2.2, srtR = qd > 0 ? V * X / (qd * Xr) : Infinity;
+    ind.push(simInd('Purga programada por día', qd, 'm3/d', null, null, `Para la edad de lodos de diseño hacen falta ${Qw.toFixed(1)} m3/d (con ${Xr.toFixed(0)} mg/L en la recirculación).${extra}`), simInd('Edad de lodos con la purga programada', srtR, 'd', cr.srt[0], cr.srt[1], 'V × MLSS / (purga × concentración del lodo purgado). Si se aparta de la edad de diseño, el MLSS sube o baja con los días.'));
+  }
   if (simPos(p.capacidad_o2)) ind.push(simInd('Capacidad de aireación / demanda con factor pico 1,5', Number(p.capacidad_o2) / AORp, '', 1.0, null, `Capacidad instalada en campo ${p.capacidad_o2} kg O2/h contra ${AORp.toFixed(1)} kg O2/h de demanda pico.`));
   if (nitrifica) ind.push(simInd('Edad de lodos / edad mínima para nitrificar', SRT / SRTmin, '', 1.5, null, `Edad mínima ${isFinite(SRTmin) ? SRTmin.toFixed(1) : '∞'} d a ${T} °C y ${DO} mg/L de OD; factor de seguridad recomendado ≥ 1,5.`));
   return { faltan: [], ind, calc: { F_M, SRT, PxBio, AOR, AORp, Qw, SRTmin } };
@@ -37259,46 +37315,80 @@ function simVerificarEsp(p, g, ev, o) {
   const sim = { Q: Qu, qin: e.Q, Xin: e.X, X: Qu.map(() => Xu), ret: { Q: Qs, X: Xs }, dtH: o.dtH, V: A * H, bomba: false, spillTotal: 0, tituloQ: 'Caudal de lodo que entra, lodo espesado y rebose (m3/h)', nSale: 'Lodo espesado', qExtra: { n: 'Rebose', vals: Qs }, pars: [{ titulo: 'Carga de sólidos (kg/m2·d)', vals: load, max: 10 }, { titulo: 'Concentración de sólidos: lodo que entra y rebose (mg/L)', vals: e.X, vals2: Xs, n1: 'Entra', n2: 'Rebose' }] };
   return { faltan: [], ind, sim };
 }
+// El digestor es un tanque con nivel: recibe el lodo de las purgas (que puede llegar a ratos), lo digiere (decaimiento de primer orden, calibrado para que con el TRH de diseño logre la remoción esperada)
+// y una bomba de extracción lo manda a la unidad que sigue. Automático: sin deshidratación a continuación sale lo que entra; con deshidratación, extrae solo mientras ella opera.
 function simVerificarDig(p, g, ev, o) {
   const V = simPos(p.volumen), trhD = simPos(p.trh_dias) || 15, rem = simPct(p.remocion_vol_pct, 40), vsf = simPos(p.fraccion_volatil_lodo) || 0.8, falt = [];
   if (!V) falt.push('Volumen del digestor'); const e = o && o.Qin ? simLodoEntrada(p, o) : null; if (!e) falt.push(SIM_LODO_FALTA);
   if (falt.length) return { faltan: falt, ind: [] };
-  const T = simNum(g.temp) != null ? Number(g.temp) : 20, fT = Math.pow(1.05, T - 20), trh = [], eta = [], Xo = [];
-  for (let k = 0; k < o.NT; k++) { const q = e.Q[k], tr = q > 1e-9 ? V / (q * 24) : 999, et = Math.min(rem * 1.1, rem * (1 - Math.exp(-3 * Math.min(tr, 60) * fT / trhD)) / (1 - Math.exp(-3))); trh.push(Math.min(tr, 999)); eta.push(et * 100); Xo.push(e.X[k] * (1 - vsf * et)); }
-  const qm = simMean(e.Q), tm = V / Math.max(1e-9, qm * 24), mIn = simMean(e.Q.map((q, k) => q * e.X[k])), mOut = simMean(e.Q.map((q, k) => q * Xo[k]));
+  const T = simNum(g.temp) != null ? Number(g.temp) : 20, fT = Math.pow(1.05, T - 20), NT = o.NT, dtH = o.dtH, dts = 1 / 60, ns = Math.max(1, Math.round(dtH / dts));
+  const pmin = simPct(p.niv_min_pct, 50); let pmax = simPct(p.niv_max_pct, 95); if (pmax <= pmin) pmax = Math.min(1, pmin + 0.05);
+  const vmin = V * pmin, vmax = V * pmax, frD = Math.min(0.95, vsf * rem), kd = frD / ((1 - frD) * trhD) * fT / 24;   // 1/h
+  const qm = simMean(e.Q), xm = simMean(e.Q.map((q, k) => q * e.X[k])) / Math.max(1e-9, qm);
+  const sp = simBombaSpec(p, 'dig', 'dig_horaria'), sig = o.sig || null; let qOut = null, modo = 'Automático: sale lo que entra (el nivel no cambia)', qbTxt = null;
+  if (sp && sp.modo === 'horario') { qOut = t => sp.prog[Math.floor((((t % 24) + 24) % 24))]; modo = 'Hora a hora (24 valores cargados)'; qbTxt = Math.max(...sp.prog); }
+  else if (sp && sp.modo === 'ciclos') { const qb = sp.qb || qm / sp.duty; qOut = t => qb * simBombaOn(sp, t); qbTxt = qb; modo = simBombaModoTxt(p, 'dig', 'dig_horaria', ''); }
+  else if (sig) { const hs = Math.min(24, simPos(sig.hs_operacion) || 8), h0 = simNum(sig.hora_inicio) != null ? Number(sig.hora_inicio) : 8, qb = qm * 24 / hs; qOut = t => ((((t % 24) + 24) % 24 - h0 + 24) % 24) < hs ? qb : 0; qbTxt = qb; modo = `Automático: extrae mientras opera la deshidratación (de ${h0} a ${(h0 + hs) % 24} h)`; }
+  let vol = V * (pmin + pmax) / 2, M = vol * xm * (1 - frD) / 1000;   // m3 y kg de sólidos
+  const step = (qin, Xin, tt) => {
+    let qo = qOut ? qOut(tt) : qin; if (qOut) qo = Math.max(0, Math.min(qo, (vol + qin * dts - vmin) / dts));   // no se extrae por debajo del nivel mínimo
+    const Xt = vol > 1e-9 ? M / vol : 0, mo = qo * Xt * dts, dec = kd * M * dts;
+    vol += (qin - qo) * dts; M += qin * Xin / 1000 * dts - mo - dec; let sp2 = 0;
+    if (vol > V) { sp2 = vol - V; M -= M * sp2 / vol; vol = V; } if (vol < 0) vol = 0; if (M < 0) M = 0;
+    return { qo, mo, dec, sp: sp2 };
+  };
+  for (let tt = -72; tt < 0; tt += dts) step(qm, xm, tt);   // 3 días con el lodo medio para llegar al régimen periódico
+  const Qo = [], Xo = [], Vs = [], Sp = [], Enc = []; let mIn = 0, mOut = 0, dest = 0, spill = 0, prev = false, arranques = 0;
+  for (let k = 0; k < NT; k++) {
+    let vq = 0, vm = 0, sps = 0, en = 0; mIn += e.Q[k] * e.X[k] / 1000 * dtH;
+    for (let i = 0; i < ns; i++) { const r = step(e.Q[k], e.X[k], k * dtH + i * dts); vq += r.qo * dts; vm += r.mo; dest += r.dec; sps += r.sp; if (r.qo > 1e-6) en++; }
+    mOut += vm; spill += sps; Qo.push(vq / dtH); Xo.push(vq > 1e-9 ? vm / vq * 1000 : (vol > 1e-9 ? M / vol * 1000 : 0)); Vs.push(vol); Sp.push(sps); Enc.push(en / ns);
+    const on = en / ns > 0.001; if (on && !prev) arranques++; prev = on;
+  }
+  const dias = NT * dtH / 24, nivPct = Vs.map(v => v / V * 100), hOn = simMean(Enc) * 24, trhMed = simMean(Vs) / Math.max(1e-9, qm * 24);
   const ind = [
-    simInd('Tiempo de retención (caudal medio)', tm, 'd', 10, null, `Típico 10–15 d (solo lodo activado) y 15–20 d (con lodo primario). El diseño es de ${trhD} d.`),
-    simInd('Tiempo de retención mínimo del período', Math.min(...trh.filter(x => x < 999), 999), 'd', 10, null, 'Con el mayor caudal de lodo que entra.'),
-    simInd('Remoción de volátiles lograda (promedio)', simMean(eta), '%', 35, null, `Se espera 35–50%; la temperatura (${T} °C) la modifica.`),
-    simInd('Sólidos que salen / sólidos que entran', mOut / Math.max(1e-9, mIn), '', null, 1, 'Menor a 1 = se destruyeron sólidos volátiles.'),
-    simInd('Lodo digerido', mOut * 24 / 1000, 'kg SS/d', null, null, `Entran ${(mIn * 24 / 1000).toFixed(0)} kg SS/d.`)];
-  const sim = { Q: e.Q.slice(), qin: e.Q, Xin: e.X, X: Xo, dtH: o.dtH, V, bomba: false, spillTotal: 0, tituloQ: 'Caudal de lodo que pasa por el digestor (m3/h)', pars: [{ titulo: 'Tiempo de retención en el digestor (d)', vals: trh.map(x => Math.min(x, 60)), min: 10 }, { titulo: 'Remoción de volátiles (%)', vals: eta, min: 35 }, { titulo: 'Sólidos del lodo: entra y sale (mg/L)', vals: e.X, vals2: Xo, n1: 'Entra', n2: 'Sale' }] };
+    simInd('Tiempo de retención (volumen medio / caudal medio)', trhMed, 'd', 10, null, `Típico 10–15 d (solo lodo activado) y 15–20 d (con lodo primario). El diseño es de ${trhD} d.`),
+    simInd('Tiempo de retención con el nivel más bajo', Math.min(...Vs) / Math.max(1e-9, qm * 24), 'd', 10, null, 'Con el menor volumen que alcanza el tanque en el período.'),
+    simInd('Remoción de volátiles lograda (promedio)', mIn > 0 ? dest / mIn / vsf * 100 : 0, '%', 35, null, `Se espera 35–50%; la temperatura (${T} °C) la modifica.`),
+    simInd('Sólidos que salen / sólidos que entran', mOut / Math.max(1e-9, mIn), '', null, 1, 'Menor a 1 = se destruyeron sólidos volátiles (o quedan acumulados en el tanque).'),
+    simInd('Lodo digerido', mOut / dias, 'kg SS/d', null, null, `Entran ${(mIn / dias).toFixed(0)} kg SS/d.`),
+    simInd('Nivel máximo del período', Math.max(...nivPct), '% del volumen', null, pmax * 100, `Nivel máximo operativo ${(pmax * 100).toFixed(0)} %: si se pasa, la extracción no alcanza.`),
+    simInd('Nivel mínimo del período', Math.min(...nivPct), '% del volumen', null, null, `La bomba no extrae por debajo del ${(pmin * 100).toFixed(0)} %.`),
+    simInd('Lodo que rebalsó', spill, 'm3', null, 0, spill > 0.01 ? 'El tanque se llena y el lodo se pierde: falta volumen o extracción.' : '')];
+  if (qOut) ind.push(simInd('Bomba de extracción: horas encendida por día', hOn, 'h', null, null, `${modo}. Caudal cuando está encendida: ${qbTxt != null ? qbTxt.toFixed(1) : '—'} m3/h; ${(arranques / dias).toFixed(1)} arranques por día.`));
+  const sim = { Q: Qo, qin: e.Q, Xin: e.X, X: Xo, dtH, V, vol: Vs, spill: Sp, enc: Enc, bomba: false, spillTotal: spill, modoTxt: modo, qb: qbTxt, tituloQ: 'Lodo que entra al digestor y lodo que se extrae (m3/h)', nSale: 'Extracción',
+    pars: [{ titulo: 'Volumen de lodo en el digestor (m3)', vals: Vs, min: +vmin.toFixed(1), max: +vmax.toFixed(1) }, { titulo: 'Tiempo de retención con el volumen del momento (d)', vals: Vs.map(v => Math.min(60, v / Math.max(1e-9, qm * 24))), min: 10 }, { titulo: 'Sólidos del lodo: entra y sale (mg/L)', vals: e.X, vals2: Xo, n1: 'Entra', n2: 'Sale' }] };
   return { faltan: [], ind, sim };
 }
 function simVerificarDesh(p, g, ev, o) {
   const cap = simPos(p.capacidad_kgh), hs = simPos(p.hs_operacion) || 8, h0 = simNum(p.hora_inicio) != null ? Number(p.hora_inicio) : 8, seq = simPos(p.sequedad_torta) || 18, capt = simPct(p.captura_pct, 95), valm = simPos(p.vol_alm), falt = [];
   if (!cap) falt.push('Capacidad de tratamiento del equipo (kg SS/h)'); const e = o && o.Qin ? simLodoEntrada(p, o) : null; if (!e) falt.push(SIM_LODO_FALTA);
   if (falt.length) return { faltan: falt, ind: [] };
-  const NT = o.NT, dt = o.dtH, Qc = [], Qf = [], Xf = [], Vs = [], proc = [], mCake = [];
-  let M = 0, V = 0, spill = 0; const qm = simMean(e.Q), xm = simMean(e.Q.map((q, k) => q * e.X[k])) / Math.max(1e-9, qm);
+  const NT = o.NT, dt = o.dtH, Qc = [], Qf = [], Xf = [], Vs = [], proc = [], mCake = [], enc = [];
+  // Cuándo opera: automático (Hs de operación desde la hora de inicio), por ciclos dentro de ese horario, u hora a hora (minutos de operación de cada hora)
+  const dsp = simBombaSpec(Object.assign({}, p, { desh_desde: h0, desh_hasta: h0 + hs }), 'desh', 'desh_horaria');
+  const fonT = tt => { const h = ((tt % 24) + 24) % 24; if (!dsp) return ((h - h0 + 24) % 24) < hs ? 1 : 0; if (dsp.modo === 'horario') { const hr = Math.floor(h); return (h - hr) * 60 < Math.min(60, Math.max(0, dsp.prog[hr])) ? 1 : 0; } return simBombaOn(dsp, tt); };
+  const fonBin = tt0 => { let a2 = 0; for (let j = 0; j < 10; j++) a2 += fonT(tt0 + (j + 0.5) * dt / 10); return a2 / 10; };
+  let M = 0, V = 0, spill = 0, arranques = 0, prevOn = false; const qm = simMean(e.Q), xm = simMean(e.Q.map((q, k) => q * e.X[k])) / Math.max(1e-9, qm);
   for (let k = -Math.round(24 / dt); k < NT; k++) {                        // un día previo con el lodo medio para arrancar en régimen
-    const q = k < 0 ? qm : e.Q[k], X = k < 0 ? xm : e.X[k], h = (((k * dt) % 24) + 24) % 24, on = ((h - h0 + 24) % 24) < hs;
+    const q = k < 0 ? qm : e.Q[k], X = k < 0 ? xm : e.X[k], fon = dsp ? fonBin(k * dt) : fonT(k * dt);
     M += q * X / 1000 * dt; V += q * dt;
     let p1 = 0, dV = 0, cV = 0, fV = 0, fM = 0, cM = 0;
-    if (on && V > 1e-9 && M > 1e-9) { p1 = Math.min(M, cap * dt); dV = p1 / (M / V); M -= p1; V -= dV; cM = capt * p1; cV = cM / (seq * 10); fV = Math.max(0, dV - cV); fM = p1 - cM; }
+    if (fon > 0 && V > 1e-9 && M > 1e-9) { p1 = Math.min(M, cap * dt * fon); dV = p1 / (M / V); M -= p1; V -= dV; cM = capt * p1; cV = cM / (seq * 10); fV = Math.max(0, dV - cV); fM = p1 - cM; }
     if (valm && V > valm) { const lost = V - valm; M -= M * lost / V; V = valm; if (k >= 0) spill += lost; }
-    if (k >= 0) { Qc.push(cV / dt); Qf.push(fV / dt); Xf.push(fV > 1e-9 ? fM * 1000 / fV : 0); Vs.push(V); proc.push(p1 / dt); mCake.push(cM / dt); }
+    if (k >= 0) { Qc.push(cV / dt); Qf.push(fV / dt); Xf.push(fV > 1e-9 ? fM * 1000 / fV : 0); Vs.push(V); proc.push(p1 / dt); mCake.push(cM / dt); enc.push(fon); const on = fon > 0.001; if (on && !prevOn) arranques++; prevOn = on; }
   }
-  const dia = qm * xm / 1000 * 24, req = dia / hs, kgTorta = simMean(mCake) * 24, dias = NT * dt / 24;
+  const dia = qm * xm / 1000 * 24, dias0 = NT * dt / 24, hOp = simMean(enc) * 24, hEf = dsp ? Math.max(0.01, hOp) : hs, req = dia / hEf, kgTorta = simMean(mCake) * 24;
+  const modoTxt = dsp ? (dsp.modo === 'horario' ? 'hora a hora (minutos de operación de cada hora)' : simBombaModoTxt(Object.assign({}, p, { desh_desde: h0, desh_hasta: h0 + hs }), 'desh', 'desh_horaria', '')) : `automático: ${hs} h por día desde las ${h0} h`;
   const ind = [
-    simInd('Capacidad del equipo / capacidad requerida', cap / Math.max(1e-9, req), '', 1.0, null, `Hay que procesar ${dia.toFixed(0)} kg SS/d en ${hs} h: ${req.toFixed(1)} kg SS/h contra ${cap} kg SS/h del equipo.`),
-    simInd('Horas por día de operación necesarias', dia / cap, 'h', null, hs, `Operando ${hs} h/d desde las ${h0} h.`),
+    simInd('Capacidad del equipo / capacidad requerida', cap / Math.max(1e-9, req), '', 1.0, null, `Hay que procesar ${dia.toFixed(0)} kg SS/d en ${hEf.toFixed(1)} h: ${req.toFixed(1)} kg SS/h contra ${cap} kg SS/h del equipo.`),
+    simInd('Horas por día de operación necesarias', dia / cap, 'h', null, hEf, `Operando ${hEf.toFixed(1)} h/d (${modoTxt}).`),
+    simInd('Horas por día en que el equipo opera según la programación', hOp, 'h', null, null, `${(arranques / dias0).toFixed(1)} arranques por día.`),
     simInd('Volumen máximo acumulado en el tanque de lodo', Math.max(...Vs), 'm3', null, valm || null, valm ? `Capacidad del tanque: ${valm} m3.` : 'Es el lodo que se junta entre una operación y la siguiente: tiene que entrar en un tanque.'),
     simInd('Lodo que no se pudo almacenar', spill, 'm3', null, 0, spill > 0 ? 'El tanque se llena y el lodo se pierde (rebalse): falta volumen o capacidad de deshidratado.' : ''),
     simInd('Torta producida', kgTorta, 'kg SS/d', null, null, `Con ${seq}% de sólidos son ${(kgTorta / (seq * 10)).toFixed(2)} m3/d de torta.`),
     simInd('Filtrado que vuelve a la cabecera', simMean(Qf) * 24, 'm3/d', null, null, `SST promedio ${(simMean(Qf.map((q, k) => q * Xf[k])) / Math.max(1e-9, simMean(Qf))).toFixed(0)} mg/L.`)];
-  void dias;
-  const sim = { Q: Qc, qin: e.Q, Xin: e.X, X: Qc.map(() => seq * 10000), ret: { Q: Qf, X: Xf }, dtH: dt, V: valm || Math.max(...Vs), bomba: false, spillTotal: spill, spill: Qc.map(() => 0), tituloQ: 'Caudal de lodo que entra y de torta que sale (m3/h)', nSale: 'Torta', qExtra: { n: 'Filtrado', vals: Qf }, cake: true,
+  const sim = { Q: Qc, qin: e.Q, Xin: e.X, X: Qc.map(() => seq * 10000), ret: { Q: Qf, X: Xf }, dtH: dt, V: valm || Math.max(...Vs), vol: Vs, enc, proc, modoTxt, cap, bomba: false, spillTotal: spill, spill: Qc.map(() => 0), tituloQ: 'Caudal de lodo que entra y de torta que sale (m3/h)', nSale: 'Torta', qExtra: { n: 'Filtrado', vals: Qf }, cake: true,
     pars: [{ titulo: 'Lodo acumulado en el tanque previo (m3)', vals: Vs, max: valm || null }, { titulo: 'Masa que procesa el equipo (kg SS/h)', vals: proc, max: cap }] };
   return { faltan: [], ind, sim };
 }
@@ -37358,7 +37448,7 @@ const SIM_MODELOS = {
     { k: 'nivel_alarma', l: 'Nivel de alarma / rebalse (Hútil)', u: 'm', dim: 'len', req: 1, alias: [/nivel.*(alarma|maximo|rebalse|desborde)/, /^h ?util|^altura util/] },
     { k: 'n_bombas', l: 'Cantidad de bombas (incluida la de reserva)', u: 'u', alias: [/^(?!.*arranque)(cantidad|numero|nro)\b.*bomba|^(?!.*(arranque|caudal)).*bombas/], tipico: 2 },
     { k: 'reserva', l: 'Bombas de reserva', u: 'u', tipico: 1, alias: [/reserva/] },
-    { k: 'q_bomba', l: 'Caudal de cada bomba (punto de trabajo)', u: 'm3/h', dim: 'flow', req: 1, alias: [/caudal.*bomba|bomba.*caudal|q bomba/] },
+    { k: 'q_bomba', l: 'Caudal de cada bomba (punto de trabajo, fijo mientras funciona)', u: 'm3/h', dim: 'flow', req: 1, alias: [/caudal.*bomba|bomba.*caudal|q bomba/], ayuda: 'Cada bomba entrega siempre este caudal. El caudal que sale del pozo es (bombas en marcha × este valor): 0, 1 o 2 veces. Los gráficos muestran el promedio de cada tramo, por eso aparecen valores intermedios cuando una bomba arranca o para dentro del tramo.' },
     { k: 'arranques_max', l: 'Cant de arranques bomba (máximo por hora)', u: '1/h', tipico: 6, alias: [/arranques/] }] },
   sedimentador: { nombre: 'Sedimentador secundario', det: /sediment|clarific|decantador secundario|\bsd\b|\bsed\b/, dinamico: true, verificar: simVerificarSed, params: [
     { k: 'area', l: 'Superficie adoptada (de cada línea)', u: 'm2', dim: 'area', req: 1, alias: [/superficie adoptada|superficie del sedimentador/, /area.*(superficial|sedimentador|decantador)|superficie/, /\barea\b/] },
@@ -37372,7 +37462,8 @@ const SIM_MODELOS = {
     { k: 'long_vertedero', l: 'Longitud de vertedero', u: 'm', dim: 'len', alias: [/vertedero/] },
     { k: 'rec_proporcional', l: '¿La recirculación sube con el caudal? (si / no)', u: '', texto: true, tipico: 'no', alias: [/recirculacion.*proporcional/] },
     { k: 'tipo_proceso', l: 'Tipo de proceso (extendida / convencional)', u: '', texto: true, tipico: 'extendida', alias: [/tipo.*proceso/] },
-    { k: 'rec_horaria', l: 'Recirculación programada hora a hora (caudal de la bomba de recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de recirculación constante (la hora 0 es de 00:00 a 01:00). Los eventos (falla de recirculación, corte de energía) y las acciones del operador se siguen aplicando encima.' },
+    { k: 'rec_horaria', vis: p => p.rec_modo === 'horario', l: 'Recirculación programada hora a hora (caudal de la bomba de recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de recirculación constante (la hora 0 es de 00:00 a 01:00). Los eventos (falla de recirculación, corte de energía) y las acciones del operador se siguen aplicando encima.' },
+    ...simBombaParams('rec', 'Recirculación', 'Automático: el caudal de recirculación de diseño, bomba siempre encendida'),
     { k: 'v0', l: 'v0 de Vesilind (opcional, de ensayo)', u: 'm/h', alias: [/\bv0\b/], ayuda: 'Si se deja vacío se estima desde el IVL.' },
     { k: 'n', l: 'n de Vesilind (opcional, de ensayo)', u: 'L/g', alias: [], ayuda: 'Si se deja vacío se estima desde el IVL.' }] },
   anoxico: { nombre: 'Reactor anóxico (pre-desnitrificación)', det: /^(?!.*aerob).*(anoxic|desnitrific)/, verificar: simVerificarAnoxico, params: [
@@ -37390,7 +37481,8 @@ const SIM_MODELOS = {
     { k: 'tipo_proceso', l: 'Tipo de proceso (extendida / convencional)', u: '', texto: true, tipico: 'extendida', alias: [/tipo.*proceso/] },
     { k: 'mlss_recirc', l: 'Concentración sedimentador (RAS) (Xr)', u: 'mg/L', alias: [/concentracion.*(sedimentador|recirc|purga|lodo)|\bxr\b/] },
     { k: 'q_purga', l: 'Volumen purga en totales (Tx) — sale de la recirculación del sedimentador', u: 'm3/h', dim: 'flow', alias: [/volumen.*purga.*totales|caudal.*purga|\btx\b/], ayuda: 'Si se carga, manda sobre la edad celular media (que pasa a ser un resultado). Vacío: se calcula la purga para lograr la edad celular media.' },
-    { k: 'purga_horaria', l: 'Purga programada hora a hora (caudal de purga, sale de la recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de purga constante (por ejemplo purgar solo en el turno de día). La edad de lodos real pasa a ser un resultado.' },
+    { k: 'purga_horaria', vis: p => p.purga_modo === 'horario', l: 'Purga programada hora a hora (caudal de purga, sale de la recirculación)', u: 'm3/h', serie24: true, opcional: true, alias: [], ayuda: 'Opcional. Si cargás las 24 horas, reemplaza al caudal de purga constante (por ejemplo purgar solo en el turno de día). La edad de lodos real pasa a ser un resultado.' },
+    ...simBombaParams('purga', 'Purga de lodo', 'Automático: el caudal que da la edad de lodos, bomba siempre encendida'),
     { k: 'capacidad_o2', l: 'Capacidad de aireación instalada en campo', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] }].concat(SIM_COEF_PARAMS) },
   mbbr: { nombre: 'MBBR', det: /mbbr/, dinamico: true, verificar: simVerificarMBBR, params: [
     { k: 'volumen', l: 'Volumen adoptado (Vadp)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen/] }, { k: 'llenado', l: '% llenado de carriers', u: '%', req: 1, tipico: 50, alias: [/llenado|relleno|fill/] },
@@ -37460,14 +37552,18 @@ const SIM_MODELOS = {
     { k: 'volumen', l: 'Volumen del digestor (Volumen adoptado)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen.*digestor/, /volumen/] },
     { k: 'trh_dias', l: 'Tiempo de retención hidráulico (TRH)', u: 'd', dim: 'dias', tipico: 15, alias: [/tiempo.*retencion.*hidraulico|^trh/] },
     { k: 'remocion_vol_pct', l: 'Remoción de volátiles esperada', u: '%', tipico: 40, alias: [/remocion.*volatiles/] },
-    { k: 'fraccion_volatil_lodo', l: 'Fracción volátil del lodo (SSV/SST)', u: '', tipico: 0.8, alias: [/fraccion.*volatil|relacion.*volatiles/] }].concat(SIM_LODO_ENTRADA) },
+    { k: 'fraccion_volatil_lodo', l: 'Fracción volátil del lodo (SSV/SST)', u: '', tipico: 0.8, alias: [/fraccion.*volatil|relacion.*volatiles/] },
+    { k: 'niv_min_pct', l: 'Nivel mínimo del digestor (la bomba de extracción no baja de acá)', u: '% del volumen', tipico: 50, alias: [], ayuda: 'El digestor es un tanque con nivel: sube cuando llega la purga y baja cuando se extrae lodo.' },
+    { k: 'niv_max_pct', l: 'Nivel máximo operativo del digestor', u: '% del volumen', tipico: 95, alias: [] },
+    ...simBombaParams('dig', 'Extracción del digestor', 'Automático: extrae mientras opera la deshidratación que sigue (si no hay, sale lo que entra)', { serie: { l: 'Extracción del digestor hora a hora (caudal de la bomba)', ayuda: 'Caudal que extrae la bomba en cada hora del día (0 = apagada).' } })].concat(SIM_LODO_ENTRADA) },
   deshidratacion: { nombre: 'Deshidratación de lodos', det: /deshidrat|filtro prensa|centrifug|filtro banda|tornillo prensa/, dinamico: true, verificar: simVerificarDesh, params: [
     { k: 'capacidad_kgh', l: 'Capacidad del equipo: kg de sólidos por hora', u: 'kg SS/h', req: 1, alias: [/capacidad.*(tratamiento|deshidrat)|kg.*solidos.*por hora|kg.*solidos.*hora/] },
     { k: 'hs_operacion', l: 'Hs de operación', u: 'h/d', tipico: 8, alias: [/hs.*operacion|horas.*(trabajo|operacion)/] },
     { k: 'hora_inicio', l: 'Hora de inicio de la operación', u: 'h', tipico: 8, alias: [] },
     { k: 'sequedad_torta', l: '% sólidos de la torta', u: '%', tipico: 18, alias: [/sequedad|torta/] },
     { k: 'captura_pct', l: 'Captura de sólidos', u: '%', tipico: 95, alias: [] },
-    { k: 'vol_alm', l: 'Volumen del tanque de lodo previo al equipo (opcional)', u: 'm3', dim: 'vol', alias: [] }].concat(SIM_LODO_ENTRADA) }
+    { k: 'vol_alm', l: 'Volumen del tanque de lodo previo al equipo (opcional)', u: 'm3', dim: 'vol', alias: [] },
+    ...simBombaParams('desh', 'Deshidratación', 'Automático: opera las horas por día indicadas, desde la hora de inicio', { qb: false, ventana: false, horarioTxt: 'Hora a hora (minutos de operación de cada hora)', serie: { l: 'Deshidratación hora a hora (minutos de operación de cada hora, 0 a 60)', u: 'min', ayuda: 'Cuántos minutos de cada hora opera el equipo (60 = toda la hora, 0 = parado).' } })].concat(SIM_LODO_ENTRADA) }
 };
 // valores por defecto de los datos generales
 const SIM_GLOBAL_PARAMS = [
@@ -37493,7 +37589,7 @@ function simNormalizar(d) {
   d = d && typeof d === 'object' ? d : {};
   const o = Object.assign({ global: {}, global_fuente: {}, patron_tipo: 'tipico', patron: null, unidades: [], fuente: null, avisos: [], evento: { mult: 0, inicio: 8, dur: 4 }, vistaVar: 'dbo', horizonte_dias: 1, eventos: [], acciones: [], examen: null }, d);
   o.unidades = (Array.isArray(o.unidades) ? o.unidades : []).map(u => Object.assign({ id: mantId(), tipo: 'sedimentador', nombre: '', params: {}, fuentes: {}, crudo: null, escenario: { mult: 0, inicio: 8, dur: 4 }, nota_ia: '' }, u, { escenario: Object.assign({ mult: 0, inicio: 8, dur: 4 }, u && u.escenario) }));
-  o.unidades.forEach(u => { const m = SIM_MODELOS[u.tipo]; if (!m) return; u.params = u.params || {}; u.fuentes = u.fuentes || {}; m.params.forEach(df => { if (df.tipico != null && (u.params[df.k] == null || u.params[df.k] === '')) { u.params[df.k] = df.tipico; u.fuentes[df.k] = 'tipico'; } }); });
+  o.unidades.forEach(u => { const m = SIM_MODELOS[u.tipo]; if (!m) return; u.params = u.params || {}; u.fuentes = u.fuentes || {}; [['rec', 'rec_horaria'], ['purga', 'purga_horaria']].forEach(([pf, sk]) => { if (u.params[pf + '_modo'] == null && sim24(u.params[sk])) { u.params[pf + '_modo'] = 'horario'; u.fuentes[pf + '_modo'] = 'manual'; } }); m.params.forEach(df => { if (df.tipico != null && (u.params[df.k] == null || u.params[df.k] === '')) { u.params[df.k] = df.tipico; u.fuentes[df.k] = 'tipico'; } }); });
   return o;
 }
 function simGuardar(ya) {
@@ -37874,7 +37970,8 @@ function simGraficosUnidad(u, res) {
   }
   if (u.tipo === 'pozo' && res.sim) {
     const r = res.sim; return simGrafico({ titulo: 'Simulación 24 h — nivel del pozo', series: [{ n: 'Nivel', c: C.azul, pts: r.t.map((t, i) => [t, r.nivel[i]]) }], hl: [{ y: r.hs, c: C.gris, t: 'paro' }, { y: r.h1, c: C.verde, t: 'arranque 1ª' }, { y: r.hmax, c: C.rojo, t: 'alarma' }], xl: 'Hora del día', yl: 'm', xmin: 0, xmax: 24, ymin: 0, ymax: r.hmax * 1.08 }) +
-      `<div style="height:8px"></div>` + simGrafico({ titulo: 'Caudal que entra y caudal que bombean las bombas (m3/h)', series: [{ n: 'Afluente', c: C.azul, pts: r.t.map((t, i) => [t, r.qin[i]]) }, { n: 'Bombeado', c: C.verde, pts: r.t.map((t, i) => [t, r.qout[i]]), w: 1.4 }], xl: 'Hora del día', yl: 'm3/h', xmin: 0, xmax: 24, ymin: 0 });
+      `<div style="height:8px"></div>` + simGrafico({ titulo: 'Caudal que entra y caudal que bombean las bombas (m3/h, promedio de cada tramo de 2 min)', series: [{ n: 'Afluente', c: C.azul, pts: r.t.map((t, i) => [t, r.qin[i]]) }, { n: 'Bombeado', c: C.verde, pts: r.t.map((t, i) => [t, r.qout[i]]), w: 1.4 }], xl: 'Hora del día', yl: 'm3/h', xmin: 0, xmax: 24, ymin: 0 }) +
+      `<div style="height:8px"></div>` + simGrafico({ titulo: `Bombas en marcha: cada una entrega siempre ${simFmt(r.qb)} m3/h; lo que cambia es cuántas están encendidas`, series: [{ n: 'Bombas encendidas', c: C.verde, pts: r.t.map((t, i) => [t, r.bombas[i]]) }], xl: 'Hora del día', yl: 'bombas', xmin: 0, xmax: 24, ymin: 0, ymax: r.nd + 0.5, h: 150 });
   }
   return '';
 }
@@ -37916,6 +38013,7 @@ function simAnoxicoHtml(nd) {
 function simUnidadHtml(u, i, n) {
   const m = SIM_MODELOS[u.tipo], d = _simDoc.datos, e = u.escenario || {};
   const fila = df => {
+    if (df.vis && !df.vis(u.params)) return '';
     if (df.serie24) return simSerieFilaHtml(u, df);
     const v = u.params[df.k], f = u.fuentes[df.k] || '', tag = SIM_FUENTE_TAG[f], falta = df.req && (v == null || v === ''), num = !df.texto, sl = num && simNum(v) > 0 && (SIM_SLIDERS[u.tipo] || []).includes(df.k) ? [simNum(v) * 0.4, simNum(v) * 1.8] : null;
     const opciones = u.crudo ? Object.entries(u.crudo).filter(([, x]) => x != null && x !== '' && typeof x !== 'object' && (df.texto || isFinite(parseFloat(String(x).replace(',', '.'))))).map(([k2, x]) => `<option value="${esc(k2)}">${esc(k2)} = ${esc(String(x).slice(0, 14))}</option>`).join('') : '';
@@ -38086,7 +38184,7 @@ function simPlantaDin1(d, ret) {
       const nitr = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s');
       if (sed && rs) {
         // reactor + sedimentador acoplados (dinámica de biomasa, oxígeno, nitrógeno y sólidos)
-        const kc = simKinDeParams(p), pgH = sim24(p.purga_horaria), anoxP = anoxPend ? { V: simPos(anoxPend.p.volumen), ri: simNum(anoxPend.p.rec_interna) != null ? Number(anoxPend.p.rec_interna) : 3, Qri: simPos(anoxPend.p.q_rec_interna) } : null, bio = simBioDin({ anox: anoxP, kin: kc.kin, kinA: kc.kinA, fv, QrProg: rs.s.prog || null, QwProg: pgH, V, X0: X, SRT: calc.SRT, Qw: simPos(p.q_purga) || (pgH ? simMedia(pgH) : null), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
+        const kc = simKinDeParams(p), pSp = simBombaSpec(p, 'purga', 'purga_horaria'), pgH = pSp && pSp.prog ? pSp.prog : null, anoxP = anoxPend ? { V: simPos(anoxPend.p.volumen), ri: simNum(anoxPend.p.rec_interna) != null ? Number(anoxPend.p.rec_interna) : 3, Qri: simPos(anoxPend.p.q_rec_interna) } : null, bio = simBioDin({ anox: anoxP, kin: kc.kin, kinA: kc.kinA, fv, QrProg: rs.s.rec && rs.s.rec.modo === 'ciclos' ? null : (rs.s.prog || null), QrSpec: rs.s.rec && rs.s.rec.modo === 'ciclos' ? rs.s.rec : null, QwProg: pgH, QwSpec: pSp && pSp.modo === 'ciclos' ? pSp : null, V, X0: X, SRT: calc.SRT, Qw: (pSp && pSp.modo === 'ciclos' && pSp.qb) ? pSp.qb * pSp.duty : (simPos(p.q_purga) || (pgH ? simMedia(pgH) : null)), cap, DOsp: simPos(p.oxigeno_disuelto) || 2, T: temp, nitrif: nitr, sed: { A: rs.s.A, H: rs.s.H, Qr: rs.s.Qr, prop: rs.s.prop, ivl: rs.s.ivl, v0: simPos(ps.v0), n: simPos(ps.n), fns: simPos(ps.fns) != null ? Number(ps.fns) : null }, Qin: cur.Q, dbo: cur.dbo, ntk: cur.ntk, dqo: cur.dqo, dtH, NT, d: dd });
         const Qe = bio.Q.map((q, k) => Math.max(0, q - bio.Qw[k]));
         const react = { Q: bio.Q.slice(), dbo: bio.S.map(s => 0.68 * s), dqo: bio.S.slice(), sst: bio.MLSS.slice(), ntk: bio.NH.map(x => x + 1.5) };
         if (anoxPend && bio.an) { const a = bio.an; nodos.push({ id: anoxPend.u.id, nombre: anoxPend.u.nombre, tipo: 'anoxico', ent: anoxPend.ent, sal: { Q: bio.Q.slice(), dbo: a.S.map(x => 0.68 * x), dqo: a.S.slice(), sst: a.MLSS.slice(), ntk: a.NH.map(x => x + 1.5) }, extra: { anox: true, no: a.NO, nh: a.NH, s: a.S, mlss: a.MLSS, qri: a.Qri, V: a.V, noAe: bio.NO } }); recircInt = { Q: a.Qri, desde: u.id, hasta: anoxPend.u.id }; }
@@ -38094,7 +38192,8 @@ function simPlantaDin1(d, ret) {
         cur = { Q: Qe, dbo: bio.dbo, dqo: bio.dqo, sst: bio.tssEfl, ntk: bio.ntk };
         recirc = { Q: bio.Qr, X: bio.xu.map(x => x * 1000), desde: sed.id, hasta: anoxPend ? anoxPend.u.id : u.id };
         const kgPurga = simMedia(bio.Qw.map((q, k) => q * bio.xu[k] * 1000), null) * 24 / 1000, qPurga = simMedia(bio.Qw, null) * 24, xuMed = simMedia(bio.xu.map((x, k) => x * bio.Qw[k]), null) / Math.max(1e-9, simMedia(bio.Qw, null));
-        purga = { nombre: 'Purga de lodo en exceso', kg_d: kgPurga, q_m3d: qPurga, X_gL: xuMed, SRT: calc.SRT, desde: sed.id };
+        purga = { nombre: 'Purga de lodo en exceso', kg_d: kgPurga, q_m3d: qPurga, X_gL: xuMed, SRT: calc.SRT, desde: sed.id, unidad: u.id, Q: bio.Qw.slice() };
+        if (pSp || pgH || (rs.s.rec && rs.s.rec.modo !== 'auto')) { const srtR = kgPurga > 0 ? V * simMedia(bio.MLSS) / 1000 / kgPurga : Infinity; if (pSp || pgH) avisos.push(`Purga programada en "${u.nombre}": la edad de lodos resultante es ${isFinite(srtR) ? srtR.toFixed(1) : '∞'} d (de diseño ${calc.SRT} d); se purgan ${qPurga.toFixed(1)} m3/d.`); }
         lodos.push({ nombre: 'Lodo en exceso (' + sed.nombre + ')', kg_d: kgPurga, q_m3d: qPurga, sequedad: xuMed / 10, nota: 'Purga de la recirculación del sedimentador (lodo concentrado del fondo)' });
         fuentesLodo.push({ id: sed.id, nombre: 'Purga de ' + sed.nombre, Q: bio.Qw.slice(), X: bio.xu.map(x => x * 1000) });
         anoxPend = null;
@@ -38147,7 +38246,7 @@ function simPlantaDin1(d, ret) {
     } else if (u.tipo === 'mbr' && res.sim) {
       const sm = res.sim; cur = { Q: sm.Q.slice(), dbo: sm.dbo.slice(), dqo: sm.dqo.slice(), sst: sm.sst.slice(), ntk: sm.ntk.slice() };
       const kgM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) * 24 / 1000, qM = simMedia(sm.Qw, null) * 24, xM = simMedia(sm.Qw.map((q, k) => q * sm.MLSS[k]), null) / Math.max(1e-9, simMedia(sm.Qw, null));
-      if (qM > 0) { lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: kgM, q_m3d: qM, sequedad: xM / 10000 * 100, nota: 'Purga directa del reactor de membranas (sin sedimentador), al MLSS del reactor' }); fuentesLodo.push({ id: u.id, nombre: 'Purga de ' + u.nombre, Q: sm.Qw.slice(), X: sm.MLSS.slice() }); purga = { nombre: 'Purga de lodo en exceso', kg_d: kgM, q_m3d: qM, X_gL: xM / 1000, SRT: simPos(p.edad_lodos), desde: u.id }; }
+      if (qM > 0) { lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: kgM, q_m3d: qM, sequedad: xM / 10000 * 100, nota: 'Purga directa del reactor de membranas (sin sedimentador), al MLSS del reactor' }); fuentesLodo.push({ id: u.id, nombre: 'Purga de ' + u.nombre, Q: sm.Qw.slice(), X: sm.MLSS.slice() }); purga = { nombre: 'Purga de lodo en exceso', kg_d: kgM, q_m3d: qM, X_gL: xM / 1000, SRT: simPos(p.edad_lodos), desde: u.id, unidad: u.id, Q: sm.Qw.slice() }; }
       if (sm.spillTotal > 0.5) avisos.push(`⚠ MBR "${u.nombre}": ${sm.spillTotal.toFixed(0)} m3 rebalsan en ${horas} h (las membranas no dejan pasar el caudal que entra, o se cortó la energía).`);
       if (Math.max(...sm.TMP) > 40) avisos.push(`MBR "${u.nombre}": la presión transmembrana llega a ${Math.max(...sm.TMP).toFixed(0)} kPa: hace falta limpieza química.`);
       pasa(u, ent, { sim: sm, mbr: true, mlss: sm.MLSS, do: sm.DO, nh: sm.NH, no: sm.NO, aire: sm.aire, aor: sm.aor, cap: sm.cap });
@@ -38162,8 +38261,8 @@ function simPlantaDin1(d, ret) {
   if (uL.length) {
     let sl = null; const zL = fill(0);
     if (fuentesLodo.length) { const Qs = Array(NT).fill(0), Ms = Array(NT).fill(0); fuentesLodo.forEach(f => f.Q.forEach((q, k) => { Qs[k] += q; Ms[k] += q * f.X[k]; })); sl = { Q: Qs, X: Qs.map((q, k) => q > 1e-9 ? Ms[k] / q : 0) }; lodoFeed = { desde: fuentesLodo[fuentesLodo.length - 1].id, Q: sl.Q, X: sl.X }; }
-    uL.forEach(u => {
-      const p = simParamsNum(u); let res; try { res = SIM_MODELOS[u.tipo].verificar(p, g, null, { Qin: sl ? sl.Q : zL, cin: {}, NT, dtH, d: dd, sl }); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
+    uL.forEach((u, iu) => {
+      const p = simParamsNum(u), sigU = uL[iu + 1] && uL[iu + 1].tipo === 'deshidratacion' ? simParamsNum(uL[iu + 1]) : null; let res; try { res = SIM_MODELOS[u.tipo].verificar(p, g, null, { Qin: sl ? sl.Q : zL, cin: {}, NT, dtH, d: dd, sl, sig: sigU }); } catch (e) { res = { faltan: ['error: ' + e.message], ind: [] }; }
       if ((res.faltan && res.faltan.length) || res.error || !res.sim) { avisos.push(`"${u.nombre}": ${res.error || 'faltan datos (' + (res.faltan || []).join(', ') + ')'}; no se tiene en cuenta en la línea de lodos.`); nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent: { Q: zL, dbo: zL, dqo: zL, sst: zL, ntk: zL }, sal: { Q: zL, dbo: zL, dqo: zL, sst: zL, ntk: zL }, extra: { lodo: true, incompleta: true, res } }); return; }
       const s = res.sim;
       nodos.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ent: { Q: s.qin, dbo: zL, dqo: zL, sst: s.Xin, ntk: zL }, sal: { Q: s.Q, dbo: zL, dqo: zL, sst: s.X, ntk: zL }, extra: { lodo: true, sim: s, res, spillTotal: s.spillTotal || 0 } });
@@ -38368,7 +38467,7 @@ function simPlantaCorte(plant, d) {
   if (nodosS.length) {
     const yf = yO(nL), x0f = pos[nL].x0, iD = plant.lodoFeed ? nodos.findIndex(x => x.id === plant.lodoFeed.desde) : -1; let dfeed;
     tub += `<text x="${x0f}" y="${padT - 14}" font-size="11" font-weight="700" fill="#5a3a10">LÍNEA DE LODOS</text>`;
-    if (iD >= 0 && iD < nL) { const yP = yBase + 104, xd = pos[iD].cx + pos[iD].wp * 0.2; dfeed = `M${xd},${pos[iD].bot} V${yP} H${x0f - 14} V${yf} H${x0f - 6}`; tub += `<text x="${(xd + x0f) / 2}" y="${yP + 14}" text-anchor="middle" font-size="10" fill="#5a3a10">Purga hacia la línea de lodos</text>`; }
+    if (iD >= 0 && iD < nL) { const yP = yBase + 104, xd = pos[iD].cx + pos[iD].wp * 0.2; dfeed = `M${xd},${pos[iD].bot} V${yP} H${x0f - 14} V${yf} H${x0f - 6}`; tub += `<text x="${(xd + x0f) / 2}" y="${yP + 14}" text-anchor="middle" font-size="10" fill="#5a3a10">Purga hacia la línea de lodos</text><text id="cp-v-lf" x="${(xd + x0f) / 2}" y="${yP + 27}" text-anchor="middle" font-size="9.5" fill="#5a3a10"></text>`; }
     else dfeed = `M${x0f - 40},${yf} H${x0f - 6}`;
     tub += `<path class="cp-fl" id="cp-lf" d="${dfeed}" fill="none" stroke="#5a3a10" stroke-width="3" stroke-dasharray="8 5"/><polygon id="cp-lfh" points="${x0f - 6},${yf - 5} ${x0f},${yf} ${x0f - 6},${yf + 5}" fill="#5a3a10"/>`;
     for (let i = nL; i < n - 1; i++) { const a = pos[i], b = pos[i + 1], ya = yO(i), yb = yO(i + 1), xm2 = (a.x1 + b.x0) / 2; tub += `<path class="cp-fl" id="cp-ls-${i}" d="M${a.x1},${ya} H${xm2} V${yb} H${b.x0 - 6}" fill="none" stroke="#5a3a10" stroke-width="3" stroke-dasharray="8 5"/><polygon id="cp-lsh-${i}" points="${b.x0 - 6},${yb - 5} ${b.x0},${yb} ${b.x0 - 6},${yb + 5}" fill="#5a3a10"/>`; }
@@ -38377,7 +38476,7 @@ function simPlantaCorte(plant, d) {
   let rec = '';
   if (plant.recirc) {
     const iS = nodos.findIndex(x => x.id === plant.recirc.desde), iR = nodos.findIndex(x => x.id === plant.recirc.hasta);
-    if (iS >= 0 && iR >= 0) { const yR = yBase + (plant.recircInt ? 92 : 74), xS = pos[iS].cx, xR = pos[iR].cx; rec = `<path class="cp-fl" id="cp-rec" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec" x="${(xS + xR) / 2}" y="${yR + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a"></text>`; if (!nodosS.length) { const xp = xS + pos[iS].wp * 0.2; rec += `<path class="cp-fl" id="cp-purga" d="M${xp},${pos[iS].bot} V${yR + 32}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xp + 6}" y="${yR + 40}" font-size="10" fill="#5a3a10">Purga (del sedimentador)</text>`; } }
+    if (iS >= 0 && iR >= 0) { const yR = yBase + (plant.recircInt ? 92 : 74), xS = pos[iS].cx, xR = pos[iR].cx; rec = `<path class="cp-fl" id="cp-rec" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#8a5a1a" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec" x="${(xS + xR) / 2}" y="${yR + 14}" text-anchor="middle" font-size="10" fill="#8a5a1a"></text>`; if (!nodosS.length) { const xp = xS + pos[iS].wp * 0.2; rec += `<path class="cp-fl" id="cp-purga" d="M${xp},${pos[iS].bot} V${yR + 32}" fill="none" stroke="#5a3a10" stroke-width="2" stroke-dasharray="5 4"/><text x="${xp + 6}" y="${yR + 40}" font-size="10" fill="#5a3a10">Purga (del sedimentador)</text><text id="cp-v-lf" x="${xp + 6}" y="${yR + 52}" font-size="9.5" fill="#5a3a10"></text>`; } }
   }
   if (plant.recircInt) { const iS = nodos.findIndex(x => x.id === plant.recircInt.desde), iR = nodos.findIndex(x => x.id === plant.recircInt.hasta); if (iS >= 0 && iR >= 0) { const yR = yBase + 62, xS = pos[iS].x0 + 8, xR = pos[iR].x1 - 8; rec += `<path class="cp-fl" id="cp-rec2" d="M${xS},${pos[iS].bot} V${yR} H${xR} V${pos[iR].bot + 1}" fill="none" stroke="#1a8f4d" stroke-width="3" stroke-dasharray="8 5"/><text id="cp-v-rec2" x="${(xS + xR) / 2}" y="${yR + 12}" text-anchor="middle" font-size="9.5" fill="#1a8f4d"></text>`; } }
   sv += `<defs>${defs}</defs>` + cuerpo + tub + rec + `<text x="${W - 10}" y="${Hh - 8}" text-anchor="end" font-size="10" fill="#6b7b8b">Corte a escala · medidas en metros</text></svg>`;
@@ -38408,9 +38507,10 @@ function simPlantaCorte(plant, d) {
         const dem = ex.aire ? Math.max(0.05, ex.aire[k] * 2.2) : 1; document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * (P.colPx - 8)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); });
       } else if (t0 === 'mbr' && ex.mbr) { set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 12000)); t3 = `TMP ${ex.sim.TMP[k].toFixed(0)} kPa · flux ${ex.sim.J[k].toFixed(0)}`; if (ex.sim.TMP[k] > 40) top = '⚠ LIMPIEZA QUÍMICA'; if (ex.sim.spill[k] > 0) top = '⚠ REBALSA';
       } else if (t0 === 'anoxico' && ex.anox) { set('cp-w-' + id, 'fill', simColorConc(ex.mlss[k], 7000)); t3 = `NO3 ${ex.no[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)}`;
+      } else if (ex.lodo && ex.sim && ex.sim.vol && ex.sim.V) { const sm = ex.sim, fr = Math.min(1, sm.vol[k] / sm.V), sobre = sm.spill && sm.spill[k] > 0.001, en = sm.enc ? sm.enc[k] : null; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; t3 = `nivel ${(fr * 100).toFixed(0)}%` + (en == null ? '' : (en > 0.5 ? ' · ▶ ON' : ' · ⏸ OFF'));
       } else if (ex.hid) { const fr = ex.bomba ? Math.min(1, ex.vol[k] / ex.V) : 1, sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; if (ex.bomba) t3 = `nivel ${(fr * 100).toFixed(0)}%`;
       } else set('cp-w-' + id, 'fill', col);
-      txt('cp-n-' + id, top); if (ex.lodo) { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k] * 24)} m3/d`); txt('cp-t2-' + id, `${(nd.sal.sst[k] / 10000).toFixed(1)} % sólidos`); } else { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`); } txt('cp-t3-' + id, t3);
+      txt('cp-n-' + id, top); if (ex.lodo) { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${(nd.sal.sst[k] / 10000).toFixed(1)} % sólidos`); } else { txt('cp-t1-' + id, `${fmt(nd.sal.Q[k])} m3/h`); txt('cp-t2-' + id, `${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`); } txt('cp-t3-' + id, t3);
     });
     { const ban = document.getElementById('pv-evento'); if (ban) { const oc = d.examen && d.examen.activo && !d.examen.respondido, act = oc ? [] : (plant.eventos || []).filter(e => t >= e.inicio && t < e.inicio + (e.dur || 0)); ban.textContent = act.length ? act.map(e => ((SIM_ESC_TIPOS[e.tipo] || {}).icono || '⚠') + ' ' + simEvNombre(e.tipo)).join('   ·   ') : (oc && plant.eventos.some(e => t >= e.inicio && t < e.inicio + Math.max(2, e.dur || 0)) ? '⚠ Algo no anda bien en la planta: mirá el tablero' : ''); } }
     const vis = q => q > Math.max(0.05, 0.004 * Qmax), pipe = (idL, idH, q, c) => { set(idL, 'opacity', vis(q) ? 1 : 0); set(idH, 'opacity', vis(q) ? 1 : 0); set(idL, 'stroke-width', flujoSeg(q)); set(idL, 'stroke', c); set(idL, 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); set(idH, 'fill', c); };
@@ -38424,7 +38524,7 @@ function simPlantaCorte(plant, d) {
       const zl = nodos[n - 1]; pipeS('cp-lo', 'cp-loh', zl.sal.Q[k], colorDe(zl, k)); txt('cp-lov', `${fmt(zl.sal.Q[k] * 24)} m3/d`);
     }
     if (plant.recircInt) { const q = plant.recircInt.Q[k]; set('cp-rec2', 'opacity', vis(q) ? 1 : 0); set('cp-rec2', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec2', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec2', `Rec. interna ${fmt(q)} m3/h`); }
-    if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'opacity', vis(q) ? 1 : 0); set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L`); set('cp-purga', 'stroke-dashoffset', -fase); set('cp-purga', 'opacity', plant.fac && plant.fac[k] && plant.fac[k].purga <= 0.001 ? 0 : 1); }
+    if (plant.recirc) { const q = plant.recirc.Q[k]; set('cp-rec', 'opacity', vis(q) ? 1 : 0); set('cp-rec', 'stroke-width', 2 + 6 * q / Qmax); set('cp-rec', 'stroke-dashoffset', -fase * (0.5 + q / Qmax * 2)); txt('cp-v-rec', `Recirculación ${fmt(q)} m3/h · ${(plant.recirc.X[k] / 1000).toFixed(1)} g/L · ${vis(q) ? '▶ bomba encendida' : '⏸ apagada'}`); const qp = plant.purga && plant.purga.Q ? plant.purga.Q[k] : null, pOn = qp != null ? qp > Math.max(0.02, 0.002 * Qmax) : !(plant.fac && plant.fac[k] && plant.fac[k].purga <= 0.001); set('cp-purga', 'stroke-dashoffset', -fase); set('cp-purga', 'opacity', pOn ? 1 : 0); txt('cp-v-lf', qp != null ? `Purga ${fmt(qp)} m3/h · ${pOn ? '▶ bomba encendida' : '⏸ apagada'}` : ''); }
   };
   return sv;
 }
@@ -38693,12 +38793,50 @@ function simPlantaInnerHtml(d) {
     ${cumpl}
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0 4px;flex-wrap:wrap"><b style="font-size:12.5px">Vista animada de la planta</b><select style="width:auto" onchange="simVistaPlanta(this.value)"><option value="corte" ${d.vistaPlanta === 'esquema' ? '' : 'selected'}>Corte a escala (como el Flowsheet)</option><option value="esquema" ${d.vistaPlanta === 'esquema' ? 'selected' : ''}>Esquema simple</option></select><label style="font-size:12px;margin:0">Color según</label>${sel}${d.fuente && ['procesos', 'flowsheet'].includes(d.fuente.tipo) ? '<button class="btn btn-secondary btn-sm" onclick="simGeoRefrescar()" title="Vuelve a leer las medidas, formas y equipos del proyecto">↻ Actualizar medidas del proyecto</button>' : ''}<span class="hint" style="margin:0">Ancho de la flecha = caudal; color = concentración (más oscuro = más cargado). El corte está a escala con las medidas de cada unidad. Usá el reproductor de arriba.</span></div>
     <div id="pv-evento" style="min-height:20px;font-size:12.5px;font-weight:700;color:#c0392b;margin:2px 0"></div><div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;padding:6px;background:var(--surface,#fff)">${d.vistaPlanta === 'esquema' ? simPlantaVista(plant, d) : simPlantaCorte(plant, d)}</div>
+    ${simBombasHtml(plant, d)}
     ${simHorarioHtml(plant, d)}
     <details style="margin-top:10px" open><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Balance por etapa (promedio de 24 h a la salida de cada una; concentraciones ponderadas por caudal)</summary>
       <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr><th style="${TH}">Etapa</th><th style="${TH};text-align:right">Q (m3/h)</th><th style="${TH};text-align:right">DBO</th><th style="${TH};text-align:right">DQO</th><th style="${TH};text-align:right">SST</th><th style="${TH};text-align:right">NTK</th></tr>${filas}</table></div>${lodos}</details>
     <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">${chart('sst', 'SST del efluente final (mg/L)', C.rojo)}${chart('dbo', 'DBO del efluente final (mg/L)', C.azul)}</div>
     ${simTableroHtml(plant, d)}${simComparacionHtml(d, plant)}
     <p class="hint" style="margin:8px 0 0">Balance teórico: el reactor biológico usa cinética de Monod con valores típicos, las demás etapas usan eficiencias típicas editables (parámetros de cada unidad) y el sedimentador se simula por capas con el caudal que le llega. El reactor y el sedimentador se simulan en el tiempo (biomasa, oxígeno, amonio, nitrato y sólidos) y el resto de las etapas son más simples. Los resultados valen como orden de magnitud y para comparar alternativas.</p>`;
+}
+// ── Bombas de lodo y deshidratación: cuándo trabajan, cuánto bombean y cómo suben y bajan los niveles ──
+function simBombasHtml(plant, d) {
+  const dtH = plant.dtH, pH = Math.max(1, Math.round(1 / dtH)), dias = Math.max(1, plant.dias || Math.round(plant.horas / 24)), dia = Math.min(Math.max(0, Number(d.horDia) || 0), dias - 1), TH = PROCESOS_EQ_TH, TD = PROCESOS_EQ_TD;
+  const pn = id => { const u = simU(id); return u ? simParamsNum(u) : {}; }, f1 = x => x == null || !isFinite(x) ? '—' : (Math.abs(x) >= 100 ? String(Math.round(x)) : String(+x.toFixed(1)));
+  const it = [], niv = [];
+  if (plant.recirc && plant.recirc.Q) { const sd = pn(plant.recirc.desde); it.push({ n: 'Recirculación de lodo', c: '#8a5a1a', Q: plant.recirc.Q, modo: simBombaModoTxt(sd, 'rec', 'rec_horaria', 'Automático: caudal de diseño, siempre encendida'), spec: simBombaSpec(sd, 'rec', 'rec_horaria') }); }
+  if (plant.purga && plant.purga.Q) { const la = pn(plant.purga.unidad); it.push({ n: 'Purga de lodo', c: '#5a3a10', Q: plant.purga.Q, modo: simBombaModoTxt(la, 'purga', 'purga_horaria', 'Automático: el caudal que da la edad de lodos, siempre encendida'), spec: simBombaSpec(la, 'purga', 'purga_horaria') }); }
+  plant.nodos.forEach(nd => {
+    const ex = nd.extra || {}, sm = ex.sim;
+    if (nd.tipo === 'pozo' && ex.bombas && ex.qb) it.push({ n: 'Bombas de ' + nd.nombre, c: '#0056a1', Q: ex.bombas.map(b => b * ex.qb), modo: `Por nivel: arranca con ${f1(ex.h1)} m y para con ${f1(ex.hs)} m (${ex.nd} bomba(s) en servicio de ${f1(ex.qb)} m3/h cada una)`, spec: null });
+    if (!ex.lodo || !sm || !sm.vol) return;
+    if (nd.tipo === 'digestor') { it.push({ n: 'Extracción de ' + nd.nombre, c: '#1a8f4d', Q: sm.Q, modo: sm.modoTxt, spec: simBombaSpec(pn(nd.id), 'dig', 'dig_horaria') }); niv.push({ n: 'Nivel de ' + nd.nombre, c: '#1a8f4d', v: sm.vol.map(v => v / sm.V * 100) }); }
+    if (nd.tipo === 'deshidratacion') { it.push({ n: nd.nombre + ' (torta)', c: '#8e44ad', Q: sm.Q, kg: sm.proc, enc: sm.enc, modo: sm.modoTxt, spec: null, cap: sm.cap }); niv.push({ n: 'Tanque previo a ' + nd.nombre, c: '#8e44ad', v: sm.vol.map(v => v / sm.V * 100) }); }
+  });
+  if (!it.length) return '';
+  const hv = (a, h) => { let t = 0, c = 0; for (let k = 0; k < pH; k++) { const x = a[(dia * 24 + h) * pH + k]; if (x != null) { t += x; c++; } } return c ? t / c : null; };
+  const stat = x => {
+    const mx = Math.max(...x.Q), on = x.enc ? x.enc : x.Q.map(q => (q > 0.02 * mx + 1e-9 ? 1 : 0));
+    let h = 0, a = 0, prev = false; on.forEach(v => { const o = v > 0.001; if (o) h += dtH * (x.enc ? v : 1); if (o && !prev) a++; prev = o; });
+    const e = x.spec && x.spec.modo === 'ciclos' ? simBombaEstad(x.spec) : null;
+    return { qb: mx, h: e ? e.horas : h / dias, a: e ? e.arranques : a / dias, vol: simMedia(x.Q) * 24 };
+  };
+  const filas = it.map(x => { const st = stat(x); return `<tr><td style="${TD};white-space:nowrap"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${x.c};margin-right:5px"></span><b>${esc(x.n)}</b></td><td style="${TD}">${esc(x.modo)}</td><td style="${TD};text-align:right">${x.kg ? f1(x.cap) + ' kg SS/h' : f1(st.qb) + ' m3/h'}</td><td style="${TD};text-align:right">${f1(st.h)} h</td><td style="${TD};text-align:right">${f1(st.a)}</td><td style="${TD};text-align:right">${f1(st.vol)} m3/d</td></tr>`; }).join('');
+  const cols = it.map(x => ({ t: x.n + (x.kg ? ' (m3/h de torta)' : ' (m3/h)'), c: x.c, get: h => hv(x.Q, h), on: v => v != null && v > 0.0005 })).concat(it.filter(x => x.kg).map(x => ({ t: x.n.replace(' (torta)', '') + ': masa que procesa (kg SS/h)', c: x.c, get: h => hv(x.kg, h), on: v => v != null && v > 0.05 }))).concat(niv.map(x => ({ t: x.n + ' (% del volumen)', c: x.c, get: h => hv(x.v, h), on: () => false })));
+  const tab = Array.from({ length: 24 }, (_, h) => cols.map(c => c.get(h)));
+  const fil2 = tab.map((r, h) => `<tr><td style="${TD};white-space:nowrap;font-weight:600">${h}–${h + 1} h</td>${r.map((v, j) => `<td style="${TD};text-align:right;${cols[j].on(v) ? 'background:rgba(26,143,77,.14);font-weight:600' : 'color:var(--text2)'}">${v == null ? '—' : f1(v)}</td>`).join('')}</tr>`).join('');
+  const pts = a => Array.from({ length: 24 * pH }, (_, k) => [k / pH, a[dia * 24 * pH + k] || 0]);
+  const gQ = simGrafico({ titulo: 'Caudal de cada bomba (m3/h): sube cuando la bomba está encendida', h: 200, w: 760, series: it.map(x => ({ n: x.n, c: x.c, pts: pts(x.Q), w: 1.8 })), xl: dias > 1 ? `Hora del día ${dia + 1}` : 'Hora del día', yl: 'm3/h', xmin: 0, xmax: 24, ymin: 0 });
+  const gN = niv.length ? simGrafico({ titulo: 'Niveles de los tanques de lodo (% del volumen)', h: 190, w: 760, series: niv.map(x => ({ n: x.n, c: x.c, pts: pts(x.v), w: 1.8 })), hl: [{ y: 100, c: '#c0392b', t: 'rebalse' }], xl: dias > 1 ? `Hora del día ${dia + 1}` : 'Hora del día', yl: '%', xmin: 0, xmax: 24, ymin: 0, ymax: 105 }) : '';
+  const selD = dias > 1 ? `<select style="width:auto" onchange="simHorDia(this.value)">${Array.from({ length: dias }, (_, i) => `<option value="${i}" ${i === dia ? 'selected' : ''}>Día ${i + 1}</option>`).join('')}</select>` : '';
+  return `<details id="sim-bombas" style="margin-top:10px" open><summary style="cursor:pointer;font-size:12.5px;font-weight:600">🔧 Bombas y lodos: cuándo trabajan, cuánto bombean y qué nivel tienen los tanques</summary>
+    <div class="hint" style="margin:6px 0">Una bomba entrega siempre el mismo caudal; lo que cambia es si está encendida. Se programan en "Datos de la unidad": la recirculación en el sedimentador, la purga en el reactor, la extracción en el digestor y los horarios en la deshidratación (automático, por ciclos de X min encendida / Y min apagada, o hora a hora).</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr><th style="${TH}">Bomba o equipo</th><th style="${TH}">Cómo trabaja</th><th style="${TH};text-align:right">Caudal cuando está encendida</th><th style="${TH};text-align:right">Encendida por día</th><th style="${TH};text-align:right">Arranques por día</th><th style="${TH};text-align:right">Volumen por día</th></tr>${filas}</table></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 4px"><b style="font-size:12.5px">Hora a hora</b>${selD}<span class="hint" style="margin:0">Promedio de cada hora. En verde, las horas en que la bomba trabaja.</span></div>
+    <div style="overflow:auto;max-height:380px;border:1px solid var(--border);border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr style="position:sticky;top:0;background:var(--surface,#fff);z-index:1"><th style="${TH}">Hora</th>${cols.map(c => `<th style="${TH};text-align:right;border-bottom:2px solid ${c.c}">${esc(c.t)}</th>`).join('')}</tr>${fil2}</table></div>
+    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px"><div>${gQ}</div><div>${gN}</div></div></details>`;
 }
 // Detalle hora a hora por etapa: solo lo clave (caudal y DQO). Cada columna es lo que SALE de esa etapa; las horas con un evento activo van marcadas.
 const SIM_HOR_COLORES = ['#0056a1', '#c0392b', '#1a8f4d', '#8e44ad', '#d68910', '#16a085', '#7f8c8d', '#2c3e50', '#e84393', '#00a8c6'];
@@ -38853,12 +38991,14 @@ function simBioDin(o) {
   // capacidad de aireación: la informada o 1,6 × la demanda inicial
   const OUR0 = () => (1 - 1.42 * YH) * (muHT / YH) * (st.S / (Ks + st.S)) * st.XH + 1.42 * (1 - fd) * bHT * st.XH + 1.42 * (1 - fd) * bAT * st.XA + 4.33 * (muAT / YA) * (st.NH / (KNH + st.NH)) * st.XA;
   const capMg = (o.cap && o.cap > 0 ? o.cap * 24000 / V : 1.6 * OUR0()) , DOref = 2, Xr0 = Math.max(1.2 * X0, Math.min(0.8e6 / Math.max(30, sd.ivl), (Qm + Qr0) * X0 / Math.max(1e-6, Qr0))), Qw0 = o.Qw ? o.Qw : V * X0 / SRT / Xr0 / 24; // m3/h de purga: se saca de la recirculación (fondo del sedimentador), a la concentración del lodo recirculado
+  const QrQb = o.QrSpec ? (o.QrSpec.qb || Qr0 / o.QrSpec.duty) : null, QwQb = o.QwSpec ? (o.QwSpec.qb || Qw0 / o.QwSpec.duty) : null;   // bombas por ciclos: caudal fijo mientras están encendidas
   const ves0 = simVesilind(sd.ivl, sd), fns = sd.fns != null ? sd.fns : 0.00228, dz = sd.H / N, rp = 2.86, Xt = 3.0;
   const X = Array.from({ length: N }, (_, i) => TSS() / 1000);
   const Js = new Array(N).fill(0);
   let aireI = 0.5, foamLvl = 0;
   const out = { t: [], Q: [], Qr: [], Qw: [], S: [], NH: [], NO: [], DO: [], MLSS: [], XH: [], XA: [], aire: [], aor: [], cap: capMg * V / 24000, manto: [], tssEfl: [], tssExtra: [], xu: [], perf: [], ivl: [], v30: [], foam: [], dbo: [], dqo: [], ntk: [], temp: [], H: sd.H, inert: XIin, nit, an: an ? { S: [], NH: [], NO: [], XH: [], MLSS: [], Qri: [], V: Va } : null };
   const interp = (arr, t) => { const x = Math.min(arr.length - 1, Math.max(0, t / dtH)), i = Math.floor(x), fr = x - i; return arr[i] * (1 - fr) + arr[Math.min(arr.length - 1, i + 1)] * fr; };
+  const binAvg = (fn, t0) => { let a = 0; for (let j = 0; j < 10; j++) a += fn(t0 + (j + 0.5) * dtH / 10); return a / 10; };   // promedio del tramo de registro (los ciclos cortos no se pierden)
   const warmH = an ? 48 : 24, totalH = NT * dtH, pasos = Math.round((warmH + totalH) / dt);
   let manto = 0, tssEx = 0;
   for (let k = 0; k < pasos; k++) {
@@ -38866,7 +39006,7 @@ function simBioDin(o) {
     const qb = t < 0 ? Qm : interp(o.Qin, t), Q = qb, cMult = 1;
     const S0 = (t < 0 ? S0m : interp(o.dbo, t) / 0.68) * cMult, NTKin = (t < 0 ? NTKm : interp(o.ntk, t)) * (1 + (cMult - 1) * 0.7), XIinT = XIin;
     // caudales
-    const hh24 = Math.floor((((t % 24) + 24) % 24)), Qr = (o.QrProg ? o.QrProg[hh24] : (sd.prop ? Qr0 / Qm * Q : Qr0)) * f.rec, Qw = (o.QwProg ? o.QwProg[hh24] : Qw0) * f.purga, Qe = Math.max(0, Q - Qw), Qf = Math.max(0, Q + Qr);
+    const hh24 = Math.floor((((t % 24) + 24) % 24)), Qr = (o.QrSpec ? QrQb * simBombaOn(o.QrSpec, t) : (o.QrProg ? o.QrProg[hh24] : (sd.prop ? Qr0 / Qm * Q : Qr0))) * f.rec, Qw = (o.QwSpec ? QwQb * simBombaOn(o.QwSpec, t) : (o.QwProg ? o.QwProg[hh24] : Qw0)) * f.purga, Qe = Math.max(0, Q - Qw), Qf = Math.max(0, Q + Qr);
     const Qri = an ? Qri0 * (f.pozoOn > 0 ? 1 : 0) : 0, Qt = Q + Qr + Qri, Qt24 = Qt * 24;   // recirculación interna (se frena sin energía)
     // cinética
     const fTh = th(1.07, Tt), fTa = th(1.10, Tt), fTd = th(1.04, Tt), inh = 1 - Math.min(0.95, f.tox), nutL = 1 - 0.45 * f.nut;
@@ -38919,7 +39059,7 @@ function simBioDin(o) {
     manto = mt;
     if (t >= 0 && k % nPorGrab === 0) {
       const tssE = X[0] * 1000 + tssEx, fvv = (st.XH + st.XA + st.XP) / VSS / Math.max(1, TSS());
-      out.t.push(t); out.Q.push(Q); out.Qr.push(Qr); out.Qw.push(Qw); out.S.push(st.S); out.NH.push(st.NH); out.NO.push(st.NO); out.DO.push(st.DO); out.MLSS.push(TSS()); out.XH.push(st.XH); out.XA.push(st.XA);
+      out.t.push(t); out.Q.push(Q); out.Qr.push(o.QrSpec ? binAvg(tt => QrQb * simBombaOn(o.QrSpec, tt), t) * f.rec : Qr); out.Qw.push(o.QwSpec ? binAvg(tt => QwQb * simBombaOn(o.QwSpec, tt), t) * f.purga : Qw); out.S.push(st.S); out.NH.push(st.NH); out.NO.push(st.NO); out.DO.push(st.DO); out.MLSS.push(TSS()); out.XH.push(st.XH); out.XA.push(st.XA);
       out.aire.push(aire); out.aor.push(our * V / 24000); out.manto.push(mt); out.tssEfl.push(tssE); out.tssExtra.push(tssEx); out.xu.push(X[N - 1]); out.perf.push(X.slice()); out.ivl.push(ivlT); out.v30.push(ivlT * TSS() / 1000);
       out.foam.push(f.foam); out.temp.push(Tt);
       if (an) { out.an.S.push(sa.S); out.an.NH.push(sa.NH); out.an.NO.push(sa.NO); out.an.XH.push(sa.XH); out.an.MLSS.push((sa.XH + sa.XA + sa.XP) / VSS + sa.XI); out.an.Qri.push(Qri); }
