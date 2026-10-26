@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -40070,7 +40070,8 @@ async function casoWordCargar(file) {
   if (doc.getElementsByTagName('parsererror').length) throw new Error('No se pudo leer el contenido del Word.');
   const body = doc.getElementsByTagName('w:body')[0];
   const sf = zip.file('word/styles.xml'); let styles = null; if (sf) { try { const sx = await sf.async('string'); styles = new DOMParser().parseFromString(sx.charCodeAt(0) === 0xFEFF ? sx.slice(1) : sx, 'application/xml'); if (styles.getElementsByTagName('parsererror').length) styles = null; } catch (e) { styles = null; } }
-  return { zip, doc, body, styles, bloques: Array.from(body.childNodes).filter(n => n.nodeType === 1 && (n.nodeName === 'w:p' || n.nodeName === 'w:tbl')) };
+  const colectar = (el, out) => { Array.from(el.childNodes).forEach(n => { if (n.nodeType !== 1) return; if (n.nodeName === 'w:p' || n.nodeName === 'w:tbl') out.push(n); else if (n.nodeName === 'w:sdt') { const c = casoHijosW(n, 'w:sdtContent')[0]; if (c) colectar(c, out); } else if (n.nodeName === 'w:customXml' || n.nodeName === 'w:smartTag') colectar(n, out); }); return out; };   // los de adentro de un control de contenido (tabla de contenido, portada…) también son bloques
+  return { zip, doc, body, styles, bloques: colectar(body, []) };
 }
 // ── Listas de un .docx: tres formas de ser un ítem ──
 // 'directa' = el párrafo trae su numeración (numPr); 'estilo' = la numeración viene del estilo del párrafo (por ejemplo "Viñeta de lista"); 'texto' = la viñeta es un carácter escrito al principio (•, –, -, *…).
@@ -40174,7 +40175,8 @@ async function casoAplicarOpsWord(W, operaciones) {
   const { zip, doc, body, bloques } = W, resumen = [];
   const bl = k => { const b = bloques[k - 1]; if (!b) throw new Error(`No existe el bloque [${k}] (el documento tiene ${bloques.length}).`); return b; };
   const sectPr = Array.from(body.childNodes).find(n => n.nodeName === 'w:sectPr');
-  const colocar = (nodos, despues) => { const ref = despues === -1 || despues >= bloques.length ? (sectPr || null) : (despues <= 0 ? bloques[0] : bloques[despues - 1].nextSibling); nodos.forEach(n => body.insertBefore(n, ref)); };
+  const raiz = n => { while (n && n.parentNode !== body) n = n.parentNode; return n; };   // el bloque, o el control de contenido que lo contiene (un índice de Word va dentro de uno)
+  const colocar = (nodos, despues) => { const ref = despues === -1 || despues >= bloques.length ? (sectPr || null) : (despues <= 0 ? raiz(bloques[0]) : raiz(bloques[despues - 1]).nextSibling); nodos.forEach(n => body.insertBefore(n, ref)); };
   const parrafoXml = async (x, ancla) => {
     const t = String(x.texto || ''), est = x.estilo || 'normal';
     if (/^titulo[123]$/.test(est)) { const id = await casoEstiloId(zip, ['heading ' + est.slice(6), 'título ' + est.slice(6)]); return id ? `<w:p><w:pPr><w:pStyle w:val="${id}"/></w:pPr>${casoRunsXml(t)}</w:p>` : `<w:p><w:r><w:rPr><w:b/><w:sz w:val="${{ 1: 32, 2: 28, 3: 24 }[est.slice(6)]}"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(t)}</w:t></w:r></w:p>`; }
@@ -40933,11 +40935,30 @@ function casoVwTitulos(W) {
   return W.bloques.map((b, i) => { if (b.nodeName !== 'w:p') return null; const m = /(?:heading|ttulo|t.tulo) ?([1-3])/i.exec(casoEstiloP(b)), t = casoTextoP(b).trim(); return m && t ? { k: i + 1, nivel: Number(m[1]), texto: t } : null; }).filter(Boolean);
 }
 // Vista "Word": después de dibujar con docx-preview, cada párrafo y cada tabla se enlaza con su bloque del .docx (si las cuentas no coinciden, se usa la vista simple)
+// Bloques (párrafos y tablas) que dibujó docx-preview, en orden; baja por los contenedores que agrega (secciones, controles de contenido) pero no entra a párrafos ni tablas
+function casoVwBloquesDom(box) {
+  const out = []; const rec = (el, prof) => { Array.from(el.children).forEach(c => { if (c.tagName === 'P' || c.tagName === 'TABLE') out.push(c); else if (prof < 6 && !/^(HEADER|FOOTER|ASIDE|STYLE|SCRIPT)$/.test(c.tagName)) rec(c, prof + 1); }); };
+  box.querySelectorAll('article').forEach(a => rec(a, 0)); return out;
+}
+// Para cada bloque del .docx, el bloque dibujado que le corresponde (por tipo y por texto; el dibujo agrega marcas de lista, números de página de los índices, etc.). -1 si no se dibujó o no se pudo ubicar.
+function casoVwAlinearBloques(dom, xml) {
+  const norm = t => String(t || '').replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase(), pares = new Array(xml.length).fill(-1);
+  const tdom = dom.map(e => norm(e.textContent)), txml = xml.map(b => norm(Array.from(b.getElementsByTagName('w:t')).map(t => t.textContent).join('')));
+  const igual = (a, b) => a === b || (a && b && (a.includes(b) || b.includes(a)) && Math.min(a.length, b.length) / Math.max(a.length, b.length) > 0.4);
+  let cur = 0;
+  for (let i = 0; i < xml.length; i++) {
+    const esP = xml[i].nodeName === 'w:p';
+    for (let j = cur; j < Math.min(dom.length, cur + 10); j++) { if ((dom[j].tagName === 'P') === esP && igual(tdom[j], txml[i])) { pares[i] = j; cur = j + 1; break; } }
+  }
+  return pares;
+}
 function casoVwPrepararWord(W, box, orig, est) {
-  const arts = Array.from(box.querySelectorAll('article')), bloques = arts.flatMap(a => Array.from(a.children).filter(c => c.tagName === 'P' || c.tagName === 'TABLE'));
-  if (!bloques.length || bloques.length !== W.bloques.length) return false;
-  for (let i = 0; i < bloques.length; i++) if ((bloques[i].tagName === 'P') !== (W.bloques[i].nodeName === 'w:p')) return false;
-  bloques.forEach((el, i) => {
+  const dom = casoVwBloquesDom(box), pares = casoVwAlinearBloques(dom, W.bloques), domAXml = new Map();
+  pares.forEach((j, i) => { if (j >= 0) domAXml.set(j, i); });
+  est.alineacion = { dom: dom.length, xml: W.bloques.length, ligados: domAXml.size };
+  if (!domAXml.size || domAXml.size < Math.min(dom.length, W.bloques.length) * 0.6) return false;
+  dom.forEach((el, di) => {
+    if (!domAXml.has(di)) return; const i = domAXml.get(di);
     const k = i + 1, b = W.bloques[i], w = document.createElement('div'); w.className = 'cw-blk'; w.dataset.k = k; el.parentNode.insertBefore(w, el); w.appendChild(el);
     if (el.tagName === 'P') {
       if (el.querySelector('img, svg, canvas')) { el.contentEditable = 'false'; return; }
@@ -40993,6 +41014,7 @@ function casoVwAnclarComentarios(W, box) {
 async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo + sucio: se reabre una versión de trabajo (con un cambio de estructura aplicado) que todavía no se guardó
   casoVisorMostrar(esc(nombre), '', '<p class="hint">Cargando…</p>');
   if (!archivo) _casoVwHist = { nombre, des: [], reh: [] };
+  _casoVwMulti = new Set();
   const file = archivo || await casoArchivoDeVersion(nombre, ver), W = await casoWordCargar(file), coms = await casoVwComentariosLeer(W), orig = {}, xmls = {}, abiertos = new Set();
   let m = modo || _casoVwModo || (file.size > 20 * 1048576 ? 'simple' : 'word'), aviso = '';
   if (m === 'word') { try { await casoCargarDocxPreview(); } catch (e) { m = 'simple'; aviso = e.message + ' Se muestra la vista simple.'; } }
@@ -41019,7 +41041,7 @@ async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo +
   if (m === 'word') {
     try {
       await window.docx.renderAsync(file, document.getElementById('cvw-doc'), null, { inWrapper: true, breakPages: false, ignoreLastRenderedPageBreak: true, renderHeaders: true, renderFooters: true, renderComments: false, useBase64URL: true });
-      if (!casoVwPrepararWord(W, box, orig, _casoVisor)) throw new Error('No se pudo enlazar el dibujo con el contenido del documento.');
+      if (!casoVwPrepararWord(W, box, orig, _casoVisor)) { const al = _casoVisor.alineacion || {}; throw new Error(`No se pudo enlazar el dibujo con el contenido del documento (${al.dom || 0} bloques dibujados, ${al.xml || 0} en el archivo, ${al.ligados || 0} enlazados)`); }
       casoVwAnclarComentarios(W, box);
     } catch (e) { _casoVisor = null; await casoVisorWord(nombre, ver, 'simple'); casoVisorMsg('Este documento no se pudo mostrar con el formato de Word (' + e.message + '): se muestra la vista simple.'); return; }
   }
@@ -41030,13 +41052,15 @@ async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo +
     if (e.key === 'Enter' && e.target.classList && (e.target.classList.contains('cw-p') || e.target.classList.contains('cw-rp'))) { e.preventDefault(); casoVwInsertar(e.target.closest('.cw-blk').querySelector('.cw-act button') || e.target.closest('.cw-blk')); } };
   box.onmouseup = box.onkeyup = () => setTimeout(casoVwBarraMostrar, 0);
   box.onclick = e => { const c = e.target.closest && e.target.closest('.cw-cm'); if (c) { casoVwComToggle(true); casoVwIrPanel(c.dataset.cm.split(' ')[0]); } };
-  ['click', 'keyup', 'focusin'].forEach(ev => box.addEventListener(ev, casoVwFoco)); casoVwResizers(box); casoVwEstrPintar();
+  ['click', 'keyup', 'focusin'].forEach(ev => box.addEventListener(ev, casoVwFoco));
+  box.addEventListener('mousedown', e => { if ((e.shiftKey || e.ctrlKey || e.metaKey) && e.target.closest && e.target.closest('.cw-blk[data-k]') && !e.target.closest('td')) e.preventDefault(); }, true); casoVwResizers(box); casoVwEstrPintar();
   casoVisorMsg(aviso || 'Seleccioná texto para resaltarlo, ponerle formato o comentarlo. Editá directamente (Enter agrega un párrafo, 🗑 lo borra). Las imágenes y el formato fino se conservan; para retocarlos usá Word.');
 }
 // ── Word: listas y tablas ──
 // Barra "Listas / Tabla" sobre el documento: actúa sobre el párrafo o la celda donde está el cursor. Un cambio de estructura (nivel de un ítem, convertir en lista, mover un ítem, filas, columnas, ancho de columnas) se aplica enseguida al documento
 // con las mismas operaciones que usa la IA y se vuelve a dibujar; queda como versión de trabajo hasta que se aprieta "💾 Guardar versión". Lo que estaba escrito en pantalla sin guardar pasa al documento antes de aplicarlo.
 const CASO_VW_MIN_COL = 500;   // twips (≈ 0,9 cm)
+let _casoVwMulti = new Set();   // ítems o párrafos marcados con Shift+clic / Ctrl+clic (cada párrafo es un campo editable aparte: el navegador no deja seleccionar texto de varios a la vez)
 let _casoVwHist = { nombre: '', des: [], reh: [] };   // copias del documento antes de cada cambio de estructura (para Ctrl+Z / Ctrl+Y); solo vale mientras el visor está abierto
 const CASO_VW_HIST_MAX = 25;
 const casoVwSpan = tc => { const pr = casoHijosW(tc, 'w:tcPr')[0], gs = pr && casoHijosW(pr, 'w:gridSpan')[0]; return gs ? Number(gs.getAttribute('w:val')) || 1 : 1; };
@@ -41044,7 +41068,7 @@ function casoVwEstrHtml() {
   const b = (g, txt, fn, ttl) => `<button type="button" class="btn btn-secondary btn-sm" data-g="${g}" style="padding:1px 7px;width:auto;font-size:12px" title="${esc(ttl)}" onmousedown="event.preventDefault()" onclick="${fn}">${txt}</button>`;
   const sep = '<span style="width:1px;height:18px;background:var(--border)"></span>';
   return `<div style="display:flex;gap:4px 6px;flex-wrap:wrap;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px 8px;margin:0 auto 8px;max-width:1200px">
-    ${b('u', '↶ Deshacer', 'casoVwDeshacer(false)', 'Deshace el último cambio de estructura (Ctrl+Z)')}${b('r', '↷ Rehacer', 'casoVwDeshacer(true)', 'Vuelve a hacer lo que deshiciste (Ctrl+Y)')}<span style="width:1px;height:18px;background:var(--border)"></span><span class="hint" style="margin:0;font-weight:600">Listas</span>${b('p', '• Viñetas', "casoVwLista('vineta')", 'Convierte el párrafo (o los párrafos seleccionados) en una lista con viñetas')}${b('p', '1. Numeración', "casoVwLista('numerada')", 'Convierte el párrafo (o los seleccionados) en una lista numerada')}${b('i', '⇥ Subítem', 'casoVwNivel(1)', 'Baja el ítem un nivel, como subítem (Tab)')}${b('i', '⇤ Subir nivel', 'casoVwNivel(-1)', 'Sube el ítem un nivel (Shift+Tab)')}${b('p', '▲', 'casoVwMoverItem(-1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia arriba')}${b('p', '▼', 'casoVwMoverItem(1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia abajo')}${b('i', '◦ Símbolo ▾', 'casoVwSimboloMenu(this)', 'Cambia el símbolo de la viñeta o el formato de la numeración')}${b('i', '✕ Quitar lista', "casoVwLista('ninguna')", 'Vuelve el ítem a párrafo normal')}
+    ${b('u', '↶ Deshacer', 'casoVwDeshacer(false)', 'Deshace el último cambio de estructura (Ctrl+Z)')}${b('r', '↷ Rehacer', 'casoVwDeshacer(true)', 'Vuelve a hacer lo que deshiciste (Ctrl+Y)')}<span style="width:1px;height:18px;background:var(--border)"></span><span class="hint" style="margin:0;font-weight:600">Listas</span>${b('p', '• Viñetas', "casoVwLista('vineta')", 'Convierte el párrafo (o los párrafos seleccionados) en una lista con viñetas')}${b('p', '1. Numeración', "casoVwLista('numerada')", 'Convierte el párrafo (o los seleccionados) en una lista numerada')}${b('i', '⇥ Subítem', 'casoVwNivel(1)', 'Baja el ítem un nivel, como subítem (Tab)')}${b('i', '⇤ Subir nivel', 'casoVwNivel(-1)', 'Sube el ítem un nivel (Shift+Tab)')}${b('p', '▲', 'casoVwMoverItem(-1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia arriba')}${b('p', '▼', 'casoVwMoverItem(1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia abajo')}${b('i', '☑ Toda la lista', 'casoVwMarcarLista()', 'Marca todos los ítems de esta lista para cambiarlos juntos (también: Shift+clic marca desde el último ítem hasta el que tocás; Ctrl+clic suma o saca uno)')}${b('i', '◦ Símbolo ▾', 'casoVwSimboloMenu(this)', 'Cambia el símbolo de la viñeta o el formato de la numeración')}${b('i', '✕ Quitar lista', "casoVwLista('ninguna')", 'Vuelve el ítem a párrafo normal')}
     ${sep}<span class="hint" style="margin:0;font-weight:600">Tabla</span>${b('t', '＋ Fila ▲', "casoVwFila('arriba')", 'Agrega una fila arriba de la fila donde está el cursor')}${b('t', '＋ Fila ▼', "casoVwFila('abajo')", 'Agrega una fila debajo')}${b('t', '＋ Col ◀', "casoVwColumna('izq')", 'Agrega una columna a la izquierda')}${b('t', '＋ Col ▶', "casoVwColumna('der')", 'Agrega una columna a la derecha')}${b('t', '🗑 Fila', 'casoVwQuitarFila()', 'Borra la fila donde está el cursor')}${b('t', '🗑 Col', 'casoVwQuitarColumna()', 'Borra la columna donde está el cursor')}${b('t', '⧉ Unir →', 'casoVwCombinar()', 'Une esta celda con la de la derecha')}${b('t', '↔ Igualar', 'casoVwIgualarColumnas()', 'Deja todas las columnas con el mismo ancho')}
     <label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center" title="Ancho de la columna donde está el cursor (también se cambia arrastrando el borde de la columna)">Ancho <input id="cvw-ancho" type="number" step="0.1" min="0.9" style="width:62px;padding:2px 4px;font-size:12px" onchange="casoVwAnchoColumna(this.value)" /> cm</label>
     <span class="hint" id="cvw-estr-msg" style="margin:0;flex-basis:100%"></span></div>`;
@@ -41058,6 +41082,7 @@ function casoVwColIdx(t, r, c) {   // columna de la grilla (desde 0) donde empie
 function casoVwAnchoCol(t, r, c) { const g = casoVwColIdx(t, r, c); if (g == null) return null; const an = casoTblAnchos(_casoVisor.W.bloques[t - 1]); return an[g] || null; }
 function casoVwFoco(e) {
   const s = _casoVisor; if (!s || s.tipo !== 'word' || !e || !e.target) return;
+  if (e.type === 'click' && casoVwMulti(e)) return;
   const el = e.target.nodeType === 1 ? e.target : e.target.parentElement; if (!el || !el.closest || !el.closest('#cvw-box')) return;
   const td = el.closest('td[data-t]');
   if (td) s.foco = { k: null, tabla: Number(td.dataset.t), fila: Number(td.dataset.r), col: Number(td.dataset.c) };
@@ -41070,10 +41095,12 @@ function casoVwEstrPintar() {
   bar.querySelectorAll('button[data-g]').forEach(bt => { const g = bt.dataset.g; bt.disabled = !(g === 'p' ? par : g === 'i' ? lista : g === 't' ? tab : g === 'u' ? _casoVwHist.des.length > 0 : g === 'r' ? _casoVwHist.reh.length > 0 : false); });
   const inp = document.getElementById('cvw-ancho'), w = tab ? casoVwAnchoCol(f.tabla, f.fila, f.col) : null; if (inp) { inp.disabled = !w; inp.value = w ? Math.round(w / 567 * 100) / 100 : ''; }
   const m = document.getElementById('cvw-estr-msg');
-  if (m) m.textContent = par ? (lista ? `Ítem de lista, nivel ${casoVwNivelLista(f.k) + 1}${casoVwTipoLista(f.k) === 'texto' ? ' (viñeta escrita como texto: al cambiarla de nivel se convierte en lista real)' : ''}. Tab lo baja a subítem y Shift+Tab lo sube; Enter agrega otro ítem.` : 'Párrafo: podés convertirlo en lista (también varios párrafos seleccionados).') : tab ? `Tabla [${f.tabla}], fila ${f.fila}, columna ${f.col}. Para el ancho arrastrá el borde de la columna o escribilo acá.` : 'Hacé clic en un párrafo o en una celda para ver las opciones de lista y de tabla.';
+  if (m && _casoVwMulti.size > 1) m.textContent = `${_casoVwMulti.size} ítems marcados: los botones de lista (viñeta, nivel, símbolo, quitar) actúan sobre todos. Un clic sin Shift ni Ctrl quita la marca.`;
+  else if (m) m.textContent = par ? (lista ? `Ítem de lista, nivel ${casoVwNivelLista(f.k) + 1}${casoVwTipoLista(f.k) === 'texto' ? ' (viñeta escrita como texto: al cambiarla de nivel se convierte en lista real)' : ''}. Tab lo baja a subítem y Shift+Tab lo sube; Enter agrega otro ítem. Para marcar varios: Shift+clic o Ctrl+clic, o ☑ Toda la lista.` : 'Párrafo: podés convertirlo en lista (también varios párrafos seleccionados).') : tab ? `Tabla [${f.tabla}], fila ${f.fila}, columna ${f.col}. Para el ancho arrastrá el borde de la columna o escribilo acá.` : 'Hacé clic en un párrafo o en una celda para ver las opciones de lista y de tabla.';
 }
 function casoVwParrafosSel() {
   const s = _casoVisor, box = document.getElementById('cvw-box'), sel = window.getSelection(), ks = new Set();
+  if (_casoVwMulti.size) return Array.from(_casoVwMulti).filter(k => box.querySelector(`.cw-blk[data-k="${k}"]`)).sort((a, b) => a - b);
   if (sel && sel.rangeCount && !sel.isCollapsed) { const r = sel.getRangeAt(0); box.querySelectorAll('.cw-blk[data-k]').forEach(b => { const p = b.querySelector(CASO_VW_ED_P); if (p && !b.querySelector('table') && r.intersectsNode(p)) ks.add(Number(b.dataset.k)); }); }
   if (!ks.size && s.foco && s.foco.k != null) ks.add(s.foco.k);
   return Array.from(ks).sort((a, b) => a - b);
@@ -41166,6 +41193,28 @@ function casoVwSimbolo(sim) {
   const ks = casoVwParrafosSel().filter(k => casoVwNivelLista(k) != null); if (!ks.length) { casoVisorMsg('Hacé clic en un ítem de una lista.'); return; }
   casoVwEstructura([{ op: 'simbolo_lista', indices: ks, simbolo: sim, alcance: _casoVwAlcance }], /^[•◦▪■●○–➢✓★→»]$/.test(sim) ? `Viñeta cambiada a "${sim}".` : `Numeración cambiada a "${sim}".`);
 }
+// Marcar varios párrafos o ítems: Shift+clic marca todos los que hay entre el último y el elegido; Ctrl+clic suma o saca de a uno; un clic común lo deja en uno solo
+function casoVwMultiPintar() {
+  document.querySelectorAll('#cvw-box .cw-blk.cw-msel').forEach(b => b.classList.remove('cw-msel'));
+  _casoVwMulti.forEach(k => { const b = document.querySelector(`#cvw-box .cw-blk[data-k="${k}"]`); if (b) b.classList.add('cw-msel'); });
+}
+function casoVwMulti(e) {
+  const s = _casoVisor, el = e.target.nodeType === 1 ? e.target : e.target.parentElement; if (!el || !el.closest || !el.closest('#cvw-box')) return false;
+  if (!(e.shiftKey || e.ctrlKey || e.metaKey)) { if (_casoVwMulti.size) { _casoVwMulti.clear(); casoVwMultiPintar(); } return false; }
+  const blk = el.closest('.cw-blk[data-k]'); if (!blk || blk.querySelector('table') || !blk.querySelector(CASO_VW_ED_P)) return false;
+  e.preventDefault(); const k = Number(blk.dataset.k), bloques = Array.from(document.querySelectorAll('#cvw-box .cw-blk[data-k]')).filter(b => !b.querySelector('table') && b.querySelector(CASO_VW_ED_P)).map(b => Number(b.dataset.k));
+  const ref = s.foco && s.foco.k != null ? s.foco.k : k;
+  if (e.shiftKey) { const a = bloques.indexOf(ref), z = bloques.indexOf(k); if (a >= 0 && z >= 0) bloques.slice(Math.min(a, z), Math.max(a, z) + 1).forEach(x => _casoVwMulti.add(x)); }
+  else { if (!_casoVwMulti.size) _casoVwMulti.add(ref); if (_casoVwMulti.has(k)) _casoVwMulti.delete(k); else _casoVwMulti.add(k); }
+  window.getSelection().removeAllRanges(); s.foco = { k }; casoVwMultiPintar(); casoVwEstrPintar(); return true;
+}
+// Marca todos los ítems de la lista del ítem donde está el cursor (todos los niveles)
+function casoVwMarcarLista() {
+  const s = _casoVisor, f = s && s.foco; if (!f || f.k == null) { casoVisorMsg('Hacé clic en un ítem de la lista.'); return; }
+  const inf = casoWListaInfo(s.W, s.W.bloques[f.k - 1]); if (!inf) { casoVisorMsg('Ese párrafo no es un ítem de lista.'); return; }
+  _casoVwMulti.clear(); s.W.bloques.forEach((b, i) => { const x = casoWListaInfo(s.W, b); if (x && x.numId === inf.numId && x.tipo === inf.tipo && document.querySelector(`#cvw-box .cw-blk[data-k="${i + 1}"]`)) _casoVwMulti.add(i + 1); });
+  casoVwMultiPintar(); casoVwEstrPintar(); casoVisorMsg(`${_casoVwMulti.size} ítems marcados: ahora los botones de lista actúan sobre todos.`);
+}
 const casoVwTab = () => { const f = _casoVisor && _casoVisor.foco; if (!f || f.tabla == null) { casoVisorMsg('Hacé clic en una celda de la tabla.'); return null; } return f; };
 // Con celdas unidas, agregar o quitar columnas (o filas) por celda puede desarmar la tabla: ahí se hace en Word
 function casoVwUnidas(t, que) { const b = _casoVisor.W.bloques[t - 1]; if (!b) return false; return que === 'columnas' ? Array.from(b.getElementsByTagName('w:gridSpan')).some(g => Number(g.getAttribute('w:val')) > 1) : Array.from(b.getElementsByTagName('w:vMerge')).length > 0; }
@@ -41224,7 +41273,7 @@ function casoVwEstilosCss() {
   if (document.getElementById('caso-vw-css')) return;
   const st = document.createElement('style'); st.id = 'caso-vw-css';
   st.textContent = '.cw-blk{padding-right:84px !important}.cw-p,#cvw-box td{white-space:pre-wrap}.cw-cm{background:rgba(255,193,7,.22);border-bottom:2px solid #e0a800;cursor:pointer}.cw-cm.cw-sel{background:rgba(255,152,0,.45)}.cw-cm.cw-flash{animation:cwflash 1.8s ease-out}@keyframes cwflash{0%,30%{background:rgba(255,120,0,.85);box-shadow:0 0 0 3px rgba(255,120,0,.5)}100%{box-shadow:0 0 0 0 rgba(255,120,0,0)}}.cw-cc{border:1px solid var(--border);border-radius:8px;padding:7px 9px;margin-bottom:8px;background:var(--surface);cursor:pointer}.cw-cc.cw-sel{border-color:#e0a800;box-shadow:0 0 0 2px rgba(224,168,0,.3)}.cw-cc .cw-an{font-size:11px;color:var(--text3);border-left:3px solid #e0a800;padding-left:6px;margin-bottom:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#cvw-barra button{cursor:pointer}'
-    + '#cvw-box.cw-rm{overflow-x:auto;background:var(--surface2);padding:14px 10px 2px;border-radius:8px}#cvw-box.cw-rm .docx-wrapper{background:transparent !important;padding:0 !important}#cvw-box.cw-rm .docx-wrapper>section.docx{box-shadow:0 0 8px rgba(0,0,0,.3);margin:0 auto 14px !important;background:#fff !important;color:#000}#cvw-box.cw-rm .cw-blk{padding-right:0 !important;position:relative}#cvw-box.cw-rm .cw-act{right:6px;top:-6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1px 2px;z-index:5}#cvw-box.cw-rm .cw-rp:focus{outline:1px dashed #6aa0ff;background:transparent}#cvw-box.cw-rm td[contenteditable=true]:focus{outline:1px dashed #6aa0ff}#cvw-box.cw-rm td[contenteditable=true]{outline-offset:-1px}.cw-rzs{position:absolute;left:0;top:0;width:100%;height:0;z-index:6}.cw-rz{position:absolute;width:8px;cursor:col-resize}.cw-rz:hover{background:rgba(26,115,232,.35)}#cvw-estr{position:sticky;top:0;z-index:20}';
+    + '#cvw-box.cw-rm{overflow-x:auto;background:var(--surface2);padding:14px 10px 2px;border-radius:8px}#cvw-box.cw-rm .docx-wrapper{background:transparent !important;padding:0 !important}#cvw-box.cw-rm .docx-wrapper>section.docx{box-shadow:0 0 8px rgba(0,0,0,.3);margin:0 auto 14px !important;background:#fff !important;color:#000}#cvw-box.cw-rm .cw-blk{padding-right:0 !important;position:relative}#cvw-box.cw-rm .cw-act{right:6px;top:-6px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1px 2px;z-index:5}#cvw-box.cw-rm .cw-rp:focus{outline:1px dashed #6aa0ff;background:transparent}#cvw-box.cw-rm td[contenteditable=true]:focus{outline:1px dashed #6aa0ff}#cvw-box.cw-rm td[contenteditable=true]{outline-offset:-1px}.cw-rzs{position:absolute;left:0;top:0;width:100%;height:0;z-index:6}.cw-rz{position:absolute;width:8px;cursor:col-resize}.cw-rz:hover{background:rgba(26,115,232,.35)}#cvw-estr{position:sticky;top:0;z-index:20}.cw-msel{background:rgba(26,115,232,.16) !important;outline:1px solid rgba(26,115,232,.55);outline-offset:-1px}';
   document.head.appendChild(st);
 }
 // ── Barra flotante sobre el texto seleccionado ──
@@ -41992,16 +42041,29 @@ async function casoWEncabezadoPie(W, o, sps, nuevaParte) {
     casoOrdenarW(sp, CASO_SECTPR_ORDEN);
   }
 }
-const casoWNivelTitulo = p => { const m = /(?:heading|ttulo|t.tulo) ?([1-9])/i.exec(casoEstiloP(p)); return m ? Number(m[1]) : null; };
+// Nivel de título de un párrafo: estilo de título (Título 1…, Heading 1…, también si el estilo está basado en uno) o nivel de esquema (outlineLvl) del párrafo o de su estilo
+function casoWNivelTitulo(p, W) {
+  const m0 = /(?:heading|ttulo|t.tulo) ?([1-9])/i.exec(casoEstiloP(p)); if (m0) return Number(m0[1]);
+  const ppr = casoHijosW(p, 'w:pPr')[0], ol = ppr && casoHijosW(ppr, 'w:outlineLvl')[0]; if (ol) { const v = Number(ol.getAttribute('w:val')); return v >= 0 && v <= 8 ? v + 1 : null; }
+  if (!W || !W.styles) return null;
+  const est = Array.from(W.styles.getElementsByTagName('w:style')); let cur = casoEstiloP(p);
+  for (let i = 0; i < 10 && cur; i++) {
+    const st = est.find(x => x.getAttribute('w:styleId') === cur); if (!st) return null;
+    const nm = casoHijosW(st, 'w:name')[0], m = nm && /^(?:heading|t[ií]tulo) ?([1-9])$/i.exec(nm.getAttribute('w:val') || ''); if (m) return Number(m[1]);
+    const spr = casoHijosW(st, 'w:pPr')[0], so = spr && casoHijosW(spr, 'w:outlineLvl')[0]; if (so) { const v = Number(so.getAttribute('w:val')); return v >= 0 && v <= 8 ? v + 1 : null; }
+    const base = casoHijosW(st, 'w:basedOn')[0]; cur = base ? base.getAttribute('w:val') : null;
+  }
+  return null;
+}
 // Índice (campo TOC de Word) en párrafos comunes, con los títulos ya escritos para que se vea enseguida; Word completa los números de página al abrir. contenido: titulos | figuras | tablas
 function casoWIndiceXml(W, o, estiloTitulo) {
   const esc = procesosPropuestaXmlEsc, cont = o.contenido || 'titulos', niv = Math.min(9, Math.max(1, Math.round(Number(o.niveles) || 3)));
   const instr = cont === 'figuras' ? ' TOC \\h \\z \\c "Figura" ' : cont === 'tablas' ? ' TOC \\h \\z \\c "Tabla" ' : ` TOC \\o "1-${niv}" \\h \\z \\u `;
-  const titulo = o.titulo === '' ? '' : esc(o.titulo || (cont === 'figuras' ? 'ÍNDICE DE FIGURAS' : cont === 'tablas' ? 'ÍNDICE DE TABLAS' : 'ÍNDICE'));
+  const titulo = o.titulo === '' ? '' : esc(o.titulo || (cont === 'figuras' ? 'Índice de figuras' : cont === 'tablas' ? 'Índice de tablas' : 'Tabla de contenido'));
   let entradas = [];
-  if (cont === 'titulos') W.bloques.forEach(b => { if (b.nodeName !== 'w:p') return; const n = casoWNivelTitulo(b), t = casoTextoP(b).trim(); if (n && n <= niv && t) entradas.push({ n, t }); });
+  if (cont === 'titulos') W.bloques.forEach(b => { if (b.nodeName !== 'w:p') return; const n = casoWNivelTitulo(b, W), t = casoTextoP(b).trim(); if (n && n <= niv && t) entradas.push({ n, t }); });
   else W.bloques.forEach(b => { if (b.nodeName !== 'w:p') return; const t = casoTextoP(b).trim(), re = cont === 'figuras' ? /^(Figura|Fig\.?)\s*\d+/i : /^Tabla\s*\d+/i; if (re.test(t)) entradas.push({ n: 1, t }); });
-  if (!entradas.length) entradas = [{ n: 1, t: 'Actualizá el índice en Word (clic derecho, Actualizar campo) para que aparezca el contenido.', vacio: true }];
+  if (!entradas.length) { if (!o.aunque_vacio) throw new Error(cont === 'titulos' ? 'No encontré títulos en el documento (párrafos con estilo Título 1/2/3 o con nivel de esquema): una tabla de contenido se arma con los títulos. Marcá primero los títulos con estilo_parrafo (titulo1, titulo2, titulo3) y volvé a pedirla, o usá aunque_vacio:true para dejar el campo listo y que se llene al actualizarlo en Word.' : `No encontré ${cont === 'figuras' ? 'leyendas de figuras' : 'leyendas de tablas'} en el documento: agregalas primero con la operación leyenda (o usá aunque_vacio:true).`); entradas = [{ n: 1, t: 'Actualizá la tabla de contenido en Word (clic derecho, Actualizar campo) para que aparezca el contenido.', vacio: true }]; }
   const tab = '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9026"/></w:tabs>';
   const fila = (e, i) => `<w:p><w:pPr><w:pStyle w:val="TOC${e.n}"/>${tab}${e.n > 1 ? `<w:ind w:left="${(e.n - 1) * 240}"/>` : ''}</w:pPr>${i === 0 ? `<w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r><w:r><w:instrText xml:space="preserve">${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>` : ''}<w:r><w:t xml:space="preserve">${esc(e.t)}</w:t></w:r>${i === entradas.length - 1 ? '<w:r><w:fldChar w:fldCharType="end"/></w:r>' : ''}</w:p>`;
   const cab = titulo ? (estiloTitulo ? `<w:p><w:pPr><w:pStyle w:val="${estiloTitulo}"/></w:pPr><w:r><w:t>${titulo}</w:t></w:r></w:p>` : `<w:p><w:pPr><w:spacing w:after="240"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>${titulo}</w:t></w:r></w:p>`) : '';
@@ -42184,7 +42246,7 @@ async function casoWordOpExtra(o, C, resumen) {
         if (!x) throw new Error(`El bloque [${o.indice}] ya es el primero.`); mia.forEach(n => x.parentNode.insertBefore(n, x));
       } else {
         const sig = vec(mia[mia.length - 1], false); if (!sig || (miNivel != null && nivel(sig) !== miNivel)) throw new Error(miNivel != null ? `El ítem [${o.indice}] ya es el último de su nivel.` : `El bloque [${o.indice}] ya es el último.`);
-        const suya = rama(sig), despues = vec(suya[suya.length - 1], false) || (Array.from(W.body.childNodes).find(n => n.nodeName === 'w:sectPr') || null); mia.forEach(n => W.body.insertBefore(n, despues));
+        const suya = rama(sig), despues = vec(suya[suya.length - 1], false) || (Array.from(W.body.childNodes).find(n => n.nodeName === 'w:sectPr') || null); mia.forEach(n => (despues ? despues.parentNode : W.body).insertBefore(n, despues));
       }
       resumen.push(`${mia.length > 1 ? 'ítem con sus subítems' : 'bloque'} [${o.indice}] movido ${atras ? 'arriba' : 'abajo'}`); return true;
     }
@@ -42201,10 +42263,10 @@ async function casoWordOpExtra(o, C, resumen) {
       if (!ps.length) throw new Error('simbolo_lista: indicá "indice" (o "indices") del ítem de la lista.'); if (!String(o.simbolo || '').trim()) throw new Error('simbolo_lista: falta "simbolo".');
       const n = await casoWSimboloLista(W, ps, String(o.simbolo).trim(), o.alcance === 'seleccion' ? 'seleccion' : 'lista'); resumen.push(`${n} ítem(s) con la viñeta "${String(o.simbolo).trim()}"`); return true;
     }
-    case 'insertar_indice': {
+    case 'insertar_indice': case 'insertar_tabla_contenido': {
       const lp = await casoEstiloId(zip, ['toc heading', 'ttulo tdc', 'título tdc']), xml = casoWIndiceXml(W, o, lp);
       colocar(procesosPropuestaParsearFragmento(doc, xml), o.despues_de == null ? 0 : o.despues_de); await casoWActualizarCampos(W);
-      resumen.push(`${o.contenido === 'figuras' ? 'índice de figuras' : o.contenido === 'tablas' ? 'índice de tablas' : 'índice'} insertado (Word completa los números de página al abrir el documento)`); return true;
+      resumen.push(`${o.contenido === 'figuras' ? 'índice de figuras' : o.contenido === 'tablas' ? 'índice de tablas' : 'tabla de contenido'} insertada con ${(xml.match(/<w:p>/g) || []).length} línea(s) (en Word se completan los números de página: hay que aceptar actualizar los campos al abrir, o clic derecho sobre la tabla y Actualizar campo; en Word Online o en Vista protegida no se actualizan solos)`); return true;
     }
     case 'encabezado_pie': {
       if (!String(o.texto || o.izquierda || o.centro || o.derecha || '').trim()) throw new Error('encabezado_pie: falta el texto ("texto", o "izquierda" / "centro" / "derecha"; podés usar {pagina}, {paginas} y {fecha}).');
@@ -42261,7 +42323,7 @@ async function casoWordOpExtra(o, C, resumen) {
     case 'salto_pagina_antes': {
       let ps = [];
       if (Array.isArray(o.indices) && o.indices.length) ps = o.indices.map(k => bl(k)); else if (o.indice) ps = [bl(o.indice)];
-      else if (o.nivel) ps = bloques.filter(b => b.nodeName === 'w:p' && casoWNivelTitulo(b) === Number(o.nivel));
+      else if (o.nivel) ps = bloques.filter(b => b.nodeName === 'w:p' && casoWNivelTitulo(b, W) === Number(o.nivel));
       ps = ps.filter(b => b.nodeName === 'w:p'); if (o.excepto_primero) ps = ps.slice(1);
       if (!ps.length) throw new Error('salto_pagina_antes: no hay párrafos para cambiar (indicá "nivel" de título, "indice" o "indices").');
       ps.forEach(b => { const ppr = casoWHijoPrimero(doc, b, 'pPr'); casoWQuitar(ppr, 'pageBreakBefore'); if (o.quitar !== true) casoWProp(doc, ppr, 'pageBreakBefore'); casoOrdenarW(ppr, CASO_PPR_ORDEN); });
@@ -42319,13 +42381,13 @@ CASO_HERRAMIENTAS.find(t => t.name === 'editar_word').description += ' RESALTAR 
   it.properties.op.enum.push('nivel_lista', 'mover_bloque', 'ancho_columnas'); Object.assign(it.properties, { nivel: { type: 'number', description: 'nivel_lista: nivel al que pasa el ítem (0 = primero).' }, delta: { type: 'number', description: 'nivel_lista: +1 lo baja a subítem, -1 lo sube un nivel.' }, direccion: { type: 'string', enum: ['arriba', 'abajo'], description: 'mover_bloque: hacia dónde (un ítem de lista se mueve con sus subítems).' }, anchos: { type: 'array', items: { type: 'number' }, description: 'ancho_columnas: ancho de cada columna en twips (567 = 1 cm), uno por columna.' } });
   eo.description += ' LISTAS Y TABLAS: nivel_lista {indice, delta o nivel} sube o baja un ítem de lista (subítems); mover_bloque {indice, direccion} reordena un ítem (con sus subítems) o un párrafo; ancho_columnas {tabla, anchos[]} cambia el ancho de las columnas; estilo_parrafo {indice, estilo: vineta|numerada|normal} convierte en lista o la quita; tabla_agregar_fila / tabla_eliminar_fila / tabla_agregar_columna / tabla_eliminar_columna / tabla_combinar editan la estructura de la tabla.'; }
 { const eo = CASO_HERRAMIENTAS.find(t => t.name === 'editar_word'), it = eo.input_schema.properties.operaciones.items, pr = it.properties;
-  it.properties.op.enum.push('simbolo_lista', 'insertar_indice', 'encabezado_pie', 'salto_seccion', 'propiedades_seccion', 'hipervinculo', 'leyenda', 'salto_pagina_antes');
-  const nuevas = { niveles: { type: 'number', description: 'insertar_indice: cuántos niveles de título incluye (1 a 9, por defecto 3).' }, contenido: { type: 'string', enum: ['titulos', 'figuras', 'tablas'], description: 'insertar_indice: de qué es el índice (por defecto títulos).' }, titulo: { type: 'string', description: 'insertar_indice: título del índice (por defecto ÍNDICE; "" para no poner título).' }, salto_pagina_despues: { type: 'boolean', description: 'insertar_indice: agrega un salto de página después del índice.' },
+  it.properties.op.enum.push('simbolo_lista', 'insertar_tabla_contenido', 'insertar_indice', 'encabezado_pie', 'salto_seccion', 'propiedades_seccion', 'hipervinculo', 'leyenda', 'salto_pagina_antes');
+  const nuevas = { niveles: { type: 'number', description: 'insertar_indice: cuántos niveles de título incluye (1 a 9, por defecto 3).' }, contenido: { type: 'string', enum: ['titulos', 'figuras', 'tablas'], description: 'insertar_indice: de qué es el índice (por defecto títulos).' }, titulo: { type: 'string', description: 'insertar_indice: título del índice (por defecto ÍNDICE; "" para no poner título).' }, salto_pagina_despues: { type: 'boolean', description: 'insertar_indice: agrega un salto de página después del índice.' }, aunque_vacio: { type: 'boolean', description: 'insertar_indice: dejar el campo aunque todavía no haya títulos (se llena al actualizarlo en Word).' },
     simbolo: { type: 'string', description: 'simbolo_lista: el símbolo de la viñeta (• ◦ ▪ – ✓ ➢…) o el formato de numeración (1. 1) a. a) A. A) i. I.).' }, alcance: { type: 'string', enum: ['lista', 'seleccion'], description: 'simbolo_lista: toda la lista en ese nivel (por defecto) o solo los ítems indicados.' }, ubicacion: { type: 'string', enum: ['encabezado', 'pie'], description: 'encabezado_pie: cuál de los dos.' }, izquierda: { type: 'string' }, centro: { type: 'string' }, derecha: { type: 'string', description: 'encabezado_pie: texto en cada tercio (con tabulaciones); {pagina}, {paginas} y {fecha} se vuelven campos que se actualizan solos.' }, alineacion: { type: 'string', enum: ['izquierda', 'centro', 'derecha'], description: 'encabezado_pie: alineación cuando se usa "texto".' }, tamano: { type: 'number', description: 'encabezado_pie: tamaño en puntos (por defecto 9).' }, negrita: { type: 'boolean' }, cursiva: { type: 'boolean' }, color: { type: 'string' }, linea: { type: 'boolean', description: 'encabezado_pie: raya debajo del encabezado / arriba del pie.' }, primera_distinta: { type: 'boolean', description: 'encabezado_pie: primera página con otro encabezado/pie (texto_primera; vacío si no se indica).' }, texto_primera: { type: 'string' }, modo: { type: 'string', enum: ['reemplazar', 'agregar'], description: 'encabezado_pie: qué hacer si ya hay uno con imágenes o tablas (logo): agregar una línea o reemplazar todo.' },
     seccion: { type: ['number', 'string'], description: 'encabezado_pie / propiedades_seccion: número de sección (ver_archivo las lista) o "todas".' }, tipo: { type: 'string', enum: ['siguiente_pagina', 'continua', 'pagina_par', 'pagina_impar'], description: 'salto_seccion: cómo empieza la sección nueva.' }, tipo_salto: { type: 'string', enum: ['siguiente_pagina', 'continua', 'pagina_par', 'pagina_impar'], description: 'propiedades_seccion: cómo empieza la sección.' }, orientacion: { type: 'string', enum: ['horizontal', 'vertical'] }, tamano_hoja: { type: 'string', enum: ['A4', 'A3', 'Carta', 'Legal', 'Oficio'] }, margenes_cm: { type: ['number', 'object'], description: 'Un número (todos los márgenes) o { superior, inferior, izquierda, derecha } en cm.' }, columnas: { type: 'number', description: 'Columnas de texto (1 a 6).' }, encabezado: { type: ['string', 'object'], description: 'salto_seccion: encabezado propio de la sección nueva (texto o los mismos campos de encabezado_pie).' }, pie: { type: ['string', 'object'], description: 'salto_seccion: pie propio de la sección nueva.' },
     url: { type: 'string', description: 'hipervinculo: dirección (http://, https:// o mailto:).' }, ocurrencia: { type: 'number' }, tipo_leyenda: { type: 'string', enum: ['Figura', 'Tabla'], description: 'leyenda: Figura (debajo de la imagen) o Tabla (arriba de la tabla).' }, posicion: { type: 'string', enum: ['arriba', 'debajo'] }, indices: { type: 'array', items: { type: 'number' } }, excepto_primero: { type: 'boolean' }, quitar: { type: 'boolean' } };
   Object.entries(nuevas).forEach(([k, v]) => { if (!pr[k]) pr[k] = v; });
-  eo.description += ' VIÑETAS: simbolo_lista {indice o indices, simbolo, alcance} cambia el símbolo de la viñeta o el formato de la numeración de una lista (las viñetas escritas como texto se convierten en lista real). ÍNDICE, ENCABEZADOS, SECCIONES Y MÁS: insertar_indice {despues_de (0 = al principio), niveles, titulo, contenido: titulos|figuras|tablas, salto_pagina_despues} pone un índice real de Word (los títulos tienen que usar estilos de título; Word completa los números de página al abrir); encabezado_pie {ubicacion: encabezado|pie, texto o izquierda/centro/derecha, alineacion, seccion, primera_distinta, linea, modo} con {pagina}, {paginas} y {fecha} como campos (por ejemplo "Página {pagina} de {paginas}"); salto_seccion {despues_de, tipo, orientacion, tamano_hoja, margenes_cm, columnas, encabezado, pie} abre una sección NUEVA de Word (por ejemplo una parte en horizontal o con otro encabezado) justo después de ese bloque; propiedades_seccion {seccion|indice, orientacion, tamano_hoja, margenes_cm, columnas} cambia secciones que ya existen; salto_pagina_antes {nivel, indices, excepto_primero, quitar} hace que cada título de ese nivel empiece en una hoja nueva; hipervinculo {indice, buscar, url} o {despues_de, texto, url}; leyenda {indice, texto, tipo_leyenda} agrega "Figura N." o "Tabla N." con numeración automática. ver_archivo lista las secciones con sus encabezados y pies. Cosas que NO se pueden hacer desde acá: notas al pie, referencias cruzadas, marcas de agua y control de cambios.'; }
+  eo.description += ' VIÑETAS: simbolo_lista {indice o indices, simbolo, alcance} cambia el símbolo de la viñeta o el formato de la numeración de una lista (las viñetas escritas como texto se convierten en lista real). ÍNDICE / TABLA DE CONTENIDO (en Word el "Índice" es otra cosa, uno alfabético de términos: lo que se pide casi siempre es la TABLA DE CONTENIDO, con los títulos y sus páginas): insertar_tabla_contenido o insertar_indice {despues_de (0 = al principio; poné el número del bloque de la portada si hay una), niveles, titulo, contenido: titulos|figuras|tablas, salto_pagina_despues} pone un índice real de Word (los títulos tienen que usar estilos de título; Word completa los números de página al abrir); encabezado_pie {ubicacion: encabezado|pie, texto o izquierda/centro/derecha, alineacion, seccion, primera_distinta, linea, modo} con {pagina}, {paginas} y {fecha} como campos (por ejemplo "Página {pagina} de {paginas}"); salto_seccion {despues_de, tipo, orientacion, tamano_hoja, margenes_cm, columnas, encabezado, pie} abre una sección NUEVA de Word (por ejemplo una parte en horizontal o con otro encabezado) justo después de ese bloque; propiedades_seccion {seccion|indice, orientacion, tamano_hoja, margenes_cm, columnas} cambia secciones que ya existen; salto_pagina_antes {nivel, indices, excepto_primero, quitar} hace que cada título de ese nivel empiece en una hoja nueva; hipervinculo {indice, buscar, url} o {despues_de, texto, url}; leyenda {indice, texto, tipo_leyenda} agrega "Figura N." o "Tabla N." con numeración automática. ver_archivo lista las secciones con sus encabezados y pies. Cosas que NO se pueden hacer desde acá: notas al pie, referencias cruzadas, marcas de agua y control de cambios.'; }
 CASO_HERRAMIENTAS.find(t => t.name === 'editar_excel').description += ' COMENTARIOS: ver_archivo lista las notas de la planilla (hoja!celda: texto); "nota" {celda, texto} agrega una y "quitar_nota" {celda} la borra.';
 // ── Casos · edición DIRECTA de DFS, manuales, presentaciones, flowsheets y propuestas + duplicar, comparar y restaurar ──
 // editar_documento le habla al chat de cada módulo (otra IA: más caro y a veces interpreta mal). Estas herramientas aplican cambios exactos, sin IA de por medio, con las mismas
