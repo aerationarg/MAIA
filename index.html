@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -14950,8 +14950,8 @@ function procesosStep3Html(p) {
     <div id="procesos-step3-status-batch"></div>
     ${etapas.map(filaEtapa).join('')}
     <div class="gap"></div>
-    <button class="btn btn-primary" ${!todasConfirmadas ? 'disabled' : ''} onclick="procesosAvanzarPaso(4)">Continuar al Paso 4 →</button>
-    ${!todasConfirmadas ? '<p class="hint" style="margin-top:6px">Definí y guardá los equipos de cada etapa para continuar.</p>' : ''}
+    <button class="btn btn-primary" onclick="procesosAvanzarPaso(4)">Continuar al Paso 4 →</button>
+    ${!todasConfirmadas ? `<p class="hint" style="margin-top:6px">Podés continuar sin guardar los equipos de todas las etapas, pero las que no estén guardadas (${etapas.filter(n => !ed[n]?.confirmada).map(esc).join(', ')}) no van a figurar con sus equipos en la propuesta hasta que las guardes.</p>` : ''}
     <div class="gap"></div>
     <label>Diagrama de flujo</label>
     <p class="hint" style="margin-bottom:6px">Diagrama esquemático (no a escala) armado con las etapas y equipos ya definidos.</p>
@@ -20196,8 +20196,9 @@ async function procesosStep3SugerirEquipos(nombreEtapa) {
   const yaTiene = (ed0[nombreEtapa]?.equipos || []).length > 0;
   if (yaTiene && !confirm(`Ya hay equipos cargados para "${nombreEtapa}". ¿Reemplazarlos con una nueva sugerencia de la IA?`)) return;
   try {
+    delete _procesosStep3MatchInfo[nombreEtapa];
     await procesosStep3SugerirEquiposCore(nombreEtapa);
-    if (procesosCurrentProyecto === p) { const st = document.getElementById(statusId); if (st) st.innerHTML = ''; renderProcesosStepContent(); }
+    if (procesosCurrentProyecto === p) { const st = document.getElementById(statusId); if (st) st.innerHTML = ''; renderProcesosStepContent(); const nota = procesosStep3MatchNotaTxt(nombreEtapa); if (nota) showMsg(statusId, /^sin modelos/.test(nota) ? 'error' : 'success', (/^sin modelos/.test(nota) ? '⚠ Equipos sugeridos, pero ' : '✓ Equipos sugeridos: ') + nota); }
   } catch (e) {
     if (procesosCurrentProyecto === p) showMsg(statusId, 'error', '✕ No se pudo sugerir: ' + e.message);
   }
@@ -20238,7 +20239,7 @@ async function procesosStep3SugerirEquiposLibres(nombreEtapa, h, valoresEtapa, r
   try {
     showMsg(statusId, 'loading', 'Buscando equivalentes en catálogo...');
     nuevos = await procesosStep3MatchCatalogo(nombreEtapa, nuevos, valoresEtapa, []);
-  } catch (eCat) { console.warn('No se pudo buscar en catálogo, se deja la lista genérica:', eCat.message); }
+  } catch (eCat) { console.warn('No se pudo buscar en catálogo, se deja la lista genérica:', eCat.message); _procesosStep3MatchInfo[nombreEtapa] = { estado: 'error', error: eCat.message }; }
   const ed = Object.assign({}, p.equipos_data);
   ed.etapas = Object.assign({}, ed.etapas);
   const e = Object.assign({ equipos: [], chat: [], confirmada: false }, ed.etapas[nombreEtapa]);
@@ -20328,6 +20329,7 @@ async function procesosStep3SugerirEquiposCore(nombreEtapa) {
       nuevos = await procesosStep3MatchCatalogo(nombreEtapa, nuevos, valoresEtapa, plantillaMatch.equipos);
     } catch (eCat) {
       console.warn('No se pudo buscar en catálogo, se deja la lista genérica:', eCat.message);
+      _procesosStep3MatchInfo[nombreEtapa] = { estado: 'error', error: eCat.message };
     }
 
     const ed = Object.assign({}, p.equipos_data);
@@ -20356,6 +20358,7 @@ async function procesosStep3SugerirTodas() {
     if ((edActual[nombre]?.equipos || []).length > 0) { saltadas++; continue; }
     showMsg(statusId, 'loading', `Sugiriendo equipos (${i+1}/${etapas.length}): ${nombre}...`);
     try {
+      delete _procesosStep3MatchInfo[nombre];
       await procesosStep3SugerirEquiposCore(nombre);
       hechas++;
     } catch (e) {
@@ -20369,6 +20372,8 @@ async function procesosStep3SugerirTodas() {
   let msg = `Listo: se completaron ${hechas} etapa(s).`;
   if (saltadas) msg += ` ${saltadas} ya tenían equipos cargados y no se tocaron.`;
   if (fallidas.length) msg += ` No se pudo con: ${fallidas.join(', ')}.`;
+  const sinModelo = etapas.map(n => ({ n, nota: procesosStep3MatchNotaTxt(n) })).filter(x => x.nota);
+  if (sinModelo.length) msg += '\n\nMarca / modelo por etapa:\n' + sinModelo.map(x => `- ${x.n}: ${x.nota}`).join('\n');
   alert(msg);
 }
 
@@ -20379,14 +20384,25 @@ async function procesosStep3SugerirTodas() {
 // tipo/cantidad/justificación, esos ya quedaron decididos en el paso 1.
 // Si no hay documentos de equipos relevantes (o ya cacheados), no llama a
 // la IA de nuevo — devuelve la lista tal cual vino.
+// Qué pasó con la búsqueda de marca/modelo en cada etapa (para decírselo al usuario: si no hay catálogos relevantes o falla, los equipos quedan sin modelo y antes no se avisaba)
+let _procesosStep3MatchInfo = {};
+function procesosStep3MatchNotaTxt(nombre) {
+  const i = _procesosStep3MatchInfo[nombre]; if (!i) return '';
+  if (i.estado === 'sin_catalogo') return 'sin modelos: no hay catálogos ni fichas de equipos para esta etapa en Cfg Procesos IA (documentos de categoría Equipos) y el cliente no nombró marcas.';
+  if (i.estado === 'error') return 'sin modelos: falló la búsqueda en catálogos (' + i.error + '). Podés cargarlos a mano o por el chat de la etapa.';
+  if (i.estado === 'sin_equipos') return '';
+  const docs = i.docs.length ? ' en ' + i.docs.length + ' documento' + (i.docs.length === 1 ? '' : 's') + ' de catálogo' : '';
+  return i.marcados ? `modelos definidos para ${i.marcados} de ${i.total} equipos${docs}; el resto no tiene un producto en los catálogos que lo satisfaga.` : `sin modelos: se buscó${docs} y ningún producto satisface los equipos (o no hay catálogo de ese tipo de equipo).`;
+}
 async function procesosStep3MatchCatalogo(nombreEtapa, equipos, valoresEtapa, plantillaEquipos) {
   const p = procesosCurrentProyecto;
   const proveedoresPreferidos = procesosStep3ProveedoresDeEquipos(plantillaEquipos, equipos);
   const equiposBlocks = await procesosStep3GetEquiposBlocks(`Proyecto: ${p.nombre}${p.cliente?' — Cliente: '+p.cliente:''}\nEtapa/unidad: ${nombreEtapa}\nValores de diseño de esta etapa:\n${valoresEtapa || '(sin valores)'}`, proveedoresPreferidos);
   const marcasCliente = procesosMarcasEquiposTxt(p);
-  if (!equipos.length || (!equiposBlocks.length && !marcasCliente)) return equipos;       // sin catálogos, igual se intenta si el cliente nombró marcas o modelos
+  if (!equipos.length) { _procesosStep3MatchInfo[nombreEtapa] = { estado: 'sin_equipos' }; return equipos; }
+  if (!equiposBlocks.length && !marcasCliente) { _procesosStep3MatchInfo[nombreEtapa] = { estado: 'sin_catalogo' }; return equipos; }       // sin catálogos, igual se intenta si el cliente nombró marcas o modelos
   const apiKey = getApiKey();
-  if (!apiKey) return equipos;
+  if (!apiKey) { _procesosStep3MatchInfo[nombreEtapa] = { estado: 'error', error: 'falta la clave de API' }; return equipos; }
   const listado = equipos.map((eq,i) => {
     const provs = procesosStep3ProveedoresDeTipo(plantillaEquipos, eq.tipo);
     return `${i+1}. ${eq.tipo} — cantidad ${eq.cantidad} — ${eq.especificacion}${provs.length ? ' — PROVEEDORES PREFERIDOS: ' + provs.join(', ') : ''}`;
@@ -20404,11 +20420,13 @@ async function procesosStep3MatchCatalogo(nombreEtapa, equipos, valoresEtapa, pl
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
   const porNumero = {};
   (parsed.equipos || []).forEach(x => { if (x.numero) porNumero[x.numero] = x.marca_modelo; });
-  return equipos.map((eq, i) => {
+  const conModelo = equipos.map((eq, i) => {
     const marcaModelo = porNumero[i+1];
     if (!marcaModelo) return eq;
     return Object.assign({}, eq, { modelo: marcaModelo });
   });
+  _procesosStep3MatchInfo[nombreEtapa] = { estado: 'ok', docs: equiposBlocks.map(x => x.nombre).filter(Boolean), marcados: conModelo.filter(e => e.modelo).length, total: conModelo.length };
+  return conModelo;
 }
 
 const _procesosStep3ChatEnviando = {};
@@ -21963,7 +21981,8 @@ function propImagenParrafosXml(id, pie) {
   ctx.contador++;
   const n = ctx.contador;
   let xml = `<w:p><w:pPr><w:keepNext/><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r>${propDrawingXml(im.rid, im.cx, im.cy, n)}</w:r></w:p>`;
-  const txt = String(pie || '').trim();
+  const meta = ((typeof _propBib !== 'undefined' && _propBib && _propBib.imagenes) || []).find(i => i.id === id);
+  const txt = meta && meta.categoria === 'equipo' ? 'Imagen de referencia' : String(pie || '').trim();   // fotos de equipos: nunca el modelo, siempre "Imagen de referencia" (aunque el texto traiga otro epígrafe)
   if (txt) xml += `<w:p><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/><w:iCs/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc('Figura ' + n + '. ' + txt)}</w:t></w:r></w:p>`;
   return xml;
 }
@@ -22160,7 +22179,8 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   // Solo imágenes que corresponden a la/s tecnología/s de la propuesta: las obras de referencia tienen que ser de la MISMA tecnología (si no tienen
   // tecnología cargada no se pueden usar); las fotos de equipos/esquemas sin tecnología cargada sirven (son genéricas), las de otra tecnología no.
   const imagenes = imagenesTodas.filter(i => { const c = propImgCoincideTec(i, claves); return i.categoria === 'referencia' ? c === true : c !== false; });
-  const pieDe = id => { const i = imagenes.find(x => x.id === id); return i ? (i.pie || i.nombre) : ''; };
+  // Las fotos de equipos van como "Imagen de referencia": el epígrafe de la biblioteca suele nombrar el modelo y la propuesta no tiene que comprometerlo (la foto es solo ilustrativa)
+  const pieDe = id => { const i = imagenes.find(x => x.id === id); return i ? (i.categoria === 'equipo' ? 'Imagen de referencia' : (i.pie || i.nombre)) : ''; };
   const idsValidos = new Set(imagenes.map(i => i.id));
 
   // 1) fotos de equipos por etapa + normativa + referencias (la IA elige de la biblioteca)
