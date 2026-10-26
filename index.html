@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8688,6 +8688,7 @@ function procesosFuenteNombres() {
   const agregar = n => { const t = String(n || '').trim(); if (t) mapa.set(t.toLowerCase(), t); };
   (info.archivos_analizados || []).forEach(a => agregar(a && a.nombre));
   ((info.carpeta_cliente && info.carpeta_cliente.archivos_cache) || []).forEach(a => agregar(a && a.nombre));
+  (info.archivos_guardados || []).forEach(a => agregar(a && a.nombre));
   ((typeof procesosStep1Files !== 'undefined' && procesosStep1Files) || []).forEach(i => agregar(i && i.file && i.file.name));
   return [...mapa.values()];
 }
@@ -8728,7 +8729,37 @@ function procesosFuenteInstruccion(nombres) {
   return `\n\nREFERENCIAS A LOS ARCHIVOS (muy importante: el usuario va a abrir cada archivo en la página que cites para verificar el dato). Los archivos adjuntos se llaman: ${lista.map(n => '"' + n + '"').join(', ')}.\n- En "fuente" de cada parámetro escribí SIEMPRE el nombre EXACTO del archivo y la página donde está el dato, con este formato: "NombreExacto.pdf — pág. 12" (si el dato está en varias páginas, la principal; si el archivo es una imagen o no tiene páginas, solo el nombre). Si lo estimaste o inferiste, aclaralo después: "NombreExacto.pdf — pág. 12 (estimado a partir de ...)".\n- En los campos generales de texto, cada dato o frase que salga de un documento lleva AL FINAL, entre corchetes, su referencia con el mismo formato: [NombreExacto.pdf — pág. 12]. Si sale de más de una página: [NombreExacto.pdf — pág. 12, 14].\n- Contá las páginas como las numera el visor de PDF (la primera página es la 1), no por el número impreso al pie de la hoja.`;
 }
 
-// Vista previa: busca el archivo (memoria de esta sesión → archivos subidos → carpeta de SharePoint del cliente → que lo elija el usuario) y lo muestra en la página indicada
+// Los PDF e imágenes que se suben desde la computadora para analizar se guardan con el proyecto (en el bucket privado "casos" de Storage, carpeta procesos/; el registro va en info_cliente.archivos_guardados), así los enlaces
+// "Archivo.pdf — pág. 12" siguen abriendo después de cerrar y volver a abrir el proyecto. Los archivos que vienen de la carpeta de SharePoint no se copian: se vuelven a bajar de ahí.
+const PROCESOS_ARCHIVO_MAX_GUARDAR = 24 * 1024 * 1024;
+async function procesosArchivosGuardarEnProyecto(p, files) {
+  const ya = ((p.info_cliente || {}).archivos_guardados || []).slice(), nuevos = [];
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null'); if (!session || !p || !p.id) return 0;
+  for (const f of files || []) {
+    if (!f || !/\.(pdf|jpe?g|png)$/i.test(f.name) || f.size > PROCESOS_ARCHIVO_MAX_GUARDAR) continue;
+    if (ya.concat(nuevos).some(a => a.nombre.toLowerCase() === f.name.toLowerCase() && a.tamano === f.size)) continue;
+    const ext = (f.name.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5) || 'bin', ruta = `procesos/${currentEmpresa}/${p.id}/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}.${ext}`;
+    const mime = /\.pdf$/i.test(f.name) ? 'application/pdf' : (/\.png$/i.test(f.name) ? 'image/png' : 'image/jpeg');
+    try {
+      const up = await supaFetch(`/storage/v1/object/casos/${ruta}`, { method: 'POST', headers: { Authorization: 'Bearer ' + session.token, 'Content-Type': mime, 'x-upsert': 'false' }, body: f });
+      if (up.ok) nuevos.push({ nombre: f.name, ruta, mime, tamano: f.size });
+      else console.warn('No se pudo guardar "' + f.name + '" con el proyecto:', up.status);
+    } catch (e) { console.warn('No se pudo guardar "' + f.name + '" con el proyecto:', e.message); }
+  }
+  if (!nuevos.length) return 0;
+  // los que se reemplazan (mismo nombre) pisan al registro anterior
+  const guardados = ya.filter(a => !nuevos.some(n => n.nombre.toLowerCase() === a.nombre.toLowerCase())).concat(nuevos);
+  await procesosSaveProyecto({ info_cliente: Object.assign({}, p.info_cliente || {}, { archivos_guardados: guardados }) }, p);
+  return nuevos.length;
+}
+async function procesosArchivoGuardadoBajar(reg) {
+  const session = JSON.parse(localStorage.getItem('daia_session') || 'null'); if (!session) return null;
+  const r = await supaFetch(`/storage/v1/object/authenticated/casos/${reg.ruta}`, { headers: { Authorization: 'Bearer ' + session.token } });
+  if (!r.ok) return null;
+  const b = await r.blob(); return new Blob([b], { type: reg.mime || b.type });
+}
+
+// Vista previa: busca el archivo (memoria de esta sesión → archivos subidos → guardado con el proyecto → carpeta de SharePoint del cliente → que lo elija el usuario) y lo muestra en la página indicada
 let _procesosFuenteBlobs = {};
 function procesosFuenteCerrar() { const m = document.getElementById('procesos-fuente-modal'); if (m) m.remove(); }
 async function procesosFuenteObtenerBlob(nombre) {
@@ -8736,7 +8767,9 @@ async function procesosFuenteObtenerBlob(nombre) {
   if (_procesosFuenteBlobs[k]) return _procesosFuenteBlobs[k];
   const local = ((typeof procesosStep1Files !== 'undefined' && procesosStep1Files) || []).find(i => i && i.file && String(i.file.name).toLowerCase() === k);
   if (local) return (_procesosFuenteBlobs[k] = local.file);
-  const p = procesosCurrentProyecto, carpeta = (typeof procesosStep1SpFolder !== 'undefined' && procesosStep1SpFolder) || (p && p.info_cliente && p.info_cliente.carpeta_cliente);
+  const p = procesosCurrentProyecto, guardado = (((p && p.info_cliente) || {}).archivos_guardados || []).find(a => a && String(a.nombre).toLowerCase() === k);
+  if (guardado) { try { const b = await procesosArchivoGuardadoBajar(guardado); if (b) return (_procesosFuenteBlobs[k] = b); } catch (e) { console.warn('No se pudo bajar el archivo guardado con el proyecto:', e.message); } }
+  const carpeta = (typeof procesosStep1SpFolder !== 'undefined' && procesosStep1SpFolder) || (p && p.info_cliente && p.info_cliente.carpeta_cliente);
   if (carpeta && carpeta.siteId && carpeta.itemId) {
     const token = await getMsToken();
     const rl = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${carpeta.itemId}/children?$top=200`, { headers: { Authorization: 'Bearer ' + token } });
@@ -8774,8 +8807,8 @@ async function procesosAbrirFuente(nombre, pagina) {
   if (blob) { procesosFuenteMostrar(nombre, pagina, blob); return; }
   // no está a mano: que lo elija el usuario (queda en memoria para las próximas veces de esta sesión)
   const cuerpo = document.getElementById('procesos-fuente-cuerpo');
-  cuerpo.innerHTML = `<div style="padding:16px"><p class="hint" style="margin-bottom:10px">No encontré "${esc(nombre)}" para abrirlo (puede que se haya subido desde tu computadora en otra sesión, o que ya no esté en la carpeta de SharePoint). Elegilo desde tu computadora para verlo en la página ${esc(pagina || '1')}:</p><input type="file" accept=".pdf,.jpg,.jpeg,.png" id="procesos-fuente-input" /></div>`;
-  document.getElementById('procesos-fuente-input').onchange = ev => { const f = ev.target.files && ev.target.files[0]; if (f) { _procesosFuenteBlobs[String(nombre).toLowerCase()] = f; procesosFuenteMostrar(nombre, pagina, f); } };
+  cuerpo.innerHTML = `<div style="padding:16px"><p class="hint" style="margin-bottom:10px">No encontré "${esc(nombre)}" para abrirlo (puede que se haya subido desde tu computadora antes de que MAIA guardara los archivos con el proyecto, o que ya no esté en la carpeta de SharePoint). Elegilo desde tu computadora para verlo en la página ${esc(pagina || '1')}; desde ahora queda guardado con el proyecto:</p><input type="file" accept=".pdf,.jpg,.jpeg,.png" id="procesos-fuente-input" /></div>`;
+  document.getElementById('procesos-fuente-input').onchange = ev => { const f = ev.target.files && ev.target.files[0]; if (f) { _procesosFuenteBlobs[String(nombre).toLowerCase()] = f; procesosFuenteMostrar(nombre, pagina, f); const pr = procesosCurrentProyecto; if (pr && f.name.toLowerCase() === String(nombre).toLowerCase()) procesosArchivosGuardarEnProyecto(pr, [f]).catch(() => {}); } };
 }
 
 // ── Paso 1: analizar cliente ───────────────────────────
@@ -9408,8 +9441,10 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt, normativaYaUs
       aviso = '✓ Se sumó a lo ya analizado' + (partes.length ? ': ' + partes.join(' · ') : ' (no había nada nuevo para agregar).');
     } else {
       infoNueva = { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null, archivos_analizados: analizadosAhora };
+      if (p.info_cliente && p.info_cliente.archivos_guardados) infoNueva.archivos_guardados = p.info_cliente.archivos_guardados;
     }
     await procesosSaveProyecto({ info_cliente: infoNueva }, p);
+    try { await procesosArchivosGuardarEnProyecto(p, procesosStep1Files.filter(i => i && i.file && analizadosAhora.some(n => n.nombre === i.file.name)).map(i => i.file)); } catch (eG) { console.warn('No se pudieron guardar los archivos con el proyecto:', eG.message); }   // para que los enlaces a las páginas sigan abriendo al volver a abrir el proyecto
     if (procesosCurrentProyecto === p) {
       if (ctx.modo === 'sumar') { procesosStep1Files = []; procesosStep1TextoLibre = ''; } // ya quedaron sumados: no se vuelven a mandar la próxima vez
       showMsg(statusId,'success',aviso);
