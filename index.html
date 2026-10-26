@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -40069,7 +40069,40 @@ async function casoWordCargar(file) {
   const doc = new DOMParser().parseFromString(xml, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('No se pudo leer el contenido del Word.');
   const body = doc.getElementsByTagName('w:body')[0];
-  return { zip, doc, body, bloques: Array.from(body.childNodes).filter(n => n.nodeType === 1 && (n.nodeName === 'w:p' || n.nodeName === 'w:tbl')) };
+  const sf = zip.file('word/styles.xml'); let styles = null; if (sf) { try { const sx = await sf.async('string'); styles = new DOMParser().parseFromString(sx.charCodeAt(0) === 0xFEFF ? sx.slice(1) : sx, 'application/xml'); if (styles.getElementsByTagName('parsererror').length) styles = null; } catch (e) { styles = null; } }
+  return { zip, doc, body, styles, bloques: Array.from(body.childNodes).filter(n => n.nodeType === 1 && (n.nodeName === 'w:p' || n.nodeName === 'w:tbl')) };
+}
+// ── Listas de un .docx: tres formas de ser un ítem ──
+// 'directa' = el párrafo trae su numeración (numPr); 'estilo' = la numeración viene del estilo del párrafo (por ejemplo "Viñeta de lista"); 'texto' = la viñeta es un carácter escrito al principio (•, –, -, *…).
+// Devuelve { tipo, nivel, numId?, marca? } o null si el párrafo no es un ítem de lista.
+const CASO_MARCA_TXT = /^[ \t ]*([•·▪▫◦‣∙●○■□][ \t ]*|[–—\-*][ \t ]+)/;
+function casoWNumDeEstilo(W, id) {
+  if (!id || !W || !W.styles) return null;
+  const est = Array.from(W.styles.getElementsByTagName('w:style')); let cur = id;
+  for (let i = 0; i < 12 && cur; i++) {
+    const st = est.find(x => x.getAttribute('w:styleId') === cur); if (!st) return null;
+    const ppr = casoHijosW(st, 'w:pPr')[0], np = ppr && casoHijosW(ppr, 'w:numPr')[0], nid = np && casoHijosW(np, 'w:numId')[0];
+    if (nid) { if (nid.getAttribute('w:val') === '0') return null; const il = casoHijosW(np, 'w:ilvl')[0]; return { numId: nid.getAttribute('w:val'), nivel: il ? Number(il.getAttribute('w:val')) || 0 : 0 }; }
+    const base = casoHijosW(st, 'w:basedOn')[0]; cur = base ? base.getAttribute('w:val') : null;
+  }
+  return null;
+}
+function casoWListaInfo(W, p) {
+  if (!p || p.nodeName !== 'w:p') return null;
+  const ppr = casoHijosW(p, 'w:pPr')[0], v = (el, n) => { const x = el && casoHijosW(el, 'w:' + n)[0]; return x ? x.getAttribute('w:val') : null; };
+  const np = ppr && casoHijosW(ppr, 'w:numPr')[0];
+  if (np) { const id = v(np, 'numId'); if (id === '0') return null; return { tipo: 'directa', nivel: Number(v(np, 'ilvl')) || 0, numId: id }; }
+  const st = ppr && casoWNumDeEstilo(W, v(ppr, 'pStyle')); if (st) return { tipo: 'estilo', nivel: st.nivel, numId: st.numId };
+  const t = casoTextoP(p), m = CASO_MARCA_TXT.exec(t);
+  if (m && t.slice(m[0].length).trim()) { const ind = ppr && casoHijosW(ppr, 'w:ind')[0], izq = ind ? Number(ind.getAttribute('w:left')) || 0 : 0; return { tipo: 'texto', nivel: Math.max(0, Math.min(8, Math.round((izq - 720) / 360))), marca: m[0] }; }
+  return null;
+}
+// Saca la viñeta escrita como texto (y la tabulación que la separa del texto) y la sangría propia del párrafo, para que mande la de la lista
+function casoWQuitarMarcaTxt(doc, p, marca) {
+  let resto = marca.length;
+  for (const t of Array.from(p.getElementsByTagName('w:t'))) { if (resto <= 0) break; const x = t.textContent; if (x.length <= resto) { resto -= x.length; t.textContent = ''; } else { t.textContent = x.slice(resto); resto = 0; } t.setAttribute('xml:space', 'preserve'); }
+  for (const r of casoHijosW(p, 'w:r')) { const tx = Array.from(r.getElementsByTagName('w:t')).map(x => x.textContent).join(''); if (tx) break; Array.from(r.getElementsByTagName('w:tab')).forEach(tb => tb.parentNode.removeChild(tb)); }
+  const ppr = casoHijosW(p, 'w:pPr')[0]; if (ppr) casoWQuitar(ppr, 'ind');
 }
 const casoTextoP = p => Array.from(p.getElementsByTagName('w:t')).map(t => t.textContent).join('');
 function casoFilasTabla(tbl) { return casoHijosW(tbl, 'w:tr').map(tr => casoHijosW(tr, 'w:tc').map(tc => Array.from(tc.getElementsByTagName('w:p')).map(casoTextoP).join(' / '))); }
@@ -40145,7 +40178,7 @@ async function casoAplicarOpsWord(W, operaciones) {
   const parrafoXml = async (x, ancla) => {
     const t = String(x.texto || ''), est = x.estilo || 'normal';
     if (/^titulo[123]$/.test(est)) { const id = await casoEstiloId(zip, ['heading ' + est.slice(6), 'título ' + est.slice(6)]); return id ? `<w:p><w:pPr><w:pStyle w:val="${id}"/></w:pPr>${casoRunsXml(t)}</w:p>` : `<w:p><w:r><w:rPr><w:b/><w:sz w:val="${{ 1: 32, 2: 28, 3: 24 }[est.slice(6)]}"/></w:rPr><w:t xml:space="preserve">${procesosPropuestaXmlEsc(t)}</w:t></w:r></w:p>`; }
-    if (est === 'item') { const pp = ancla && ancla.nodeName === 'w:p' ? casoHijosW(ancla, 'w:pPr')[0] : null, ser = pp ? new XMLSerializer().serializeToString(pp).replace(/ xmlns:\w+="[^"]*"/g, '').replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, '') : ''; return `<w:p>${ser}${casoRunsXml(t)}</w:p>`; }   // mismo formato (y lista y nivel) que el párrafo de arriba
+    if (est === 'item') { const pp = ancla && ancla.nodeName === 'w:p' ? casoHijosW(ancla, 'w:pPr')[0] : null, ser = pp ? new XMLSerializer().serializeToString(pp).replace(/ xmlns:\w+="[^"]*"/g, '').replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, '') : ''; const inf = ancla && ancla.nodeName === 'w:p' ? casoWListaInfo(W, ancla) : null; return `<w:p>${ser}${casoRunsXml((inf && inf.tipo === 'texto' ? inf.marca : '') + t)}</w:p>`; }   // mismo formato (y lista y nivel) que el párrafo de arriba; si la viñeta de arriba es un carácter escrito, también la repite
     if (est === 'vineta') return `<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>${casoRunsXml('•  ' + t)}</w:p>`;
     let ppr = ''; if (ancla && ancla.nodeName === 'w:p' && !/heading|ttulo|t.tulo/i.test(casoEstiloP(ancla))) { const pp = casoHijosW(ancla, 'w:pPr')[0]; if (pp && !pp.getElementsByTagName('w:numPr').length) ppr = new XMLSerializer().serializeToString(pp).replace(/ xmlns:\w+="[^"]*"/g, ''); }
     return `<w:p>${ppr}${casoRunsXml(t, est === 'negrita')}</w:p>`;
@@ -40959,6 +40992,7 @@ function casoVwAnclarComentarios(W, box) {
 }
 async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo + sucio: se reabre una versión de trabajo (con un cambio de estructura aplicado) que todavía no se guardó
   casoVisorMostrar(esc(nombre), '', '<p class="hint">Cargando…</p>');
+  if (!archivo) _casoVwHist = { nombre, des: [], reh: [] };
   const file = archivo || await casoArchivoDeVersion(nombre, ver), W = await casoWordCargar(file), coms = await casoVwComentariosLeer(W), orig = {}, xmls = {}, abiertos = new Set();
   let m = modo || _casoVwModo || (file.size > 20 * 1048576 ? 'simple' : 'word'), aviso = '';
   if (m === 'word') { try { await casoCargarDocxPreview(); } catch (e) { m = 'simple'; aviso = e.message + ' Se muestra la vista simple.'; } }
@@ -40977,7 +41011,7 @@ async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo +
       return `<div class="cw-blk" data-k="${k}"><table class="cw-t">${filas.map((tr, r) => '<tr>' + casoHijosW(tr, 'w:tc').map((tc, c) => { const ps = Array.from(tc.getElementsByTagName('w:p')), t = ps.map(casoTextoP).join(' / '), ed = ps.length === 1 && !tc.getElementsByTagName('w:drawing').length; if (ed) { orig[`${k}:${r + 1}:${c + 1}`] = t; xmls[`${k}:${r + 1}:${c + 1}`] = t; } return `<td contenteditable="${ed}" data-t="${k}" data-r="${r + 1}" data-c="${c + 1}" ${ed ? '' : 'title="Celda con varios párrafos o imágenes: se edita en Word" style="color:var(--text3)"'}>${ed ? casoVwParrafoHtml(ps[0], abiertos) : esc(t)}</td>`; }).join('') + '</tr>').join('')}</table></div>`;
     }).join('') || '<p class="hint">El documento está vacío.</p>';
   }
-  _casoVisor = { tipo: 'word', nombre, W, orig, dirty: !!sucio, baseSucia: !!sucio, foco: null, ocupado: false, ver: ver || 0, borrados: new Set(), coms, nuevos: new Map(), quitar: new Set(), estilos: {}, reemplazos: [], pend: null, cont: 0, modo: m, titulos: casoVwTitulos(W), pendForm: null, pendDe: new Set(), xml: xmls, alin: {} };
+  _casoVisor = { tipo: 'word', nombre, W, orig, dirty: !!sucio, baseSucia: !!sucio, foco: null, ocupado: false, tocado: false, undoVisto: false, ver: ver || 0, borrados: new Set(), coms, nuevos: new Map(), quitar: new Set(), estilos: {}, reemplazos: [], pend: null, cont: 0, modo: m, titulos: casoVwTitulos(W), pendForm: null, pendDe: new Set(), xml: xmls, alin: {} };
   const acciones = `${casoVerSelector(nombre, ver || 0)}<button class="btn btn-secondary btn-sm" onclick="casoVwCambiarModo()" title="${m === 'word' ? 'Texto y tablas, más liviana' : 'Con el formato real de Word'}">${m === 'word' ? '🗒 Vista simple' : '📄 Vista Word'}</button><button id="cvw-btn-com" class="btn btn-secondary btn-sm" onclick="casoVwComToggle()" title="Mostrar u ocultar la columna de comentarios">💬 Comentarios</button><button class="btn btn-secondary btn-sm" onclick="casoVwBuscarToggle()" title="Buscar y reemplazar en el documento">🔍 Buscar</button><button class="btn btn-secondary btn-sm" onclick="casoVwIndice(this)" title="Ir a un título del documento">☰ Índice</button><button class="btn btn-primary btn-sm" onclick="casoVwGuardar()">💾 Guardar versión</button><button class="btn btn-secondary btn-sm" onclick="casoVwDescargar()">⬇ Descargar</button>`;
   casoVisorMostrar(`📝 ${esc(nombre)}`, acciones, `<div id="cvw-estr">${casoVwEstrHtml()}</div><div id="cvw-find" style="display:none;gap:6px;align-items:center;flex-wrap:wrap;margin:0 auto 8px;max-width:1200px"><input id="cvw-buscar" placeholder="Buscar…" style="width:200px;font-size:12.5px" onkeydown="if(event.key==='Enter')casoVwBuscar(event.shiftKey?-1:1)" /><button class="btn btn-secondary btn-sm" onclick="casoVwBuscar(-1)">◀</button><button class="btn btn-secondary btn-sm" onclick="casoVwBuscar(1)">▶</button><input id="cvw-por" placeholder="Reemplazar por…" style="width:200px;font-size:12.5px" /><button class="btn btn-secondary btn-sm" onclick="casoVwReemplazarTodo()">Reemplazar todo</button><span class="hint" id="cvw-cuenta" style="margin:0"></span></div><div id="cvw-wrap" style="display:flex;gap:14px;align-items:flex-start;max-width:1200px;margin:0 auto"><div id="cvw-box" class="${m === 'word' ? 'cw-rm' : ''}" style="flex:1;min-width:0;${m === 'word' ? '' : 'max-width:860px;padding:8px 12px;'}font-size:14px;line-height:1.5">${cuerpo}</div><div id="cvw-panel" style="width:280px;flex-shrink:0;position:sticky;top:0;max-height:72vh;overflow-y:auto;${casoVwComVisible() ? '' : 'display:none'}"></div></div>`);
   casoVwEstilosCss(); casoVwBarraCrear();
@@ -40990,7 +41024,8 @@ async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo +
     } catch (e) { _casoVisor = null; await casoVisorWord(nombre, ver, 'simple'); casoVisorMsg('Este documento no se pudo mostrar con el formato de Word (' + e.message + '): se muestra la vista simple.'); return; }
   }
   casoVwPanel(); casoVwAnclarFaltantes(W, box, coms);
-  box.oninput = () => { _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); };
+  box.oninput = e => { _casoVisor.dirty = true; if (e && e.inputType === 'historyUndo') _casoVisor.undoVisto = true; else _casoVisor.tocado = true; casoVisorMsg('Cambios sin guardar.'); };
+  if (!window._casoVwTeclaOk) { document.addEventListener('keydown', casoVwTecla, true); window._casoVwTeclaOk = true; }
   box.onkeydown = e => { if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && e.target.closest && e.target.closest('.cw-blk[data-k]') && !e.target.closest('td')) { casoVwFoco(e); const f = _casoVisor && _casoVisor.foco; if (f && f.k != null && casoVwNivelLista(f.k) != null) { e.preventDefault(); casoVwNivel(e.shiftKey ? -1 : 1); return; } }
     if (e.key === 'Enter' && e.target.classList && (e.target.classList.contains('cw-p') || e.target.classList.contains('cw-rp'))) { e.preventDefault(); casoVwInsertar(e.target.closest('.cw-blk').querySelector('.cw-act button') || e.target.closest('.cw-blk')); } };
   box.onmouseup = box.onkeyup = () => setTimeout(casoVwBarraMostrar, 0);
@@ -41002,21 +41037,20 @@ async function casoVisorWord(nombre, ver, modo, archivo, sucio) {   // archivo +
 // Barra "Listas / Tabla" sobre el documento: actúa sobre el párrafo o la celda donde está el cursor. Un cambio de estructura (nivel de un ítem, convertir en lista, mover un ítem, filas, columnas, ancho de columnas) se aplica enseguida al documento
 // con las mismas operaciones que usa la IA y se vuelve a dibujar; queda como versión de trabajo hasta que se aprieta "💾 Guardar versión". Lo que estaba escrito en pantalla sin guardar pasa al documento antes de aplicarlo.
 const CASO_VW_MIN_COL = 500;   // twips (≈ 0,9 cm)
+let _casoVwHist = { nombre: '', des: [], reh: [] };   // copias del documento antes de cada cambio de estructura (para Ctrl+Z / Ctrl+Y); solo vale mientras el visor está abierto
+const CASO_VW_HIST_MAX = 25;
 const casoVwSpan = tc => { const pr = casoHijosW(tc, 'w:tcPr')[0], gs = pr && casoHijosW(pr, 'w:gridSpan')[0]; return gs ? Number(gs.getAttribute('w:val')) || 1 : 1; };
 function casoVwEstrHtml() {
   const b = (g, txt, fn, ttl) => `<button type="button" class="btn btn-secondary btn-sm" data-g="${g}" style="padding:1px 7px;width:auto;font-size:12px" title="${esc(ttl)}" onmousedown="event.preventDefault()" onclick="${fn}">${txt}</button>`;
   const sep = '<span style="width:1px;height:18px;background:var(--border)"></span>';
   return `<div style="display:flex;gap:4px 6px;flex-wrap:wrap;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px 8px;margin:0 auto 8px;max-width:1200px">
-    <span class="hint" style="margin:0;font-weight:600">Listas</span>${b('p', '• Viñetas', "casoVwLista('vineta')", 'Convierte el párrafo (o los párrafos seleccionados) en una lista con viñetas')}${b('p', '1. Numeración', "casoVwLista('numerada')", 'Convierte el párrafo (o los seleccionados) en una lista numerada')}${b('i', '⇥ Subítem', 'casoVwNivel(1)', 'Baja el ítem un nivel, como subítem (Tab)')}${b('i', '⇤ Subir nivel', 'casoVwNivel(-1)', 'Sube el ítem un nivel (Shift+Tab)')}${b('p', '▲', 'casoVwMoverItem(-1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia arriba')}${b('p', '▼', 'casoVwMoverItem(1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia abajo')}${b('i', '✕ Quitar lista', "casoVwLista('ninguna')", 'Vuelve el ítem a párrafo normal')}
+    ${b('u', '↶ Deshacer', 'casoVwDeshacer(false)', 'Deshace el último cambio de estructura (Ctrl+Z)')}${b('r', '↷ Rehacer', 'casoVwDeshacer(true)', 'Vuelve a hacer lo que deshiciste (Ctrl+Y)')}<span style="width:1px;height:18px;background:var(--border)"></span><span class="hint" style="margin:0;font-weight:600">Listas</span>${b('p', '• Viñetas', "casoVwLista('vineta')", 'Convierte el párrafo (o los párrafos seleccionados) en una lista con viñetas')}${b('p', '1. Numeración', "casoVwLista('numerada')", 'Convierte el párrafo (o los seleccionados) en una lista numerada')}${b('i', '⇥ Subítem', 'casoVwNivel(1)', 'Baja el ítem un nivel, como subítem (Tab)')}${b('i', '⇤ Subir nivel', 'casoVwNivel(-1)', 'Sube el ítem un nivel (Shift+Tab)')}${b('p', '▲', 'casoVwMoverItem(-1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia arriba')}${b('p', '▼', 'casoVwMoverItem(1)', 'Mueve el ítem (con sus subítems) o el párrafo hacia abajo')}${b('i', '✕ Quitar lista', "casoVwLista('ninguna')", 'Vuelve el ítem a párrafo normal')}
     ${sep}<span class="hint" style="margin:0;font-weight:600">Tabla</span>${b('t', '＋ Fila ▲', "casoVwFila('arriba')", 'Agrega una fila arriba de la fila donde está el cursor')}${b('t', '＋ Fila ▼', "casoVwFila('abajo')", 'Agrega una fila debajo')}${b('t', '＋ Col ◀', "casoVwColumna('izq')", 'Agrega una columna a la izquierda')}${b('t', '＋ Col ▶', "casoVwColumna('der')", 'Agrega una columna a la derecha')}${b('t', '🗑 Fila', 'casoVwQuitarFila()', 'Borra la fila donde está el cursor')}${b('t', '🗑 Col', 'casoVwQuitarColumna()', 'Borra la columna donde está el cursor')}${b('t', '⧉ Unir →', 'casoVwCombinar()', 'Une esta celda con la de la derecha')}${b('t', '↔ Igualar', 'casoVwIgualarColumnas()', 'Deja todas las columnas con el mismo ancho')}
     <label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center" title="Ancho de la columna donde está el cursor (también se cambia arrastrando el borde de la columna)">Ancho <input id="cvw-ancho" type="number" step="0.1" min="0.9" style="width:62px;padding:2px 4px;font-size:12px" onchange="casoVwAnchoColumna(this.value)" /> cm</label>
     <span class="hint" id="cvw-estr-msg" style="margin:0;flex-basis:100%"></span></div>`;
 }
-function casoVwNivelLista(k) {
-  const s = _casoVisor, b = s && s.W.bloques[k - 1]; if (!b || b.nodeName !== 'w:p') return null;
-  const np = b.getElementsByTagName('w:numPr')[0]; if (!np) return null; const id = np.getElementsByTagName('w:numId')[0]; if (id && id.getAttribute('w:val') === '0') return null;
-  const il = np.getElementsByTagName('w:ilvl')[0]; return il ? Number(il.getAttribute('w:val')) || 0 : 0;
-}
+function casoVwNivelLista(k) { const s = _casoVisor, i = s && casoWListaInfo(s.W, s.W.bloques[k - 1]); return i ? i.nivel : null; }
+function casoVwTipoLista(k) { const s = _casoVisor, i = s && casoWListaInfo(s.W, s.W.bloques[k - 1]); return i ? i.tipo : null; }
 function casoVwColIdx(t, r, c) {   // columna de la grilla (desde 0) donde empieza la celda (fila r, celda c), contando las celdas combinadas
   const b = _casoVisor.W.bloques[t - 1]; if (!b || b.nodeName !== 'w:tbl') return null; const tr = casoHijosW(b, 'w:tr')[r - 1]; if (!tr) return null;
   const tcs = casoHijosW(tr, 'w:tc'); let g = 0; for (let i = 0; i < c - 1 && i < tcs.length; i++) g += casoVwSpan(tcs[i]); return g;
@@ -41033,10 +41067,10 @@ function casoVwFoco(e) {
 function casoVwEstrPintar() {
   const s = _casoVisor, bar = document.getElementById('cvw-estr'); if (!s || !bar) return; const f = s.foco || {};
   const par = f.k != null, lista = par && casoVwNivelLista(f.k) != null, tab = f.tabla != null;
-  bar.querySelectorAll('button[data-g]').forEach(bt => { const g = bt.dataset.g; bt.disabled = !(g === 'p' ? par : g === 'i' ? lista : g === 't' ? tab : false); });
+  bar.querySelectorAll('button[data-g]').forEach(bt => { const g = bt.dataset.g; bt.disabled = !(g === 'p' ? par : g === 'i' ? lista : g === 't' ? tab : g === 'u' ? _casoVwHist.des.length > 0 : g === 'r' ? _casoVwHist.reh.length > 0 : false); });
   const inp = document.getElementById('cvw-ancho'), w = tab ? casoVwAnchoCol(f.tabla, f.fila, f.col) : null; if (inp) { inp.disabled = !w; inp.value = w ? Math.round(w / 567 * 100) / 100 : ''; }
   const m = document.getElementById('cvw-estr-msg');
-  if (m) m.textContent = par ? (lista ? `Ítem de lista, nivel ${casoVwNivelLista(f.k) + 1}. Tab lo baja a subítem y Shift+Tab lo sube; Enter agrega otro ítem.` : 'Párrafo: podés convertirlo en lista (también varios párrafos seleccionados).') : tab ? `Tabla [${f.tabla}], fila ${f.fila}, columna ${f.col}. Para el ancho arrastrá el borde de la columna o escribilo acá.` : 'Hacé clic en un párrafo o en una celda para ver las opciones de lista y de tabla.';
+  if (m) m.textContent = par ? (lista ? `Ítem de lista, nivel ${casoVwNivelLista(f.k) + 1}${casoVwTipoLista(f.k) === 'texto' ? ' (viñeta escrita como texto: al cambiarla de nivel se convierte en lista real)' : ''}. Tab lo baja a subítem y Shift+Tab lo sube; Enter agrega otro ítem.` : 'Párrafo: podés convertirlo en lista (también varios párrafos seleccionados).') : tab ? `Tabla [${f.tabla}], fila ${f.fila}, columna ${f.col}. Para el ancho arrastrá el borde de la columna o escribilo acá.` : 'Hacé clic en un párrafo o en una celda para ver las opciones de lista y de tabla.';
 }
 function casoVwParrafosSel() {
   const s = _casoVisor, box = document.getElementById('cvw-box'), sel = window.getSelection(), ks = new Set();
@@ -41050,7 +41084,9 @@ async function casoVwEstructura(ops, ok) {
   s.ocupado = true; casoVisorMsg('Aplicando el cambio…');
   const cuerpo = document.getElementById('caso-visor-cuerpo'), top = cuerpo ? cuerpo.scrollTop : 0, foco = s.foco ? Object.assign({}, s.foco) : null, nombre = s.nombre, ver = s.ver, modo = s.modo;
   let err = null;
-  try { await casoVwBlob(); } catch (e) { s.ocupado = false; casoVisorMsg('No se pudo preparar el cambio: ' + e.message); return; }   // lo que está pendiente en pantalla pasa al documento
+  let pendiente = false;
+  try { pendiente = !!(await casoVwBlob()); } catch (e) { s.ocupado = false; casoVisorMsg('No se pudo preparar el cambio: ' + e.message); return; }   // lo que está pendiente en pantalla pasa al documento
+  try { await casoWSerializar(s.W); const antes = await s.W.zip.generateAsync({ type: 'blob', mimeType: casoMimeDe('x.docx') }); _casoVwHist.des.push({ blob: antes, sucio: !!(s.baseSucia || pendiente) }); if (_casoVwHist.des.length > CASO_VW_HIST_MAX) _casoVwHist.des.shift(); _casoVwHist.reh = []; } catch (e) { /* sin copia no se podrá deshacer este cambio, pero se aplica igual */ }
   try { await casoAplicarOpsWord(s.W, ops); } catch (e) { err = e; }
   try {
     await casoWSerializar(s.W);
@@ -41079,6 +41115,34 @@ function casoVwNivel(delta) {
 function casoVwMoverItem(dir) {
   const f = _casoVisor && _casoVisor.foco; if (!f || f.k == null) { casoVisorMsg('Hacé clic en el ítem o párrafo que querés mover.'); return; }
   casoVwEstructura([{ op: 'mover_bloque', indice: f.k, direccion: dir < 0 ? 'arriba' : 'abajo' }], dir < 0 ? 'Movido hacia arriba.' : 'Movido hacia abajo.');
+}
+async function casoVwDeshacer(rehacer) {
+  const s = _casoVisor; if (!s || s.tipo !== 'word' || s.ocupado) return;
+  const pila = rehacer ? _casoVwHist.reh : _casoVwHist.des, otra = rehacer ? _casoVwHist.des : _casoVwHist.reh;
+  if (!pila.length) { casoVisorMsg(rehacer ? 'No hay nada para rehacer.' : 'No hay cambios de estructura para deshacer.'); return; }
+  if (s.pend) casoVwComentarNo();
+  if ((casoVwEdiciones().length || casoVwMarcas().length || casoVwOps().length) && !confirm('Hay texto o marcas escritos en pantalla que todavía no pasaron al documento y se perderían al ' + (rehacer ? 'rehacer' : 'deshacer') + ' el cambio de estructura. ¿Seguir igual?')) return;
+  s.ocupado = true; casoVisorMsg(rehacer ? 'Rehaciendo…' : 'Deshaciendo…');
+  const cuerpo = document.getElementById('caso-visor-cuerpo'), top = cuerpo ? cuerpo.scrollTop : 0, foco = s.foco ? Object.assign({}, s.foco) : null, nombre = s.nombre, ver = s.ver, modo = s.modo;
+  try {
+    s.pend = null; await casoWSerializar(s.W);
+    const actual = await s.W.zip.generateAsync({ type: 'blob', mimeType: casoMimeDe('x.docx') }), e = pila.pop(); otra.push({ blob: actual, sucio: true });
+    _casoVisor = null; await casoVisorWord(nombre, ver, modo, new File([e.blob], nombre, { type: e.blob.type }), e.sucio);
+  } catch (err) { s.ocupado = false; casoVisorMsg('No se pudo ' + (rehacer ? 'rehacer' : 'deshacer') + ': ' + err.message); return; }
+  const c2 = document.getElementById('caso-visor-cuerpo'); if (c2) c2.scrollTop = top;
+  if (_casoVisor) { const box = document.getElementById('cvw-box'), ok2 = foco && (foco.k != null ? box.querySelector(`.cw-blk[data-k="${foco.k}"]`) : box.querySelector(`td[data-t="${foco.tabla}"][data-r="${foco.fila}"][data-c="${foco.col}"]`)); _casoVisor.foco = ok2 ? foco : null; casoVwEstrPintar(); }
+  casoVisorMsg(rehacer ? 'Rehecho.' : 'Deshecho el último cambio de estructura.' + (_casoVisor && !_casoVisor.baseSucia ? ' Volviste a la versión guardada.' : ' Ctrl+Y lo vuelve a hacer.'));
+}
+// Ctrl+Z / Ctrl+Y: si se escribió algo desde el último cambio de estructura, lo primero que se deshace es el texto (lo hace el navegador); cuando ya no hay texto para deshacer se pasa a la estructura
+function casoVwTecla(e) {
+  const s = _casoVisor; if (!s || s.tipo !== 'word' || !document.getElementById('cvw-box') || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const k = String(e.key || '').toLowerCase(), deshacer = k === 'z' && !e.shiftKey, rehacer = k === 'y' || (k === 'z' && e.shiftKey); if (!deshacer && !rehacer) return;
+  const el = e.target && e.target.closest ? e.target : null; if (el && (el.closest('#cvw-find') || el.closest('#cvw-panel') || el.closest('#cvw-ctxt'))) return;   // buscar y comentarios tienen su propio deshacer
+  if (el && el !== document.body && !el.closest('#caso-visor')) return;   // un campo de texto de otra parte de MAIA conserva el suyo
+  const enTexto = !!(el && el.closest(CASO_VW_ED));
+  if (rehacer) { if (_casoVwHist.reh.length || !enTexto) { e.preventDefault(); casoVwDeshacer(true); } return; }
+  if (s.tocado && enTexto) { s.undoVisto = false; setTimeout(() => { if (_casoVisor === s && !s.undoVisto && _casoVwHist.des.length && !s.ocupado) casoVwDeshacer(false); }, 60); return; }
+  e.preventDefault(); casoVwDeshacer(false);
 }
 const casoVwTab = () => { const f = _casoVisor && _casoVisor.foco; if (!f || f.tabla == null) { casoVisorMsg('Hacé clic en una celda de la tabla.'); return null; } return f; };
 // Con celdas unidas, agregar o quitar columnas (o filas) por celda puede desarmar la tabla: ahí se hace en Word
@@ -41330,7 +41394,11 @@ function casoVwInsertar(el) {
   if (n.dataset.lista) n.querySelector('.cw-p').classList.add('cw-li');
   blk.after(n); n.querySelector('.cw-p').focus(); _casoVisor.dirty = true;
 }
-function casoVwBorrar(el) { const blk = el.closest('.cw-blk'); if (!blk) return; if (blk.dataset.k) _casoVisor.borrados.add(Number(blk.dataset.k)); blk.remove(); _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.'); }
+function casoVwBorrar(el) {
+  const blk = el.closest('.cw-blk'); if (!blk) return;
+  if (blk.dataset.k && _casoVisor.tipo === 'word') { casoVwEstructura([{ op: 'eliminar', indice: Number(blk.dataset.k) }], 'Párrafo borrado.'); return; }   // se aplica enseguida: así se puede deshacer (Ctrl+Z)
+  if (blk.dataset.k) _casoVisor.borrados.add(Number(blk.dataset.k)); blk.remove(); _casoVisor.dirty = true; casoVisorMsg('Cambios sin guardar.');
+}
 // Cuántas veces aparece antes, en el párrafo, el mismo texto que el tramo marcado: así el .docx sabe cuál de las apariciones es (misma cuenta que formato_texto / comentario: sin solaparse)
 function casoVwOcurrencia(el, sp) {
   const pre = document.createRange(); pre.selectNodeContents(el); pre.setEndBefore(sp);
@@ -41854,8 +41922,8 @@ async function casoWordOpExtra(o, C, resumen) {
       if (o.estilo) {
         const e = String(o.estilo);
         if (/^titulo[123]$/.test(e)) { const id = await casoEstiloId(zip, ['heading ' + e.slice(6), 'título ' + e.slice(6)]); if (!id) throw new Error('El documento no tiene el estilo de título ' + e.slice(6)); casoWQuitar(ppr, 'pStyle'); casoWProp(doc, ppr, 'pStyle', { val: id }); casoWQuitar(ppr, 'numPr'); }
-        else if (e === 'normal') { casoWQuitar(ppr, 'pStyle'); casoWQuitar(ppr, 'numPr'); }
-        else if (e === 'vineta' || e === 'numerada') { const n = await casoNumId(W, e, p), lp = await casoEstiloId(zip, ['list paragraph', 'párrafo de lista']), np0 = ppr.getElementsByTagName('w:numPr')[0], il0 = np0 && np0.getElementsByTagName('w:ilvl')[0], nivel0 = il0 ? il0.getAttribute('w:val') : '0'; if (lp) { casoWQuitar(ppr, 'pStyle'); casoWProp(doc, ppr, 'pStyle', { val: lp }); } casoWQuitar(ppr, 'numPr'); const np = casoWProp(doc, ppr, 'numPr'); casoWProp(doc, np, 'ilvl', { val: nivel0 }); casoWProp(doc, np, 'numId', { val: String(n) }); }
+        else if (e === 'normal') { const inf0 = casoWListaInfo(W, p); if (inf0 && inf0.tipo === 'texto') casoWQuitarMarcaTxt(doc, p, inf0.marca); casoWQuitar(ppr, 'pStyle'); casoWQuitar(ppr, 'numPr'); }
+        else if (e === 'vineta' || e === 'numerada') { const inf0 = casoWListaInfo(W, p); if (inf0 && inf0.tipo === 'texto') casoWQuitarMarcaTxt(doc, p, inf0.marca); const n = await casoNumId(W, e, p), lp = await casoEstiloId(zip, ['list paragraph', 'párrafo de lista']), np0 = ppr.getElementsByTagName('w:numPr')[0], il0 = np0 && np0.getElementsByTagName('w:ilvl')[0], nivel0 = il0 ? il0.getAttribute('w:val') : '0'; if (lp) { casoWQuitar(ppr, 'pStyle'); casoWProp(doc, ppr, 'pStyle', { val: lp }); } casoWQuitar(ppr, 'numPr'); const np = casoWProp(doc, ppr, 'numPr'); casoWProp(doc, np, 'ilvl', { val: nivel0 }); casoWProp(doc, np, 'numId', { val: String(n) }); }
         else throw new Error('estilo_parrafo: "estilo" debe ser normal, titulo1, titulo2, titulo3, vineta o numerada.');
         hecho = true;
       }
@@ -41914,15 +41982,21 @@ async function casoWordOpExtra(o, C, resumen) {
     }
     case 'nivel_lista': {
       const p = o._el; if (!p || p.nodeName !== 'w:p') throw new Error('nivel_lista: "indice" tiene que ser un párrafo.');
-      const np = p.getElementsByTagName('w:numPr')[0]; if (!np) throw new Error(`nivel_lista: el bloque [${o.indice}] no es un ítem de una lista (primero convertilo en viñetas o numeración).`);
-      const il = np.getElementsByTagName('w:ilvl')[0], actual = il ? Number(il.getAttribute('w:val')) || 0 : 0, nuevo = Math.min(8, Math.max(0, o.nivel != null ? Number(o.nivel) : actual + (Number(o.delta) || 0)));
+      const inf = casoWListaInfo(W, p); if (!inf) throw new Error(`nivel_lista: el bloque [${o.indice}] no es un ítem de una lista (primero convertilo en viñetas o numeración).`);
+      const actual = inf.nivel, nuevo = Math.min(8, Math.max(0, o.nivel != null ? Number(o.nivel) : actual + (Number(o.delta) || 0)));
       if (nuevo === actual) throw new Error(actual === 0 && (Number(o.delta) || 0) < 0 ? `El ítem [${o.indice}] ya está en el primer nivel.` : `El ítem [${o.indice}] ya está en el último nivel (9).`);
-      casoWProp(doc, np, 'ilvl', { val: String(nuevo) }); casoOrdenarW(np, ['ilvl', 'numId']); resumen.push(`ítem [${o.indice}] pasó al nivel ${nuevo + 1}`); return true;
+      const ppr = casoWHijoPrimero(doc, p, 'pPr');
+      if (inf.tipo === 'texto') {   // viñeta escrita como texto: se convierte en lista real con el nivel pedido
+        casoWQuitarMarcaTxt(doc, p, inf.marca); const n = await casoNumId(W, 'vineta', p); casoWQuitar(ppr, 'numPr'); const np = casoWProp(doc, ppr, 'numPr'); casoWProp(doc, np, 'ilvl', { val: String(nuevo) }); casoWProp(doc, np, 'numId', { val: String(n) });
+      } else {   // directa, o por estilo: se escribe la numeración en el párrafo (la del estilo sigue siendo la misma lista)
+        const np = casoWProp(doc, ppr, 'numPr'); casoWProp(doc, np, 'ilvl', { val: String(nuevo) }); if (!np.getElementsByTagName('w:numId')[0]) casoWProp(doc, np, 'numId', { val: String(inf.numId) }); casoOrdenarW(np, ['ilvl', 'numId']);
+      }
+      casoOrdenarW(ppr, CASO_PPR_ORDEN); resumen.push(`ítem [${o.indice}] pasó al nivel ${nuevo + 1}${inf.tipo === 'texto' ? ' (la viñeta escrita se convirtió en lista)' : ''}`); return true;
     }
     case 'mover_bloque': {
       const b = o._el; if (!b || !b.parentNode) throw new Error('mover_bloque: falta "indice".');
       const esBloque = x => x && x.nodeType === 1 && (x.nodeName === 'w:p' || x.nodeName === 'w:tbl'), vec = (n, atras) => { let x = atras ? n.previousSibling : n.nextSibling; while (x && !esBloque(x)) x = atras ? x.previousSibling : x.nextSibling; return x; };
-      const nivel = n => { if (!n || n.nodeName !== 'w:p') return null; const np = n.getElementsByTagName('w:numPr')[0]; if (!np) return null; const id = np.getElementsByTagName('w:numId')[0]; if (id && id.getAttribute('w:val') === '0') return null; const il = np.getElementsByTagName('w:ilvl')[0]; return il ? Number(il.getAttribute('w:val')) || 0 : 0; };
+      const nivel = n => { const i = casoWListaInfo(W, n); return i ? i.nivel : null; };
       const rama = n => { const r = [n], v0 = nivel(n); if (v0 == null) return r; let x = vec(n, false); while (x && nivel(x) != null && nivel(x) > v0) { r.push(x); x = vec(x, false); } return r; };
       const atras = o.direccion === 'arriba', miNivel = nivel(b), mia = rama(b);
       if (atras) {
