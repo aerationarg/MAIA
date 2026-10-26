@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -39271,7 +39271,7 @@ async function casoAbrir(id) {
   const r = await casoRest(`maia_casos?id=eq.${id}&select=*`), rows = await r.json().catch(() => []);
   if (!r.ok || !rows.length) { alert('No se pudo abrir el caso.'); return; }
   const m = await casoRest(`maia_casos_mensajes?caso_id=eq.${id}&select=id,rol,contenido,meta,costo_usd,created_at&order=created_at.asc&limit=400`), ms = await m.json().catch(() => []);
-  _caso = rows[0]; _caso.vinculos = Array.isArray(_caso.vinculos) ? _caso.vinculos : []; _caso.notas = Array.isArray(_caso.notas) ? _caso.notas : [];
+  _caso = rows[0]; _caso.vinculos = Array.isArray(_caso.vinculos) ? _caso.vinculos : []; _caso.notas = Array.isArray(_caso.notas) ? _caso.notas : []; _caso.sp_links = _caso.sp_links && typeof _caso.sp_links === 'object' && !Array.isArray(_caso.sp_links) ? _caso.sp_links : {}; _casoSpPend = {}; _casoSpUlt = {};
   _casoMsgs = Array.isArray(ms) ? ms : []; _casoArchivos = []; _casoArchSes = []; _casoLecturas = {}; _casoLista = []; _casoArchFalta = false; _casoArchAviso = ''; _casoSpAviso = null; _casoPend = []; _casoPendFalta = false; _casoOpcionesVinc = null;
   document.getElementById('casos-list-view').style.display = 'none'; document.getElementById('casos-doc-view').style.display = '';
   casoRenderEsqueleto();
@@ -39283,7 +39283,7 @@ function casoHeaderVolver(mostrar) {
 function casoVolver(silencioso) {
   casoTabsCerrarTodas();
   casoHeaderVolver(false);
-  _caso = null; const a = document.getElementById('casos-list-view'), b = document.getElementById('casos-doc-view');
+  clearInterval(_casoSpTimer); _casoSpTimer = null; _caso = null; const a = document.getElementById('casos-list-view'), b = document.getElementById('casos-doc-view');
   if (a) a.style.display = ''; if (b) { b.style.display = 'none'; b.innerHTML = ''; }
   if (!silencioso) casosListaRender();
 }
@@ -40374,7 +40374,7 @@ async function casoArchivosCargar() {
     if (r.ok && Array.isArray(j)) { const g = new Map(); j.forEach(x => { if (!g.has(x.nombre)) g.set(x.nombre, []); g.get(x.nombre).push(x); }); _casoLista = Array.from(g, ([nombre, versiones]) => ({ nombre, versiones })); }
     else _casoArchFalta = casoTablaFalta(r, j);
   } catch (e) { /* queda vacío */ }
-  casoRenderLado();
+  casoRenderLado(); casoSpIniciar();
 }
 async function casoArchivoSubir(blob, nombre, origen) {
   if (!_caso) return null;
@@ -40394,6 +40394,7 @@ async function casoArchivoSubir(blob, nombre, origen) {
     const rows = await w.json().catch(() => null);
     if (!w.ok || !rows || !rows.length) throw new Error(casoTablaFalta(w, rows) ? 'falta crear la tabla maia_casos_archivos (SQL en docs/casos.sql)' : 'no se pudo registrar el archivo');
     if (_caso && _caso.id === caso.id) { it = _casoLista.find(x => x.nombre === nombre); if (it) it.versiones.unshift(rows[0]); else _casoLista.unshift({ nombre, versiones: [rows[0]] }); _casoArchAviso = aviso; casoRenderLado(); }
+    if (origen !== 'SharePoint' && !/^SharePoint/.test(origen) && casoSpLinks()[nombre] && casoSpLinks()[nombre].sync !== false) casoSpAutoEmpujar(nombre, blob, rows[0].version);   // el archivo está vinculado a SharePoint: se actualiza allá también
     return rows[0];
   } catch (e) { _casoArchAviso = `"${nombre}" no se pudo guardar en el caso (${e.message}); sigue disponible hasta que recargues la página.`; casoRenderLado(); return null; }
 }
@@ -40412,6 +40413,7 @@ async function casoAdjunto(nombre, extRe) {
   if (!nombres.length) throw new Error('No hay un archivo ' + (/docx/.test(extRe.source) && /xlsx/.test(extRe.source) ? 'Word o Excel' : /docx/.test(extRe.source) ? 'Word (.docx)' : 'Excel (.xlsx)') + ' en este caso: el usuario tiene que adjuntarlo (📎) en el chat.');
   const n = casoNorm(nombre || ''), el = nombres.find(x => casoNorm(x) === n) || nombres.find(x => n && casoNorm(x).includes(n)) || (nombres.length === 1 ? nombres[0] : null);
   if (!el) throw new Error('Indicá cuál archivo: ' + nombres.join(', '));
+  await casoSpRevisarSuave(el);   // si el archivo está vinculado a SharePoint, antes de leerlo se mira que no haya una versión más nueva allá
   return await casoArchivoActual(el);
 }
 async function casoSubirArchivos(files) { for (const f0 of files) { const f = await casoNombreReal(f0); casoSesionPoner(f.name, f); await casoArchivoSubir(f, f.name, 'adjunto'); } }
@@ -40441,6 +40443,7 @@ async function casoRenombrarArchivo(nombre, nuevo) {
   const it = _casoLista.find(x => x.nombre === nombre);
   if (it) { const r = await casoRest(`maia_casos_archivos?caso_id=eq.${_caso.id}&nombre=eq.${encodeURIComponent(nombre)}`, { method: 'PATCH', body: { nombre: nuevo } }); if (!r.ok) throw new Error('No se pudo cambiar el nombre en el caso.'); it.nombre = nuevo; it.versiones.forEach(v => { v.nombre = nuevo; }); }
   const k = _casoArchSes.findIndex(f => f.name === nombre); if (k >= 0) _casoArchSes[k] = new File([_casoArchSes[k]], nuevo, { type: _casoArchSes[k].type, lastModified: _casoArchSes[k].lastModified });
+  if (casoSpLinks()[nombre]) { const ls = Object.assign({}, _caso.sp_links); ls[nuevo] = ls[nombre]; delete ls[nombre]; _caso.sp_links = ls; casoSpGuardarLinks(); }   // el vínculo con SharePoint sigue al archivo
   casoRenderLado(); return nuevo;
 }
 async function casoArchivoRenombrar(nombre) {
@@ -40457,15 +40460,17 @@ async function casoArchivoEliminar(nombre) {
   if (!confirm(`¿Sacar "${nombre}" del caso? Se borran todas sus versiones.`)) return;
   const it = _casoLista.find(x => x.nombre === nombre);
   if (it) { await casoRest(`maia_casos_archivos?caso_id=eq.${_caso.id}&nombre=eq.${encodeURIComponent(nombre)}`, { method: 'DELETE' }); supaFetch(`/storage/v1/object/${CASO_BUCKET}`, { method: 'DELETE', headers: casoH(), body: JSON.stringify({ prefixes: it.versiones.map(v => v.ruta) }) }).catch(() => {}); }
-  _casoLista = _casoLista.filter(x => x.nombre !== nombre); _casoArchSes = _casoArchSes.filter(f => f.name !== nombre); casoRenderLado();
+  _casoLista = _casoLista.filter(x => x.nombre !== nombre); _casoArchSes = _casoArchSes.filter(f => f.name !== nombre);
+  if (casoSpLinks()[nombre]) { const ls = Object.assign({}, _caso.sp_links); delete ls[nombre]; _caso.sp_links = ls; delete _casoSpPend[nombre]; casoSpGuardarLinks(); }   // el archivo de SharePoint no se toca
+  casoRenderLado();
 }
 async function casoArchivoDescargar(nombre) { try { const f = await casoArchivoActual(nombre); const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = nombre; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); } catch (e) { alert(e.message); } }
 function casoArchivosHtml() {
   const icono = n => /\.xlsx?$/i.test(n) ? '📊' : /\.docx?$/i.test(n) ? '📝' : /\.pdf$/i.test(n) ? '📕' : /\.(png|jpe?g)$/i.test(n) ? '🖼' : /\.msg$/i.test(n) ? '✉' : '📄';
   const filas = casoNombresArchivos().map(n => { const it = _casoLista.find(x => x.nombre === n), v = it && it.versiones[0], en = /\.(xlsx|docx|pdf|png|jpe?g|msg)$/i.test(n);
     const q = esc(n);
-    return `<div style="padding:5px 0;border-bottom:1px solid var(--border)"><div style="display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.3"><span>${icono(n)}</span><span style="flex:1;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" title="${q}">${q}</span></div><div style="display:flex;gap:4px;align-items:center;margin-top:3px;padding-left:22px"><span class="hint" style="margin:0;flex:1;min-width:0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${v ? `v${v.version} · ${esc(v.origen)}` : 'solo esta sesión'}</span>${en ? `<button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" data-n="${q}" onclick="casoVisorAbrir(this.dataset.n)">${/\.(xlsx|docx)$/i.test(n) ? 'Ver / editar' : 'Ver'}</button>` : ''}<button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Cambiar el nombre del archivo" data-n="${q}" onclick="casoArchivoRenombrar(this.dataset.n)">✏</button><button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Descargar la última versión" data-n="${q}" onclick="casoArchivoDescargar(this.dataset.n)">⬇</button><button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Guardar una copia de la última versión en una carpeta de SharePoint (elegís la carpeta)" data-n="${q}" onclick="casoArchivoASharePoint(this.dataset.n)">☁</button><button class="remove-btn" title="Sacar del caso" style="font-size:12px" data-n="${q}" onclick="casoArchivoEliminar(this.dataset.n)">&#x2715;</button></div></div>`; }).join('');
-  return `<div class="card" style="margin-bottom:12px"><div class="card-label">Archivos del caso</div>${filas || '<p class="hint" style="margin:0 0 6px">Los archivos que adjuntes en el chat y los que genere la IA quedan acá, para verlos y editarlos.</p>'}${_casoArchFalta ? '<p class="hint" style="color:var(--red);margin:6px 0 0">Para que los archivos se conserven al recargar, corré el bloque de <b>maia_casos_archivos</b> y de Storage de docs/casos.sql en Supabase.</p>' : ''}${_casoArchAviso ? `<p class="hint" style="color:var(--red);margin:6px 0 0">${esc(_casoArchAviso)}</p>` : ''}${_casoSpAviso ? `<p class="hint" style="color:${_casoSpAviso.error ? 'var(--red)' : 'var(--green)'};margin:6px 0 0">${esc(_casoSpAviso.texto)}${_casoSpAviso.url ? ` <a href="${esc(_casoSpAviso.url)}" target="_blank" rel="noopener" style="color:var(--blue)">Abrir en SharePoint</a>` : ''}</p>` : ''}<div style="margin-top:8px"><input type="file" id="caso-subir" multiple style="display:none" onchange="casoArchivoSubirManual(this)" /><button class="btn btn-secondary btn-sm" onclick="casoSubirClick()">+ Subir archivo</button></div></div>`;
+    return `<div style="padding:5px 0;border-bottom:1px solid var(--border)"><div style="display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.3"><span>${icono(n)}</span><span style="flex:1;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" title="${q}">${q}</span></div><div style="display:flex;gap:4px;align-items:center;margin-top:3px;padding-left:22px"><span class="hint" style="margin:0;flex:1;min-width:0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${v ? `v${v.version} · ${esc(v.origen)}` : 'solo esta sesión'}</span>${en ? `<button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" data-n="${q}" onclick="casoVisorAbrir(this.dataset.n)">${/\.(xlsx|docx)$/i.test(n) ? 'Ver / editar' : 'Ver'}</button>` : ''}<button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Cambiar el nombre del archivo" data-n="${q}" onclick="casoArchivoRenombrar(this.dataset.n)">✏</button><button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Descargar la última versión" data-n="${q}" onclick="casoArchivoDescargar(this.dataset.n)">⬇</button><button class="btn btn-secondary btn-sm" style="padding:1px 7px;font-size:11px;width:auto;line-height:1.5" title="Guardar una copia de la última versión en una carpeta de SharePoint (elegís la carpeta)" data-n="${q}" onclick="casoArchivoASharePoint(this.dataset.n)">☁</button><button class="remove-btn" title="Sacar del caso" style="font-size:12px" data-n="${q}" onclick="casoArchivoEliminar(this.dataset.n)">&#x2715;</button></div>${casoSpFilaHtml(n)}</div>`; }).join('');
+  return `<div class="card" style="margin-bottom:12px"><div class="card-label">Archivos del caso</div>${filas || '<p class="hint" style="margin:0 0 6px">Los archivos que adjuntes en el chat y los que genere la IA quedan acá, para verlos y editarlos.</p>'}${_casoArchFalta ? '<p class="hint" style="color:var(--red);margin:6px 0 0">Para que los archivos se conserven al recargar, corré el bloque de <b>maia_casos_archivos</b> y de Storage de docs/casos.sql en Supabase.</p>' : ''}${_casoArchAviso ? `<p class="hint" style="color:var(--red);margin:6px 0 0">${esc(_casoArchAviso)}</p>` : ''}${_casoSpAviso ? `<p class="hint" style="color:${_casoSpAviso.error ? 'var(--red)' : 'var(--green)'};margin:6px 0 0">${esc(_casoSpAviso.texto)}${_casoSpAviso.url ? ` <a href="${esc(_casoSpAviso.url)}" target="_blank" rel="noopener" style="color:var(--blue)">Abrir en SharePoint</a>` : ''}</p>` : ''}<div style="margin-top:8px"><input type="file" id="caso-subir" multiple style="display:none" onchange="casoArchivoSubirManual(this)" /><button class="btn btn-secondary btn-sm" onclick="casoSubirClick()">+ Subir archivo</button>${Object.keys(casoSpLinks()).length ? ' <button class="btn btn-secondary btn-sm" onclick="casoSpRevisarTodos({ manual: true })" title="Mira si alguno de los archivos vinculados cambió en SharePoint y sube los cambios que falten">🔄 Revisar SharePoint</button>' : ''}</div></div>`;
 }
 
 // ── Visor (ventana grande) ──
@@ -42631,17 +42636,9 @@ function casoArchivoASharePoint(nombre) {
   _casoSpArchivo = nombre; _casoSpAviso = null;
   casoMsListo().then(() => { fbOpen('folder', 'caso-subir-sp'); const t = document.getElementById('fb-title'); if (t) t.textContent = `Elegí la carpeta donde guardar "${casoCorto(nombre, 45)}"`; }).catch(e => { _casoSpArchivo = null; alert(e.message); });
 }
-async function casoSpSubirContenido(token, base, nombre, file) {
-  const enc = encodeURIComponent(nombre), err = async r => { const j = await r.json().catch(() => ({})); return new Error((j.error && j.error.message) || 'Microsoft respondió ' + r.status); };
-  if (file.size <= 4 * 1024 * 1024) {
-    const r = await fetch(`${base}:/${enc}:/content`, { method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type || 'application/octet-stream' }, body: file });
-    if (!r.ok) throw await err(r);
-    return await r.json();
-  }
-  const sesion = await fetch(`${base}:/${enc}:/createUploadSession`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }) });
-  if (!sesion.ok) throw await err(sesion);
-  const { uploadUrl } = await sesion.json(), PARTE = 5 * 1024 * 1024;   // 5 MB = múltiplo de 320 KB, como pide Graph
-  let ini = 0, ultimo = {};
+// Subida por partes de 5 MB (múltiplo de 320 KB, como pide Graph) a la url de una sesión de subida; esa url ya viene autorizada, no lleva el token
+async function casoSpSubirPartes(uploadUrl, file, err) {
+  const PARTE = 5 * 1024 * 1024; let ini = 0, ultimo = {};
   while (ini < file.size) {
     const fin = Math.min(ini + PARTE, file.size), r = await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Range': `bytes ${ini}-${fin - 1}/${file.size}` }, body: file.slice(ini, fin) });
     if (!r.ok && r.status !== 202) { fetch(uploadUrl, { method: 'DELETE' }).catch(() => {}); throw await err(r); }
@@ -42649,6 +42646,18 @@ async function casoSpSubirContenido(token, base, nombre, file) {
     ini = fin;
   }
   return ultimo;
+}
+const casoSpErr = async r => { const j = await r.json().catch(() => ({})), e = new Error(r.status === 423 ? 'el archivo está bloqueado (alguien lo tiene abierto para editar en SharePoint)' : ((j.error && j.error.message) || 'Microsoft respondió ' + r.status)); e.status = r.status; return e; };
+async function casoSpSubirContenido(token, base, nombre, file) {
+  const enc = encodeURIComponent(nombre);
+  if (file.size <= 4 * 1024 * 1024) {
+    const r = await fetch(`${base}:/${enc}:/content`, { method: 'PUT', headers: { Authorization: 'Bearer ' + token, 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+    if (!r.ok) throw await casoSpErr(r);
+    return await r.json();
+  }
+  const sesion = await fetch(`${base}:/${enc}:/createUploadSession`, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }) });
+  if (!sesion.ok) throw await casoSpErr(sesion);
+  return await casoSpSubirPartes((await sesion.json()).uploadUrl, file, casoSpErr);
 }
 async function casoSpSubirEn(dest) {
   const nombre = _casoSpArchivo; _casoSpArchivo = null; if (!nombre || !dest || !dest.siteId) return;
@@ -42660,8 +42669,160 @@ async function casoSpSubirEn(dest) {
     const ya = await fetch(`${base}:/${encodeURIComponent(nombre)}?$select=id,name`, { headers: { Authorization: 'Bearer ' + token } });
     if (ya.ok && !confirm(`Ya hay un archivo "${nombre}" en ${lugar}.\n\n¿Reemplazarlo con la última versión del caso? (SharePoint guarda el historial de versiones.)`)) { _casoSpAviso = { texto: `No se subió "${nombre}": ya existía en ${lugar} y elegiste no reemplazarlo.`, error: true }; casoRenderLado(); return; }
     const r = await casoSpSubirContenido(token, base, nombre, file);
-    _casoSpAviso = { texto: `✓ "${nombre}" (${casoKB(file.size)}) se guardó en ${lugar}.`, url: r && r.webUrl };
+    _casoSpAviso = { texto: `✓ "${nombre}" (${casoKB(file.size)}) se guardó en ${lugar}. Desde ahora los cambios se mantienen sincronizados (se puede apagar en la lista de archivos).`, url: r && r.webUrl };
+    if (r && r.id && r.parentReference && r.parentReference.driveId) { const it = _casoLista.find(x => x.nombre === nombre); casoSpVincular(nombre, { driveId: r.parentReference.driveId, itemId: r.id, webUrl: r.webUrl, etag: r.eTag, ctag: r.cTag, mtime: r.lastModifiedDateTime, carpeta: lugar }, it ? it.versiones[0].version : null); }
   } catch (e) { _casoSpAviso = { texto: `No se pudo guardar "${nombre}" en SharePoint: ${e.message}`, error: true }; }
+  casoRenderLado();
+}
+
+// ── Casos · sincronización de los archivos del caso con SharePoint ──
+// Un archivo que se subió con ☁ (o que la IA trajo de SharePoint) queda vinculado: caso.sp_links[nombre] = { driveId, itemId, webUrl, etag, mtime, ver, sync }.
+//   etag / ctag = la versión (la de todo el elemento / la del contenido) del archivo en SharePoint en la última sincronización; ver = el número de versión del caso que quedó igual a esa.
+// · Cada versión nueva en el caso (editada en el visor, por la IA, restaurada) se sube a SharePoint si allá nadie lo cambió desde la última sincronización (If-Match).
+// · Al abrir el caso, cada 3 minutos y justo antes de que la IA lea el archivo se mira si SharePoint cambió: si en el caso no hay cambios sin subir, se trae como versión nueva (las anteriores quedan en el historial);
+//   si cambió en los dos lados, nunca se pisa nada en silencio: se muestra un cuadro para elegir (usar la de SharePoint / subir la del caso / guardar la de SharePoint aparte / decidir después).
+// · No hay avisos en tiempo real (MAIA no tiene un servidor que reciba los de Microsoft): hace falta tener la sesión de Microsoft iniciada; sin sesión los cambios del caso quedan "sin subir" hasta la próxima revisión.
+let _casoSpPend = {}, _casoSpUlt = {}, _casoSpTimer = null, _casoSpOcupado = new Set();
+const casoSpLinks = () => (_caso && _caso.sp_links) || {};
+const casoSpBase = l => `https://graph.microsoft.com/v1.0/drives/${l.driveId}/items/${l.itemId}`;
+async function casoMsSilencioso() {   // token sin abrir ninguna ventana (null si no hay sesión de Microsoft)
+  try { await initMsal(); if (!msAccount) return null; return (await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: msAccount })).accessToken; } catch (e) { return null; }
+}
+async function casoSpGuardarLinks() {
+  if (!_caso) return;
+  try {
+    const r = await casoRest('maia_casos?id=eq.' + _caso.id, { method: 'PATCH', body: { sp_links: _caso.sp_links || {}, updated_at: new Date().toISOString() } });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); if (/sp_links/.test(JSON.stringify(j))) { _casoSpAviso = { texto: 'Para que MAIA recuerde qué archivos están vinculados a SharePoint falta crear la columna sp_links: corré el bloque "Sincronización con SharePoint" de docs/casos.sql en Supabase. Mientras tanto la sincronización no se conserva al cerrar el caso.', error: true }; casoRenderLado(); } }
+  } catch (e) { /* sin red: el vínculo vale en esta sesión */ }
+}
+function casoSpVincular(nombre, d, ver) { _caso.sp_links = Object.assign({}, _caso.sp_links, { [nombre]: Object.assign({ sync: true }, d, { ver }) }); casoSpGuardarLinks(); casoSpIniciar(); casoRenderLado(); }
+async function casoSpMetaItem(token, l) { const r = await casoGraph(token, casoSpBase(l) + '?$select=id,name,eTag,cTag,lastModifiedDateTime,lastModifiedBy,size,webUrl'); return await r.json(); }
+const casoSpCambio = (meta, l) => (meta.cTag && l.ctag) ? meta.cTag !== l.ctag : meta.eTag !== l.etag;   // cTag cambia solo si cambia el contenido; si falta, se compara el eTag
+const casoSpQuien = m => (m && m.lastModifiedBy && m.lastModifiedBy.user && m.lastModifiedBy.user.displayName) || '';
+// Sube un archivo sobre el que ya existe en SharePoint. Sin "forzar", solo si allá no cambió desde la última sincronización.
+async function casoSpEmpujar(nombre, file, ver, forzar, tokenDado) {
+  const l = casoSpLinks()[nombre]; if (!l) return { estado: 'sin_vinculo' };
+  const token = tokenDado || await casoMsSilencioso(); if (!token) return { estado: 'sin_sesion' };
+  const meta = await casoSpMetaItem(token, l);
+  if (!forzar && casoSpCambio(meta, l)) { _casoSpPend[nombre] = meta; return { estado: 'conflicto', meta }; }
+  let r;
+  try { r = await casoSpSubirItem(token, l, file, forzar ? null : meta.eTag); }   // If-Match con el eTag recién leído: si alguien lo cambia justo ahora, SharePoint lo rechaza
+  catch (e) { if (e.status === 412) { _casoSpPend[nombre] = await casoSpMetaItem(token, l).catch(() => meta); return { estado: 'conflicto', meta: _casoSpPend[nombre] }; } throw e; }
+  _caso.sp_links = Object.assign({}, _caso.sp_links, { [nombre]: Object.assign({}, l, { etag: r.eTag || l.etag, ctag: r.cTag || l.ctag, mtime: r.lastModifiedDateTime || l.mtime, ver, webUrl: r.webUrl || l.webUrl }) });
+  delete _casoSpPend[nombre]; await casoSpGuardarLinks();
+  return { estado: 'ok', url: r.webUrl };
+}
+async function casoSpSubirItem(token, l, file, ifMatch) {
+  const base = casoSpBase(l), H = Object.assign({ Authorization: 'Bearer ' + token }, ifMatch ? { 'If-Match': ifMatch } : {});
+  if (file.size <= 4 * 1024 * 1024) { const r = await fetch(`${base}/content`, { method: 'PUT', headers: Object.assign({ 'Content-Type': file.type || 'application/octet-stream' }, H), body: file }); if (!r.ok) throw await casoSpErr(r); return await r.json(); }
+  const sesion = await fetch(`${base}/createUploadSession`, { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }) });
+  if (!sesion.ok) throw await casoSpErr(sesion);
+  return await casoSpSubirPartes((await sesion.json()).uploadUrl, file, casoSpErr);
+}
+async function casoSpAutoEmpujar(nombre, blob, ver) {
+  try {
+    const r = await casoSpEmpujar(nombre, blob, ver, false);
+    if (r.estado === 'ok') _casoSpAviso = { texto: `✓ "${nombre}" también se actualizó en SharePoint.`, url: r.url };
+    else if (r.estado === 'conflicto') { _casoSpAviso = { texto: `"${nombre}" cambió en SharePoint mientras tanto: la versión nueva quedó guardada en el caso, pero hay que elegir cuál queda.`, error: true }; casoSpConflicto(nombre); }
+    else if (r.estado === 'sin_sesion') _casoSpAviso = { texto: `"${nombre}" quedó guardado en el caso pero no se subió a SharePoint porque no hay sesión de Microsoft (iniciala y usá 🔄 Revisar SharePoint).`, error: true };
+  } catch (e) { _casoSpAviso = { texto: `No se pudo actualizar "${nombre}" en SharePoint: ${e.message}. Sigue guardado en el caso; se reintenta en la próxima revisión.`, error: true }; }
+  casoRenderLado();
+}
+// Trae la versión actual de SharePoint al caso como versión nueva
+async function casoSpTraer(nombre, token, meta) {
+  const l = casoSpLinks()[nombre], r = await casoGraph(token, casoSpBase(l) + '/content'), blob = await r.blob();
+  if (blob.size > CASO_MAX_DESCARGA) throw new Error(`"${nombre}" pesa ${casoKB(blob.size)}: es demasiado grande para traerlo.`);
+  const f = new File([blob], nombre, { type: blob.type || casoMimeDe(nombre) }); casoSesionPoner(nombre, f);
+  const row = await casoArchivoSubir(f, nombre, 'SharePoint'); if (!row) throw new Error('no se pudo guardar la versión en el caso');
+  _caso.sp_links = Object.assign({}, _caso.sp_links, { [nombre]: Object.assign({}, l, { etag: meta.eTag, ctag: meta.cTag, mtime: meta.lastModifiedDateTime, ver: row.version, por: casoSpQuien(meta) }) });
+  delete _casoSpPend[nombre]; await casoSpGuardarLinks();
+  return row;
+}
+// Mira un archivo vinculado: igual / traído de SharePoint / subido a SharePoint / en conflicto
+async function casoSpRevisar(nombre, opt) {
+  opt = opt || {}; const l = casoSpLinks()[nombre]; if (!l || l.sync === false || _casoSpOcupado.has(nombre)) return null;
+  const token = opt.token || await casoMsSilencioso(); if (!token) return { estado: 'sin_sesion' };
+  _casoSpOcupado.add(nombre);
+  try {
+    const meta = await casoSpMetaItem(token, l); _casoSpUlt[nombre] = Date.now();
+    const it = _casoLista.find(x => x.nombre === nombre), local = it ? it.versiones[0].version : null;
+    const spCambio = casoSpCambio(meta, l), localCambio = local != null && l.ver != null && local > l.ver;
+    if (!spCambio && !localCambio) { delete _casoSpPend[nombre]; return { estado: 'igual' }; }
+    if (spCambio && !localCambio) {
+      if (_casoVisor && _casoVisor.nombre === nombre) { _casoSpPend[nombre] = meta; return { estado: 'sp_nuevo_abierto', meta }; }   // abierto en el visor: no se cambia por debajo
+      const row = await casoSpTraer(nombre, token, meta); return { estado: 'traido', meta, row };
+    }
+    if (!spCambio && localCambio) { const r = await casoSpEmpujar(nombre, await casoArchivoActual(nombre), local, false, token); return r.estado === 'ok' ? { estado: 'subido', url: r.url } : r; }
+    _casoSpPend[nombre] = meta; return { estado: 'conflicto', meta };
+  } catch (e) {
+    if (/not.?found|no se encontr|could not be found|404/i.test(e.message)) { _casoSpPend[nombre] = null; return { estado: 'borrado' }; }
+    throw e;
+  } finally { _casoSpOcupado.delete(nombre); }
+}
+async function casoSpRevisarSuave(nombre) { const l = casoSpLinks()[nombre]; if (!l || l.sync === false || Date.now() - (_casoSpUlt[nombre] || 0) < 90000) return; try { await casoSpRevisar(nombre); } catch (e) { /* si no se puede mirar, se lee lo que hay en el caso */ } }
+async function casoSpRevisarTodos(opt) {
+  opt = opt || {}; if (!_caso) return; const nombres = Object.keys(casoSpLinks()).filter(n => casoSpLinks()[n].sync !== false && casoNombresArchivos().includes(n)); if (!nombres.length) return;
+  const token = await casoMsSilencioso() || (opt.manual ? await getMsToken().catch(() => null) : null);
+  if (!token) { if (opt.manual) { _casoSpAviso = { texto: 'Hay que iniciar sesión con Microsoft para revisar SharePoint (botón "Iniciar sesión" arriba a la derecha).', error: true }; casoRenderLado(); } return; }
+  const textos = []; let conflicto = null, error = false;
+  for (const n of nombres) {
+    let r; try { r = await casoSpRevisar(n, { token }); } catch (e) { textos.push(`No se pudo revisar "${n}": ${e.message}`); error = true; continue; }
+    if (!r) continue;
+    if (r.estado === 'traido') textos.push(`↻ "${n}" cambió en SharePoint${casoSpQuien(r.meta) ? ' (' + casoSpQuien(r.meta) + ')' : ''} y se trajo al caso como versión v${r.row.version}.`);
+    else if (r.estado === 'subido') textos.push(`✓ "${n}" tenía cambios sin subir y se actualizó en SharePoint.`);
+    else if (r.estado === 'sp_nuevo_abierto') { textos.push(`"${n}" cambió en SharePoint pero lo tenés abierto en el visor: cerralo y usá 🔄 para traer lo nuevo.`); error = true; }
+    else if (r.estado === 'conflicto') { textos.push(`"${n}" cambió en SharePoint y también en el caso: hay que elegir cuál queda (botón Resolver).`); error = true; conflicto = conflicto || n; }
+    else if (r.estado === 'borrado') { textos.push(`"${n}" ya no está en SharePoint (se borró o se movió). Sigue en el caso.`); error = true; }
+  }
+  if (textos.length) _casoSpAviso = { texto: textos.join(' '), error };
+  else if (opt.manual) _casoSpAviso = { texto: 'Los archivos vinculados están al día con SharePoint.' };
+  casoRenderLado(); if (conflicto && opt.manual) casoSpConflicto(conflicto);
+}
+function casoSpIniciar() {
+  if (!_caso || !Object.keys(casoSpLinks()).length) return;
+  if (!_casoSpTimer) _casoSpTimer = setInterval(() => { if (!_caso || document.hidden) return; casoSpRevisarTodos(); }, 3 * 60 * 1000);
+  casoSpRevisarTodos();
+}
+function casoSpFilaHtml(n) {
+  const l = casoSpLinks()[n]; if (!l) return '';
+  const it = _casoLista.find(x => x.nombre === n), local = it ? it.versiones[0].version : null, q = esc(n), pend = _casoSpPend[n] !== undefined;
+  const est = l.sync === false ? 'sincronización apagada' : pend ? (_casoSpPend[n] === null ? '⚠ ya no está en SharePoint' : '⚠ cambió en SharePoint') : (local != null && l.ver != null && local > l.ver) ? 'cambios sin subir' : 'sincronizado ✓';
+  return `<div class="hint" style="margin:3px 0 0;padding-left:22px;font-size:11px">☁ <a href="${esc(l.webUrl || '#')}" target="_blank" rel="noopener" style="color:var(--blue)">SharePoint</a> · <span style="${pend ? 'color:var(--red)' : ''}">${est}</span>${pend && _casoSpPend[n] ? ` · <a href="#" data-n="${q}" onclick="casoSpConflicto(this.dataset.n);return false" style="color:var(--blue)">Resolver</a>` : ''} · <a href="#" data-n="${q}" onclick="casoSpToggle(this.dataset.n);return false" style="color:var(--text2)">${l.sync === false ? 'activar' : 'apagar'}</a></div>`;
+}
+function casoSpToggle(nombre) {
+  const l = casoSpLinks()[nombre]; if (!l) return;
+  _caso.sp_links = Object.assign({}, _caso.sp_links, { [nombre]: Object.assign({}, l, { sync: l.sync === false }) }); casoSpGuardarLinks(); casoRenderLado();
+}
+// Cuadro para elegir qué queda cuando el archivo cambió en SharePoint y también en el caso
+function casoSpConflicto(nombre) {
+  const meta = _casoSpPend[nombre]; if (!meta) { const l = casoSpLinks()[nombre]; if (l) casoSpRevisarTodos({ manual: true }); return; }
+  const quien = casoSpQuien(meta), cuando = meta.lastModifiedDateTime ? new Date(meta.lastModifiedDateTime).toLocaleString('es-AR') : '', q = esc(nombre);
+  let m = document.getElementById('caso-sp-modal'); if (m) m.remove();
+  m = document.createElement('div'); m.id = 'caso-sp-modal'; m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1100;display:flex;align-items:center;justify-content:center;padding:16px';
+  const b = (op, t, d, cls) => `<button class="btn ${cls || 'btn-secondary'}" style="width:100%;text-align:left;margin-bottom:8px;white-space:normal" data-n="${q}" onclick="casoSpResolver(this.dataset.n,'${op}')"><b>${t}</b><br><span style="font-size:11.5px;font-weight:400">${d}</span></button>`;
+  m.innerHTML = `<div class="card" style="max-width:560px;width:100%;margin:0"><div class="card-label">⚠ "${q}" cambió en los dos lados</div>
+    <p style="font-size:13px;margin:0 0 10px">En SharePoint lo modificó ${quien ? '<b>' + esc(quien) + '</b>' : 'alguien'}${cuando ? ' el ' + esc(cuando) : ''}, y en el caso hay una versión que todavía no se subió. MAIA no pisa nada sin que elijas:</p>
+    ${b('sp', 'Usar la de SharePoint', 'Se trae como versión nueva del caso. La que tenías queda en el historial de versiones del caso.', 'btn-primary')}
+    ${b('mia', 'Subir la del caso y pisar la de SharePoint', 'SharePoint conserva la suya en su historial de versiones.')}
+    ${b('aparte', 'Guardar la de SharePoint como un archivo aparte', 'Se agrega al caso con otro nombre para compararlas. El conflicto sigue pendiente hasta que elijas.')}
+    ${b('luego', 'Decidir después', 'No se sube ni se trae nada por ahora.')}</div>`;
+  m.onmousedown = e => { if (e.target === m) m.remove(); }; document.body.appendChild(m);
+}
+async function casoSpResolver(nombre, op) {
+  const m = document.getElementById('caso-sp-modal'); if (m) m.remove(); if (op === 'luego') return;
+  _casoSpAviso = { texto: 'Trabajando…' }; casoRenderLado();
+  try {
+    const l = casoSpLinks()[nombre]; if (!l) throw new Error('el archivo ya no está vinculado');
+    const token = await casoMsSilencioso() || await getMsToken(), meta = await casoSpMetaItem(token, l);
+    if (op === 'sp') { const row = await casoSpTraer(nombre, token, meta); _casoSpAviso = { texto: `↻ Se usó la versión de SharePoint de "${nombre}" (versión v${row.version} del caso).` }; }
+    else if (op === 'mia') { const it = _casoLista.find(x => x.nombre === nombre), r = await casoSpEmpujar(nombre, await casoArchivoActual(nombre), it ? it.versiones[0].version : l.ver, true, token); _casoSpAviso = { texto: `✓ Se subió la versión del caso de "${nombre}" a SharePoint.`, url: r.url }; }
+    else if (op === 'aparte') {
+      const r = await casoGraph(token, casoSpBase(l) + '/content'), blob = await r.blob(), ext = (/\.[A-Za-z0-9]+$/.exec(nombre) || [''])[0], base = nombre.slice(0, nombre.length - ext.length), fecha = new Date(meta.lastModifiedDateTime || Date.now()).toLocaleDateString('es-AR').replace(/\//g, '-');
+      let nuevo = `${base} (SharePoint ${fecha})${ext}`, k = 2; while (casoNombresArchivos().some(x => casoNorm(x) === casoNorm(nuevo))) nuevo = `${base} (SharePoint ${fecha}) ${k++}${ext}`;
+      const f = new File([blob], nuevo, { type: blob.type || casoMimeDe(nuevo) }); casoSesionPoner(nuevo, f); await casoArchivoSubir(f, nuevo, 'SharePoint (aparte)');
+      _casoSpAviso = { texto: `Se guardó la versión de SharePoint como "${nuevo}". Falta elegir cuál queda como "${nombre}" (botón Resolver).`, error: true };
+    }
+  } catch (e) { _casoSpAviso = { texto: `No se pudo resolver "${nombre}": ${e.message}`, error: true }; }
   casoRenderLado();
 }
 
@@ -42680,7 +42841,7 @@ async function casoBuscarSharePoint(i) {
 }
 async function casoSpMeta(token, url) {
   if (!url || !/^https?:\/\//i.test(String(url).trim())) throw new Error('Falta la url del archivo o carpeta (la que devuelve buscar_sharepoint).');
-  const id = maiaChatEncodeShareUrl(String(url).trim()), r = await fetch(`https://graph.microsoft.com/v1.0/shares/${id}/driveItem?$select=id,name,size,folder,file,webUrl`, { headers: { Authorization: 'Bearer ' + token } });
+  const id = maiaChatEncodeShareUrl(String(url).trim()), r = await fetch(`https://graph.microsoft.com/v1.0/shares/${id}/driveItem?$select=id,name,size,folder,file,webUrl,eTag,cTag,lastModifiedDateTime,parentReference`, { headers: { Authorization: 'Bearer ' + token } });
   if (!r.ok) throw new Error('No se pudo acceder (¿la url es correcta y tenés permiso?).');
   return { id, meta: await r.json() };
 }
@@ -42697,8 +42858,9 @@ async function casoTraerSharePoint(i) {
   if (meta.folder) return `"${meta.name}" es una carpeta: usá listar_sharepoint para ver su contenido y traé los archivos de a uno.`;
   const nombre = String(i.nombre_nuevo || meta.name).replace(/[\\/:*?"<>|]/g, '_'); casoNombreLibre(nombre);
   if (meta.size > CASO_MAX_DESCARGA) throw new Error(`"${meta.name}" pesa ${casoKB(meta.size)}: es demasiado grande para traerlo.`);
-  const r = await casoGraph(token, `https://graph.microsoft.com/v1.0/shares/${id}/driveItem/content`);
-  return await casoGuardarTraido(await r.blob(), nombre, 'SharePoint');
+  const r = await casoGraph(token, `https://graph.microsoft.com/v1.0/shares/${id}/driveItem/content`), res = await casoGuardarTraido(await r.blob(), nombre, 'SharePoint');
+  if (meta.id && meta.parentReference && meta.parentReference.driveId) { const it = _casoLista.find(x => x.nombre === nombre); if (it) casoSpVincular(nombre, { driveId: meta.parentReference.driveId, itemId: meta.id, webUrl: meta.webUrl, etag: meta.eTag, ctag: meta.cTag, mtime: meta.lastModifiedDateTime, carpeta: 'SharePoint' }, it.versiones[0].version); }   // desde ahora el archivo se mantiene sincronizado
+  return res;
 }
 
 // ── Mails de Outlook ──

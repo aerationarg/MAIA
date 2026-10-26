@@ -103,3 +103,7 @@ create index if not exists maia_casos_pendientes_resp_idx on maia_casos_pendient
 alter table maia_casos_pendientes enable row level security;
 drop policy if exists "maia_casos_pendientes_authenticated_all" on maia_casos_pendientes;
 create policy "maia_casos_pendientes_authenticated_all" on maia_casos_pendientes for all to authenticated using (true) with check (true);
+
+-- ── Sincronización con SharePoint (archivos del caso vinculados a SharePoint) ──
+-- Si ya corriste lo anterior, corré solo esta línea. Guarda a qué archivo de SharePoint corresponde cada archivo del caso.
+alter table maia_casos add column if not exists sp_links jsonb default '{}'::jsonb;
