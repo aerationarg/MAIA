@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -16355,7 +16355,17 @@ function procesosFlowsheetSvg(p) {
   const modLiq = todas.filter(e => e._mod && !e.esLodos && e.tipoFig !== 'caja' && e.tipoFig !== 'maquina');
   if (modLiq.length) {
     const PXM = 24, hCom = Math.max(...modLiq.map(e => e.figH));
-    modLiq.forEach(e => { const m = modInfoPF && modInfoPF.miembros.find(x => x.nombre === e.nombre); e.figW = Math.max(50, Math.round(((m && m.largo) || 3) * PXM)); e.figH = hCom; e._minW = 150; });
+    // Ancho a escala (24 px por metro). Alto: el del compartimento más alto (referencia, en metros: la mayor altura cargada o la del módulo) se dibuja con la altura común del módulo, y los demás
+    // a la proporción de su altura real. La cámara de desinfección (laberinto) respeta su altura aunque sea mucho menor y va "en altura": a la misma cota superior que las demás unidades,
+    // sin llegar al piso (apoyada en patas). Una altura cargada que no es creíble para un compartimento (menos del 55 % de la de referencia) no se usa: se dibuja con la altura común.
+    const altoDe = e => { const m = modInfoPF && modInfoPF.miembros.find(x => x.nombre === e.nombre); return (m && m.alto) || 0; };
+    const hRefM = Math.max(...modLiq.map(altoDe), (modInfoPF && modInfoPF.alto) || 0);
+    modLiq.forEach(e => {
+      const m = modInfoPF && modInfoPF.miembros.find(x => x.nombre === e.nombre), alto = altoDe(e), r = hRefM > 0 && alto > 0 ? alto / hRefM : 0;
+      e.figW = Math.max(50, Math.round(((m && m.largo) || 3) * PXM)); e._minW = 150;
+      if (e.tipoFig === 'desinfeccion' && r > 0) { e.figH = Math.max(26, Math.round(hCom * Math.min(1, r))); e._enAltura = r < 0.97; }
+      else e.figH = (r >= 0.55 && r < 0.97) ? Math.round(hCom * r) : hCom;
+    });
   }
   // Tags numerados y listado de equipos (por defecto, cuando hay módulo compacto)
   p._pfListado = null;
@@ -16401,6 +16411,7 @@ function procesosFlowsheetSvg(p) {
     return { w, h: Math.round(h), hFigura: Math.round(hFigura) };
   };
   todas.forEach(et => Object.assign(et, medir(et)));
+  const hMaxMod = modLiq.length ? Math.max(...modLiq.map(e => e.hFigura)) : 0; // cota superior común del módulo (la unidad "en altura" se alinea con ella)
   modLiq.forEach(e => { e.figW = e.w; }); // el compartimento ocupa todo el ancho de su caja: los vecinos quedan pegados, como un solo tanque
   // "Zona de químicos": una caja más, medida con el mismo medir() genérico
   // (tipoFig 'caja' — grilla de íconos, sin figura de tanque), pero
@@ -16821,7 +16832,7 @@ function procesosFlowsheetSvg(p) {
   }
   if (liq.length) marcaTxtSvg('titulo_liq', padSides, padTop - 9, 'EFLUENTE LÍQUIDO', `fill="${c.text2}" font-size="10" font-weight="600"`, false);
   // posición de una unidad de la línea líquida (columna, banda de terreno y lo que el usuario movió a mano)
-  const posLiq = e => { const o = procesosFlowsheetOffset(layout, 'etapas', e.nombre); return { x: e._liqX + o.x, y: floorsLiq[e._rank] - e.hFigura + profundidadPx(e) + o.y }; };
+  const posLiq = e => { const o = procesosFlowsheetOffset(layout, 'etapas', e.nombre); return { x: e._liqX + o.x, y: floorsLiq[e._rank] - (e._enAltura ? hMaxMod : e.hFigura) + profundidadPx(e) + o.y }; };
   const prevLiq = e => { if (!e._col) return null; const pc = colsLiq[e._col - 1]; return pc[Math.min(e._rank, pc.length - 1)]; };
   const sigsLiq = e => { const sc = colsLiq[e._col + 1]; return sc ? procesosParesColumnas(colsLiq[e._col], sc).filter(par => par[0] === e).map(par => par[1]) : []; };
   colsLiq.flat().forEach(et => {
@@ -16829,6 +16840,7 @@ function procesosFlowsheetSvg(p) {
     const { svg: cajaSvg, bombas, bombasRecirc } = caja(x, y, et, false);
     et._bombas = bombas; et._x = x; et._y = y;
     svg += procesosFlowsheetDragWrap('etapa', et.nombre, cajaSvg, { x, y, w: et.w, h: et.h });
+    if (et._enAltura) { const yFondo = y + et.hFigura, yPiso = floorsLiq[et._rank]; if (yPiso - yFondo > 4) svg += `<line x1="${x + 10}" y1="${yFondo}" x2="${x + 10}" y2="${yPiso}" stroke="${verdeEq}" stroke-width="2.4" pointer-events="none"/><line x1="${x + et.w - 10}" y1="${yFondo}" x2="${x + et.w - 10}" y2="${yPiso}" stroke="${verdeEq}" stroke-width="2.4" pointer-events="none"/>`; }   // cámara en altura: apoyada en patas, sin llegar al piso
     if (bombasRecirc && bombasRecirc.length) svg += dibujarRecirculacion(bombasRecirc, prevLiq(et));
     const salida = puertoSalidaXY(et, x, y);
     const ax1 = salida.x, ax2 = x + et.w + gapX, ay = salida.y;
