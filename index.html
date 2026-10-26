@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -40116,7 +40116,7 @@ async function casoVerWord(file, desde, hasta) {
     else { const f = casoFilasTabla(b); out += `[${k}] TABLA ${f.length}x${(f[0] || []).length}: ` + f.slice(0, 6).map((r, ri) => `f${ri + 1}: ` + r.map(c => casoCorto(c, 30)).join(' | ')).join(' ‖ ') + (f.length > 6 ? ' …' : '') + '\n'; }
     if (out.length > CASO_MAX_RESULTADO - 300) { out += `… (se corta acá: seguí con desde=${k + 1})\n`; break; }
   }
-  return out + await casoWComentariosTxt(W);
+  return out + await casoWComentariosTxt(W) + await casoWSeccionesTxt(W);
 }
 const casoColLetra = n => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
 const casoValorEx = v => { if (v == null) return ''; if (typeof v === 'object') { if ('formula' in v || 'sharedFormula' in v) return '=' + (v.formula || v.sharedFormula) + (v.result != null ? ' → ' + v.result : ''); if (v.richText) return v.richText.map(r => r.text).join(''); if (v.text) return v.text; if (v instanceof Date) return v.toISOString().slice(0, 10); if (v.error) return v.error; return JSON.stringify(v); } return String(v); };
@@ -41839,11 +41839,11 @@ async function casoWSerializar(W) {
   W.zip.file('word/document.xml', new XMLSerializer().serializeToString(W.doc));
   (W.partes || new Map()).forEach((d, path) => W.zip.file(path, new XMLSerializer().serializeToString(d)));
 }
-async function casoWRel(W, tipo, target) {
+async function casoWRel(W, tipo, target, externo) {
   const d = await casoWParte(W, 'word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
   const ex = Array.from(d.getElementsByTagName('Relationship')).find(r => r.getAttribute('Target') === target && r.getAttribute('Type').endsWith('/' + tipo)); if (ex) return ex.getAttribute('Id');
   const n = Math.max(0, ...Array.from(d.getElementsByTagName('Relationship')).map(r => Number((/^rId(\d+)$/.exec(r.getAttribute('Id')) || [0, 0])[1]))) + 1, el = d.createElementNS(d.documentElement.namespaceURI, 'Relationship');
-  el.setAttribute('Id', 'rId' + n); el.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/' + tipo); el.setAttribute('Target', target); d.documentElement.appendChild(el); return 'rId' + n;
+  el.setAttribute('Id', 'rId' + n); el.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/' + tipo); el.setAttribute('Target', target); if (externo) el.setAttribute('TargetMode', 'External'); d.documentElement.appendChild(el); return 'rId' + n;
 }
 async function casoWTipo(W, { ext, mime, parte }) {
   const d = await casoWParte(W, '[Content_Types].xml'), ns = d.documentElement.namespaceURI;
@@ -41894,8 +41894,116 @@ function casoTblReescalar(tbl, total) { const gs = Array.from(tbl.getElementsByT
 function casoCeldaTexto(doc, tc, texto) { let ps = casoHijosW(tc, 'w:p'); if (!ps.length) { const p = procesosPropuestaParsearFragmento(doc, '<w:p/>')[0]; tc.appendChild(p); ps = [p]; } procesosPropuestaSetTextoParrafo(doc, ps[0], String(texto == null ? '' : texto)); ps.slice(1).forEach(x => tc.removeChild(x)); }
 
 // Operaciones nuevas de Word (devuelve true si la operación es de este grupo)
+// ── Word: índice, encabezados y pies, secciones, enlaces y leyendas ──
+const CASO_RNS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const CASO_SECTPR_ORDEN = ['headerReference', 'footerReference', 'footnotePr', 'endnotePr', 'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders', 'lnNumType', 'pgNumType', 'cols', 'formProt', 'vAlign', 'noEndnote', 'titlePg', 'textDirection', 'bidi', 'rtlGutter', 'docGrid', 'printerSettings', 'sectPrChange'];
+const CASO_HOJAS = { a4: [11906, 16838], a3: [16838, 23811], carta: [12240, 15840], letter: [12240, 15840], legal: [12240, 20160], oficio: [12240, 18720] };
+// Las secciones del documento en orden: las que terminan en un salto de sección (adentro de un párrafo) y, al final, la del cuerpo
+const casoWSectPrs = W => Array.from(W.doc.getElementsByTagName('w:sectPr')).filter(sp => sp.parentNode && (sp.parentNode === W.body || sp.parentNode.nodeName === 'w:pPr'));
+function casoWSeccionDe(W, bloque) { const sps = casoWSectPrs(W); return sps.find(sp => bloque.contains(sp) || !!(bloque.compareDocumentPosition(sp) & 4)) || null; }
+const casoWDocPartes = async W => { const d = await casoWParte(W, 'word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'); return Array.from(d.getElementsByTagName('Relationship')); };
+// Pone o cambia tamaño de hoja, orientación, márgenes, columnas y cómo empieza una sección
+function casoWAplicarSeccion(doc, sp, o) {
+  if (o.tipo_salto) { const t = { siguiente_pagina: 'nextPage', continua: 'continuous', pagina_par: 'evenPage', pagina_impar: 'oddPage' }[o.tipo_salto]; if (!t) throw new Error('El tipo de salto de sección tiene que ser siguiente_pagina, continua, pagina_par o pagina_impar.'); casoWQuitar(sp, 'type'); casoWProp(doc, sp, 'type', { val: t }); }
+  const pg = casoWProp(doc, sp, 'pgSz'); let w = Number(pg.getAttribute('w:w')) || 11906, h = Number(pg.getAttribute('w:h')) || 16838;
+  if (o.tamano_hoja) { const m = CASO_HOJAS[String(o.tamano_hoja).toLowerCase()]; if (!m) throw new Error('tamano_hoja: A4, A3, Carta, Legal u Oficio.'); [w, h] = m; }
+  if (o.orientacion) { const hor = o.orientacion === 'horizontal'; if (!hor && o.orientacion !== 'vertical') throw new Error('orientacion: horizontal o vertical.'); const a = Math.min(w, h), b = Math.max(w, h); [w, h] = hor ? [b, a] : [a, b]; if (hor) pg.setAttribute('w:orient', 'landscape'); else pg.removeAttribute('w:orient'); }
+  else if (o.tamano_hoja) { const hor = (Number(pg.getAttribute('w:w')) || 0) > (Number(pg.getAttribute('w:h')) || 1); if (hor) [w, h] = [Math.max(w, h), Math.min(w, h)]; }
+  pg.setAttribute('w:w', String(w)); pg.setAttribute('w:h', String(h));
+  if (o.margenes_cm != null) {
+    const m = o.margenes_cm, v = typeof m === 'object' ? m : { superior: m, inferior: m, izquierda: m, derecha: m }, mar = casoWProp(doc, sp, 'pgMar'), tw = x => String(Math.round(Number(x) * 567));
+    [['superior', 'top'], ['inferior', 'bottom'], ['izquierda', 'left'], ['derecha', 'right']].forEach(([k, a]) => { if (v[k] != null) { const n = Number(v[k]); if (!(n >= 0 && n < 15)) throw new Error('margenes_cm: valores entre 0 y 15 cm.'); mar.setAttribute('w:' + a, tw(n)); } });
+    ['header', 'footer'].forEach(a => { if (!mar.getAttribute('w:' + a)) mar.setAttribute('w:' + a, '708'); }); if (!mar.getAttribute('w:gutter')) mar.setAttribute('w:gutter', '0');
+  }
+  if (o.columnas != null) { const n = Math.round(Number(o.columnas)); if (!(n >= 1 && n <= 6)) throw new Error('columnas: de 1 a 6.'); const c = casoWProp(doc, sp, 'cols'); Array.from(c.attributes).forEach(a => c.removeAttribute(a.name)); c.setAttribute('w:num', String(n)); c.setAttribute('w:space', '708'); }
+  casoOrdenarW(sp, CASO_SECTPR_ORDEN);
+}
+// Párrafo de un encabezado o pie: texto simple con alineación, o tres partes (izquierda / centro / derecha) con tabulaciones. {pagina}, {paginas} y {fecha} se vuelven campos.
+function casoWHFParrafo(o, ancho) {
+  const esc = procesosPropuestaXmlEsc, tam = Math.round((Number(o.tamano) || 9) * 2), hoy = new Date().toLocaleDateString('es-AR');
+  const rpr = `<w:rPr>${o.negrita ? '<w:b/><w:bCs/>' : ''}${o.cursiva ? '<w:i/><w:iCs/>' : ''}${o.color ? `<w:color w:val="${casoHex(o.color)}"/>` : ''}<w:sz w:val="${tam}"/><w:szCs w:val="${tam}"/></w:rPr>`;
+  const campo = (ins, rel) => `<w:r>${rpr}<w:fldChar w:fldCharType="begin"/></w:r><w:r>${rpr}<w:instrText xml:space="preserve"> ${ins} </w:instrText></w:r><w:r>${rpr}<w:fldChar w:fldCharType="separate"/></w:r><w:r>${rpr}<w:t>${rel}</w:t></w:r><w:r>${rpr}<w:fldChar w:fldCharType="end"/></w:r>`;
+  const runs = t => String(t == null ? '' : t).split(/(\{pagina\}|\{paginas\}|\{fecha\})/).map(x => x === '{pagina}' ? campo('PAGE', '1') : x === '{paginas}' ? campo('NUMPAGES', '1') : x === '{fecha}' ? campo('DATE \\@ "dd/MM/yyyy"', hoy) : (x ? `<w:r>${rpr}<w:t xml:space="preserve">${esc(x)}</w:t></w:r>` : '')).join('');
+  const tres = o.izquierda != null || o.centro != null || o.derecha != null, borde = o.linea ? `<w:pBdr><w:${o.__pie ? 'top' : 'bottom'} w:val="single" w:sz="6" w:space="1" w:color="808080"/></w:pBdr>` : '';
+  if (tres) return `<w:p><w:pPr>${borde}<w:tabs><w:tab w:val="center" w:pos="${Math.round(ancho / 2)}"/><w:tab w:val="right" w:pos="${ancho}"/></w:tabs></w:pPr>${runs(o.izquierda)}<w:r><w:tab/></w:r>${runs(o.centro)}<w:r><w:tab/></w:r>${runs(o.derecha)}</w:p>`;
+  const jc = { izquierda: 'left', centro: 'center', derecha: 'right' }[o.alineacion || 'centro'] || 'center';
+  return `<w:p><w:pPr>${borde}<w:jc w:val="${jc}"/></w:pPr>${runs(o.texto)}</w:p>`;
+}
+// updateFields: Word actualiza los campos (índice, números de página, leyendas) al abrir el documento
+async function casoWActualizarCampos(W) {
+  const nueva = !W.zip.file('word/settings.xml') && !(W.partes && W.partes.has('word/settings.xml')), d = await casoWParte(W, 'word/settings.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="${CASO_WNS}"></w:settings>`), raiz = d.documentElement;
+  if (!d.getElementsByTagName('w:updateFields').length) {
+    const el = d.createElementNS(CASO_WNS, 'w:updateFields'); el.setAttribute('w:val', 'true');
+    const despues = ['hdrShapeDefaults', 'footnotePr', 'endnotePr', 'compat', 'docVars', 'rsids', 'mathPr', 'attachedSchema', 'themeFontLang', 'clrSchemeMapping', 'doNotIncludeSubdocsInStats', 'doNotAutoCompressPictures', 'forceUpgrade', 'captions', 'readModeInkLockDown', 'smartTagType', 'schemaLibrary', 'shapeDefaults', 'doNotEmbedSmartTags', 'decimalSymbol', 'listSeparator'];
+    raiz.insertBefore(el, Array.from(raiz.childNodes).find(n => n.nodeType === 1 && despues.includes(n.nodeName.replace(/^w:/, ''))) || null);
+  }
+  if (nueva) { await casoWRel(W, 'settings', 'settings.xml'); await casoWTipo(W, { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml', parte: '/word/settings.xml' }); }
+}
+// Encabezado o pie para las secciones indicadas: cambia el que ya tienen o crea uno nuevo (compartido por las que no tenían). nuevaParte = no tocar el que usan otras secciones.
+async function casoWEncabezadoPie(W, o, sps, nuevaParte) {
+  const doc = W.doc, pie = o.ubicacion === 'pie', tag = pie ? 'footer' : 'header', raiz = pie ? 'ftr' : 'hdr', ref = pie ? 'footerReference' : 'headerReference', rels = await casoWDocPartes(W);
+  const mime = `application/vnd.openxmlformats-officedocument.wordprocessingml.${tag}+xml`, modo = o.modo || null, creadas = {};
+  const ancho0 = (() => { const sp = sps[0], pg = sp && casoHijosW(sp, 'w:pgSz')[0], mar = sp && casoHijosW(sp, 'w:pgMar')[0]; return pg && mar ? Math.max(2000, (Number(pg.getAttribute('w:w')) || 11906) - (Number(mar.getAttribute('w:left')) || 1701) - (Number(mar.getAttribute('w:right')) || 1701)) : 9026; })();
+  const tipos = [['default', Object.assign({ __pie: pie }, o)]]; if (o.primera_distinta) tipos.push(['first', Object.assign({ __pie: pie }, o, { texto: o.texto_primera || '', izquierda: null, centro: null, derecha: null, alineacion: o.alineacion })]);
+  for (const sp of sps) {
+    for (const [tipo, oo] of tipos) {
+      const xml = casoWHFParrafo(oo, ancho0), actual = nuevaParte ? null : casoHijosW(sp, 'w:' + ref).find(x => x.getAttribute('w:type') === tipo);
+      if (actual) {
+        const rid = actual.getAttributeNS(CASO_RNS, 'id') || actual.getAttribute('r:id'), rel = rels.find(r => r.getAttribute('Id') === rid), path = rel && 'word/' + String(rel.getAttribute('Target')).replace(/^\/?(word\/)?/, '');
+        const d = path && await casoWParte(W, path); if (!d) throw new Error(`No se encontró el ${pie ? 'pie' : 'encabezado'} actual para cambiarlo.`);
+        const raizD = d.documentElement, tieneObjetos = raizD.getElementsByTagName('w:drawing').length || raizD.getElementsByTagName('w:pict').length || raizD.getElementsByTagName('w:tbl').length;
+        if (tieneObjetos && !modo) throw new Error(`El ${pie ? 'pie' : 'encabezado'} actual tiene imágenes o tablas (por ejemplo el logo). Indicá modo "agregar" para sumarle una línea sin tocarlo, o "reemplazar" para quitar todo y poner solo lo nuevo.`);
+        if (modo !== 'agregar') Array.from(raizD.childNodes).filter(n => n.nodeType === 1).forEach(n => raizD.removeChild(n));
+        procesosPropuestaParsearFragmento(d, xml).forEach(n => raizD.appendChild(n));
+      } else {
+        if (!creadas[tipo]) {
+          const num = 1 + Math.max(0, ...Object.keys(W.zip.files).concat(Array.from((W.partes || new Map()).keys())).map(n => Number((new RegExp('^word/' + tag + '(\\d+)\\.xml$').exec(n) || [0, 0])[1])));
+          const nombre = `${tag}${num}.xml`, d = await casoWParte(W, 'word/' + nombre, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${raiz} xmlns:w="${CASO_WNS}" xmlns:r="${CASO_RNS}"></w:${raiz}>`);
+          procesosPropuestaParsearFragmento(d, xml).forEach(n => d.documentElement.appendChild(n));
+          await casoWTipo(W, { mime, parte: '/word/' + nombre }); creadas[tipo] = await casoWRel(W, tag, nombre);
+        }
+        const [e] = procesosPropuestaParsearFragmento(doc, `<w:${ref} w:type="${tipo}" r:id="${creadas[tipo]}"/>`);
+        casoHijosW(sp, 'w:' + ref).filter(x => x.getAttribute('w:type') === tipo).forEach(x => sp.removeChild(x)); sp.insertBefore(e, sp.firstChild);
+      }
+    }
+    if (o.primera_distinta) casoWProp(doc, sp, 'titlePg'); else if (o.primera_distinta === false) casoWQuitar(sp, 'titlePg');
+    casoOrdenarW(sp, CASO_SECTPR_ORDEN);
+  }
+}
+const casoWNivelTitulo = p => { const m = /(?:heading|ttulo|t.tulo) ?([1-9])/i.exec(casoEstiloP(p)); return m ? Number(m[1]) : null; };
+// Índice (campo TOC de Word) en párrafos comunes, con los títulos ya escritos para que se vea enseguida; Word completa los números de página al abrir. contenido: titulos | figuras | tablas
+function casoWIndiceXml(W, o, estiloTitulo) {
+  const esc = procesosPropuestaXmlEsc, cont = o.contenido || 'titulos', niv = Math.min(9, Math.max(1, Math.round(Number(o.niveles) || 3)));
+  const instr = cont === 'figuras' ? ' TOC \\h \\z \\c "Figura" ' : cont === 'tablas' ? ' TOC \\h \\z \\c "Tabla" ' : ` TOC \\o "1-${niv}" \\h \\z \\u `;
+  const titulo = o.titulo === '' ? '' : esc(o.titulo || (cont === 'figuras' ? 'ÍNDICE DE FIGURAS' : cont === 'tablas' ? 'ÍNDICE DE TABLAS' : 'ÍNDICE'));
+  let entradas = [];
+  if (cont === 'titulos') W.bloques.forEach(b => { if (b.nodeName !== 'w:p') return; const n = casoWNivelTitulo(b), t = casoTextoP(b).trim(); if (n && n <= niv && t) entradas.push({ n, t }); });
+  else W.bloques.forEach(b => { if (b.nodeName !== 'w:p') return; const t = casoTextoP(b).trim(), re = cont === 'figuras' ? /^(Figura|Fig\.?)\s*\d+/i : /^Tabla\s*\d+/i; if (re.test(t)) entradas.push({ n: 1, t }); });
+  if (!entradas.length) entradas = [{ n: 1, t: 'Actualizá el índice en Word (clic derecho, Actualizar campo) para que aparezca el contenido.', vacio: true }];
+  const tab = '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9026"/></w:tabs>';
+  const fila = (e, i) => `<w:p><w:pPr><w:pStyle w:val="TOC${e.n}"/>${tab}${e.n > 1 ? `<w:ind w:left="${(e.n - 1) * 240}"/>` : ''}</w:pPr>${i === 0 ? `<w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r><w:r><w:instrText xml:space="preserve">${instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>` : ''}<w:r><w:t xml:space="preserve">${esc(e.t)}</w:t></w:r>${i === entradas.length - 1 ? '<w:r><w:fldChar w:fldCharType="end"/></w:r>' : ''}</w:p>`;
+  const cab = titulo ? (estiloTitulo ? `<w:p><w:pPr><w:pStyle w:val="${estiloTitulo}"/></w:pPr><w:r><w:t>${titulo}</w:t></w:r></w:p>` : `<w:p><w:pPr><w:spacing w:after="240"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>${titulo}</w:t></w:r></w:p>`) : '';
+  return cab + entradas.map(fila).join('') + (o.salto_pagina_despues ? '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' : '');
+}
+const casoWCampoSeq = (tipo, n) => `<w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:instrText xml:space="preserve"> SEQ ${tipo} \\* ARABIC </w:instrText></w:r><w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:t>${n}</w:t></w:r><w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>`;
+// Resumen de las secciones y de sus encabezados y pies (para ver_archivo)
+async function casoWSeccionesTxt(W) {
+  const sps = casoWSectPrs(W); if (!sps.length) return '';
+  const rels = await casoWDocPartes(W), textoDe = async (sp, ref) => {
+    const out = []; for (const r of casoHijosW(sp, 'w:' + ref)) { const rid = r.getAttributeNS(CASO_RNS, 'id') || r.getAttribute('r:id'), rel = rels.find(x => x.getAttribute('Id') === rid); if (!rel) continue; const d = await casoWParte(W, 'word/' + String(rel.getAttribute('Target')).replace(/^\/?(word\/)?/, '')); if (d) { const t = Array.from(d.getElementsByTagName('w:t')).map(x => x.textContent).join(' ').trim(), campos = Array.from(d.getElementsByTagName('w:instrText')).map(x => x.textContent.trim().split(/\s+/)[0]).filter(Boolean); out.push(`${r.getAttribute('w:type')}: «${casoCorto(t, 60)}»${campos.length ? ' [' + Array.from(new Set(campos)).join(', ') + ']' : ''}`); } }
+    return out.join('; ');
+  };
+  const lineas = [];
+  for (let i = 0; i < sps.length; i++) {
+    const sp = sps[i], pg = casoHijosW(sp, 'w:pgSz')[0], mar = casoHijosW(sp, 'w:pgMar')[0], tp = casoHijosW(sp, 'w:type')[0], cols = casoHijosW(sp, 'w:cols')[0], cm = a => mar ? (Number(mar.getAttribute('w:' + a)) / 567).toFixed(1) : '?';
+    const w = pg ? Number(pg.getAttribute('w:w')) : 0, h = pg ? Number(pg.getAttribute('w:h')) : 0, hojas = w && h ? (w > h ? 'horizontal' : 'vertical') + ` ${(Math.min(w, h) / 567).toFixed(1)}×${(Math.max(w, h) / 567).toFixed(1)} cm` : '';
+    lineas.push(`- Sección ${i + 1}${i === sps.length - 1 ? ' (última)' : ''}: ${hojas}${tp ? ', empieza: ' + tp.getAttribute('w:val') : ''}, márgenes sup ${cm('top')} inf ${cm('bottom')} izq ${cm('left')} der ${cm('right')} cm${cols && Number(cols.getAttribute('w:num')) > 1 ? ', ' + cols.getAttribute('w:num') + ' columnas' : ''}${casoHijosW(sp, 'w:titlePg')[0] ? ', primera página distinta' : ''}; encabezado ${(await textoDe(sp, 'headerReference')) || '(hereda o sin encabezado)'}; pie ${(await textoDe(sp, 'footerReference')) || '(hereda o sin pie)'}`);
+  }
+  return `\nSECCIONES (propiedades_seccion / salto_seccion / encabezado_pie):\n${lineas.join('\n')}\n`;
+}
 async function casoWordOpExtra(o, C, resumen) {
   const { W, doc, zip, colocar, bloques } = C;
+  const bl = k => { const b = bloques[k - 1]; if (!b) throw new Error(`No existe el bloque [${k}] (el documento tiene ${bloques.length}).`); return b; };
   const tabla = () => { if (!o._tabla || o._tabla.nodeName !== 'w:tbl') throw new Error(`${o.op}: "tabla" tiene que ser el número de un bloque que sea una tabla (ver_archivo).`); return o._tabla; };
   const filaIdx = (tbl, k) => { const trs = casoHijosW(tbl, 'w:tr'), tr = trs[(k || 1) - 1]; if (!tr) throw new Error(`La tabla no tiene la fila ${k} (tiene ${trs.length}).`); return tr; };
   const parr = () => { if (o._el && o._el.nodeName === 'w:p') return o._el; if (o.tabla && o.fila && o.columna) { const tc = casoHijosW(filaIdx(tabla(), o.fila), 'w:tc')[o.columna - 1]; return tc ? tc.getElementsByTagName('w:p')[0] : null; } return o._el; };
@@ -42016,6 +42124,72 @@ async function casoWordOpExtra(o, C, resumen) {
       const tpr = casoWHijoPrimero(doc, tbl, 'tblPr'); casoWProp(doc, tpr, 'tblW', { w: String(Math.round(an.reduce((x, y) => x + y, 0))), type: 'dxa' }); casoWProp(doc, tpr, 'tblLayout', { type: 'fixed' }); casoOrdenarW(tpr, CASO_TBLPR_ORDEN);
       resumen.push(`anchos de columna de la tabla [${o.tabla}]`); return true;
     }
+    case 'insertar_indice': {
+      const lp = await casoEstiloId(zip, ['toc heading', 'ttulo tdc', 'título tdc']), xml = casoWIndiceXml(W, o, lp);
+      colocar(procesosPropuestaParsearFragmento(doc, xml), o.despues_de == null ? 0 : o.despues_de); await casoWActualizarCampos(W);
+      resumen.push(`${o.contenido === 'figuras' ? 'índice de figuras' : o.contenido === 'tablas' ? 'índice de tablas' : 'índice'} insertado (Word completa los números de página al abrir el documento)`); return true;
+    }
+    case 'encabezado_pie': {
+      if (!String(o.texto || o.izquierda || o.centro || o.derecha || '').trim()) throw new Error('encabezado_pie: falta el texto ("texto", o "izquierda" / "centro" / "derecha"; podés usar {pagina}, {paginas} y {fecha}).');
+      const sps = casoWSectPrs(W), sel = (o.seccion == null || o.seccion === 'todas') ? sps : [sps[Number(o.seccion) - 1]];
+      if (!sel.length || sel.some(x => !x)) throw new Error(`encabezado_pie: el documento tiene ${sps.length} sección(es); "seccion" va de 1 a ${sps.length} o "todas".`);
+      await casoWEncabezadoPie(W, o, sel, false); await casoWActualizarCampos(W);
+      resumen.push(`${o.ubicacion === 'pie' ? 'pie' : 'encabezado'} ${o.seccion == null || o.seccion === 'todas' ? 'en todas las secciones' : 'en la sección ' + o.seccion}`); return true;
+    }
+    case 'salto_seccion': {
+      const x = bloques[Number(o.despues_de) - 1]; if (!x) throw new Error(`salto_seccion: "despues_de" tiene que ser el número de un bloque (1 a ${bloques.length}); el salto va justo después.`);
+      if (x.nodeName === 'w:p' && casoHijosW(x, 'w:pPr')[0] && casoHijosW(casoHijosW(x, 'w:pPr')[0], 'w:sectPr')[0]) throw new Error(`El bloque [${o.despues_de}] ya termina una sección: elegí otro lugar.`);
+      const gov = casoWSeccionDe(W, x); if (!gov) throw new Error('salto_seccion: no se encontró la sección donde va el salto.');
+      const copia = gov.cloneNode(true);   // la sección que termina acá conserva lo que tenía; la que empieza toma lo pedido
+      casoWAplicarSeccion(doc, gov, { tipo_salto: o.tipo || 'siguiente_pagina', orientacion: o.orientacion, tamano_hoja: o.tamano_hoja, margenes_cm: o.margenes_cm, columnas: o.columnas });
+      if (o.encabezado || o.pie) {
+        for (const [ub, v] of [['encabezado', o.encabezado], ['pie', o.pie]]) if (v) await casoWEncabezadoPie(W, Object.assign({}, typeof v === 'string' ? { texto: v } : v, { ubicacion: ub, modo: 'reemplazar' }), [gov], true);
+        await casoWActualizarCampos(W);
+      }
+      const [pr] = procesosPropuestaParsearFragmento(doc, '<w:p><w:pPr/></w:p>'); casoHijosW(pr, 'w:pPr')[0].appendChild(copia); x.parentNode.insertBefore(pr, x.nextSibling);
+      resumen.push(`salto de sección después de [${o.despues_de}]${o.orientacion ? ' (' + o.orientacion + ')' : ''}`); return true;
+    }
+    case 'propiedades_seccion': {
+      const sps = casoWSectPrs(W); let sel;
+      if (o.indice) { const sp = casoWSeccionDe(W, bl(o.indice)); sel = sp ? [sp] : []; } else sel = (o.seccion == null || o.seccion === 'todas') ? sps : [sps[Number(o.seccion) - 1]];
+      if (!sel.length || sel.some(x => !x)) throw new Error(`propiedades_seccion: el documento tiene ${sps.length} sección(es); "seccion" va de 1 a ${sps.length}, "todas", o indicá un "indice" de bloque.`);
+      if (!['orientacion', 'tamano_hoja', 'margenes_cm', 'columnas', 'tipo_salto'].some(k => o[k] != null)) throw new Error('propiedades_seccion: indicá orientacion, tamano_hoja, margenes_cm, columnas o tipo_salto.');
+      sel.forEach(sp => casoWAplicarSeccion(doc, sp, o)); resumen.push(`propiedades de ${sel.length} sección(es)`); return true;
+    }
+    case 'hipervinculo': {
+      const url = String(o.url || '').trim(); if (!/^(https?:\/\/|mailto:)\S+$/i.test(url)) throw new Error('hipervinculo: "url" tiene que empezar con http://, https:// o mailto:.');
+      const rid = await casoWRel(W, 'hyperlink', url, true), rp = '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr>';
+      if (o.buscar) {
+        const p = parr(); if (!p || p.nodeName !== 'w:p') throw new Error('hipervinculo: "indice" tiene que ser un párrafo (o una celda con tabla, fila y columna) cuando se usa "buscar".');
+        const txt = casoTextoP(p), quiere = Number.isInteger(o.ocurrencia) ? o.ocurrencia : 1; let desde = 0, i, n = 0, pos = -1;
+        while ((i = txt.indexOf(o.buscar, desde)) >= 0) { n++; if (n === quiere) { pos = i; break; } desde = i + o.buscar.length; }
+        if (pos < 0) throw new Error(`hipervinculo: el párrafo no contiene "${casoCorto(o.buscar, 40)}".`);
+        const rs = casoRunsRango(p, pos, pos + o.buscar.length); if (!rs.length || rs.some(r => r.parentNode !== p)) throw new Error('hipervinculo: ese texto está dentro de otro elemento (un enlace, un campo…) y no se puede enlazar acá.');
+        const [h] = procesosPropuestaParsearFragmento(doc, `<w:hyperlink r:id="${rid}" w:history="1"/>`); p.insertBefore(h, rs[0]);
+        rs.forEach(r => { const rpr = casoWHijoPrimero(doc, r, 'rPr'); casoWQuitar(rpr, 'color'); casoWQuitar(rpr, 'u'); casoWProp(doc, rpr, 'color', { val: '0563C1' }); casoWProp(doc, rpr, 'u', { val: 'single' }); casoOrdenarW(rpr, CASO_RPR_ORDEN); h.appendChild(r); });
+        resumen.push(`enlace en "${casoCorto(o.buscar, 25)}"`);
+      } else {
+        if (!String(o.texto || '').trim()) throw new Error('hipervinculo: indicá "buscar" (el texto que ya está en el párrafo) o "texto" (para agregar un párrafo con el enlace).');
+        colocar(procesosPropuestaParsearFragmento(doc, `<w:p><w:hyperlink r:id="${rid}" w:history="1"><w:r>${rp}<w:t xml:space="preserve">${procesosPropuestaXmlEsc(String(o.texto))}</w:t></w:r></w:hyperlink></w:p>`), o.despues_de == null ? -1 : o.despues_de); resumen.push('párrafo con enlace agregado');
+      }
+      return true;
+    }
+    case 'leyenda': {
+      const b = o._el; if (!b) throw new Error('leyenda: falta "indice" (el bloque de la imagen o de la tabla).');
+      const tipo = o.tipo_leyenda === 'Tabla' || o.tipo_leyenda === 'tabla' || b.nodeName === 'w:tbl' ? 'Tabla' : 'Figura', arriba = o.posicion ? o.posicion === 'arriba' : tipo === 'Tabla';
+      const previas = Array.from(doc.getElementsByTagName('w:instrText')).filter(x => new RegExp('SEQ\\s+' + tipo, 'i').test(x.textContent)).length, cap = await casoEstiloId(zip, ['caption', 'epígrafe', 'leyenda']);
+      const xml = `<w:p><w:pPr>${cap ? `<w:pStyle w:val="${cap}"/>` : ''}${arriba ? '<w:keepNext/>' : ''}<w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve">${tipo} </w:t></w:r>${casoWCampoSeq(tipo, previas + 1)}<w:r><w:rPr><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve">. ${procesosPropuestaXmlEsc(String(o.texto || ''))}</w:t></w:r></w:p>`;
+      const [n] = procesosPropuestaParsearFragmento(doc, xml); b.parentNode.insertBefore(n, arriba ? b : b.nextSibling); await casoWActualizarCampos(W); resumen.push(`leyenda de ${tipo.toLowerCase()} en [${o.indice}]`); return true;
+    }
+    case 'salto_pagina_antes': {
+      let ps = [];
+      if (Array.isArray(o.indices) && o.indices.length) ps = o.indices.map(k => bl(k)); else if (o.indice) ps = [bl(o.indice)];
+      else if (o.nivel) ps = bloques.filter(b => b.nodeName === 'w:p' && casoWNivelTitulo(b) === Number(o.nivel));
+      ps = ps.filter(b => b.nodeName === 'w:p'); if (o.excepto_primero) ps = ps.slice(1);
+      if (!ps.length) throw new Error('salto_pagina_antes: no hay párrafos para cambiar (indicá "nivel" de título, "indice" o "indices").');
+      ps.forEach(b => { const ppr = casoWHijoPrimero(doc, b, 'pPr'); casoWQuitar(ppr, 'pageBreakBefore'); if (o.quitar !== true) casoWProp(doc, ppr, 'pageBreakBefore'); casoOrdenarW(ppr, CASO_PPR_ORDEN); });
+      resumen.push(`${o.quitar === true ? 'se quitó el salto de página antes de' : 'salto de página antes de'} ${ps.length} párrafo(s)`); return true;
+    }
     case 'comentario': {
       const p = parr(); if (!p || p.nodeName !== 'w:p') throw new Error('comentario: "indice" tiene que ser un párrafo (o una celda con tabla, fila y columna).'); if (!String(o.texto || '').trim()) throw new Error('comentario: falta "texto".');
       let primero = null, ultimo = null;
@@ -42067,6 +42241,14 @@ CASO_HERRAMIENTAS.find(t => t.name === 'editar_word').description += ' RESALTAR 
 { const eo = CASO_HERRAMIENTAS.find(t => t.name === 'editar_word'), it = eo.input_schema.properties.operaciones.items;
   it.properties.op.enum.push('nivel_lista', 'mover_bloque', 'ancho_columnas'); Object.assign(it.properties, { nivel: { type: 'number', description: 'nivel_lista: nivel al que pasa el ítem (0 = primero).' }, delta: { type: 'number', description: 'nivel_lista: +1 lo baja a subítem, -1 lo sube un nivel.' }, direccion: { type: 'string', enum: ['arriba', 'abajo'], description: 'mover_bloque: hacia dónde (un ítem de lista se mueve con sus subítems).' }, anchos: { type: 'array', items: { type: 'number' }, description: 'ancho_columnas: ancho de cada columna en twips (567 = 1 cm), uno por columna.' } });
   eo.description += ' LISTAS Y TABLAS: nivel_lista {indice, delta o nivel} sube o baja un ítem de lista (subítems); mover_bloque {indice, direccion} reordena un ítem (con sus subítems) o un párrafo; ancho_columnas {tabla, anchos[]} cambia el ancho de las columnas; estilo_parrafo {indice, estilo: vineta|numerada|normal} convierte en lista o la quita; tabla_agregar_fila / tabla_eliminar_fila / tabla_agregar_columna / tabla_eliminar_columna / tabla_combinar editan la estructura de la tabla.'; }
+{ const eo = CASO_HERRAMIENTAS.find(t => t.name === 'editar_word'), it = eo.input_schema.properties.operaciones.items, pr = it.properties;
+  it.properties.op.enum.push('insertar_indice', 'encabezado_pie', 'salto_seccion', 'propiedades_seccion', 'hipervinculo', 'leyenda', 'salto_pagina_antes');
+  const nuevas = { niveles: { type: 'number', description: 'insertar_indice: cuántos niveles de título incluye (1 a 9, por defecto 3).' }, contenido: { type: 'string', enum: ['titulos', 'figuras', 'tablas'], description: 'insertar_indice: de qué es el índice (por defecto títulos).' }, titulo: { type: 'string', description: 'insertar_indice: título del índice (por defecto ÍNDICE; "" para no poner título).' }, salto_pagina_despues: { type: 'boolean', description: 'insertar_indice: agrega un salto de página después del índice.' },
+    ubicacion: { type: 'string', enum: ['encabezado', 'pie'], description: 'encabezado_pie: cuál de los dos.' }, izquierda: { type: 'string' }, centro: { type: 'string' }, derecha: { type: 'string', description: 'encabezado_pie: texto en cada tercio (con tabulaciones); {pagina}, {paginas} y {fecha} se vuelven campos que se actualizan solos.' }, alineacion: { type: 'string', enum: ['izquierda', 'centro', 'derecha'], description: 'encabezado_pie: alineación cuando se usa "texto".' }, tamano: { type: 'number', description: 'encabezado_pie: tamaño en puntos (por defecto 9).' }, negrita: { type: 'boolean' }, cursiva: { type: 'boolean' }, color: { type: 'string' }, linea: { type: 'boolean', description: 'encabezado_pie: raya debajo del encabezado / arriba del pie.' }, primera_distinta: { type: 'boolean', description: 'encabezado_pie: primera página con otro encabezado/pie (texto_primera; vacío si no se indica).' }, texto_primera: { type: 'string' }, modo: { type: 'string', enum: ['reemplazar', 'agregar'], description: 'encabezado_pie: qué hacer si ya hay uno con imágenes o tablas (logo): agregar una línea o reemplazar todo.' },
+    seccion: { type: ['number', 'string'], description: 'encabezado_pie / propiedades_seccion: número de sección (ver_archivo las lista) o "todas".' }, tipo: { type: 'string', enum: ['siguiente_pagina', 'continua', 'pagina_par', 'pagina_impar'], description: 'salto_seccion: cómo empieza la sección nueva.' }, tipo_salto: { type: 'string', enum: ['siguiente_pagina', 'continua', 'pagina_par', 'pagina_impar'], description: 'propiedades_seccion: cómo empieza la sección.' }, orientacion: { type: 'string', enum: ['horizontal', 'vertical'] }, tamano_hoja: { type: 'string', enum: ['A4', 'A3', 'Carta', 'Legal', 'Oficio'] }, margenes_cm: { type: ['number', 'object'], description: 'Un número (todos los márgenes) o { superior, inferior, izquierda, derecha } en cm.' }, columnas: { type: 'number', description: 'Columnas de texto (1 a 6).' }, encabezado: { type: ['string', 'object'], description: 'salto_seccion: encabezado propio de la sección nueva (texto o los mismos campos de encabezado_pie).' }, pie: { type: ['string', 'object'], description: 'salto_seccion: pie propio de la sección nueva.' },
+    url: { type: 'string', description: 'hipervinculo: dirección (http://, https:// o mailto:).' }, ocurrencia: { type: 'number' }, tipo_leyenda: { type: 'string', enum: ['Figura', 'Tabla'], description: 'leyenda: Figura (debajo de la imagen) o Tabla (arriba de la tabla).' }, posicion: { type: 'string', enum: ['arriba', 'debajo'] }, indices: { type: 'array', items: { type: 'number' } }, excepto_primero: { type: 'boolean' }, quitar: { type: 'boolean' } };
+  Object.entries(nuevas).forEach(([k, v]) => { if (!pr[k]) pr[k] = v; });
+  eo.description += ' ÍNDICE, ENCABEZADOS, SECCIONES Y MÁS: insertar_indice {despues_de (0 = al principio), niveles, titulo, contenido: titulos|figuras|tablas, salto_pagina_despues} pone un índice real de Word (los títulos tienen que usar estilos de título; Word completa los números de página al abrir); encabezado_pie {ubicacion: encabezado|pie, texto o izquierda/centro/derecha, alineacion, seccion, primera_distinta, linea, modo} con {pagina}, {paginas} y {fecha} como campos (por ejemplo "Página {pagina} de {paginas}"); salto_seccion {despues_de, tipo, orientacion, tamano_hoja, margenes_cm, columnas, encabezado, pie} abre una sección NUEVA de Word (por ejemplo una parte en horizontal o con otro encabezado) justo después de ese bloque; propiedades_seccion {seccion|indice, orientacion, tamano_hoja, margenes_cm, columnas} cambia secciones que ya existen; salto_pagina_antes {nivel, indices, excepto_primero, quitar} hace que cada título de ese nivel empiece en una hoja nueva; hipervinculo {indice, buscar, url} o {despues_de, texto, url}; leyenda {indice, texto, tipo_leyenda} agrega "Figura N." o "Tabla N." con numeración automática. ver_archivo lista las secciones con sus encabezados y pies. Cosas que NO se pueden hacer desde acá: notas al pie, referencias cruzadas, marcas de agua y control de cambios.'; }
 CASO_HERRAMIENTAS.find(t => t.name === 'editar_excel').description += ' COMENTARIOS: ver_archivo lista las notas de la planilla (hoja!celda: texto); "nota" {celda, texto} agrega una y "quitar_nota" {celda} la borra.';
 // ── Casos · edición DIRECTA de DFS, manuales, presentaciones, flowsheets y propuestas + duplicar, comparar y restaurar ──
 // editar_documento le habla al chat de cada módulo (otra IA: más caro y a veces interpreta mal). Estas herramientas aplican cambios exactos, sin IA de por medio, con las mismas
