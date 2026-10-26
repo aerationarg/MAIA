@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -10281,6 +10281,7 @@ function procesosStep2Html(p) {
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2TrenAbrirDesdeActual()" title="Abre el tren actual para preguntarle a la IA por qué está armado así o modificarlo por chat (agregar/sacar unidades, serie/paralelo, etc.) — no se aplica hasta que lo confirmes">💬 Revisar / modificar el tren con chat</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2ToggleBalanceTren()" title="Calcula cómo entra y cómo sale cada parámetro (DBO, DQO, SST...) en cada unidad y en todo el tren, con las eficiencias de remoción">📊 Balance de parámetros del tren</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2ExportarExcel()" title="Baja un Excel con una hoja por unidad del tren, con los valores que tiene definidos en este momento (y su unidad, origen, motivo y fórmula)">📥 Descargar valores (Excel)</button>` : ''}
+      ${ordenadas.length ? `<input type="file" id="procesos-step2-imp-file" accept=".xlsx" style="display:none" onchange="procesosStep2ImportarExcel(this)" /><button class="btn btn-secondary btn-sm" style="width:auto" onclick="document.getElementById('procesos-step2-imp-file').click()" title="Carga valores desde un Excel con el mismo formato que baja Descargar valores (una hoja por unidad, columnas Ref / Parámetro / Valor). Antes de aplicar te muestra qué cambia y podés destildar lo que no quieras.">📤 Importar valores (Excel)</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="procesosStep2DefinirTodas()" title="Define los valores de las unidades que todavía no están definidas, en orden y en una sola pasada por unidad">✦ Definir valores de todas las unidades</button>` : ''}
       ${ordenadas.length ? `<button class="btn btn-secondary btn-sm" style="width:auto;color:var(--red)" onclick="procesosStep2BorrarValores()" title="Borra los valores definidos de todas las unidades para poder volver a definirlos desde cero (se conservan el tren, las conexiones, las fórmulas y filas propias)">🗑 Borrar valores definidos</button>` : ''}
     </div>
@@ -12419,6 +12420,122 @@ async function procesosStep2ExportarExcel() {
     cotizDescargarBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), nombreArch);
     showMsg(sid, sinHoja.length ? 'error' : 'success', `✓ Excel descargado: ${nombres.length} hoja${nombres.length === 1 ? '' : 's'} (una por unidad).` + (sinHoja.length ? ` No se pudo leer: ${sinHoja.join(', ')}.` : ''));
   } catch (e) { showMsg(sid, 'error', '✕ No se pudo armar el Excel: ' + e.message); }
+}
+
+// ── Importar valores desde el Excel que baja "Descargar valores" ──
+// Lee ese mismo Excel (una hoja por unidad: A1 = nombre de la unidad y, desde el encabezado Ref / Parámetro / Valor, una fila por celda) y cruza cada fila con la celda de la unidad por su REF. Antes de aplicar muestra qué cambia
+// (valor actual → valor del Excel) y deja destildar filas. Solo se cargan valores de celdas de entrada: las calculadas por fórmula, las dimensiones fijas de la planta compacta y las filas cuyo nombre no coincide vienen sin tildar
+// y avisando; las filas propias se cambian desde su hoja. Los valores quedan como si se hubieran escrito a mano (con el motivo "importado del Excel"), la unidad pasa a "sin guardar" y se pueden revisar y confirmar como siempre.
+let _procesosImp = null;
+function procesosImpTexto(cell) {
+  const v = cell.value;
+  if (v == null) return '';
+  if (typeof v === 'object') return v.richText ? v.richText.map(r => r.text).join('') : (v.result !== undefined ? String(v.result) : (v.text != null ? String(v.text) : ''));
+  return String(v);
+}
+function procesosImpValor(cell) {
+  let v = cell.value;
+  if (v && typeof v === 'object' && !(v instanceof Date)) { if (v.result !== undefined) v = v.result; else if (v.richText) v = v.richText.map(r => r.text).join(''); else if (v.text != null) v = v.text; else return null; }
+  if (v == null || typeof v === 'object') return null;
+  if (typeof v === 'string') { const t = v.trim(); if (!t || /^ERROR/.test(t)) return null; return /^-?\d+([.,]\d+)?$/.test(t) ? Number(t.replace(',', '.')) : t; }
+  return typeof v === 'number' && isFinite(v) ? v : null;
+}
+async function procesosStep2ImportarExcel(input) {
+  const file = input.files && input.files[0]; input.value = ''; if (!file) return;
+  const p = procesosCurrentProyecto, st = procesosStep2State, dd = (p && p.diseno_data) || {}, sid = 'procesos-step2-status';
+  const nombres = (dd.orden || []).filter(n => dd.hojas && dd.hojas[n] && dd.hojas[n].seleccionada);
+  if (!nombres.length) { alert('No hay unidades en el tren para importar valores.'); return; }
+  if (!st.workbook) { alert('Todavía no se cargó la planilla de diseño: esperá a que termine de cargar y probá de nuevo.'); return; }
+  showMsg(sid, 'loading', 'Leyendo el Excel...');
+  try {
+    await casoCargarExcelJS();
+    const wb = new ExcelJS.Workbook(); await wb.xlsx.load(await file.arrayBuffer());
+    const norm = procesosNormTxt, porNombre = {}; nombres.forEach(n => { porNombre[norm(n)] = n; });
+    const unidades = [], avisos = []; let iguales = 0, propias = 0;
+    for (const ws of wb.worksheets) {
+      const unidad = porNombre[norm(procesosImpTexto(ws.getCell('A1')).trim())] || porNombre[norm(ws.name)];
+      if (!unidad) { avisos.push(`La hoja "${ws.name}" no corresponde a ninguna unidad del tren (se ignora).`); continue; }
+      let hdr = 0, cRef = 0, cPar = 0, cVal = 0;
+      for (let r = 1; r <= Math.min(12, ws.rowCount) && !hdr; r++) {
+        let a = 0, b = 0, c = 0; for (let k = 1; k <= Math.min(12, ws.columnCount); k++) { const t = norm(procesosImpTexto(ws.getCell(r, k)).trim()); if (t === 'ref') a = k; else if (t === 'parametro') b = k; else if (t === 'valor') c = k; }
+        if (a && b && c) { hdr = r; cRef = a; cPar = b; cVal = c; }
+      }
+      if (!hdr) { avisos.push(`La hoja "${ws.name}" no tiene la tabla Ref / Parámetro / Valor (se ignora).`); continue; }
+      const model = st.hojaModels[unidad], hf = procesosStep2GetHF(unidad);
+      if (!model || !hf) { avisos.push(`No se pudo leer la planilla de "${unidad}" (se ignora).`); continue; }
+      const h = dd.hojas[unidad] || {}, fijas = procesosPCFijas(unidad, h), items = [];
+      for (let r = hdr + 1; r <= ws.rowCount; r++) {
+        const ref = procesosImpTexto(ws.getCell(r, cRef)).trim(); if (!ref) continue;
+        const nuevo = procesosImpValor(ws.getCell(r, cVal)); if (nuevo === null) continue;
+        const c = model.cells.find(x => x.ref === ref);
+        if (!c) { avisos.push(`"${unidad}": la celda ${ref} ya no existe en la planilla (se ignora).`); continue; }
+        if (c.extra) { propias++; continue; }
+        const actual = hf.getCellValue({ sheet: 0, row: c.row, col: c.col });
+        if (typeof nuevo === 'number' ? (typeof actual === 'number' && Math.abs(actual - nuevo) <= 1e-9 * Math.max(1, Math.abs(actual))) : String(actual == null ? '' : actual) === nuevo) { iguales++; continue; }
+        if (typeof nuevo === 'string' && typeof actual === 'number') { avisos.push(`"${unidad}" ${ref} ${c.label}: el Excel tiene un texto ("${nuevo.slice(0, 30)}") donde la celda es numérica (se ignora).`); continue; }
+        const adv = [];
+        if (norm(procesosImpTexto(ws.getCell(r, cPar)).trim()) !== norm(c.label || '')) adv.push(`el nombre no coincide ("${procesosImpTexto(ws.getCell(r, cPar)).trim().slice(0, 40)}" en el Excel): puede ser otra celda`);
+        if (fijas && fijas.refs.has(ref)) adv.push(fijas.enlazadas.has(ref) ? 'se toma de otra unidad del módulo de planta compacta' : 'dimensión de fábrica del modelo de planta compacta');
+        if (c.isFormula) adv.push('es una celda calculada por fórmula: al importarla queda fija');
+        items.push({ ref, label: c.label || ref, unidad: c.unidad || '', actual: typeof actual === 'number' ? actual : (procesosStep2EsError(actual) ? 'error' : (actual == null ? '' : String(actual))), nuevo, adv, marcada: !adv.length });
+      }
+      if (items.length) unidades.push({ nombre: unidad, hoja: ws.name, items });
+    }
+    _procesosImp = { proyecto: p, archivo: file.name, unidades, avisos, iguales, propias };
+    if (!unidades.length) {
+      showMsg(sid, avisos.length ? 'error' : 'success', avisos.length ? '✕ No hay nada para importar. ' + avisos.slice(0, 3).join(' ') : `✓ El Excel no trae cambios: los ${iguales} valores coinciden con los que ya tiene el proyecto.`);
+      _procesosImp = null; return;
+    }
+    { const el = document.getElementById(sid); if (el) el.style.display = 'none'; } procesosStep2ImportarMostrar();
+  } catch (e) { showMsg(sid, 'error', '✕ No se pudo leer el Excel: ' + e.message); }
+}
+function procesosStep2ImportarMostrar() {
+  const imp = _procesosImp; if (!imp) return;
+  let m = document.getElementById('procesos-imp-modal');
+  if (!m) { m = document.createElement('div'); m.id = 'procesos-imp-modal'; m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1001;display:flex;align-items:center;justify-content:center;padding:12px'; document.body.appendChild(m); }
+  const fmt = v => typeof v === 'number' ? procesosFormatearNumero(v) : (v === '' ? '(vacío)' : esc(String(v)));
+  const bloques = imp.unidades.map((u, i) => `<div style="margin-bottom:12px"><div style="display:flex;gap:8px;align-items:center;font-weight:600;margin-bottom:4px"><span style="flex:1">${esc(u.nombre)} <span class="hint" style="margin:0;display:inline;font-weight:400">· hoja "${esc(u.hoja)}" · ${u.items.length} cambio${u.items.length === 1 ? '' : 's'}</span></span><button class="btn btn-secondary btn-sm" style="width:auto;padding:1px 8px;font-size:11px" onclick="procesosStep2ImportarMarcarTodas(${i},true)">Tildar todas</button><button class="btn btn-secondary btn-sm" style="width:auto;padding:1px 8px;font-size:11px" onclick="procesosStep2ImportarMarcarTodas(${i},false)">Destildar</button></div><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr style="text-align:left;color:var(--text2)"><th style="padding:3px 6px"></th><th style="padding:3px 6px">Ref</th><th style="padding:3px 6px">Parámetro</th><th style="padding:3px 6px;text-align:right">Ahora</th><th style="padding:3px 6px;text-align:right">Excel</th><th style="padding:3px 6px">Unidad</th><th style="padding:3px 6px">Aviso</th></tr></thead><tbody>${u.items.map((it, j) => `<tr style="border-top:1px solid var(--border);vertical-align:top"><td style="padding:3px 6px"><input type="checkbox" id="pimp-${i}-${j}" ${it.marcada ? 'checked' : ''} onchange="procesosStep2ImportarMarcar(${i},${j},this.checked)" /></td><td style="padding:3px 6px">${esc(it.ref)}</td><td style="padding:3px 6px">${esc(it.label)}</td><td style="padding:3px 6px;text-align:right;color:var(--text2)">${fmt(it.actual)}</td><td style="padding:3px 6px;text-align:right;font-weight:600">${fmt(it.nuevo)}</td><td style="padding:3px 6px">${esc(it.unidad)}</td><td style="padding:3px 6px;color:var(--red);font-size:11.5px">${esc(it.adv.join(' · '))}</td></tr>`).join('')}</tbody></table></div></div>`).join('');
+  const notas = [imp.iguales ? `${imp.iguales} valor${imp.iguales === 1 ? '' : 'es'} del Excel ya coinciden con el proyecto (no se muestran).` : '', imp.propias ? `${imp.propias} fila${imp.propias === 1 ? ' propia' : 's propias'} no se importan (se cambian desde su hoja).` : '', ...imp.avisos.slice(0, 6)].filter(Boolean);
+  m.innerHTML = `<div class="card" style="width:min(1000px,100%);max-height:min(90vh,900px);margin:0;display:flex;flex-direction:column;min-height:0"><div style="font-weight:700;margin-bottom:4px">Importar valores de "${esc(imp.archivo)}"</div><p class="hint" style="margin:0 0 8px">Tildá lo que querés cargar. Los valores quedan como cargados a mano (con el motivo "importado del Excel") y las unidades modificadas pasan a "sin guardar" para que las revises. Las filas con aviso vienen sin tildar.</p><div style="flex:1;min-height:0;overflow:auto">${bloques}${notas.length ? `<p class="hint" style="margin:0">${notas.map(esc).join('<br>')}</p>` : ''}</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-secondary" style="width:auto" onclick="procesosStep2ImportarCerrar()">Cancelar</button><button class="btn btn-primary" id="procesos-imp-aplicar" style="width:auto" onclick="procesosStep2ImportarAplicar()"></button></div></div>`;
+  procesosStep2ImportarContar();
+}
+function procesosStep2ImportarContar() {
+  const b = document.getElementById('procesos-imp-aplicar'); if (!b || !_procesosImp) return;
+  const n = _procesosImp.unidades.reduce((a, u) => a + u.items.filter(i => i.marcada).length, 0);
+  b.textContent = n ? `Aplicar ${n} valor${n === 1 ? '' : 'es'}` : 'Nada tildado'; b.disabled = !n;
+}
+function procesosStep2ImportarMarcar(i, j, v) { if (_procesosImp) { _procesosImp.unidades[i].items[j].marcada = !!v; procesosStep2ImportarContar(); } }
+function procesosStep2ImportarMarcarTodas(i, v) { if (!_procesosImp) return; _procesosImp.unidades[i].items.forEach((it, j) => { it.marcada = v; const c = document.getElementById(`pimp-${i}-${j}`); if (c) c.checked = v; }); procesosStep2ImportarContar(); }
+function procesosStep2ImportarCerrar() { const m = document.getElementById('procesos-imp-modal'); if (m) m.remove(); _procesosImp = null; }
+async function procesosStep2ImportarAplicar() {
+  const imp = _procesosImp, sid = 'procesos-step2-status'; if (!imp) return;
+  const p = procesosCurrentProyecto, st = procesosStep2State;
+  if (p !== imp.proyecto) { alert('Cambiaste de proyecto mientras se revisaba el Excel: volvé a importarlo.'); procesosStep2ImportarCerrar(); return; }
+  const sel = imp.unidades.map(u => ({ u, items: u.items.filter(i => i.marcada) })).filter(x => x.items.length);
+  if (!sel.length) return;
+  const archivo = imp.archivo; procesosStep2ImportarCerrar();
+  const dd = Object.assign({}, p.diseno_data); dd.hojas = Object.assign({}, dd.hojas);
+  const fecha = new Date().toLocaleDateString('es-AR'); let n = 0; const tocadas = [];
+  sel.forEach(({ u, items }) => {
+    const model = st.hojaModels[u.nombre], hf = procesosStep2GetHF(u.nombre); if (!model || !hf) return;
+    const h = Object.assign({ seleccionada: true, valores: {}, chat: [], confirmada: false }, dd.hojas[u.nombre]);
+    h.valores = Object.assign({}, h.valores); h.motivos = Object.assign({}, h.motivos); const forz = new Set(h.celdasForzadas || []); const formulas = h.formulas ? Object.assign({}, h.formulas) : null;
+    items.forEach(it => {
+      const c = model.cells.find(x => x.ref === it.ref); if (!c) return;
+      hf.setCellContents({ sheet: 0, row: c.row, col: c.col }, [[it.nuevo]]);
+      h.valores[it.ref] = it.nuevo;
+      if (formulas && formulas[it.ref]) { delete formulas[it.ref]; c.formulaEditada = false; if (c.isFormulaOrig !== undefined) c.isFormula = c.isFormulaOrig; }   // igual que al escribir a mano sobre una celda con fórmula propia
+      if (c.isFormula || ((dd.mapeos || {})[u.nombre] || []).some(m => m.celda === it.ref)) forz.add(it.ref);
+      h.motivos[it.ref] = { motivo: `importado del Excel "${archivo}" (hoja "${u.hoja}")`, origen: 'importación de Excel', fecha };
+      n++;
+    });
+    if (formulas) h.formulas = formulas;
+    h.celdasForzadas = Array.from(forz); h.confirmada = false; dd.hojas[u.nombre] = h; tocadas.push(u.nombre);
+  });
+  if (st.hfShared) st.hfShared.rebuildAndRecalculate();
+  clearTimeout(_procesosSaveTimeout);
+  try { await procesosSaveProyecto({ diseno_data: dd }, p); } catch (e) { showMsg(sid, 'error', '✕ No se pudo guardar: ' + e.message); return; }
+  if (procesosCurrentProyecto === p) { renderProcesosStepContent(); showMsg(sid, 'success', `✓ ${n} valor${n === 1 ? '' : 'es'} importado${n === 1 ? '' : 's'} en ${tocadas.length} unidad${tocadas.length === 1 ? '' : 'es'} (${tocadas.join(', ')}). Quedaron "sin guardar": revisalas y confirmalas.`); }
 }
 
 async function procesosStep2DefinirTodas() {
