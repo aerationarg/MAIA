@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -39122,7 +39122,7 @@ async function simRecBuscar() {
         }
         if (corto) break;
       }
-      resuelven.sort((a, b) => simRecRel(a.cs[0]) - simRecRel(b.cs[0]));
+      resuelven.sort((a, b) => (Number(!!simRecCausa(b.cs[0])) - Number(!!simRecCausa(a.cs[0]))) || (simRecRel(a.cs[0]) - simRecRel(b.cs[0])));   // primero los que atacan la causa
       let combo = null;
       if (!resuelven.length && parciales.length && !soloSimples) {
         parciales.sort((a, b) => (a.p[0] - b.p[0]) || (a.p[1] - b.p[1]));
@@ -39181,22 +39181,51 @@ function simRecAplicar(n) {
   const cs = _simRecAcc[n]; if (!cs) return; const y0 = window.scrollY;
   cs.forEach(c => { const u = simU(c.id); if (u) { u.params[c.k] = c.v; u.fuentes[c.k] = 'manual'; } }); _simRecom = null; simGuardar(); simRender(); window.scrollTo(0, y0);
 }
+// ¿Este cambio ataca la causa del problema? Sí si corrige un valor que hoy está fuera de su rango normal (edad de lodos real, recirculación, MLSS, oxígeno) y con el cambio entra al rango o se acerca mucho
+function simRecCausa(c) {
+  try {
+    const u = simU(c.id); if (!u) return null;
+    const g = simGlobalNum(), f = x => +(Math.abs(x) >= 100 ? x.toFixed(0) : x.toFixed(1)), P0 = simParamsNum(u), uc = Object.assign({}, u, { params: Object.assign({}, u.params, { [c.k]: c.v }) }), P1 = simParamsNum(uc);
+    const dentro = (x, lo, hi) => x >= lo && x <= hi, dist = (x, lo, hi) => x < lo ? lo - x : x > hi ? x - hi : 0;
+    const mejora = (a, b, lo, hi) => a != null && b != null && !dentro(a, lo, hi) && (dentro(b, lo, hi) || dist(b, lo, hi) < 0.4 * dist(a, lo, hi));
+    const ext = String(P0.tipo_proceso || 'extendida').toLowerCase().startsWith('ext');
+    if (u.tipo === 'lodos_activados') {
+      const edad = P => {   // edad de lodos real con la purga cargada
+        const r = simVerificarLA(P, g); if (r.faltan && r.faltan.length) return null;
+        const prog = (r.ind || []).find(i => /^Edad de lodos con la purga programada/.test(i.nombre)); if (prog) return prog.valor;
+        if (P.q_purga > 0 && P.purga_modo !== 'horario' && P.purga_modo !== 'ciclos') return P.volumen * P.mlss / (P.q_purga * 24 * (P.mlss_recirc || P.mlss * 2.2));
+        return r.calc ? r.calc.SRT : null;
+      };
+      if (['q_purga', 'purga_qb', 'purga_horaria', 'edad_lodos'].includes(c.k)) { const [lo, hi] = ext ? [20, 40] : [5, 15], a = edad(P0), b = edad(P1); if (mejora(a, b, lo, hi)) return `La edad de lodos real es ${f(a)} d (normal ${lo}–${hi} d) y con este cambio queda en ${f(b)} d.`; }
+      if (c.k === 'mlss') { const [lo, hi] = ext ? [3000, 6000] : [1500, 4000]; if (mejora(P0.mlss, P1.mlss, lo, hi)) return `El MLSS es ${f(P0.mlss)} mg/L (normal ${lo}–${hi}) y con este cambio queda en ${f(P1.mlss)}.`; }
+      if (c.k === 'oxigeno_disuelto') { if (mejora(P0.oxigeno_disuelto, P1.oxigeno_disuelto, 1.5, 4)) return `El oxígeno disuelto es ${f(P0.oxigeno_disuelto)} mg/L (normal 1,5–4) y con este cambio queda en ${f(P1.oxigeno_disuelto)}.`; }
+    }
+    if (u.tipo === 'sedimentador' && ['relacion_rec', 'q_rec', 'rec_qb', 'rec_horaria'].includes(c.k)) {
+      const [lo, hi] = ext ? [0.75, 1.5] : [0.25, 1.0], r0 = simSedParams(P0, g), r1 = simSedParams(P1, g), a = r0.Qr && r0.Q ? r0.Qr / r0.Q : null, b = r1.Qr && r1.Q ? r1.Qr / r1.Q : null;
+      if (mejora(a, b, lo, hi)) return `La recirculación es ${f(a * 100) / 100} veces el caudal (normal ${lo}–${hi}) y con este cambio queda en ${f(b * 100) / 100}.`;
+    }
+  } catch (e) { /* sin explicación */ }
+  return null;
+}
 function simRecomHtml(plant, d) {
   if (d.examen && d.examen.activo && !d.examen.respondido) return '';
   _simRecAcc = [];
   const pr = simProblemas(plant), malU = simIndMalos(d), f1 = x => x == null || !isFinite(x) ? '—' : (Math.abs(x) >= 100 ? String(Math.round(x)) : String(+x.toFixed(1)));
   if (!pr.length && !malU.length) return `<div class="hint" style="margin:10px 0 0;color:var(--green)">✓ Todo cumple y nada rebalsa.</div>`;
   const rec = _simRecom && _simRecom.k === simPlantaClave(d) ? _simRecom : null;
-  const tr = rs => rs.slice(0, 4).map(([a, b]) => `${simHora(a)}–${simHora(b)}`).join(', ') + (rs.length > 4 ? '…' : '');
+  const pre = /^Día \d+ · /, tr = rs => rs.slice(0, 4).map(([a, b]) => { const h0 = simHora(a), h1 = simHora(b); return `${h0}–${(pre.exec(h0) || [])[0] === (pre.exec(h1) || [])[0] ? h1.replace(pre, '') : h1}`; }).join(', ') + (rs.length > 4 ? '…' : '');
   const lista = pr.map(p => p.tipo === 'efluente'
     ? `<li><b>${esc(p.nombre)}</b>: promedio ${f1(p.media)} mg/L (límite ${f1(p.limite)})${p.estado === 'justo' ? ' — el promedio cumple pero hay picos' : ''}. Máximo <b>${f1(p.max)}</b> a las ${simHora(p.tMax)}; fuera de límite ${f1(p.hFuera)} h${p.rangos.length ? ' (' + tr(p.rangos) + ')' : ''}</li>`
     : `<li><b>${esc(p.nombre)}</b> rebalsa: se pierden ${f1(p.spill)} m3${p.rangos && p.rangos.length ? ' (' + tr(p.rangos) + ')' : ''}</li>`).join('')
     + malU.map(m => `<li><b>${esc(m.nombre)}</b>: ${m.ind.map(i => `${esc(i.nombre)} = ${simFmt(i.valor)} ${esc(i.unidad)} (pedido ${i.min != null && i.max != null ? simFmt(i.min) + ' – ' + simFmt(i.max) : i.min != null ? '≥ ' + simFmt(i.min) : '≤ ' + simFmt(i.max)})`).join('; ')}</li>`).join('');
   const linea = c => `<b>${esc((simU(c.id) || {}).nombre || '')}</b> — ${esc(simRecEtq(c))}: de <b>${esc(c.deTxt || f1(c.de))}</b> a <b>${esc(c.vTxt || f1(c.v))}</b> ${c.vTxt ? '' : esc(simRecUni(c))}<div class="hint" style="margin:0 0 4px;font-size:11.5px">${esc(SIM_REC_POR[c.k] || '')}</div>`;
-  const caja = (cs, extra) => { _simRecAcc.push(cs); return `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:240px">${cs.map(linea).join('')}${extra || ''}</div><button class="btn btn-secondary btn-sm" onclick="simRecAplicar(${_simRecAcc.length - 1})">Aplicar</button></div>`; };
+  const caja = (cs, extra, causas, hay) => {
+    if (causas === undefined) causas = cs.map(simRecCausa).filter(Boolean); _simRecAcc.push(cs);
+    const etq = causas.length ? `<div style="font-size:12px;font-weight:700;color:#1a6e3c;margin-bottom:4px">🎯 Ataca la causa <span style="font-weight:400">— ${causas.map(esc).join(' ')}</span></div>` : (hay ? `<div class="hint" style="margin:0 0 4px;font-size:11.5px">Alivia el problema, pero no corrige la causa.</div>` : '');
+    return `<div style="border:1px solid ${causas.length ? '#1a8f4d' : 'var(--border)'};border-radius:8px;padding:8px 10px;margin-top:6px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:240px">${etq}${cs.map(linea).join('')}${extra || ''}</div><button class="btn btn-secondary btn-sm" onclick="simRecAplicar(${_simRecAcc.length - 1})">Aplicar</button></div>`; };
   const bloque = (r, titulo) => {
     let h = '';
-    if (r.opciones.length) h += `<div style="margin-top:6px;font-size:12.5px;font-weight:600">${titulo}: cada uno de estos cambios, por separado, hace que cumpla todo</div>${r.opciones.map(cs => caja(cs)).join('')}`;
+    if (r.opciones.length) { const cz = r.opciones.map(cs => cs.map(simRecCausa).filter(Boolean)), hay = cz.some(x => x.length), orden = r.opciones.map((_, i) => i).sort((a, b) => (cz[b].length > 0) - (cz[a].length > 0) || a - b); h += `<div style="margin-top:6px;font-size:12.5px;font-weight:600">${titulo}: cada uno de estos cambios, por separado, hace que cumpla todo${hay ? ' (primero el que ataca la causa)' : ''}</div>${orden.map(i => caja(r.opciones[i], '', cz[i], hay)).join('')}`; }
     else if (r.combo) h += `<div style="margin-top:6px;font-size:12.5px;font-weight:600">${titulo}: ningún cambio solo alcanza. ${r.combo.resuelto ? 'Combinando estos, cumple todo:' : 'Esta combinación mejora, pero no llega a cumplir todo:'}</div>${caja(r.combo.cambios, r.combo.resuelto ? '' : `<div class="hint" style="margin:4px 0 0;color:#a93226">Queda fuera de límite: ${r.combo.restantes.map(p => esc(p.nombre) + (p.estado === 'justo' ? ' (solo en el pico; el promedio cumple)' : '')).join(', ')}.</div>`)}`;
     else h += `<div class="hint" style="margin:6px 0 0">${titulo}: no encontré un ajuste simple que mejore esto.</div>`;
     if (r.corto) h += `<div class="hint" style="margin:4px 0 0">La búsqueda se cortó por tiempo: puede haber otras opciones.</div>`;
