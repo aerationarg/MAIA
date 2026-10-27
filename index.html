@@ -408,7 +408,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -465,7 +465,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -38994,32 +38994,52 @@ function simBombasHtml(plant, d) {
     ${gr ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 2px"><b style="font-size:12.5px">Gráfico</b><select style="width:auto" onchange="simBombaVer(this.value)">${opciones.map(o => `<option value="${o.v}" ${o.v === ver ? 'selected' : ''}>${esc(o.t)}</option>`).join('')}</select></div><div style="max-width:780px">${gr}</div>` : ''}</details>`;
 }
 // ═══ RECOMENDACIONES: qué ajustar para que la planta cumpla y nada rebalse ═══
-// Se buscan los problemas (efluente fuera de límite, tanques que rebalsan), se prueba con la simulación cada ajuste posible de los parámetros que se pueden
-// cambiar (edad de lodos, purga, recirculación, volúmenes, caudales de bombas, horas de operación…) y se muestran los que lo resuelven.
-let _simRecom = null, _simRecBusy = false;
+// Se buscan los problemas (efluente fuera de límite, tanques que rebalsan, indicadores de unidades que no cumplen) y se prueba con la simulación cada ajuste posible.
+// Dos clases de ajustes, siempre en este orden: de OPERACIÓN (se pueden hacer con la planta funcionando: purga, recirculación, oxígeno, horarios, niveles de arranque…)
+// y de DISEÑO (cambian la obra: volúmenes, superficies, bombas, equipos), por si todavía se está diseñando.
+let _simRecom = null, _simRecBusy = false, _simRecAcc = [];
+const SIM_REC_OP = new Set(['q_purga', 'purga_qb', 'edad_lodos', 'oxigeno_disuelto', 'mlss', 'relacion_rec', 'q_rec', 'rec_qb', 'rec_interna', 'nivel_arranque', 'niv_min_pct', 'dig_qb', 'dig_on', 'hs_operacion']);
+const simRecTier = k => SIM_REC_OP.has(k) ? 'op' : 'dis';
+// Tramos del día (hh:mm) en que una serie pasa un límite
+function simRangosFuera(arr, lim, dtH, fn) {
+  const r = []; let ini = null; fn = fn || (x => x > lim);
+  arr.forEach((x, i) => { if (fn(x)) { if (ini == null) ini = i; } else if (ini != null) { r.push([ini * dtH, i * dtH]); ini = null; } }); if (ini != null) r.push([ini * dtH, arr.length * dtH]); return r;
+}
 function simProblemas(pl) {
   const pr = [], Qd = Math.max(1, simMedia(pl.Qin) * 24 * (pl.dias || 1));
-  pl.cumpl.forEach(c => { if (c.limite != null && (c.estado === 'mal' || c.estado === 'justo')) pr.push({ tipo: 'efluente', clave: 'ef:' + c.k, nombre: c.nombre, estado: c.estado, media: c.media, max: c.max, limite: c.limite, exceso: Math.max(0, c.media / c.limite - 1) + 0.3 * Math.max(0, c.max / c.limite - 1) }); });
-  pl.nodos.forEach(nd => { const ex = nd.extra || {}, sp = nd.tipo === 'pozo' ? ex.rebalse : (ex.spillTotal != null ? ex.spillTotal : (ex.sim && ex.sim.spillTotal)); if (sp > 0.5) pr.push({ tipo: 'rebalse', clave: 'rb:' + nd.id, id: nd.id, nombre: nd.nombre, spill: sp, exceso: Math.min(2, sp / Qd) + 0.1 }); });
+  pl.cumpl.forEach(c => { if (c.limite != null && (c.estado === 'mal' || c.estado === 'justo')) { const arr = pl.efluente[c.k] || [], im = arr.indexOf(Math.max(...arr)); pr.push({ tipo: 'efluente', clave: 'ef:' + c.k, nombre: c.nombre, estado: c.estado, media: c.media, max: c.max, limite: c.limite, hFuera: c.hFuera, tMax: im * pl.dtH, rangos: simRangosFuera(arr, c.limite, pl.dtH), exceso: Math.max(0, c.media / c.limite - 1) + 0.3 * Math.max(0, c.max / c.limite - 1) }); } });
+  pl.nodos.forEach(nd => { const ex = nd.extra || {}, sp = nd.tipo === 'pozo' ? ex.rebalse : (ex.spillTotal != null ? ex.spillTotal : (ex.sim && ex.sim.spillTotal)); if (sp > 0.5) { const sr = simRebalseSerie(nd); pr.push({ tipo: 'rebalse', clave: 'rb:' + nd.id, id: nd.id, utipo: nd.tipo, nombre: nd.nombre, spill: sp, rangos: sr ? simRangosFuera(sr, 0, pl.dtH, x => x > 0.001) : [], exceso: Math.min(2, sp / Qd) + 0.1 }); } });
   return pr;
 }
+// Indicadores de las unidades (los que dicen "No cumple") de los tipos que se pueden revisar rápido
+const SIM_AJ_UNIDAD = {
+  lodos_activados: [['edad_lodos', 'm', [0.6, 0.8, 1.25, 1.6]], ['oxigeno_disuelto', 's', [-0.5, 0.5, 1], 4], ['mlss', 'm', [0.7, 0.85, 1.15, 1.3]], ['volumen', 'm', [0.8, 1.25, 1.6, 2]], ['capacidad_o2', 'm', [1.3, 1.6]]],
+  sedimentador: [['relacion_rec', 'm', [0.5, 0.7, 1.3, 1.6, 2]], ['q_rec', 'm', [0.5, 0.7, 1.3, 1.6, 2]], ['mlss', 'm', [0.7, 0.85, 1.15, 1.3]], ['area', 'm', [0.8, 1.25, 1.6, 2]], ['profundidad', 'm', [1.25, 1.5]]],
+  pozo: [['nivel_arranque', 'm', [0.6, 0.8, 1.2]], ['q_bomba', 'm', [0.8, 1.25, 1.6, 2]], ['n_bombas', 's', [1]], ['area', 'm', [1.25, 1.6, 2]]],
+  anoxico: [['rec_interna', 'm', [0.7, 1.3, 1.6]], ['volumen', 'm', [1.25, 1.6]]]
+};
+function simIndMalos(d) {
+  const out = [];
+  d.unidades.forEach(u => { if (!SIM_AJ_UNIDAD[u.tipo]) return; let res; try { res = simCorrer(u); } catch (e) { return; } if (!res || res.error || (res.faltan && res.faltan.length)) return; const mal = (res.ind || []).filter(i => i.estado === 'mal'); if (mal.length) out.push({ id: u.id, nombre: u.nombre, tipo: u.tipo, ind: mal }); });
+  return out;
+}
 const SIM_REC_POR = {
-  edad_lodos: 'Con más edad de lodos se mantienen las bacterias nitrificantes y baja la DBO soluble (hace falta más aire).',
-  q_purga: 'Purgar menos sube la edad de lodos: más biomasa en el reactor y mejor depuración.',
-  purga_qb: 'Una bomba de purga más chica saca menos lodo por día y sube la edad de lodos.',
-  purga_on: 'Menos minutos de purga por ciclo = menos lodo purgado = más edad de lodos.',
+  edad_lodos: 'La edad de lodos se maneja con la purga: más edad = más biomasa, mejor nitrificación y menos DBO soluble (hace falta más aire); menos edad = menos biomasa y menos lodo en el sedimentador.',
+  q_purga: 'Purgar menos sube la edad de lodos (más biomasa, mejor depuración); purgar más la baja y descarga el sedimentador.',
+  purga_qb: 'El caudal de la bomba de purga define cuánto lodo se saca por día y, con eso, la edad de lodos.',
   volumen: 'Más volumen = más tiempo de contacto y más capacidad de almacenar.',
-  oxigeno_disuelto: 'Más oxígeno disuelto ayuda a nitrificar y a degradar la materia orgánica.',
+  oxigeno_disuelto: 'El oxígeno disuelto que se sostiene en el reactor: más ayuda a nitrificar y a degradar materia orgánica (gasta más energía).',
   capacidad_o2: 'Más capacidad de aireación evita que falte oxígeno en las horas de mayor carga.',
-  mlss: 'Cambia la cantidad de biomasa del reactor; si es mucha, el sedimentador se sobrecarga.',
+  mlss: 'La concentración de biomasa del reactor se maneja con la purga; si es mucha, el sedimentador se sobrecarga.',
   relacion_rec: 'La recirculación devuelve lodo al reactor: más recirculación baja el manto de lodos, pero carga más al sedimentador.',
   q_rec: 'La recirculación devuelve lodo al reactor: más recirculación baja el manto de lodos, pero carga más al sedimentador.',
   rec_qb: 'La recirculación devuelve lodo al reactor: más caudal baja el manto de lodos, pero carga más al sedimentador.',
   area: 'Más superficie baja la carga sobre la unidad (menos sólidos en el efluente).',
+  profundidad: 'Más profundidad da más lugar al manto de lodos y más tiempo de retención.',
   rec_interna: 'Más recirculación interna lleva más nitrato a la zona sin aire, donde se elimina.',
   q_bomba: 'Una bomba de más caudal evacúa antes el agua o el lodo acumulado y evita el rebalse.',
   n_bombas: 'Otra bomba en servicio duplica la capacidad de bombeo cuando sube el nivel.',
-  nivel_arranque: 'Arrancar la bomba con menos nivel deja más margen antes del rebalse.',
+  nivel_arranque: 'Arrancar la bomba con menos nivel deja más margen antes del rebalse (cuidado con los arranques por hora).',
   capacidad_kgh: 'El equipo procesa más lodo por hora y el tanque previo no se llena.',
   hs_operacion: 'Más horas de operación por día procesan más lodo.',
   vol_alm: 'Un tanque previo más grande aguanta más lodo entre una operación y la siguiente.',
@@ -39029,38 +39049,38 @@ const SIM_REC_POR = {
   area_membrana: 'Más membrana deja pasar más caudal sin rebalsar.',
   vol_hid: 'Más volumen de almacenamiento antes de la bomba de salida.'
 };
+// Candidatos para los problemas de la planta: lista de grupos (un parámetro cada uno, del cambio más chico al más grande)
 function simRecCandidatos(d, problemas) {
   const g = [], rd = x => { const a = Math.abs(x); return +(a >= 100 ? x.toFixed(0) : a >= 10 ? x.toFixed(1) : x.toFixed(2)); };
   const grupo = (u, k, vals, tope, ok) => { const x = simNum(u.params[k]); if (!(x != null && isFinite(x))) return; const l = vals.map(f => rd(f(x))).filter(v => v !== x && v >= 0 && (tope == null || v <= tope) && (!ok || ok(v))).map(v => ({ id: u.id, k, v, de: x, unidad: u.nombre, tipoU: u.tipo })); if (l.length) g.push(l.sort((a, b) => Math.abs(a.v / a.de - 1) - Math.abs(b.v / b.de - 1))); };
   const m = (...f) => f.map(k => x => x * k), suma = (...f) => f.map(k => x => x + k);
   const hayEf = problemas.some(p => p.tipo === 'efluente'), reb = new Set(problemas.filter(p => p.tipo === 'rebalse').map(p => p.id));
+  const lodoReb = problemas.some(p => p.tipo === 'rebalse' && ['digestor', 'deshidratacion', 'espesador'].includes(p.utipo));
   d.unidades.forEach(u => {
     const P = u.params, t = u.tipo;
+    if (t === 'lodos_activados' && (hayEf || lodoReb)) {
+      const modoP = P.purga_modo, factores = hayEf ? m(0.5, 0.65, 0.8, 1.25, 1.6, 2) : m(0.5, 0.65, 0.8), edades = hayEf ? m(0.6, 0.8, 1.25, 1.6) : m(1.25, 1.6, 2);
+      if (simNum(P.q_purga) != null) grupo(u, 'q_purga', factores);
+      else if (modoP === 'ciclos' && simNum(P.purga_qb) != null) grupo(u, 'purga_qb', factores);
+      else if (modoP !== 'horario') grupo(u, 'edad_lodos', edades);
+      if (hayEf) { grupo(u, 'oxigeno_disuelto', suma(-0.5, 0.5, 1), 4, v => v >= 0.5); grupo(u, 'mlss', m(0.7, 0.85, 1.15, 1.3)); grupo(u, 'volumen', m(1.25, 1.6, 2)); grupo(u, 'capacidad_o2', m(1.3, 1.6)); }
+    }
     if (hayEf) {
-      if (t === 'lodos_activados') {
-        const modoP = P.purga_modo, purgaDef = simNum(P.q_purga) != null || (modoP === 'ciclos' && simNum(P.purga_qb) != null) || modoP === 'horario';
-        if (simNum(P.q_purga) != null) grupo(u, 'q_purga', m(0.8, 0.65, 0.5));
-        else if (modoP === 'ciclos' && simNum(P.purga_qb) != null) grupo(u, 'purga_qb', m(0.8, 0.65, 0.5));
-        if (!purgaDef) grupo(u, 'edad_lodos', m(1.25, 1.6));
-        grupo(u, 'volumen', m(1.25, 1.6, 2)); grupo(u, 'oxigeno_disuelto', suma(0.5, 1), 4); grupo(u, 'capacidad_o2', m(1.3, 1.6)); grupo(u, 'mlss', m(0.85, 1.15));
-      }
       if (t === 'sedimentador') {
-        if (simNum(P.q_rec) != null) grupo(u, 'q_rec', m(0.7, 1.3, 1.6)); else if (P.rec_modo === 'ciclos' && simNum(P.rec_qb) != null) grupo(u, 'rec_qb', m(0.7, 1.3, 1.6)); else grupo(u, 'relacion_rec', m(0.7, 1.3, 1.6));
+        if (simNum(P.q_rec) != null) grupo(u, 'q_rec', m(0.5, 0.7, 1.3, 1.6, 2)); else if (P.rec_modo === 'ciclos' && simNum(P.rec_qb) != null) grupo(u, 'rec_qb', m(0.5, 0.7, 1.3, 1.6, 2)); else grupo(u, 'relacion_rec', m(0.5, 0.7, 1.3, 1.6, 2));
         grupo(u, 'area', m(1.25, 1.6, 2));
       }
-      if (t === 'anoxico') grupo(u, 'rec_interna', m(1.3, 1.6));
+      if (t === 'anoxico') grupo(u, 'rec_interna', m(0.7, 1.3, 1.6));
       if (['mbbr', 'sbr', 'mbr'].includes(t)) grupo(u, t === 'mbr' ? 'area_membrana' : 'volumen', m(1.25, 1.6, 2));
     }
     if (reb.has(u.id)) {
-      if (t === 'pozo') { grupo(u, 'q_bomba', m(1.25, 1.6, 2)); grupo(u, 'n_bombas', suma(1)); grupo(u, 'nivel_arranque', m(0.8), null, v => v > (simNum(P.nivel_paro) || 0) + 0.15); }
+      if (t === 'pozo') { grupo(u, 'q_bomba', m(1.25, 1.6, 2)); grupo(u, 'n_bombas', suma(1)); grupo(u, 'nivel_arranque', m(0.6, 0.8), null, v => v > (simNum(P.nivel_paro) || 0) + 0.15); }
       if (t === 'ecualizador') grupo(u, 'volumen', m(1.3, 1.6, 2));
-      if (t === 'digestor') { grupo(u, 'volumen', m(1.3, 1.6, 2, 3)); grupo(u, 'niv_min_pct', m(0.8)); if (P.dig_modo === 'ciclos') { if (simNum(P.dig_qb) != null) grupo(u, 'dig_qb', m(1.3, 1.6, 2)); else grupo(u, 'dig_on', m(1.3, 1.6, 2)); } }
+      if (t === 'digestor') { grupo(u, 'volumen', m(1.3, 1.6, 2, 3)); grupo(u, 'niv_min_pct', m(0.6, 0.8)); if (P.dig_modo === 'ciclos') { if (simNum(P.dig_qb) != null) grupo(u, 'dig_qb', m(1.3, 1.6, 2)); else grupo(u, 'dig_on', m(1.3, 1.6, 2)); } }
       if (t === 'deshidratacion') { grupo(u, 'capacidad_kgh', m(1.3, 1.6, 2, 3, 5)); grupo(u, 'hs_operacion', suma(2, 4, 8), 24); grupo(u, 'vol_alm', m(1.5, 2, 3)); }
       if (t === 'mbr') grupo(u, 'area_membrana', m(1.3, 1.6, 2));
       if (['tamiz', 'daf', 'fisicoquimico', 'desinfeccion', 'desengrasadora'].includes(t)) { grupo(u, 'q_bomba', m(1.3, 1.6, 2)); grupo(u, 'vol_hid', m(1.5, 2)); }
     }
-    // el rebalse de una unidad puede venir de que la que sigue no da abasto: se prueba también la purga/recirculación de arriba
-    if (reb.size && t === 'lodos_activados' && !hayEf && simNum(P.q_purga) != null) grupo(u, 'q_purga', m(0.8, 0.65));
   });
   return g;
 }
@@ -39068,72 +39088,113 @@ const simClonD = dd => Object.assign({}, dd, { unidades: dd.unidades.map(u => Ob
 const simAplicarCambios = (dd, cs) => { cs.forEach(c => { const u = dd.unidades.find(x => x.id === c.id); if (u) u.params[c.k] = c.v; }); return dd; };
 const simPeorDe = pr => [pr.length, pr.reduce((a, p) => a + p.exceso, 0)];
 const simMejor = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1] - 1e-6);
+const simNInc = pl => pl.nodos.filter(n => n.extra && n.extra.incompleta).length;
 async function simRecBuscar() {
-  if (_simRecBusy || !_simDoc) return; _simRecBusy = true;
-  const d = _simDoc.datos, clave = simPlantaClave(d), t0 = Date.now(), pausa = () => new Promise(r => setTimeout(r, 0)), est = t => { const e = document.getElementById('sim-rec-estado'); if (e) e.textContent = t; };
-  let corto = false;
+  if (_simRecBusy || !_simDoc) return; _simRecBusy = true; _simRecom = null; simPlantaRefrescar();
+  const d = _simDoc.datos, clave = simPlantaClave(d), pausa = () => new Promise(r => setTimeout(r, 0)), est = t => { const e = document.getElementById('sim-rec-estado'); if (e) e.textContent = t; };
   try {
-    const base = simProblemas(simPlantaCache(d)), pBase = simPeorDe(base);
-    const incBase = simPlantaCache(d).nodos.filter(n => n.extra && n.extra.incompleta).length;
-    const evaluar = cs => { const pl = simPlantaDin(simAplicarCambios(simClonD(d), cs)); if (pl.nodos.filter(n => n.extra && n.extra.incompleta).length > incBase) return { cs, pr: base, p: pBase }; const pr = simProblemas(pl); return { cs, pr, p: simPeorDe(pr) }; };   // un ajuste que deja una unidad sin poder calcularse no cuenta
-    // 1) cada ajuste por separado (del más chico al más grande; si uno ya lo resuelve todo no se prueba el siguiente)
-    const grupos = simRecCandidatos(d, base), total = grupos.reduce((a, l) => a + l.length, 0); let n = 0; const resuelven = [], parciales = [];
-    for (const l of grupos) {
-      for (const c of l) {
-        if (Date.now() - t0 > 60000) { corto = true; break; }
-        est(`Probando ajustes… ${++n} de hasta ${total}`); await pausa();
-        const r = evaluar([c]);
-        if (!r.pr.length) { resuelven.push(r); break; }
-        if (simMejor(r.p, pBase)) parciales.push(r);
-      }
-      if (corto) break;
-    }
-    resuelven.sort((a, b) => Math.abs(a.cs[0].v / a.cs[0].de - 1) - Math.abs(b.cs[0].v / b.cs[0].de - 1));
-    // 2) si ninguno alcanza solo, se combinan (el mejor, y desde ahí el siguiente mejor)
-    let combo = null;
-    if (!resuelven.length && parciales.length) {
-      parciales.sort((a, b) => (a.p[0] - b.p[0]) || (a.p[1] - b.p[1]));
-      let cur = parciales[0], cambios = cur.cs.slice(), dcur = simAplicarCambios(simClonD(d), cambios), prCur = cur.pr;
-      for (let paso = 0; paso < 3 && prCur.length && !corto; paso++) {
-        const gs = simRecCandidatos(dcur, prCur).filter(l => !cambios.some(c => c.id === l[0].id && c.k === l[0].k)); let mejor = null;
-        for (const l of gs) for (const c of l) {
-          if (Date.now() - t0 > 60000) { corto = true; break; }
-          est(`Combinando ajustes… (paso ${paso + 2})`); await pausa();
-          const pl = simPlantaDin(simAplicarCambios(simClonD(dcur), [c])); if (pl.nodos.filter(n => n.extra && n.extra.incompleta).length > incBase) continue; const pr = simProblemas(pl), p = simPeorDe(pr);
-          if (simMejor(p, simPeorDe(prCur)) && (!mejor || simMejor(p, mejor.p))) mejor = { c, pr, p };
-          if (!pr.length) break;
+    const plBase = simPlantaCache(d), base = simProblemas(plBase), pBase = simPeorDe(base), incBase = simNInc(plBase);
+    const evaluar = (dd, cs) => { const pl = simPlantaDin(simAplicarCambios(simClonD(dd), cs)); if (simNInc(pl) > incBase) return null; const pr = simProblemas(pl); return { cs, pr, p: simPeorDe(pr) }; };   // un ajuste que deja una unidad sin poder calcularse no cuenta
+    const buscarTier = async (tier, soloSimples, etq) => {
+      const t0 = Date.now(); let corto = false;
+      if (!base.length) return { opciones: [], combo: null, corto: false, sinNada: false };
+      const grupos = simRecCandidatos(d, base).filter(l => simRecTier(l[0].k) === tier), total = grupos.reduce((a, l) => a + l.length, 0); let n = 0; const resuelven = [], parciales = [];
+      for (const l of grupos) {
+        for (const c of l) {
+          if (Date.now() - t0 > 45000) { corto = true; break; }
+          est(`${etq}: probando… ${++n} de hasta ${total}`); await pausa();
+          const r = evaluar(d, [c]); if (!r) continue;
+          if (!r.pr.length) { resuelven.push(r); break; }
+          if (simMejor(r.p, pBase)) parciales.push(r);
         }
-        if (!mejor) break; cambios.push(mejor.c); dcur = simAplicarCambios(dcur, [mejor.c]); prCur = mejor.pr;
+        if (corto) break;
       }
-      combo = { cambios, resuelto: !prCur.length, restantes: prCur };
+      resuelven.sort((a, b) => Math.abs(a.cs[0].v / a.cs[0].de - 1) - Math.abs(b.cs[0].v / b.cs[0].de - 1));
+      let combo = null;
+      if (!resuelven.length && parciales.length && !soloSimples) {
+        parciales.sort((a, b) => (a.p[0] - b.p[0]) || (a.p[1] - b.p[1]));
+        const cambios = parciales[0].cs.slice(); let dcur = simAplicarCambios(simClonD(d), cambios), prCur = parciales[0].pr;
+        for (let paso = 0; paso < 3 && prCur.length && !corto; paso++) {
+          const gs = simRecCandidatos(dcur, prCur).filter(l => simRecTier(l[0].k) === tier && !cambios.some(c => c.id === l[0].id && c.k === l[0].k)); let mejor = null;
+          for (const l of gs) for (const c of l) {
+            if (Date.now() - t0 > 45000) { corto = true; break; }
+            est(`${etq}: combinando ajustes… (paso ${paso + 2})`); await pausa();
+            const r = evaluar(dcur, [c]); if (!r) continue;
+            if (simMejor(r.p, simPeorDe(prCur)) && (!mejor || simMejor(r.p, mejor.p))) mejor = { c, pr: r.pr, p: r.p };
+            if (!r.pr.length) break;
+          }
+          if (!mejor) break; cambios.push(mejor.c); dcur = simAplicarCambios(dcur, [mejor.c]); prCur = mejor.pr;
+        }
+        combo = { cambios, resuelto: !prCur.length, restantes: prCur };
+      }
+      return { opciones: resuelven.slice(0, 4).map(r => r.cs), combo, corto, sinNada: !resuelven.length && !combo };
+    };
+    const op = await buscarTier('op', false, 'Ajustes de operación');
+    const dis = await buscarTier('dis', op.opciones.length > 0 || !!(op.combo && op.combo.resuelto), 'Ajustes de diseño');
+    // indicadores de unidades que no cumplen: primero un ajuste de operación, después uno de diseño
+    const ind = [];
+    for (const mu of simIndMalos(d)) {
+      const u = simU(mu.id), malN = mu.ind.length, nombres = new Set(mu.ind.map(i => i.nombre)), res = { op: [], dis: [] };
+      for (const [k, tp, vals, tope] of SIM_AJ_UNIDAD[u.tipo]) {
+        const x = simNum(u.params[k]); if (!(x != null && isFinite(x))) continue; const tier = simRecTier(k);
+        const lista = vals.map(f => tp === 'm' ? x * f : x + f).map(v => { const a = Math.abs(v); return +(a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : v.toFixed(2)); }).filter(v => v !== x && v >= 0 && (tope == null || v <= tope)).sort((a, b) => Math.abs(a / x - 1) - Math.abs(b / x - 1));
+        for (const v of lista) {
+          est(`Revisando ${u.nombre}…`); await pausa();
+          const uc = Object.assign({}, u, { params: Object.assign({}, u.params, { [k]: v }) }); let r; try { r = simCorrer(uc); } catch (e) { continue; }
+          if (!r || r.error || (r.faltan && r.faltan.length)) continue;
+          const mal2 = (r.ind || []).filter(i => i.estado === 'mal'); if (mal2.some(i => !nombres.has(i.nombre))) continue;
+          if (mal2.length <= Math.floor(malN / 2)) {   // solo se proponen los que resuelven todo o al menos la mitad de lo que no cumple
+             res[tier].push({ c: { id: u.id, k, v, de: x, unidad: u.nombre, tipoU: u.tipo }, quedan: mal2.length }); if (!mal2.length) break; }
+        }
+      }
+      ['op', 'dis'].forEach(t => { res[t].sort((a, b) => (a.quedan - b.quedan) || (Math.abs(a.c.v / a.c.de - 1) - Math.abs(b.c.v / b.c.de - 1))); res[t] = res[t].slice(0, 2); });
+      // se comprueba el efecto de cada propuesta sobre el efluente y los rebalses
+      for (const t of ['op', 'dis']) for (const o of res[t]) { est(`Comprobando el efecto sobre la planta…`); await pausa(); const r = evaluar(d, [o.c]); if (r) { const nuevas = r.pr.filter(p => !base.some(b => b.clave === p.clave)); if (nuevas.length) o.empeora = nuevas.map(p => p.nombre); } }
+      ind.push({ id: mu.id, nombre: mu.nombre, ind: mu.ind, op: res.op, dis: res.dis });
     }
-    _simRecom = { k: clave, opciones: resuelven.slice(0, 4).map(r => r.cs), combo, corto, sinNada: !resuelven.length && !combo };
+    _simRecom = { k: clave, op, dis, ind };
   } catch (e) { _simRecom = { k: clave, error: e.message }; }
   _simRecBusy = false; simPlantaRefrescar();
 }
 function simRecEtq(c) { const u = simU(c.id), df = u && SIM_MODELOS[u.tipo].params.find(x => x.k === c.k); return df ? df.l.replace(/\s*[—(].*$/, '') : c.k; }
 function simRecUni(c) { const u = simU(c.id), df = u && SIM_MODELOS[u.tipo].params.find(x => x.k === c.k); return df ? (df.u || '') : ''; }
-function simRecAplicar(cual, i) {
-  const r = _simRecom; if (!r) return; const cs = cual === 'combo' ? (r.combo ? r.combo.cambios : []) : (r.opciones[i] || []); const y0 = window.scrollY;
+function simRecAplicar(n) {
+  const cs = _simRecAcc[n]; if (!cs) return; const y0 = window.scrollY;
   cs.forEach(c => { const u = simU(c.id); if (u) { u.params[c.k] = c.v; u.fuentes[c.k] = 'manual'; } }); _simRecom = null; simGuardar(); simRender(); window.scrollTo(0, y0);
 }
 function simRecomHtml(plant, d) {
   if (d.examen && d.examen.activo && !d.examen.respondido) return '';
-  const pr = simProblemas(plant), f1 = x => x == null || !isFinite(x) ? '—' : (Math.abs(x) >= 100 ? String(Math.round(x)) : String(+x.toFixed(1)));
-  if (!pr.length) return `<div class="hint" style="margin:10px 0 0;color:var(--green)">✓ Todo cumple y nada rebalsa.</div>`;
-  const rec = _simRecom && _simRecom.k === simPlantaClave(d) ? _simRecom : null, TD = PROCESOS_EQ_TD;
-  const lista = pr.map(p => p.tipo === 'efluente' ? `<li><b>${esc(p.nombre)}</b>: promedio ${f1(p.media)} mg/L (límite ${f1(p.limite)})${p.estado === 'justo' ? ' — el promedio cumple pero el pico llega a ' + f1(p.max) : ''}</li>` : `<li><b>${esc(p.nombre)}</b> rebalsa: se pierden ${f1(p.spill)} m3 en el período</li>`).join('');
+  _simRecAcc = [];
+  const pr = simProblemas(plant), malU = simIndMalos(d), f1 = x => x == null || !isFinite(x) ? '—' : (Math.abs(x) >= 100 ? String(Math.round(x)) : String(+x.toFixed(1)));
+  if (!pr.length && !malU.length) return `<div class="hint" style="margin:10px 0 0;color:var(--green)">✓ Todo cumple y nada rebalsa.</div>`;
+  const rec = _simRecom && _simRecom.k === simPlantaClave(d) ? _simRecom : null;
+  const tr = rs => rs.slice(0, 4).map(([a, b]) => `${simHora(a)}–${simHora(b)}`).join(', ') + (rs.length > 4 ? '…' : '');
+  const lista = pr.map(p => p.tipo === 'efluente'
+    ? `<li><b>${esc(p.nombre)}</b>: promedio ${f1(p.media)} mg/L (límite ${f1(p.limite)})${p.estado === 'justo' ? ' — el promedio cumple pero hay picos' : ''}. Máximo <b>${f1(p.max)}</b> a las ${simHora(p.tMax)}; fuera de límite ${f1(p.hFuera)} h${p.rangos.length ? ' (' + tr(p.rangos) + ')' : ''}</li>`
+    : `<li><b>${esc(p.nombre)}</b> rebalsa: se pierden ${f1(p.spill)} m3${p.rangos && p.rangos.length ? ' (' + tr(p.rangos) + ')' : ''}</li>`).join('')
+    + malU.map(m => `<li><b>${esc(m.nombre)}</b>: ${m.ind.map(i => `${esc(i.nombre)} = ${simFmt(i.valor)} ${esc(i.unidad)} (pedido ${i.min != null && i.max != null ? simFmt(i.min) + ' – ' + simFmt(i.max) : i.min != null ? '≥ ' + simFmt(i.min) : '≤ ' + simFmt(i.max)})`).join('; ')}</li>`).join('');
   const linea = c => `<b>${esc((simU(c.id) || {}).nombre || '')}</b> — ${esc(simRecEtq(c))}: de <b>${f1(c.de)}</b> a <b>${f1(c.v)}</b> ${esc(simRecUni(c))}<div class="hint" style="margin:0 0 4px;font-size:11.5px">${esc(SIM_REC_POR[c.k] || '')}</div>`;
+  const caja = (cs, extra) => { _simRecAcc.push(cs); return `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:240px">${cs.map(linea).join('')}${extra || ''}</div><button class="btn btn-secondary btn-sm" onclick="simRecAplicar(${_simRecAcc.length - 1})">Aplicar</button></div>`; };
+  const bloque = (r, titulo) => {
+    let h = '';
+    if (r.opciones.length) h += `<div style="margin-top:6px;font-size:12.5px;font-weight:600">${titulo}: cada uno de estos cambios, por separado, hace que cumpla todo</div>${r.opciones.map(cs => caja(cs)).join('')}`;
+    else if (r.combo) h += `<div style="margin-top:6px;font-size:12.5px;font-weight:600">${titulo}: ningún cambio solo alcanza. ${r.combo.resuelto ? 'Combinando estos, cumple todo:' : 'Esta combinación mejora, pero no llega a cumplir todo:'}</div>${caja(r.combo.cambios, r.combo.resuelto ? '' : `<div class="hint" style="margin:4px 0 0;color:#a93226">Queda fuera de límite: ${r.combo.restantes.map(p => esc(p.nombre) + (p.estado === 'justo' ? ' (solo en el pico; el promedio cumple)' : '')).join(', ')}.</div>`)}`;
+    else h += `<div class="hint" style="margin:6px 0 0">${titulo}: no encontré un ajuste simple que mejore esto.</div>`;
+    if (r.corto) h += `<div class="hint" style="margin:4px 0 0">La búsqueda se cortó por tiempo: puede haber otras opciones.</div>`;
+    return h;
+  };
   let res = '';
   if (_simRecBusy) res = `<div id="sim-rec-estado" class="hint" style="margin:8px 0 0">Probando ajustes…</div>`;
-  else if (!rec) res = `<div style="margin-top:8px"><button class="btn btn-primary btn-sm" onclick="simRecBuscar()">💡 Buscar qué ajustar</button> <span class="hint" style="display:inline;margin:0">Prueba con la simulación cambios en la purga, la recirculación, los volúmenes, los caudales de las bombas y las horas de operación (puede tardar unos segundos).</span></div>`;
+  else if (!rec) res = `<div style="margin-top:8px"><button class="btn btn-primary btn-sm" onclick="simRecBuscar()">💡 Buscar qué ajustar</button> <span class="hint" style="display:inline;margin:0">Prueba con la simulación cambios de operación (purga, recirculación, oxígeno, horarios…) y, aparte, de diseño (volúmenes, superficies, bombas). Puede tardar unos segundos.</span></div>`;
   else if (rec.error) res = `<div class="hint" style="margin:8px 0 0;color:var(--red)">No se pudo calcular: ${esc(rec.error)}</div>`;
   else {
-    if (rec.opciones.length) res += `<div style="margin-top:8px;font-size:12.5px;font-weight:600">Cada uno de estos cambios, por separado, hace que cumpla todo:</div>${rec.opciones.map((cs, i) => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:240px">${cs.map(linea).join('')}</div><button class="btn btn-secondary btn-sm" onclick="simRecAplicar('op',${i})">Aplicar</button></div>`).join('')}`;
-    else if (rec.combo) res += `<div style="margin-top:8px;font-size:12.5px;font-weight:600">Ningún cambio solo alcanza. ${rec.combo.resuelto ? 'Combinando estos, cumple todo:' : 'Esta combinación mejora, pero no llega a cumplir todo:'}</div><div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:240px">${rec.combo.cambios.map(linea).join('')}${rec.combo.resuelto ? '' : `<div class="hint" style="margin:4px 0 0;color:#a93226">Queda fuera de límite: ${rec.combo.restantes.map(p => esc(p.nombre) + (p.estado === 'justo' ? ' (solo en el pico; el promedio cumple)' : '')).join(', ')}. Para eso probablemente haga falta revisar el diseño (volumen o superficie), el caudal o amortiguar los picos (ecualizador).</div>`}</div><button class="btn btn-secondary btn-sm" onclick="simRecAplicar('combo')">Aplicar todo</button></div>`;
-    else res += `<div class="hint" style="margin:8px 0 0">No encontré un ajuste simple que mejore esto con los parámetros que se pueden mover. Revisá el diseño (volumen, superficie) o el caudal de entrada.</div>`;
-    if (rec.corto) res += `<div class="hint" style="margin:6px 0 0">La búsqueda se cortó por tiempo: puede haber otras opciones.</div>`;
-    res += `<div style="margin-top:6px"><button class="btn btn-secondary btn-sm" onclick="simRecBuscar()">↻ Buscar de nuevo</button></div>`;
+    if (pr.length) {
+      const opResuelve = rec.op.opciones.length > 0 || !!(rec.op.combo && rec.op.combo.resuelto);
+      res += `<div style="margin-top:10px;font-size:13px;font-weight:700">⚙ Ajustes de operación <span class="hint" style="display:inline;margin:0;font-weight:400">(se pueden hacer con la planta funcionando)</span></div>${bloque(rec.op, 'Operación')}`;
+      res += `<details style="margin-top:10px" ${opResuelve ? '' : 'open'}><summary style="cursor:pointer;font-size:13px;font-weight:700">🏗 Ajustes de diseño <span class="hint" style="display:inline;margin:0;font-weight:400">(cambian la obra: solo si todavía se está diseñando)</span></summary>${bloque(rec.dis, 'Diseño')}</details>`;
+    }
+    if (rec.ind && rec.ind.length) res += `<div style="margin-top:10px;font-size:13px;font-weight:700">📋 Indicadores de las unidades que no cumplen</div>${rec.ind.map(u => `<div style="margin-top:6px;font-size:12.5px"><b>${esc(u.nombre)}</b>: ${u.ind.map(i => esc(i.nombre)).join('; ')}${u.op.length ? `<div style="font-weight:600;margin-top:4px">⚙ Operación</div>${u.op.map(o => caja([o.c], `<div class="hint" style="margin:0;font-size:11.5px">${o.quedan ? 'Mejora, pero quedan ' + o.quedan + ' indicador(es) sin cumplir.' : 'Resuelve los indicadores de esta unidad.'}${o.empeora ? ' <span style="color:#a93226">⚠ Empeora: ' + o.empeora.map(esc).join(', ') + '.</span>' : ''}</div>`)).join('')}` : ''}${u.dis.length ? `<div style="font-weight:600;margin-top:4px">🏗 Diseño</div>${u.dis.map(o => caja([o.c], `<div class="hint" style="margin:0;font-size:11.5px">${o.quedan ? 'Mejora, pero quedan ' + o.quedan + ' indicador(es) sin cumplir.' : 'Resuelve los indicadores de esta unidad.'}${o.empeora ? ' <span style="color:#a93226">⚠ Empeora: ' + o.empeora.map(esc).join(', ') + '.</span>' : ''}</div>`)).join('')}` : ''}${!u.op.length && !u.dis.length ? '<div class="hint" style="margin:2px 0 0">No encontré un ajuste simple para esto.</div>' : ''}</div>`).join('')}`;
+    res += `<div style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="simRecBuscar()">↻ Buscar de nuevo</button></div>`;
   }
   return simDetSec('recom', '💡 Qué ajustar para que cumpla', `<ul style="margin:0 0 0 18px;padding:0;font-size:12.5px;line-height:1.5">${lista}</ul>${res}`, true);
 }
