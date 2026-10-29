@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -44607,7 +44607,7 @@ const OOO_CFG_DEF = {
   sitio: 'aerationargentina.sharepoint.com:/sites/VacacionesyLicencias', lista: 'OOO Solicitudes',
   periodoInicio: '10-01', regimen: 'corridos',
   escalaCorridos: [[0, 14], [5, 21], [10, 28], [20, 35]], escalaHabiles: [[0, 10], [5, 15], [10, 20], [20, 25]],   // [años de antigüedad desde, días]
-  feriados: [], escalamientoEmail: '', rrhhEmails: [], notificar: false,
+  feriados: [], escalamientoEmail: '', rrhhEmails: [], notificar: false, listaVieja: 'Calendario', usarVieja: true,   // la lista anterior se lee (solo lectura) para el calendario, la vista de RR.HH. y los saldos
   tipos: [
     { id: 'vacaciones', nombre: 'Vacaciones', descuenta: true, cuenta: 'regimen', bordes: true },
     { id: 'sin_goce', nombre: 'Licencia sin goce de sueldo', descuenta: false, cuenta: 'corridos' },
@@ -44622,10 +44622,11 @@ const OOO_CFG_DEF = {
   personas: {}   // email → { ingreso: 'YYYY-MM-DD', dias: null (a mano), ajustes: [{ fecha, dias, motivo, por }] }
 };
 const OOO_ESTADOS = { pendiente_coord: ['Pendiente del coordinador', '#b8860b'], pendiente_rrhh: ['Pendiente de RR.HH.', '#b8860b'], aprobada: ['Aprobada', 'var(--green)'], rechazada: ['Rechazada', 'var(--red)'], cancelada: ['Cancelada', 'var(--text3)'] };
-// Columnas de la lista (el nombre es el interno de SharePoint): t = texto, n = número, m = texto largo. Las fechas van como texto AAAA-MM-DD para que no las corra la zona horaria.
-const OOO_COLS = [['EmpleadoEmail', 't'], ['EmpleadoNombre', 't'], ['Sector', 't'], ['Tipo', 't'], ['Desde', 't'], ['Hasta', 't'], ['Dias', 'n'], ['Regimen', 't'], ['Superposicion', 't'], ['Gestion', 'm'], ['Comentarios', 'm'],
+// Columnas de la lista (el nombre es el interno de SharePoint; el tercer dato, si hay, el nombre que se ve): t = texto, n = número, m = texto largo, d = fecha. Desde/Hasta son una copia en texto AAAA-MM-DD (MAIA lee de ahí, sin corrimientos de zona
+// horaria) y FechaDesde/FechaHasta son las fechas reales que se ven como "Desde"/"Hasta" y sirven para las vistas de calendario de SharePoint.
+const OOO_COLS = [['EmpleadoEmail', 't'], ['EmpleadoNombre', 't'], ['Sector', 't'], ['Tipo', 't'], ['Desde', 't', 'Desde (texto)'], ['Hasta', 't', 'Hasta (texto)'], ['FechaDesde', 'd', 'Desde'], ['FechaHasta', 'd', 'Hasta'], ['Dias', 'n'], ['Regimen', 't'], ['Superposicion', 't'], ['Gestion', 'm'], ['Comentarios', 'm'],
   ['Estado', 't'], ['Ronda', 'n'], ['AprobCoord', 't'], ['RtaCoord', 't'], ['FechaCoord', 't'], ['ComentCoord', 'm'], ['RtaRRHH', 't'], ['FechaRRHH', 't'], ['ComentRRHH', 'm'], ['Historial', 'm']];
-let _oooCfg = null, _oooPerf = null, _oooSp = null, _ooo = { tab: 'mis', items: null, error: '', cargando: false, form: null, per: 0, abierto: {} };
+let _oooCfg = null, _oooPerf = null, _oooSp = null, _ooo = { tab: 'mis', items: null, error: '', avisos: [], cargando: false, form: null, per: 0, abierto: {}, cal: null, persona: '', filtroP: '' };
 
 // ── Configuración ──
 async function oooCfgCargar(forzar) {
@@ -44705,9 +44706,13 @@ async function oooLista(crear, log) {
     lista = await oooGraph(`/sites/${sitio.id}/lists`, { method: 'POST', body: { displayName: cfg.lista, list: { template: 'genericList' } } }); say('Lista creada: ' + cfg.lista);
   } else say('Lista encontrada: ' + cfg.lista);
   if (crear) {
-    const cols = await oooGraph(`/sites/${sitio.id}/lists/${lista.id}/columns?$select=name&$top=200`), tiene = new Set((cols.value || []).map(c => c.name)); let n = 0;
-    for (const [nombre, t] of OOO_COLS) if (!tiene.has(nombre)) { await oooGraph(`/sites/${sitio.id}/lists/${lista.id}/columns`, { method: 'POST', body: Object.assign({ name: nombre, displayName: nombre }, t === 'n' ? { number: {} } : t === 'm' ? { text: { allowMultipleLines: true, textType: 'plain' } } : { text: {} }) }); n++; }
-    say(n ? `Columnas creadas: ${n}.` : 'La lista ya tenía todas las columnas.');
+    const cols = await oooGraph(`/sites/${sitio.id}/lists/${lista.id}/columns?$select=id,name,displayName&$top=200`), tiene = new Set((cols.value || []).map(c => c.name)); let n = 0, ren = 0;
+    for (const [nombre, t, vis] of OOO_COLS) {   // si Desde/Hasta ya existían con ese nombre visible, pasan a "(texto)" para dejarle "Desde"/"Hasta" a las fechas reales
+      const ex = (cols.value || []).find(c => c.name === nombre);
+      if (ex && vis && ex.displayName !== vis) { await oooGraph(`/sites/${sitio.id}/lists/${lista.id}/columns/${ex.id}`, { method: 'PATCH', body: { displayName: vis } }); ex.displayName = vis; ren++; }
+    }
+    for (const [nombre, t, vis] of OOO_COLS) if (!tiene.has(nombre)) { await oooGraph(`/sites/${sitio.id}/lists/${lista.id}/columns`, { method: 'POST', body: Object.assign({ name: nombre, displayName: vis || nombre }, t === 'n' ? { number: {} } : t === 'm' ? { text: { allowMultipleLines: true, textType: 'plain' } } : t === 'd' ? { dateTime: { format: 'dateOnly' } } : { text: {} }) }); n++; }
+    say(n || ren ? `Columnas creadas: ${n}${ren ? '; renombradas: ' + ren : ''}.` : 'La lista ya tenía todas las columnas.');
   }
   return (_oooSp = { siteId: sitio.id, listId: lista.id });
 }
@@ -44720,6 +44725,30 @@ function oooItemDe(it) {
 async function oooLeerItems() {
   const sp = await oooLista(false); let url = `/sites/${sp.siteId}/lists/${sp.listId}/items?$expand=fields&$top=500`, out = [];
   for (let n = 0; url && n < 20; n++) { const j = await oooGraph(url.replace('https://graph.microsoft.com/v1.0', '')); out.push(...(j.value || []).map(oooItemDe)); url = j['@odata.nextLink'] || null; }
+  return out;
+}
+// Lista anterior de vacaciones (solo lectura): las columnas se buscan por el nombre que se ve ("Fecha Inicio", "Rta RRHH"…), así no hace falta conocer los nombres internos
+async function oooLeerVieja() {
+  const cfg = _oooCfg; if (!cfg.usarVieja || !String(cfg.listaVieja || '').trim()) return [];
+  const sitio = await oooGraph('/sites/' + cfg.sitio), ls = await oooGraph(`/sites/${sitio.id}/lists?$select=id,displayName&$top=200`), l = (ls.value || []).find(x => x.displayName === cfg.listaVieja);
+  if (!l) throw new Error(`No encontré la lista anterior "${cfg.listaVieja}" en el sitio.`);
+  const cols = (await oooGraph(`/sites/${sitio.id}/lists/${l.id}/columns?$select=name,displayName&$top=200`)).value || [], norm = x => procesosNormTxt(x || '').trim();
+  const col = (...ns) => { for (const n of ns) { const c = cols.find(c => norm(c.displayName) === n); if (c) return c.name; } return null; };
+  const cIni = col('fecha inicio', 'inicio', 'desde'), cFin = col('fecha final', 'fecha fin', 'fin', 'hasta'), cJefe = col('rta jefe'), cRRHH = col('rta rrhh'), cDias = col('dias de licencia', 'dias'), cEmp = col('empleado');
+  if (!cIni || !cFin) throw new Error('En la lista anterior no encontré las columnas "Fecha Inicio" y "Fecha Final".');
+  const perf = await oooPerfiles(), txt = v => v == null ? '' : typeof v === 'object' ? (v.Value || v.LookupValue || v.Email || '') : String(v), d10 = v => String(v || '').slice(0, 10), out = [];
+  let url = `/sites/${sitio.id}/lists/${l.id}/items?$expand=fields&$top=500`;
+  for (let n = 0; url && n < 20; n++) {
+    const j = await oooGraph(url.replace('https://graph.microsoft.com/v1.0', ''));
+    (j.value || []).forEach(it => {
+      const f = it.fields || {}, desde = d10(f[cIni]), hasta = d10(f[cFin]); if (!oooD(desde) || !oooD(hasta)) return;
+      const emp = txt(cEmp ? f[cEmp] : '') || txt(f.Title), email = (/@/.test(emp) ? emp : '').toLowerCase(), pf = perf.find(p => p.email === email), j1 = norm(txt(cJefe ? f[cJefe] : '')), r1 = norm(txt(cRRHH ? f[cRRHH] : ''));
+      const estado = r1.includes('rechaz') || j1.includes('rechaz') ? 'rechazada' : r1.includes('aprob') ? 'aprobada' : j1.includes('aprob') ? 'pendiente_rrhh' : 'pendiente_coord';
+      out.push({ id: 'v' + it.id, vieja: true, email, nombre: (pf && pf.nombre) || (email ? email.split('@')[0].replace(/[._]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : emp), sector: (pf && pf.sector) || '', tipo: 'vacaciones', desde, hasta,
+        dias: Number(cDias ? f[cDias] : 0) || Math.round((oooD(hasta) - oooD(desde)) / 864e5) + 1, regimen: 'corridos', sup: '', gestion: '', coment: '', estado, ronda: 1, aprobCoord: [], historial: [], creado: it.createdDateTime || '' });
+    });
+    url = j['@odata.nextLink'] || null;
+  }
   return out;
 }
 async function oooLeerItem(id) { const sp = await oooLista(false); return oooItemDe(await oooGraph(`/sites/${sp.siteId}/lists/${sp.listId}/items/${id}?$expand=fields`)); }
@@ -44742,7 +44771,7 @@ function oooAprobadoresCoord(perf, cfg, sector, email) {
   return coords;
 }
 const oooRRHHPerfiles = (perf, cfg) => perf.filter(p => p.sector === 'RRHH' || (cfg.rrhhEmails || []).map(e => e.toLowerCase()).includes(p.email));
-const oooPuedeAprobar = (it, cfg) => (it.estado === 'pendiente_coord' && (currentSector === 'Admin' || it.aprobCoord.includes(oooMiEmail()))) || (it.estado === 'pendiente_rrhh' && oooEsRRHH(cfg));
+const oooPuedeAprobar = (it, cfg) => !it.vieja && ((it.estado === 'pendiente_coord' && (currentSector === 'Admin' || it.aprobCoord.includes(oooMiEmail()))) || (it.estado === 'pendiente_rrhh' && oooEsRRHH(cfg)));
 async function oooAvisar(perfiles, titulo, cuerpo) {
   if (!_oooCfg || !_oooCfg.notificar) return;
   for (const p of perfiles) { try { await notifCreate(p.id, titulo, cuerpo, 'ooo'); } catch (e) { /* un aviso que falla no frena la solicitud */ } }
@@ -44761,7 +44790,7 @@ async function oooEnviar(f, editId) {
   const email = oooMiEmail(), mias = (_ooo.items || []).filter(i => i.email === email && i.id !== editId && (i.estado === 'pendiente_coord' || i.estado === 'pendiente_rrhh' || i.estado === 'aprobada') && i.desde <= f.hasta && i.hasta >= f.desde);
   if (mias.length) throw new Error(`Ya tenés una solicitud en esas fechas (${oooFmt(mias[0].desde)} al ${oooFmt(mias[0].hasta)}).`);
   const aprob = oooAprobadoresCoord(perf, cfg, currentSector, email); if (!aprob.length) throw new Error('No encontré quién aprueba tu solicitud (coordinador de tu sector). Avisale a RR.HH.');
-  const sp = await oooLista(false), base = { EmpleadoEmail: email, EmpleadoNombre: currentUser.nombre || email, Sector: currentSector, Tipo: tipo.id, Desde: f.desde, Hasta: f.hasta, Dias: calc.dias, Regimen: calc.cuenta, Superposicion: f.sup || 'No', Gestion: f.gestion || '', Comentarios: f.coment || '', AprobCoord: aprob.map(p => p.email).join(',') };
+  const sp = await oooLista(false), base = { EmpleadoEmail: email, EmpleadoNombre: currentUser.nombre || email, Sector: currentSector, Tipo: tipo.id, Desde: f.desde, Hasta: f.hasta, FechaDesde: f.desde + 'T12:00:00Z', FechaHasta: f.hasta + 'T12:00:00Z', Dias: calc.dias, Regimen: calc.cuenta, Superposicion: f.sup || 'No', Gestion: f.gestion || '', Comentarios: f.coment || '', AprobCoord: aprob.map(p => p.email).join(',') };
   const titulo = `${currentUser.nombre || email} — ${tipo.nombre} ${oooFmt(f.desde)} al ${oooFmt(f.hasta)}`;
   if (!editId) {
     const it0 = { historial: [], ronda: 1 };
@@ -44801,7 +44830,12 @@ async function oooAbrir() {
 async function oooLoginYCargar() { try { await getMsToken(); } catch (e) { _ooo.error = e.message; oooRender(); return; } await oooCargar(); }
 async function oooCargar() {
   _ooo.error = ''; _ooo.cargando = true; oooRender();
-  try { await oooPerfiles(); _ooo.items = await oooLeerItems(); } catch (e) { _ooo.error = e.message; _ooo.items = null; }
+  _ooo.avisos = [];
+  try {
+    await oooPerfiles();
+    const nuevos = await oooLeerItems().catch(e => { _ooo.avisos.push('Lista nueva: ' + e.message); return []; }), viejos = await oooLeerVieja().catch(e => { _ooo.avisos.push('Lista anterior: ' + e.message); return []; });
+    _ooo.items = nuevos.concat(viejos);
+  } catch (e) { _ooo.error = e.message; _ooo.items = null; }
   _ooo.cargando = false; oooRender();
 }
 function oooTab(t) { _ooo.tab = t; if (t === 'nueva' && !_ooo.form) _ooo.form = oooFormNuevo(); oooRender(); }
@@ -44812,10 +44846,67 @@ function oooRender() {
   if (_ooo.error === 'login') { el.innerHTML = `<div class="card"><div class="card-label">Fuera de oficina</div><p style="font-size:14px;margin-bottom:10px">Las solicitudes se guardan en SharePoint: necesitás iniciar sesión con tu cuenta de Microsoft.</p><button class="btn btn-primary btn-sm" onclick="oooLoginYCargar()">Iniciar sesión con Microsoft</button></div>`; return; }
   if (_ooo.error) { el.innerHTML = `<div class="card"><div class="card-label">Fuera de oficina</div><p style="font-size:14px;color:var(--red);margin-bottom:10px">${esc(_ooo.error)}</p><button class="btn btn-secondary btn-sm" onclick="oooCargar()">Reintentar</button></div>`; return; }
   const pend = oooPendientesMios(), verAprobar = oooPuedeVerAprobar(), editando = _ooo.form && _ooo.form.editId;
-  const tabs = [['mis', 'Mis días'], ['nueva', editando ? 'Editar solicitud' : 'Nueva solicitud']].concat(verAprobar ? [['aprobar', 'Para aprobar' + (pend.length ? ` (${pend.length})` : '')]] : []);
+  const tabs = [['mis', 'Mis días'], ['nueva', editando ? 'Editar solicitud' : 'Nueva solicitud'], ['cal', 'Calendario']].concat(verAprobar ? [['aprobar', 'Para aprobar' + (pend.length ? ` (${pend.length})` : '')]] : []).concat(oooEsRRHH(cfg) ? [['personas', 'Personas']] : []);
   const bar = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${tabs.map(([k, t]) => `<button class="btn btn-sm ${_ooo.tab === k ? 'btn-primary' : 'btn-secondary'}" onclick="oooTab('${k}')">${esc(t)}</button>`).join('')}<button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="oooCargar()" title="Volver a leer SharePoint">↻</button></div>`;
-  el.innerHTML = bar + (_ooo.cargando && !_ooo.items ? '<p class="hint">Leyendo SharePoint…</p>' : _ooo.tab === 'nueva' ? oooFormHtml() : _ooo.tab === 'aprobar' && verAprobar ? oooAprobarHtml(pend) : oooMisHtml());
+  const avisos = (_ooo.avisos || []).map(a => `<div class="status-msg" style="background:#fff4d6;color:#7a5b00;margin:0 0 10px">${esc(a)}</div>`).join('');
+  el.innerHTML = bar + avisos + (_ooo.cargando && !_ooo.items ? '<p class="hint">Leyendo SharePoint…</p>' : _ooo.tab === 'nueva' ? oooFormHtml() : _ooo.tab === 'cal' ? oooCalHtml() : _ooo.tab === 'personas' && oooEsRRHH(cfg) ? oooPersonasHtml() : _ooo.tab === 'aprobar' && verAprobar ? oooAprobarHtml(pend) : oooMisHtml());
   if (_ooo.tab === 'nueva') oooFormPreview();
+}
+// ── Calendario general: todos ven quién está fuera y cuándo ──
+const OOO_COL_TIPO = { vacaciones: '#2b6cb0', home_office: '#2f855a', otro: '#718096' };
+const oooColorTipo = id => OOO_COL_TIPO[id] || OOO_COL_TIPO.otro;
+// Nombre corto para el calendario: nombre y la inicial del apellido
+const oooCorto = n => { const p = String(n || '').trim().split(/\s+/); return p.length > 1 ? p[0] + ' ' + p[p.length - 1][0] + '.' : p[0] || ''; };
+// Las licencias (enfermedad, duelo…) las ven con su motivo solo la persona y RR.HH.; el resto ve "Licencia"
+const oooTipoVisible = i => { const t = oooTipoNombre(i.tipo); return ['vacaciones', 'home_office'].includes(i.tipo) || i.email === oooMiEmail() || (_oooCfg && oooEsRRHH(_oooCfg)) ? t : 'Licencia'; };
+function oooCalMover(d) { const c = _ooo.cal, f = new Date(c.y, c.m + d, 1); c.y = f.getFullYear(); c.m = f.getMonth(); oooRender(); }
+function oooCalHtml() {
+  const cfg = _oooCfg, hoy = new Date(); if (!_ooo.cal) _ooo.cal = { y: hoy.getFullYear(), m: hoy.getMonth(), sector: '', pend: true }; const c = _ooo.cal;
+  const todos = (_ooo.items || []).filter(i => i.estado === 'aprobada' || (c.pend && (i.estado === 'pendiente_coord' || i.estado === 'pendiente_rrhh'))), sectores = [...new Set((_ooo.items || []).map(i => i.sector).filter(Boolean))].sort();
+  const items = todos.filter(i => !c.sector || i.sector === c.sector), primero = new Date(c.y, c.m, 1, 12), desfase = (primero.getDay() + 6) % 7, ini = oooSuma(primero, -desfase), dias = new Date(c.y, c.m + 1, 0).getDate(), filas = Math.ceil((desfase + dias) / 7), hoyIso = oooIso(hoy);
+  const MES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  let celdas = '';
+  for (let k = 0; k < filas * 7; k++) {
+    const d = oooSuma(ini, k), iso = oooIso(d), fuera = d.getMonth() !== c.m, fin = d.getDay() === 0 || d.getDay() === 6, fer = (cfg.feriados || []).includes(iso), del = items.filter(i => i.desde <= iso && i.hasta >= iso).sort((a, b) => a.nombre.localeCompare(b.nombre));
+    const chips = del.slice(0, 3).map(i => { const col = oooColorTipo(i.tipo), pend = i.estado !== 'aprobada'; return `<div title="${esc(i.nombre + ' — ' + oooTipoVisible(i) + ' (' + oooFmt(i.desde) + ' al ' + oooFmt(i.hasta) + ')' + (pend ? ' · pendiente' : ''))}" style="font-size:11px;line-height:1.3;padding:1px 4px;margin-top:2px;border-radius:4px;border-left:3px ${pend ? 'dashed' : 'solid'} ${col};background:${col}22;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${pend ? 'opacity:.65' : ''}">${esc(oooCorto(i.nombre))}</div>`; }).join('');
+    const mas = del.length > 3 ? `<div class="hint" style="margin-top:2px" title="${esc(del.slice(3).map(i => i.nombre).join(', '))}">+${del.length - 3} más</div>` : '';
+    celdas += `<div style="min-height:84px;padding:4px;border:1px solid var(--border);${fuera ? 'opacity:.45;' : ''}${fin || fer ? 'background:var(--surface2);' : ''}${iso === hoyIso ? 'outline:2px solid var(--accent);outline-offset:-2px;' : ''}"><div style="font-size:11px;color:var(--text2);display:flex;justify-content:space-between"><b>${d.getDate()}</b>${fer ? '<span title="Feriado">F</span>' : ''}</div>${chips}${mas}</div>`;
+  }
+  const leyenda = [['vacaciones', 'Vacaciones'], ['home_office', 'Home office'], ['otro', 'Licencias']].map(([k, t]) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:12px"><span style="width:10px;height:10px;border-radius:2px;background:${oooColorTipo(k)}"></span>${t}</span>`).join('');
+  return `<div class="card"><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><button class="btn btn-secondary btn-sm" onclick="oooCalMover(-1)">←</button><b style="min-width:140px;text-align:center;text-transform:capitalize">${MES[c.m]} ${c.y}</b><button class="btn btn-secondary btn-sm" onclick="oooCalMover(1)">→</button><button class="btn btn-secondary btn-sm" onclick="_ooo.cal.y=${hoy.getFullYear()};_ooo.cal.m=${hoy.getMonth()};oooRender()">Hoy</button>
+    <select style="width:auto;padding:6px 8px;font-size:13px;margin-left:auto" onchange="_ooo.cal.sector=this.value;oooRender()"><option value="">Todos los sectores</option>${sectores.map(x => `<option ${c.sector === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+    <label style="display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer"><input type="checkbox" style="width:auto" ${c.pend ? 'checked' : ''} onchange="_ooo.cal.pend=this.checked;oooRender()" /> Ver pendientes</label></div>
+    <div style="overflow-x:auto"><div style="min-width:640px"><div style="display:grid;grid-template-columns:repeat(7,1fr);font-size:11px;color:var(--text2);text-align:center;margin-bottom:2px">${['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map(x => `<div>${x}</div>`).join('')}</div><div style="display:grid;grid-template-columns:repeat(7,1fr)">${celdas}</div></div></div>
+    <div style="margin-top:10px">${leyenda}<span class="hint">Las rayas punteadas son solicitudes todavía sin aprobar. Las licencias se muestran sin el motivo.</span></div></div>`;
+}
+// ── Vista de RR.HH.: todas las personas con su saldo, y el detalle de cada una ──
+function oooPersonasLista(todos) {
+  const cfg = _oooCfg, per = oooPeriodo(new Date(), cfg, _ooo.per), items = _ooo.items || [], perf = _oooPerf || [], f = todos ? '' : procesosNormTxt(_ooo.filtroP || '');
+  const mapa = {}; perf.forEach(p => { if (p.email) mapa[p.email] = { email: p.email, nombre: p.nombre, sector: p.sector }; }); items.forEach(i => { if (i.email && !mapa[i.email]) mapa[i.email] = { email: i.email, nombre: i.nombre, sector: i.sector }; });
+  return Object.values(mapa).filter(p => !f || procesosNormTxt(p.nombre + ' ' + p.sector).includes(f)).sort((a, b) => a.nombre.localeCompare(b.nombre)).map(p => Object.assign(p, { s: oooSaldo(p.email, items, per, cfg), n: items.filter(i => i.email === p.email).length }));
+}
+function oooPersonasTabla() {
+  const filas = oooPersonasLista().map(p => { const s = p.s, sel = _ooo.persona === p.email;
+    return `<tr style="cursor:pointer;${sel ? 'background:var(--surface2)' : ''}" onclick="_ooo.persona='${esc(p.email)}';oooRender()"><td style="padding:6px 4px">${esc(p.nombre)}<div class="hint" style="margin:0">${esc(p.sector || '')}</div></td><td style="text-align:center">${s.base == null ? '<span class="hint" title="' + esc(s.origen) + '">—</span>' : s.base + s.aj}</td><td style="text-align:center">${s.tomados}</td><td style="text-align:center">${s.pend || ''}</td><td style="text-align:center;font-weight:600;${s.quedan != null && s.quedan < 0 ? 'color:var(--red)' : ''}">${s.quedan == null ? '—' : s.quedan}</td><td style="text-align:center" class="hint">${p.n || ''}</td></tr>`; }).join('');
+  return `<div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr style="text-align:center"><th style="text-align:left">Persona</th><th>Corresponden</th><th>Tomados</th><th>Pendientes</th><th>Quedan</th><th>Solicitudes</th></tr></thead><tbody>${filas || '<tr><td colspan="6" class="hint">Nadie coincide con la búsqueda.</td></tr>'}</tbody></table></div>`;
+}
+function oooPersonasHtml() {
+  const cfg = _oooCfg, per = oooPeriodo(new Date(), cfg, _ooo.per), sel = _ooo.persona, p = sel ? oooPersonasLista(true).find(x => x.email === sel) : null;
+  const lista = `<div class="card"><div class="card-label">Personas — período ${esc(per.etiqueta)}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"><button class="btn btn-secondary btn-sm" onclick="_ooo.per--;oooRender()">← Anterior</button><button class="btn btn-secondary btn-sm" onclick="_ooo.per=0;oooRender()">Actual</button><button class="btn btn-secondary btn-sm" onclick="_ooo.per++;oooRender()">Siguiente →</button>
+    <input placeholder="Buscar persona o sector…" value="${esc(_ooo.filtroP)}" style="flex:1;min-width:160px" oninput="_ooo.filtroP=this.value;document.getElementById('ooo-pers-tabla').innerHTML=oooPersonasTabla()" /></div>
+    <div id="ooo-pers-tabla">${oooPersonasTabla()}</div><p class="hint">Tocá una persona para ver sus solicitudes. La fecha de ingreso, los días a mano y los ajustes se cargan en Cfg Fuera de oficina.</p></div>`;
+  if (!p) return lista;
+  const s = oooSaldo(p.email, _ooo.items || [], per, cfg), pc = (cfg.personas || {})[p.email] || {}, mias = (_ooo.items || []).filter(i => i.email === p.email).sort((a, b) => b.desde.localeCompare(a.desde));
+  const ajustes = (pc.ajustes || []).map(a => `<div class="hint" style="margin:2px 0">${esc(oooFmt(a.fecha))}: ${a.dias > 0 ? '+' : ''}${a.dias} día${Math.abs(a.dias) === 1 ? '' : 's'} — ${esc(a.motivo || 'sin motivo')} (${esc(a.por || '')})</div>`).join('');
+  const reqs = mias.map(i => { const ab = !!_ooo.abierto[i.id];
+    return `<div style="border-top:1px solid var(--border);padding:8px 0"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:180px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span></div>${oooChip(i.estado)}<button class="btn btn-secondary btn-sm" onclick="_ooo.abierto['${i.id}']=!_ooo.abierto['${i.id}'];oooRender()">${ab ? 'Ocultar' : 'Historial'}</button></div>
+      ${ab ? `<div style="font-size:12px;margin-top:6px">${i.historial.map(h => `<div><b>${esc(oooFmt(String(h.f || '').slice(0, 10)))}</b> · ronda ${esc(h.r || 1)} · ${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ` — «${esc(h.c)}»` : ''}</div>`).join('') || '<span class="hint">' + (i.vieja ? 'Viene de la lista anterior de SharePoint.' : 'Sin movimientos.') + '</span>'}</div>` : ''}</div>`; }).join('');
+  const tile = (v, l, c) => dashTile(v == null ? '—' : v, l, '', c);
+  return lista + `<div class="card"><div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><div class="card-label" style="margin:0;flex:1">${esc(p.nombre)} · ${esc(p.sector || '')}</div><button class="btn btn-secondary btn-sm" onclick="_ooo.persona='';oooRender()">Cerrar</button></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px">${tile(s.base == null ? null : s.base + s.aj, 'Corresponden')}${tile(s.tomados, 'Tomados', 'var(--green)')}${tile(s.pend, 'Pendientes', s.pend ? '#b8860b' : null)}${tile(s.quedan, 'Quedan', s.quedan != null && s.quedan < 0 ? 'var(--red)' : null)}</div>
+    <p class="hint">Ingreso: ${pc.ingreso ? esc(oooFmt(pc.ingreso)) : 'sin cargar'} · ${esc(s.origen)}.</p>${ajustes ? `<div style="margin:6px 0"><b style="font-size:12px">Ajustes de días</b>${ajustes}</div>` : ''}
+    <div class="card-label" style="margin:10px 0 0">Solicitudes</div>${reqs || '<p class="hint">Sin solicitudes.</p>'}</div>`;
 }
 function oooMisHtml() {
   const cfg = _oooCfg, email = oooMiEmail(), per = oooPeriodo(new Date(), cfg, _ooo.per), s = oooSaldo(email, _ooo.items || [], per, cfg), mios = (_ooo.items || []).filter(i => i.email === email).sort((a, b) => b.desde.localeCompare(a.desde));
@@ -44826,10 +44917,10 @@ function oooMisHtml() {
     <p class="hint">Régimen de ${cfg.regimen === 'habiles' ? 'días hábiles' : 'días corridos'}. ${esc(s.origen)}${s.aj ? `; ajustes de RR.HH.: ${s.aj > 0 ? '+' : ''}${s.aj}` : ''}.</p></div>`;
   const filas = mios.map(i => {
     const abierto = !!_ooo.abierto[i.id], acc = [];
-    if (i.estado === 'rechazada') acc.push(`<button class="btn btn-primary btn-sm" onclick="oooEditar('${i.id}')">Corregir y reenviar</button>`);
-    if (['pendiente_coord', 'pendiente_rrhh', 'rechazada'].includes(i.estado)) acc.push(`<button class="btn btn-secondary btn-sm" onclick="oooCancelarUI('${i.id}')">Cancelar</button>`);
-    const hist = abierto ? `<div style="margin-top:8px;font-size:12px;border-top:1px solid var(--border);padding-top:8px">${i.historial.map(h => `<div style="margin-bottom:4px"><b>${esc(oooFmt(String(h.f || '').slice(0, 10)))}</b> · ronda ${esc(h.r || 1)} · ${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ` — «${esc(h.c)}»` : ''}</div>`).join('') || '<span class="hint">Sin movimientos.</span>'}</div>` : '';
-    return `<div class="card" style="margin-bottom:8px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:200px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''})</span></div>${oooChip(i.estado)}</div>${hist}
+    if (i.estado === 'rechazada' && !i.vieja) acc.push(`<button class="btn btn-primary btn-sm" onclick="oooEditar('${i.id}')">Corregir y reenviar</button>`);
+    if (!i.vieja && ['pendiente_coord', 'pendiente_rrhh', 'rechazada'].includes(i.estado)) acc.push(`<button class="btn btn-secondary btn-sm" onclick="oooCancelarUI('${i.id}')">Cancelar</button>`);
+    const hist = abierto ? `<div style="margin-top:8px;font-size:12px;border-top:1px solid var(--border);padding-top:8px">${i.vieja ? '<span class="hint">Viene de la lista anterior de SharePoint (solo lectura).</span>' : ''}${i.historial.map(h => `<div style="margin-bottom:4px"><b>${esc(oooFmt(String(h.f || '').slice(0, 10)))}</b> · ronda ${esc(h.r || 1)} · ${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ` — «${esc(h.c)}»` : ''}</div>`).join('') || '<span class="hint">Sin movimientos.</span>'}</div>` : '';
+    return `<div class="card" style="margin-bottom:8px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:200px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span></div>${oooChip(i.estado)}</div>${hist}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="_ooo.abierto['${i.id}']=!_ooo.abierto['${i.id}'];oooRender()">${abierto ? 'Ocultar historial' : 'Ver historial'}</button>${acc.join('')}</div></div>`;
   }).join('');
   return resumen + `<div class="card-label" style="margin:14px 2px 8px">Mis solicitudes</div>` + (filas || '<p class="hint">Todavía no hiciste ninguna solicitud.</p>');
@@ -44938,6 +45029,8 @@ function oooCfgRender() {
   <div class="card"><div class="card-label">Lista de SharePoint</div>
     <label>Sitio</label><input value="${esc(cfg.sitio)}" style="width:100%;margin-bottom:8px" onchange="oooCfgSet('sitio',this.value.trim());_oooSp=null" />
     <label>Nombre de la lista</label><input value="${esc(cfg.lista)}" style="width:100%;margin-bottom:8px" onchange="oooCfgSet('lista',this.value.trim());_oooSp=null" />
+    <label>Lista anterior (solo lectura)</label><input value="${esc(cfg.listaVieja || '')}" placeholder="Calendario" style="width:100%;margin-bottom:8px" onchange="oooCfgSet('listaVieja',this.value.trim())" />
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;margin-bottom:8px"><input type="checkbox" style="width:auto" ${cfg.usarVieja ? 'checked' : ''} onchange="oooCfgSet('usarVieja',this.checked)" /> Mostrarla en el calendario y en la vista de RR.HH. (y contarla en los saldos)</label>
     <button class="btn btn-secondary btn-sm" onclick="oooCfgPreparar()">Preparar la lista (crea las columnas que falten)</button><div id="cfg-ooo-prep" class="hint" style="margin-top:8px"></div>
     <p class="hint">Hay que iniciar sesión con Microsoft con una cuenta que pueda administrar la lista. Si la lista ya existe solo agrega lo que falta.</p></div>
   <div class="card"><div class="card-label">Régimen y período</div>
@@ -44961,9 +45054,9 @@ function oooCfgRender() {
 async function dashOOO() {
   try {
     await initMsal().catch(() => {}); if (typeof msAccount === 'undefined' || !msAccount) return '';
-    const cfg = await oooCfgCargar(), items = await oooLeerItems(), hoy = oooIso(new Date());
+    const cfg = await oooCfgCargar(), items = (await oooLeerItems().catch(() => [])).concat(await oooLeerVieja().catch(() => [])), hoy = oooIso(new Date());
     if (oooEsRRHH(cfg)) {
-      const pr = items.filter(i => i.estado === 'pendiente_rrhh').length, pc = items.filter(i => i.estado === 'pendiente_coord').length, fuera = items.filter(i => i.estado === 'aprobada' && i.desde <= hoy && i.hasta >= hoy);
+      const nuevos = items.filter(i => !i.vieja), pr = nuevos.filter(i => i.estado === 'pendiente_rrhh').length, pc = nuevos.filter(i => i.estado === 'pendiente_coord').length, fuera = items.filter(i => i.estado === 'aprobada' && i.desde <= hoy && i.hasta >= hoy);
       return dashGrupo('Personal — fuera de oficina', [dashTile(pr, 'Esperan a RR.HH.', '', pr ? 'var(--red)' : 'var(--green)'), dashTile(pc, 'Esperan al coordinador', '', pc ? '#b8860b' : null), dashTile(fuera.length, 'Fuera hoy', fuera.slice(0, 3).map(i => i.nombre.split(' ')[0]).join(', ') + (fuera.length > 3 ? '…' : ''))].join(''));
     }
     const s = oooSaldo(oooMiEmail(), items, oooPeriodo(new Date(), cfg, 0), cfg), mias = items.filter(i => i.email === oooMiEmail() && i.estado.startsWith('pendiente')).length;
