@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45268,70 +45268,6 @@ async function oooCfgPreparar() {
   const out = document.getElementById('cfg-ooo-prep'); out.innerHTML = ''; const log = t => { out.innerHTML += `<div>${esc(t)}</div>`; };
   try { _oooSp = null; await oooLista(true, log); log('✓ Todo listo.'); } catch (e) { out.innerHTML += `<div style="color:var(--red)">✕ ${esc(e.message)}</div>`; }
 }
-// ── Importar las fechas de ingreso desde un Excel (columnas "Nombre y Apellido" y "Fecha Alta") ──
-// Se elige el archivo en el momento y no queda guardado en ningún lado: solo se escriben las fechas que se confirmen. Los nombres del Excel vienen como "APELLIDO, NOMBRES"
-// y los de MAIA como "Nombres Apellido": se comparan por palabras. Si no hay coincidencia clara, se elige a mano.
-let _oooImp = null;
-const oooTokens = t => procesosNormTxt(String(t || '')).split(/[^a-z0-9]+/).filter(x => x.length > 1);
-function oooFechaIngreso(v) {
-  if (v == null || v === '') return { iso: '', dudosa: false };
-  const pad = n => String(n).padStart(2, '0');
-  if (v instanceof Date) return isNaN(v) ? { iso: '', dudosa: false } : { iso: `${v.getUTCFullYear()}-${pad(v.getUTCMonth() + 1)}-${pad(v.getUTCDate())}`, dudosa: false };
-  if (typeof v === 'number') { const d = new Date(Math.round((v - 25569) * 864e5)); return { iso: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`, dudosa: false }; }
-  const t = String(v).trim(); let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t); if (m) return { iso: `${m[1]}-${pad(m[2])}-${pad(m[3])}`, dudosa: false };
-  m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/.exec(t); if (!m) return { iso: '', dudosa: false };
-  let a = Number(m[1]), b = Number(m[2]), y = Number(m[3]); if (y < 100) y += 2000;
-  if (a > 12) return { iso: `${y}-${pad(b)}-${pad(a)}`, dudosa: false };   // día/mes/año
-  if (b > 12) return { iso: `${y}-${pad(a)}-${pad(b)}`, dudosa: false };   // mes/día/año
-  return { iso: `${y}-${pad(b)}-${pad(a)}`, dudosa: true };   // ambigua: se toma día/mes/año y se avisa
-}
-function oooCoincidencia(nombreExcel, perfiles) {
-  const a = oooTokens(nombreExcel), puntos = perfiles.map(p => { const b = oooTokens(p.nombre), comunes = a.filter(x => b.includes(x)).length; return { p, comunes, rel: comunes / Math.max(1, Math.min(a.length, b.length)) }; }).sort((x, y) => y.comunes - x.comunes || y.rel - x.rel);
-  const mejor = puntos[0], segundo = puntos[1];
-  if (mejor && mejor.comunes >= 2 && (!segundo || segundo.comunes < mejor.comunes || segundo.rel < mejor.rel)) return { email: mejor.p.email, nivel: 'ok' };
-  // un solo apellido en común y el nombre de pila empieza igual (ej. "Leo" y "LEANDRO"): se propone pero hay que revisarlo
-  const apellido = String(nombreExcel).split(',')[0], ta = oooTokens(apellido), pila = oooTokens(String(nombreExcel).split(',').slice(1).join(' '))[0] || '';
-  const cand = perfiles.filter(p => { const b = oooTokens(p.nombre); return ta.length && ta.every(x => b.includes(x)) && pila && b.some(x => x !== ta[0] && x.slice(0, 2) === pila.slice(0, 2)); });
-  if (cand.length === 1) return { email: cand[0].email, nivel: 'revisar' };
-  return { email: '', nivel: 'no' };
-}
-async function oooImportarIngresos(input) {
-  const f = input.files && input.files[0]; input.value = ''; if (!f) return;
-  const out = document.getElementById('cfg-ooo-import'); out.innerHTML = '<p class="hint">Leyendo el Excel…</p>';
-  try {
-    await casoCargarExcelJS(); const wb = new ExcelJS.Workbook(); await wb.xlsx.load(await f.arrayBuffer());
-    const celda = c => { let v = c.value; if (v && typeof v === 'object' && !(v instanceof Date)) v = v.result != null ? v.result : v.text != null ? v.text : v.richText ? v.richText.map(r => r.text).join('') : null; return v; };
-    let filas = null;
-    for (const ws of wb.worksheets) {
-      for (let r = 1; r <= Math.min(ws.rowCount, 15) && !filas; r++) {
-        let cN = 0, cF = 0; ws.getRow(r).eachCell((c, i) => { const t = procesosNormTxt(String(celda(c) || '')); if (!cN && /nombre|apellido|empleado/.test(t)) cN = i; else if (!cF && /fecha|alta|ingreso/.test(t)) cF = i; });
-        if (cN && cF) { filas = []; for (let k = r + 1; k <= ws.rowCount; k++) { const nom = String(celda(ws.getRow(k).getCell(cN)) || '').trim(); if (nom) filas.push({ nombre: nom, f: oooFechaIngreso(celda(ws.getRow(k).getCell(cF))) }); } }
-      }
-      if (filas) break;
-    }
-    if (!filas || !filas.length) throw new Error('No encontré las columnas de nombre y de fecha de alta en el Excel (los encabezados tienen que decir algo como "Nombre y Apellido" y "Fecha Alta").');
-    const perf = (_oooPerf || []).filter(p => p.email);
-    _oooImp = filas.map(x => Object.assign({}, x, oooCoincidencia(x.nombre, perf)));
-    oooImportarRender();
-  } catch (e) { out.innerHTML = `<div class="status-msg" style="background:#fdecea;color:#b3261e">✕ ${esc(e.message)}</div>`; }
-}
-function oooImportarRender() {
-  const out = document.getElementById('cfg-ooo-import'); if (!out || !_oooImp) return; const perf = (_oooPerf || []).filter(p => p.email), cfg = _oooCfg;
-  const filas = _oooImp.map((x, i) => {
-    const ya = x.email && (cfg.personas[x.email] || {}).ingreso, cambia = ya && x.f.iso && ya !== x.f.iso, estado = !x.f.iso ? '<span style="color:var(--red)">fecha ilegible</span>' : x.nivel === 'revisar' ? '<span style="color:#b8860b">revisar</span>' : x.nivel === 'no' && !x.email ? '<span style="color:var(--red)">sin coincidencia</span>' : cambia ? `<span style="color:#b8860b">ya tenía ${esc(oooFmt(ya))}</span>` : x.f.dudosa ? '<span style="color:#b8860b">fecha dudosa (día/mes)</span>' : '<span style="color:var(--green)">ok</span>';
-    return `<tr style="vertical-align:middle"><td style="padding:4px 6px">${esc(x.nombre)}</td><td style="padding:4px 6px;white-space:nowrap">${x.f.iso ? esc(oooFmt(x.f.iso)) : '—'}</td><td style="padding:4px 6px"><select style="width:100%;padding:4px 6px;font-size:13px" onchange="_oooImp[${i}].email=this.value;oooImportarRender()"><option value="">— no cargar —</option>${perf.map(p => `<option value="${esc(p.email)}" ${x.email === p.email ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select></td><td style="padding:4px 6px;font-size:12px">${estado}</td></tr>`;
-  }).join('');
-  const listas = _oooImp.filter(x => x.email && x.f.iso).length, repetidas = _oooImp.filter(x => x.email).length - new Set(_oooImp.filter(x => x.email).map(x => x.email)).size;
-  out.innerHTML = `<div class="card" style="margin:10px 0"><div class="card-label">Importar fechas de ingreso — revisá antes de aplicar</div>
-    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;font-size:12px;color:var(--text2)"><th style="padding:4px 6px">En el Excel</th><th style="padding:4px 6px">Fecha de alta</th><th style="padding:4px 6px">Persona en MAIA</th><th style="padding:4px 6px">Estado</th></tr></thead><tbody>${filas}</tbody></table></div>
-    ${repetidas > 0 ? '<div class="status-msg" style="background:#fff4d6;color:#7a5b00">Hay dos filas del Excel asignadas a la misma persona: se usa la última.</div>' : ''}
-    <div style="display:flex;gap:8px;margin-top:8px"><button class="btn btn-primary btn-sm" onclick="oooImportarAplicar()" ${listas ? '' : 'disabled'}>Cargar ${listas} fecha${listas === 1 ? '' : 's'} de ingreso</button><button class="btn btn-secondary btn-sm" onclick="_oooImp=null;document.getElementById('cfg-ooo-import').innerHTML=''">Cancelar</button></div>
-    <p class="hint">Solo se cargan las filas con persona elegida y fecha válida. Las demás quedan como están. El Excel no se guarda en MAIA.</p></div>`;
-}
-function oooImportarAplicar() {
-  let n = 0; (_oooImp || []).forEach(x => { if (!x.email || !x.f.iso) return; const pc = (_oooCfg.personas[x.email] = _oooCfg.personas[x.email] || {}); pc.ingreso = x.f.iso; n++; });
-  _oooImp = null; oooCfgCambio(); oooCfgRender(); oooCfgEstado(`Se cargaron ${n} fechas de ingreso. Guardando…`, 'info');
-}
 function oooCfgRender() {
   const el = document.getElementById('cfg-ooo-root'); if (!el) return; const cfg = _oooCfg, perf = _oooPerf || [], sel = 'width:auto;padding:6px 8px;font-size:13px';
   const emails = perf.filter(p => p.email);
@@ -45369,8 +45305,7 @@ function oooCfgRender() {
     <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" style="width:auto" ${cfg.notificar ? 'checked' : ''} onchange="oooCfgSet('notificar',this.checked)" /> Avisar por campanita y push (apagado = modo prueba, no le llega nada a nadie)</label>
     <p class="hint">Aprueban primero los coordinadores del sector de quien pide, y después RR.HH. (las personas del sector RR.HH.).</p></div>
   <div class="card"><div class="card-label">Personas: ingreso, días y ajustes</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><input type="file" id="cfg-ooo-import-file" accept=".xlsx" style="display:none" onchange="oooImportarIngresos(this)" /><button class="btn btn-secondary btn-sm" onclick="document.getElementById('cfg-ooo-import-file').click()">⬆ Importar fechas de ingreso desde Excel</button><span class="hint" style="margin:0">Columnas "Nombre y Apellido" y "Fecha Alta".</span></div>
-    <div id="cfg-ooo-import"></div><div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="5" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
+<div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="5" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
 }
 // Tarjeta del dashboard: RR.HH. ve lo pendiente y quién está fuera hoy; el resto, su propio saldo
 async function dashOOO() {
