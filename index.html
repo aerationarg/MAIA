@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -44629,13 +44629,26 @@ const OOO_COLS = [['EmpleadoEmail', 't'], ['EmpleadoNombre', 't'], ['Sector', 't
 let _oooCfg = null, _oooPerf = null, _oooSp = null, _ooo = { tab: 'mis', items: null, error: '', avisos: [], cargando: false, form: null, per: 0, abierto: {}, cal: null, persona: '', filtroP: '' };
 
 // ── Configuración ──
+let _oooCfgErrLectura = '';
 async function oooCfgCargar(forzar) {
   if (_oooCfg && !forzar) return _oooCfg;
-  let v = null; try { v = await supaConfigGet(OOO_CFG_KEY); } catch (e) { v = null; }
+  let v = null; _oooCfgErrLectura = '';
+  try { v = await supaConfigGetSeguro(OOO_CFG_KEY); } catch (e) { _oooCfgErrLectura = e.message; if (_oooCfg) return _oooCfg; }   // si no se puede leer, no se reemplaza lo que ya había en pantalla por valores por defecto
   _oooCfg = Object.assign(JSON.parse(JSON.stringify(OOO_CFG_DEF)), v || {}); if (!_oooCfg.personas) _oooCfg.personas = {};
   return _oooCfg;
 }
-async function oooCfgGuardar() { await supaConfigSet(OOO_CFG_KEY, _oooCfg); }
+const oooCanon = v => Array.isArray(v) ? v.map(oooCanon) : v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => (o[k] = oooCanon(v[k]), o), {}) : v;
+// Guarda en app_config y vuelve a leer para comprobar que quedó: si algo falla, el motivo se muestra en pantalla
+async function oooCfgGuardar() {
+  if (_oooCfgErrLectura) throw new Error(`No guardo porque no pude leer la configuración que ya estaba guardada (${_oooCfgErrLectura}): así no la piso con valores por defecto. Recargá la página.`);
+  const s = JSON.parse(localStorage.getItem('daia_session') || 'null'); if (!s || !s.token) throw new Error('Tu sesión de MAIA venció: volvé a iniciar sesión.');
+  const h = { Authorization: 'Bearer ' + s.token, 'Content-Type': 'application/json' };
+  const res = await supaFetch('/rest/v1/app_config', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates' }, h), body: JSON.stringify({ key: OOO_CFG_KEY, value: _oooCfg }) });
+  if (!res.ok) { let m = ''; try { const j = await res.json(); m = j.message || j.hint || JSON.stringify(j); } catch (e) { /* sin detalle */ } throw new Error(`No se pudo guardar (HTTP ${res.status}${m ? ': ' + m : ''}).`); }
+  const rd = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${OOO_CFG_KEY}`, { headers: h }), j = rd.ok ? await rd.json().catch(() => null) : null;
+  if (!Array.isArray(j) || !j.length) throw new Error('Se envió, pero al volver a leer no aparece lo guardado (puede faltar el permiso de lectura de la tabla app_config).');
+  if (JSON.stringify(oooCanon(j[0].value)) !== JSON.stringify(oooCanon(_oooCfg))) throw new Error('Se envió, pero al volver a leer lo guardado es distinto: puede haber filas repetidas para esta clave en app_config.');
+}
 
 // ── Fechas y cálculo de días ──
 const oooD = s => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3], 12) : null; };
@@ -45023,9 +45036,21 @@ let _oooCfgTimer = null;
 async function oooCfgAbrir() {
   const el = document.getElementById('cfg-ooo-root'); if (!el) return; el.innerHTML = '<p class="hint">Cargando…</p>';
   await oooCfgCargar(true); try { await oooPerfiles(); } catch (e) { /* se muestra sin la lista de personas */ }
-  oooCfgRender();
+  oooCfgRender(); if (_oooCfgErrLectura) oooCfgEstado('✕ No pude leer la configuración guardada: ' + _oooCfgErrLectura, 'error');
 }
-function oooCfgCambio() { clearTimeout(_oooCfgTimer); const st = document.getElementById('cfg-ooo-estado'); if (st) st.textContent = 'Guardando…'; _oooCfgTimer = setTimeout(async () => { try { await oooCfgGuardar(); if (st) st.textContent = '✓ Guardado'; } catch (e) { if (st) st.textContent = '✕ ' + e.message; } }, 600); }
+// Cartel fijo abajo a la derecha: así se ve si guardó o no aunque estés más abajo en la pantalla (los errores quedan hasta el próximo guardado)
+function oooCfgEstado(txt, tipo) {
+  let el = document.getElementById('ooo-cfg-toast');
+  if (!el) { el = document.createElement('div'); el.id = 'ooo-cfg-toast'; el.style.cssText = 'position:fixed;right:16px;bottom:16px;max-width:380px;padding:10px 14px;border-radius:8px;font-size:13px;z-index:900;box-shadow:0 2px 10px rgba(0,0,0,.25);cursor:pointer'; el.onclick = () => { el.style.display = 'none'; }; document.body.appendChild(el); }
+  const col = { ok: ['#e6f4ea', '#1e6b34'], error: ['#fdecea', '#b3261e'], info: ['var(--surface2)', 'var(--text)'] }[tipo] || ['var(--surface2)', 'var(--text)'];
+  el.style.background = col[0]; el.style.color = col[1]; el.textContent = txt; el.style.display = 'block'; clearTimeout(el._t); if (tipo === 'ok') el._t = setTimeout(() => { el.style.display = 'none'; }, 2500);
+}
+async function oooCfgGuardarYa() {
+  clearTimeout(_oooCfgTimer); oooCfgEstado('Guardando…', 'info'); const st = document.getElementById('cfg-ooo-estado');
+  try { await oooCfgGuardar(); oooCfgEstado('✓ Guardado', 'ok'); if (st) st.textContent = '✓ Guardado'; }
+  catch (e) { oooCfgEstado('✕ No se guardó. ' + e.message, 'error'); if (st) st.textContent = '✕ ' + e.message; }
+}
+function oooCfgCambio() { clearTimeout(_oooCfgTimer); oooCfgEstado('Guardando…', 'info'); _oooCfgTimer = setTimeout(oooCfgGuardarYa, 300); }
 const oooEscalaTxt = e => e.map(([a, d]) => `${a}:${d}`).join(', ');
 const oooEscalaLeer = t => String(t || '').split(',').map(x => x.trim().split(':').map(Number)).filter(p => p.length === 2 && p.every(n => !isNaN(n))).sort((a, b) => a[0] - b[0]);
 function oooCfgSet(k, v) { _oooCfg[k] = v; oooCfgCambio(); }
@@ -45059,7 +45084,8 @@ function oooCfgRender() {
   const personas = emails.map(p => { const d = cfg.personas[p.email] || {}, per = oooPeriodo(new Date(), cfg, 0), c = oooCorresponden(p.email, per, cfg);
     return `<tr><td>${esc(p.nombre)}<div class="hint">${esc(p.sector || '')}</div></td><td><input type="date" value="${esc(d.ingreso || '')}" style="${sel}" onchange="oooCfgPersona('${esc(p.email)}','ingreso',this.value)" /></td><td><input type="number" value="${d.dias == null ? '' : esc(String(d.dias))}" placeholder="auto" style="width:80px;padding:6px 8px;font-size:13px" onchange="oooCfgPersona('${esc(p.email)}','dias',this.value)" /></td>
       <td style="font-size:12px">${c.base == null ? '<span class="hint">—</span>' : c.base + c.aj}${(d.ajustes || []).length ? ` <span class="hint" title="${esc((d.ajustes || []).map(a => `${a.fecha}: ${a.dias > 0 ? '+' : ''}${a.dias} ${a.motivo || ''}`).join('\n'))}">(${d.ajustes.length} ajuste${d.ajustes.length === 1 ? '' : 's'})</span>` : ''}</td><td><button class="btn btn-secondary btn-sm" onclick="oooCfgAjuste('${esc(p.email)}')">＋ Ajuste</button></td></tr>`; }).join('');
-  el.innerHTML = `<div class="card"><div class="card-label">Fuera de oficina — Configuración</div><p class="hint" id="cfg-ooo-estado" style="margin-top:0"> </p></div>
+  el.innerHTML = `<div class="card"><div class="card-label">Fuera de oficina — Configuración</div><p class="hint" id="cfg-ooo-estado" style="margin-top:0">${_oooCfgErrLectura ? '✕ No pude leer la configuración guardada: ' + esc(_oooCfgErrLectura) : 'Los cambios se guardan solos; abajo a la derecha aparece si quedó guardado.'}</p>
+    <button class="btn btn-secondary btn-sm" onclick="oooCfgGuardarYa()">Guardar ahora</button></div>
   <div class="card"><div class="card-label">Lista de SharePoint</div>
     <label>Sitio</label><input value="${esc(cfg.sitio)}" style="width:100%;margin-bottom:8px" onchange="oooCfgSet('sitio',this.value.trim());_oooSp=null" />
     <label>Nombre de la lista</label><input value="${esc(cfg.lista)}" style="width:100%;margin-bottom:8px" onchange="oooCfgSet('lista',this.value.trim());_oooSp=null" />
