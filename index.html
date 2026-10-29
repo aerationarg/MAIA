@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -8900,6 +8900,7 @@ function procesosStep1Html(p) {
     <textarea rows="3" placeholder="Ej: Cliente ABC, planta láctea, caudal 50 m3/día, DBO 2000 mg/L, vuelca a colector cloacal..." style="margin-bottom:10px" oninput="procesosStep1TextoLibre=this.value">${esc(procesosStep1TextoLibre)}</textarea>
     <p class="hint" style="margin-bottom:10px">Podés combinarla con archivos, o usarla sola. La IA completa lo que pueda a partir de este texto y deja el resto en blanco — después lo editás a mano, o avanzás igual al Paso 2 aunque falte información.</p>
 
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-bottom:10px"><input type="checkbox" style="width:auto;margin-top:3px" ${info.sin_vuelco ? 'checked' : ''} onchange="procesosSinVuelcoSet(this.checked)" /><span style="font-size:13px"><b>Etapa intermedia / sin vuelco</b> — el efluente sigue a otra planta o proceso, así que no hay límites ni normativa de vuelco que cumplir. La IA lo propone al analizar; acá lo corregís. Tildado: no se busca normativa, no se chequea el cumplimiento y las propuestas y manuales salen sin la parte de vuelco.</span></label>
     <p class="hint" style="margin-bottom:10px">También se suman solos los documentos de "Normativa" e "Información general" cargados en Cfg Procesos IA. Si algún límite igual queda sin resolver, MAIA propone después un documento de normativa puntual y pide tu confirmación antes de usarlo.</p>
 
     ${tieneAnalisis ? `
@@ -9095,6 +9096,7 @@ async function procesosNormativaSugerir(contextoTexto, candidatos) {
 // parámetro sin límite, no tiene sentido volver a proponer el mismo, así
 // que se excluye de las opciones antes de sugerir.
 async function procesosStep1NormativaVerificar(p, yaProbado) {
+  if (procesosSinVuelco(p)) return;   // etapa intermedia: no hay normativa de vuelco que buscar
   const corrientes = p.info_cliente?.corrientes || [];
   const faltantes = []; // strings para mostrar/mandar en el prompt
   const faltantesClaves = []; // "Corriente|Parametro" exactas — único whitelist de lo que se puede tocar
@@ -9399,6 +9401,7 @@ async function procesosStep1Analizar(modo) {
     const templateStep1 = await procesosPromptText('step1_analizar', DEFAULT_TEMPLATE_STEP1);
     let prompt = procesosPromptFill(templateStep1, { paramPrompt, textoPrompt });
     prompt += procesosFuenteInstruccion(contentItems.map(c => c.nombre).filter(n => n && n !== 'Descripción escrita a mano'));
+    prompt += '\n\nETAPA INTERMEDIA / SIN VUELCO: si por lo que dicen los documentos este proyecto es una etapa INTERMEDIA del tratamiento (el efluente que sale de acá sigue a otra planta o proceso, por ejemplo un pretratamiento o una etapa que envía a otra planta, y NO se vuelca a un cuerpo receptor, a la red colectora ni a reúso desde esta planta), agregá en el JSON la clave raíz "sin_vuelco": true y dejá en null "Tipo de vuelco", "Normativa aplicable" y los límites normativos (no los infieras: no hay límites de vuelco que cumplir). Si la planta sí vuelca, o si hay duda, "sin_vuelco": false.';
     if (modo === 'sumar') {
       const yaNombres = (p.info_cliente.corrientes || []).map(c => c.nombre).filter(Boolean);
       prompt += '\n\nANÁLISIS INCREMENTAL: este cliente ya fue analizado antes con otros documentos; ahora se agrega información NUEVA. Extraé SOLO lo que figure en los documentos adjuntos ahora (dejá null lo que no aparezca — lo ya cargado se conserva aparte).' + (yaNombres.length ? ' Corrientes que ya existen: ' + yaNombres.map(n => '"' + n + '"').join(', ') + '. Si lo adjuntado corresponde a una de ellas, usá EXACTAMENTE ese nombre; solo creá una corriente nueva si es realmente otra distinta.' : '');
@@ -9471,6 +9474,7 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt, normativaYaUs
       const f = procesosStep1Fusionar(p.info_cliente, extraido);
       const previos = (p.info_cliente.archivos_analizados || []).filter(a => !analizadosAhora.some(n => n.nombre === a.nombre));
       infoNueva = Object.assign({}, p.info_cliente, f.info, { carpeta_cliente: procesosStep1SpFolder || p.info_cliente.carpeta_cliente || null, archivos_analizados: previos.concat(analizadosAhora) });
+      if (typeof p.info_cliente.sin_vuelco !== 'boolean' && extraido.sin_vuelco === true) infoNueva.sin_vuelco = true;   // lo que ya tildaste a mano se respeta
       const partes = [];
       if (f.res.nuevos) partes.push(f.res.nuevos + ' dato' + (f.res.nuevos === 1 ? '' : 's') + ' nuevo' + (f.res.nuevos === 1 ? '' : 's'));
       if (f.res.actualizados) partes.push(f.res.actualizados + ' actualizado' + (f.res.actualizados === 1 ? '' : 's'));
@@ -9478,7 +9482,7 @@ async function procesosStep1EjecutarAnalisis(contentItems, prompt, normativaYaUs
       if (f.res.respetados) partes.push(f.res.respetados + ' que editaste a mano se conserv' + (f.res.respetados === 1 ? 'ó' : 'aron') + ' como estaban');
       aviso = '✓ Se sumó a lo ya analizado' + (partes.length ? ': ' + partes.join(' · ') : ' (no había nada nuevo para agregar).');
     } else {
-      infoNueva = { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null, archivos_analizados: analizadosAhora };
+      infoNueva = { campos: extraido.campos_generales || {}, corrientes: extraido.corrientes || [], sin_vuelco: extraido.sin_vuelco === true, carpeta_cliente: procesosStep1SpFolder || p.info_cliente?.carpeta_cliente || null, archivos_analizados: analizadosAhora };
       if (p.info_cliente && p.info_cliente.archivos_guardados) infoNueva.archivos_guardados = p.info_cliente.archivos_guardados;
     }
     await procesosSaveProyecto({ info_cliente: infoNueva }, p);
@@ -10284,7 +10288,7 @@ function procesosStep2Html(p) {
   const todasConfirmadas = algunaSeleccionada && seleccionadas.every(n => hojasGuardadas[n]?.confirmada);
   const algunaDesactualizada = seleccionadas.some(n => procesosStep2HojaDesactualizada(n));
   const orden = dd.orden || [];
-  const cumplimiento = dd.cumplimiento || [];
+  const cumplimiento = procesosSinVuelco(procesosCurrentProyecto) ? [] : (dd.cumplimiento || []);
   const ponderaciones = dd.ponderaciones || {};
 
   // Primero las hojas seleccionadas, en el orden del tren (con flechas para
@@ -14746,7 +14750,7 @@ async function procesosStep2GuardarHoja(nombre) {
     const orden = dd.orden || [];
     const liquidas = procesosStep2GruposDesdeActual({ diseno_data: dd }).filter(g => g.tipo !== 'auxiliar' && g.linea !== 'lodos');
     const ultimaLiquida = liquidas.length ? liquidas[liquidas.length - 1].instancias[liquidas[liquidas.length - 1].instancias.length - 1].nombre : orden[orden.length - 1];
-    if (orden.length && nombre === ultimaLiquida) {
+    if (orden.length && nombre === ultimaLiquida && !procesosSinVuelco(p)) {
       showMsg('procesos-step2-status', 'loading', 'Verificando cumplimiento vs. límites de vuelco...');
       dd.cumplimiento = await procesosStep2ChequearCumplimiento(model, hf);
       if (procesosCurrentProyecto === p) { const st = document.getElementById('procesos-step2-status'); if (st) st.innerHTML = ''; }
@@ -20672,7 +20676,7 @@ function procesosResumenDiseno(p) {
     const matTxt = h.tipo !== 'auxiliar' ? [h.material && (PROCESOS_MATERIALES[h.material] || h.material), h.geometria && (PROCESOS_GEOMETRIAS[h.geometria] || h.geometria)].filter(Boolean).join(', ') : '';
     return `${titulo}:\n${matTxt ? '  - Material y geometría constructiva: ' + matTxt + '\n' : ''}${vals || '  (sin valores)'}`;
   }).join('\n\n');
-  if (dd.cumplimiento && dd.cumplimiento.length) {
+  if (dd.cumplimiento && dd.cumplimiento.length && !procesosSinVuelco(p)) {
     ctx += '\n\nCumplimiento vs. límites de vuelco:\n' + dd.cumplimiento.map(r => `  - ${r.parametro}: ${r.valor_final}${r.unidad?' '+r.unidad:''} (límite ${r.limite}${r.unidad?' '+r.unidad:''}) — ${r.cumple?'cumple':'NO cumple'}`).join('\n');
   }
   return ctx;
@@ -20720,6 +20724,15 @@ function procesosMarcasEquiposTxt(p) {
   const r = procesosCampoCliente(p, /(modelo|marca)/, /equipo/);
   return r ? `MODELOS O MARCAS DE EQUIPOS QUE NOMBRA EL CLIENTE (campo "${r.campo}" del Paso 1):\n${r.texto}\n\nCómo usarlos: si alguno corresponde a un equipo de esta etapa, preferilo e indicá en la especificación o la justificación que lo pidió el cliente (siempre dentro de los tipos de equipo disponibles); si no corresponde a ninguno de los equipos de esta etapa, ignoralo.\n\n` : '';
 }
+// Etapa intermedia: el efluente sigue a otra planta o proceso y no se vuelca desde acá, así que no hay límites ni normativa de vuelco que cumplir
+const procesosSinVuelco = p => !!(p && p.info_cliente && p.info_cliente.sin_vuelco);
+const PROCESOS_SIN_VUELCO_AVISO = 'ETAPA INTERMEDIA SIN VUELCO: este proyecto es una etapa intermedia del tratamiento (el efluente sigue a otra planta o proceso y NO se vuelca desde acá): no hay límites ni normativa de vuelco que cumplir. No inventes ni infieras normativa de vuelco, no chequees cumplimiento contra límites de vuelco y no redactes secciones de calidad ni de normativa de vuelco.';
+async function procesosSinVuelcoSet(on) {
+  const p = procesosCurrentProyecto; if (!p) return;
+  const info = Object.assign({}, p.info_cliente || {}, { sin_vuelco: !!on });
+  if (on) procesosStep1PendingNormativa = null;
+  await procesosSaveProyecto({ info_cliente: info }, p); renderProcesosStepContent();
+}
 function procesosResumenCampos(p) {
   const info = p.info_cliente || {};
   const campos = info.campos || {};
@@ -20732,8 +20745,8 @@ function procesosResumenCampos(p) {
     const vals = entries.map(([k,v]) => `  ${k}: ${v.valor}${v.unidad?' '+v.unidad:''}${(v.limite_normativo!=null&&v.limite_normativo!=='')?' (límite normativo: '+v.limite_normativo+(v.unidad?' '+v.unidad:'')+')':''}`).join('\n');
     parts.push(`Corriente "${c.nombre||'(sin nombre)'}":\n${vals || '  (sin parámetros)'}`);
   });
-  if (!parts.length) return '(sin analizar todavía)';
-  return parts.join('\n\n');
+  if (!parts.length) return info.sin_vuelco ? PROCESOS_SIN_VUELCO_AVISO : '(sin analizar todavía)';
+  return (info.sin_vuelco ? PROCESOS_SIN_VUELCO_AVISO + '\n\n' : '') + parts.join('\n\n');
 }
 
 // Todo lo conversado en el chat general del proyecto — así cualquier
@@ -20935,6 +20948,13 @@ function procesosPropuestaReemplazarBloque(doc, nivel, texto, nuevoTexto, tipo) 
 // contenido ES una tabla (Parámetros de diseño / Calidad de vuelco) — a
 // diferencia de la otra, ACÁ sí hay que barrer una w:tbl si ya existía (de
 // una generación anterior), por eso no corta el barrido al toparse con una.
+// Saca un encabezado y todo su contenido (hasta el siguiente encabezado), por ejemplo la "Calidad de vuelco" de una etapa intermedia
+function procesosPropuestaEliminarBloque(doc, nivel, texto) {
+  const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto), parent = heading.parentNode;
+  let node = heading.nextSibling; const aSacar = [heading];
+  while (node) { if (node.nodeType === 1 && (procesosPropuestaEsEncabezado(node) || node.tagName === 'w:sectPr')) break; aSacar.push(node); node = node.nextSibling; }
+  aSacar.forEach(n => parent.removeChild(n));
+}
 function procesosPropuestaReemplazarBloqueTabla(doc, nivel, texto, tablaXml) {
   const heading = procesosPropuestaBuscarEncabezado(doc, nivel, texto);
   const parent = heading.parentNode;
@@ -21111,6 +21131,8 @@ function procesosPropuestaInsertarAntesDe(doc, nivel, textoHeading, xml) {
   const heading = procesosPropuestaBuscarEncabezado(doc, nivel, textoHeading);
   procesosPropuestaParsearFragmento(doc, xml).forEach(n => heading.parentNode.insertBefore(n, heading));
 }
+// ¿La propuesta lleva la sección de calidad de vuelco? Si no se eligió a mano, sigue lo que dice el proyecto (etapa intermedia sin vuelco)
+const propVuelcoOmitido = p => { const o = p && p.propuesta_data && p.propuesta_data.secciones && p.propuesta_data.secciones.intro_calidad_vuelco && p.propuesta_data.secciones.intro_calidad_vuelco.omitir; return o !== undefined && o !== null ? !!o : procesosSinVuelco(p); };
 function procesosPropuestaAplicarDatos(doc, p) {
   const pd = p.propuesta_data || {};
   const alts = procesosAlternativasLista(p), multi = alts.length > 1;
@@ -21123,6 +21145,7 @@ function procesosPropuestaAplicarDatos(doc, p) {
   try { procesosPropuestaAsegurarSaltoDePagina(doc, 'INTRODUCCIÓN'); } catch(e) { console.warn('No se pudo asegurar el salto de página antes de la Introducción:', e.message); }
   const sec = k => (pd.secciones && pd.secciones[k]) || {};
   PROCESOS_PROPUESTA_SECCIONES.filter(s => !s.especial).forEach(s => {
+    if (s.key === 'intro_calidad_vuelco' && propVuelcoOmitido(p)) { try { procesosPropuestaEliminarBloque(doc, s.nivel, s.heading); } catch (e) { console.warn('No se pudo sacar la sección de calidad de vuelco:', e.message); } return; }
     const texto = sec(s.key).texto || '';
     if (s.columnas) {
       const lineasTxt = String(texto).split('\n');
@@ -21377,7 +21400,8 @@ function procesosStep4Html(p) {
     return `
     <div class="field-row" style="padding:8px 0">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-        <span style="font-size:13px;color:var(--text)"><b>${esc(meta.label)}</b>${tieneContenido ? ' <span style="color:var(--green)">✓</span>' : ' <span style="color:var(--text2)">(vacío)</span>'}</span>
+        <span style="font-size:13px;color:var(--text)"><b>${esc(meta.label)}</b>${meta.key === 'intro_calidad_vuelco' && propVuelcoOmitido(p) ? ' <span style="color:var(--text2)">(no va: sin vuelco)</span>' : tieneContenido ? ' <span style="color:var(--green)">✓</span>' : ' <span style="color:var(--text2)">(vacío)</span>'}</span>
+        ${meta.key === 'intro_calidad_vuelco' ? `<label style="display:flex;gap:4px;align-items:center;font-size:12px;cursor:pointer;margin-left:auto"><input type="checkbox" style="width:auto" ${propVuelcoOmitido(p) ? '' : 'checked'} onchange="procesosStep4SetSeccionExtra('intro_calidad_vuelco','omitir',!this.checked);renderProcesosStepContent()" /> Incluir</label>` : ''}
         <button class="btn btn-secondary btn-sm" onclick="procesosStep4ToggleSeccion('${meta.key}')">${esAbierta ? 'Cerrar' : 'Editar →'}</button>
       </div>
       ${esAbierta ? procesosStep4SeccionPanelHtml(meta) : ''}
@@ -21546,7 +21570,7 @@ async function propTextosIntroIA(p, alts) {
   const reqs = procesosRequerimientosDisenoTxt(p, 'tren') || '';
   const contexto = `Proyecto: ${p.nombre || ''}${p.cliente ? ' — Cliente: ' + p.cliente : ''}\n\n${procesosResumenCampos(p)}\n\nTrenes de tratamiento:\n${alts.map(a => (a.etiqueta ? a.etiqueta + ': ' : '') + propTrenTxt(a.proy).replace(/\n/g, ' → ')).join('\n')}\n`;
   const prompt = `${contexto}\nRedactá los textos de introducción de la propuesta técnica de Aeration Argentina para este proyecto${multi ? ` (que tiene ${alts.length} alternativas: ${alts.map(a => a.etiqueta).join('; ')})` : ''}. Estilo: formal, en español, tercera persona, párrafos corrientes sin viñetas salvo donde se indica, sin negritas ni asteriscos. NO cites números de tabla ni de figura (las tablas del documento no están numeradas). Ejemplo de estilo (de otra oferta; NO copies sus datos): "En el presente documento se detalla la propuesta para la incorporación de una etapa de tratamiento biológico en la Planta de Tratamiento de Efluentes del establecimiento de X ubicado en Y. La solución propuesta ha sido desarrollada tomando como punto de partida el efluente proveniente del sistema de tratamiento primario existente, compuesto por ecualización, coagulación–floculación y flotación por aire disuelto (DAF), y tiene como objetivo completar el tratamiento del efluente hasta alcanzar los parámetros de calidad requeridos para su descarga final." / "A continuación se muestran los parámetros de diseño del efluente crudo y los valores de normativa a alcanzar. La ET indica además que el cuerpo receptor es el Canal San Francisco." / "Sumado a esto, en el pliego se establecen las siguientes condiciones de salida del sistema biológico: SST < 20 mg/L; SSV < 15 mg/L; DBO₅ soluble < 20 mg/L".\n\nUsá SOLO información que figure en el contexto (campos del cliente, requerimientos del pliego, normativa, tratamiento existente, cuerpo receptor...). Lo que no se pueda determinar, omitilo o dejá el campo vacío: no inventes datos.\n${reqs}`;
-  return await propLlamarForzado(PROP_TOOL_TEXTOS, prompt, 3000);
+  return await propLlamarForzado(PROP_TOOL_TEXTOS, prompt + (procesosSinVuelco(p) ? '\n\nIMPORTANTE: este proyecto es una ETAPA INTERMEDIA SIN VUELCO (el efluente sigue a otra planta o proceso). Dejá "vuelco_antes" y "vuelco_despues" como "" (la propuesta no lleva sección de calidad de vuelco) y en la introducción no hables de alcanzar parámetros de vuelco: el objetivo es el de la etapa que se propone.' : ''), 3000);
 }
 function propTablaTexto(columnas, filas) {
   const lim = s => { const t = String(s == null ? '' : s).replace(/\|/g, '/').replace(/\s*\n\s*/g, ' ').trim(); return t || '-'; };
@@ -22289,7 +22313,7 @@ async function procesosPropuestaAplicarBiblioteca(p, pd) {
   pd.secciones.etapas_proceso = Object.assign({}, etapasSec, { texto: propInsertarImagenesEnEtapas(propQuitarImagenes(etapasBase), porEtapa, pieDe) });
   const vuelco = sec('intro_calidad_vuelco');
   let normaTxt = propQuitarImagenes(vuelco.texto);
-  if (sel && sel.normativa && idsValidos.has(sel.normativa) && !usadas.has(sel.normativa)) { usadas.add(sel.normativa); normaTxt += `\n[[img:${sel.normativa}|${pieDe(sel.normativa)}]]`; nFotos++; }
+  if (!propVuelcoOmitido(p) && sel && sel.normativa && idsValidos.has(sel.normativa) && !usadas.has(sel.normativa)) { usadas.add(sel.normativa); normaTxt += `\n[[img:${sel.normativa}|${pieDe(sel.normativa)}]]`; nFotos++; }
   pd.secciones.intro_calidad_vuelco = Object.assign({}, vuelco, { texto: normaTxt });
 
   // 2) texto estándar de la/s tecnología/s: con una sola alternativa va después del texto de "Selección de tecnología"; con varias, dentro de cada alternativa
@@ -32542,6 +32566,7 @@ const PROP_TOOL_EXTRAER = {
       nombre: { type: 'string', description: 'Nombre corto de la alternativa (ej. "Lodos activados convencional").' },
       etapas: { type: 'array', items: PROP_ETAPA_SCHEMA },
     }, required: ['nombre', 'etapas'] } },
+    sin_vuelco: { type: 'boolean', description: 'true si lo que se pide es una etapa INTERMEDIA del tratamiento: el efluente sigue a otra planta o proceso y NO se vuelca desde acá (no hay límites ni normativa de vuelco que cumplir). Ante la duda, false.' },
     caratula: { type: 'object', properties: { destinatario_empresa: { type: 'string' }, suministro_objeto: { type: 'string', description: 'Ej: "Planta de tratamiento de efluentes cloacales".' }, ref_numero: { type: 'string' } } },
   }, required: ['campos', 'corrientes', 'etapas'] },
 };
@@ -32597,7 +32622,7 @@ function propuestasArmarProyecto(ext, camposDef) {
     };
   }
   const t0 = armarTren(alts.length === 1 ? alts[0].etapas : ext.etapas);
-  return { info_cliente: { campos, corrientes }, diseno_data: t0.diseno, equipos_data: t0.equipos };
+  return { info_cliente: { campos, corrientes, sin_vuelco: ext.sin_vuelco === true }, diseno_data: t0.diseno, equipos_data: t0.equipos };
 }
 async function propuestasCrear() {
   if (_propDirecta.ocupado) return;
@@ -33409,6 +33434,8 @@ async function manGenerar() {
     showMsg(st, 'loading', 'Leyendo el DFS, el proyecto y los documentos...');
     const dfsTxt = await manContextoDfs();
     const ctx = await dfsContextoProyecto(d);
+    let sinVuelcoProy = false;   // si el proyecto de Procesos IA es una etapa intermedia sin vuelco, el manual no lleva normativa de vuelco
+    try { if (d.origen === 'procesos' && d.origen_id) { const rp = await supaFetch(`/rest/v1/procesos_proyectos?id=eq.${d.origen_id}&select=info_cliente`, { headers: mantH() }), rowsP = await rp.json().catch(() => []); sinVuelcoProy = !!(rowsP[0] && rowsP[0].info_cliente && rowsP[0].info_cliente.sin_vuelco); } } catch (e) { sinVuelcoProy = false; }
     const bloques = await mantIaBloques(_manIa.archivos);
     const fuentes = dfsTxt + (ctx ? `DATOS DEL PROYECTO (MAIA):\n${ctx}\n` : '') + (texto ? `MENSAJE DEL USUARIO:\n${texto}\n\n` : '');
     let refs = [], refIds = [];
@@ -33427,7 +33454,7 @@ async function manGenerar() {
     nuevo.portada = Object.assign(nuevo.portada, d.datos.portada, { cliente: est.cliente || d.datos.portada.cliente, proyecto: est.proyecto || d.datos.portada.proyecto || d.origen_nombre || d.nombre, ubicacion: est.ubicacion || d.datos.portada.ubicacion });
     ['alcance', 'normativa_texto', 'diseno_texto', 'inicio'].forEach(k => { nuevo[k] = est[k] || ''; });
     nuevo.definiciones = est.definiciones || []; nuevo.normativa = est.normativa || []; nuevo.diseno = est.diseno || [];
-    nuevo.incluir_normativa = est.incluir_normativa !== false; if (!nuevo.incluir_normativa) { nuevo.normativa = []; nuevo.normativa_texto = ''; }
+    nuevo.incluir_normativa = sinVuelcoProy ? false : est.incluir_normativa !== false; if (!nuevo.incluir_normativa) { nuevo.normativa = []; nuevo.normativa_texto = ''; }
     nuevo.puntos_control = (est.puntos_control || []).filter(x => x && x.parametro).map(x => ({ parametro: x.parametro, punto: x.punto_muestreo || '', frecuencia: MAN_FREC.includes(x.frecuencia) ? x.frecuencia : 'Semanal' }));
     nuevo.parametros_control = (est.parametros_control || []).filter(x => x && x.parametro).map(x => ({ parametro: x.parametro, unidad: x.unidad || '', rango: x.rango || '', setpoint: x.setpoint || '', critico: !!x.critico }));
     nuevo.equipos = est.equipos || []; nuevo.sensores = est.sensores || [];
@@ -37771,6 +37798,7 @@ function simUnidadNueva(tipo, nombre) {
   return u;
 }
 // ── Datos generales desde las corrientes del Paso 1 (caudales se suman, concentraciones se ponderan por caudal) ──
+const SIM_ES_LIM = k => /^lim_/.test(k) || k === 'sst_vuelco' || k === 'coli_lim';   // límites de vuelco
 function simGlobalDesdeCorrientes(info) {
   const out = {}, fu = {}, cs = (info && info.corrientes) || [], acum = {};
   const flujos = cs.map(c => { const e = Object.entries(c.campos || {}).map(([k, v]) => Object.assign({ norm: procesosNormTxt(k) }, v && typeof v === 'object' ? v : { valor: v })); const q = e.find(x => SIM_GLOBAL_PARAMS[0].alias[0].test(x.norm) && x.valor != null && x.valor !== ''); return { e, q: q ? simConv(q.valor, q.unidad, 'flow') : 0 }; });
@@ -37785,7 +37813,7 @@ function simGlobalDesdeCorrientes(info) {
     if (hay) { out[d.k] = d.dim === 'flow' ? suma : suma / peso; fu[d.k] = 'proyecto'; }
   });
   // límites de vuelco que figuran en el Paso 1 (valor máximo)
-  Object.entries({ dbo: 'lim_dbo', dqo: 'lim_dqo', sst: 'sst_vuelco', ntk: 'lim_ntk' }).forEach(([k, lk]) => {
+  Object.entries((info && info.sin_vuelco) ? {} : { dbo: 'lim_dbo', dqo: 'lim_dqo', sst: 'sst_vuelco', ntk: 'lim_ntk' }).forEach(([k, lk]) => {
     const def = SIM_GLOBAL_PARAMS.find(x => x.k === k);
     for (const c of cs) for (const [nombre, v] of Object.entries(c.campos || {})) {
       if (!v || typeof v !== 'object' || v.limite_normativo == null || v.limite_normativo === '' || !def.alias.some(re => re.test(procesosNormTxt(nombre)))) continue;
@@ -37897,7 +37925,7 @@ async function simImportarProcesos(id, origen) {
       unidades.push(u);
     });
     d.unidades = unidades; d.global = Object.assign({}, gl.global); d.global_fuente = Object.assign({}, gl.fuente);
-    SIM_GLOBAL_PARAMS.forEach(x => { if (d.global[x.k] == null && x.tipico != null) { d.global[x.k] = x.tipico; d.global_fuente[x.k] = 'tipico'; } });
+    SIM_GLOBAL_PARAMS.forEach(x => { if (d.global[x.k] == null && x.tipico != null && !(procesosSinVuelco(p) && SIM_ES_LIM(x.k))) { d.global[x.k] = x.tipico; d.global_fuente[x.k] = 'tipico'; } });
     d.fuente = { tipo: origen, id, nombre: (origen === 'flowsheet' ? 'Flowsheet: ' : 'Procesos IA: ') + p.nombre }; d.avisos = [];
     let nIA = 0; try { showMsg(st, 'loading', 'Buscando con IA los datos que faltan en las planillas...'); nIA = await simAutoCompletarIA(unidades); } catch (e) { d.avisos.push('No se pudo completar con IA: ' + e.message); }
     simAplicarPerfilesEq(d);
