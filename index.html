@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5482,7 +5482,38 @@ function maiaChatRenderHistory() {
   log.forEach(entry => maiaChatRenderMsg(entry.role, entry.text, false));
 }
 
+// El botón flotante del asistente se arrastra (mouse o dedo) y recuerda dónde lo dejaste; el panel del chat se abre pegado a él.
+(function maiaChatFabMovible() {
+  const KEY = 'maia_chat_fab_pos';
+  const fab = () => document.getElementById('maia-chat-fab'), panel = () => document.getElementById('maia-chat-panel');
+  const guardada = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } };
+  const limitar = (r, b) => { const f = fab(); return { r: Math.min(Math.max(4, r), Math.max(4, innerWidth - f.offsetWidth - 4)), b: Math.min(Math.max(4, b), Math.max(4, innerHeight - f.offsetHeight - 4)) }; };
+  const poner = (r, b) => { const f = fab(), p = limitar(r, b); f.style.right = p.r + 'px'; f.style.bottom = p.b + 'px'; f.style.left = 'auto'; f.style.top = 'auto'; return p; };
+  // El panel va arriba o abajo del botón (donde haya más lugar) y alineado a su lado
+  window.maiaChatFabColocar = function () {
+    const f = fab(), pn = panel(); if (!f || !pn || !guardada()) return; const r = f.getBoundingClientRect(), vw = innerWidth, vh = innerHeight, arriba = r.top > vh - r.bottom;
+    pn.style.maxHeight = Math.max(160, (arriba ? r.top : vh - r.bottom) - 16) + 'px';
+    if (arriba) { pn.style.top = 'auto'; pn.style.bottom = (vh - r.top + 8) + 'px'; } else { pn.style.bottom = 'auto'; pn.style.top = (r.bottom + 8) + 'px'; }
+    if (r.left + r.width / 2 > vw / 2) { pn.style.left = 'auto'; pn.style.right = Math.max(8, vw - r.right) + 'px'; } else { pn.style.right = 'auto'; pn.style.left = Math.max(8, r.left) + 'px'; }
+  };
+  function iniciar() {
+    const f = fab(); if (!f || f._movible) return; f._movible = true; f.style.touchAction = 'none';
+    const g = guardada(); if (g) { poner(g.r, g.b); maiaChatFabColocar(); }
+    let ini = null;
+    f.addEventListener('pointerdown', e => { if (e.button) return; const rc = f.getBoundingClientRect(); ini = { x: e.clientX, y: e.clientY, r: innerWidth - rc.right, b: innerHeight - rc.bottom, movio: false }; try { f.setPointerCapture(e.pointerId); } catch (x) { /* sin captura */ } });
+    f.addEventListener('pointermove', e => {
+      if (!ini) return; const dx = e.clientX - ini.x, dy = e.clientY - ini.y;
+      if (!ini.movio && Math.hypot(dx, dy) < 6) return; ini.movio = true; f.style.cursor = 'grabbing'; poner(ini.r - dx, ini.b - dy); maiaChatFabColocar();
+    });
+    const fin = () => { if (!ini) return; f.style.cursor = ''; if (ini.movio) { const rc = f.getBoundingClientRect(); try { localStorage.setItem(KEY, JSON.stringify(limitar(innerWidth - rc.right, innerHeight - rc.bottom))); } catch (e) { /* sin almacenamiento */ } f._arrastro = true; setTimeout(() => { f._arrastro = false; }, 50); maiaChatFabColocar(); } ini = null; };
+    f.addEventListener('pointerup', fin); f.addEventListener('pointercancel', fin);
+    f.addEventListener('click', e => { if (f._arrastro) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);   // al soltar después de arrastrar no se abre el chat
+    window.addEventListener('resize', () => { const g2 = guardada(); if (g2) { const p = poner(g2.r, g2.b); maiaChatFabColocar(); void p; } });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciar); else iniciar();
+})();
 function maiaChatToggle() {
+  if (typeof maiaChatFabColocar === 'function') maiaChatFabColocar();
   const panel = document.getElementById('maia-chat-panel');
   if (!panel) return;
   const opening = !panel.classList.contains('open');
@@ -44633,7 +44664,8 @@ let _oooCfgErrLectura = '';
 async function oooCfgCargar(forzar) {
   if (_oooCfg && !forzar) return _oooCfg;
   let v = null; _oooCfgErrLectura = '';
-  try { v = await supaConfigGetSeguro(OOO_CFG_KEY); } catch (e) { _oooCfgErrLectura = e.message; if (_oooCfg) return _oooCfg; }   // si no se puede leer, no se reemplaza lo que ya había en pantalla por valores por defecto
+  try { v = await supaConfigGetSeguro(OOO_CFG_KEY); } catch (e) { _oooCfgErrLectura = e.message; if (_oooCfg) return _oooCfg; }
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { v = null; } }   // por si la tabla devuelve el JSON como texto   // si no se puede leer, no se reemplaza lo que ya había en pantalla por valores por defecto
   _oooCfg = Object.assign(JSON.parse(JSON.stringify(OOO_CFG_DEF)), v || {}); if (!_oooCfg.personas) _oooCfg.personas = {};
   return _oooCfg;
 }
@@ -44643,11 +44675,22 @@ async function oooCfgGuardar() {
   if (_oooCfgErrLectura) throw new Error(`No guardo porque no pude leer la configuración que ya estaba guardada (${_oooCfgErrLectura}): así no la piso con valores por defecto. Recargá la página.`);
   const s = JSON.parse(localStorage.getItem('daia_session') || 'null'); if (!s || !s.token) throw new Error('Tu sesión de MAIA venció: volvé a iniciar sesión.');
   const h = { Authorization: 'Bearer ' + s.token, 'Content-Type': 'application/json' };
-  const res = await supaFetch('/rest/v1/app_config', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates' }, h), body: JSON.stringify({ key: OOO_CFG_KEY, value: _oooCfg }) });
-  if (!res.ok) { let m = ''; try { const j = await res.json(); m = j.message || j.hint || JSON.stringify(j); } catch (e) { /* sin detalle */ } throw new Error(`No se pudo guardar (HTTP ${res.status}${m ? ': ' + m : ''}).`); }
+  const detalle = async res => { let m = ''; try { const j = await res.json(); m = j.message || j.hint || JSON.stringify(j); } catch (e) { /* sin detalle */ } return `HTTP ${res.status}${m ? ': ' + m : ''}`; };
+  // Primero se actualizan TODAS las filas que ya tengan esta clave (si la tabla tuviera filas repetidas, quedan iguales); solo si no hay ninguna se crea
+  let res = await supaFetch(`/rest/v1/app_config?key=eq.${OOO_CFG_KEY}`, { method: 'PATCH', headers: Object.assign({ Prefer: 'return=representation' }, h), body: JSON.stringify({ value: _oooCfg }) });
+  const tocadas = res.ok ? await res.json().catch(() => []) : null;
+  if (!res.ok || !Array.isArray(tocadas) || !tocadas.length) {
+    res = await supaFetch('/rest/v1/app_config', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates' }, h), body: JSON.stringify({ key: OOO_CFG_KEY, value: _oooCfg }) });
+    if (!res.ok) throw new Error('No se pudo guardar (' + await detalle(res) + ').');
+  }
   const rd = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${OOO_CFG_KEY}`, { headers: h }), j = rd.ok ? await rd.json().catch(() => null) : null;
   if (!Array.isArray(j) || !j.length) throw new Error('Se envió, pero al volver a leer no aparece lo guardado (puede faltar el permiso de lectura de la tabla app_config).');
-  if (JSON.stringify(oooCanon(j[0].value)) !== JSON.stringify(oooCanon(_oooCfg))) throw new Error('Se envió, pero al volver a leer lo guardado es distinto: puede haber filas repetidas para esta clave en app_config.');
+  const nuestro = oooCanon(_oooCfg), valor = v => { if (typeof v === 'string') { try { return JSON.parse(v); } catch (e) { return v; } } return v; };
+  const malas = j.filter(r => JSON.stringify(oooCanon(valor(r.value))) !== JSON.stringify(nuestro));
+  if (malas.length) {
+    const a = oooCanon(valor(malas[0].value)) || {}, dif = [...new Set([...Object.keys(a), ...Object.keys(nuestro)])].filter(k => JSON.stringify(a[k]) !== JSON.stringify(nuestro[k]));
+    throw new Error(`Se envió, pero al volver a leer lo guardado es distinto (${j.length} fila${j.length === 1 ? '' : 's'} con esta clave; ${malas.length} distinta${malas.length === 1 ? '' : 's'}; difiere: ${dif.slice(0, 4).join(', ') || 'el valor no es un objeto'}).`);
+  }
 }
 
 // ── Fechas y cálculo de días ──
