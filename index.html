@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2463,15 +2463,16 @@ async function supaConfigHeredarSAS(key) {
   if (aa != null) { try { await supaConfigSet(key, aa); } catch (e) { /* queda leída de AA; se copia en la próxima */ } }
   return aa;
 }
+// Primero se actualizan TODAS las filas que ya tengan la clave (si la tabla tuviera filas repetidas, antes se leía siempre la más vieja y "no se guardaba"); solo si no hay ninguna se crea.
 async function supaConfigSet(key, value) {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
   if (!session?.token) throw new Error('No autenticado.');
-  const res = await supaFetch('/rest/v1/app_config', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + session.token, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
-    body: JSON.stringify({ key, value })
-  });
-  if (!res.ok) throw new Error('No se pudo guardar en app_config (HTTP ' + res.status + '). Verificá que la tabla tenga una restricción UNIQUE en "key" y permisos de escritura.');
+  const h = { Authorization: 'Bearer ' + session.token, 'Content-Type': 'application/json' };
+  const upd = await supaFetch(`/rest/v1/app_config?key=eq.${encodeURIComponent(key)}`, { method: 'PATCH', headers: Object.assign({ Prefer: 'return=representation' }, h), body: JSON.stringify({ value }) });
+  const tocadas = upd.ok ? await upd.json().catch(() => null) : null;
+  if (Array.isArray(tocadas) && tocadas.length) return;
+  const res = await supaFetch('/rest/v1/app_config', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates' }, h), body: JSON.stringify({ key, value }) });
+  if (!res.ok) { let m = ''; try { const j = await res.json(); m = j.message || j.hint || ''; } catch (e) { /* sin detalle */ } throw new Error('No se pudo guardar en app_config (HTTP ' + res.status + (m ? ': ' + m : '') + '). Verificá los permisos de escritura de la tabla.'); }
 }
 
 // ── Config de Rendiciones y Cfg Comercial POR EMPRESA ──
@@ -5312,7 +5313,7 @@ async function renderHallazgos() {
 }
 
 // ── Asistente MAIA (chat flotante, con búsqueda en SharePoint) ──
-const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, buscar en los datos guardados dentro de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos, etc.), y explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿qué le cotizamos a tal cliente?", "¿qué hallazgos siguen abiertos?" o "¿cómo cargo un hallazgo?".';
+const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, buscar en los datos guardados dentro de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos, etc.), decirte tus días de vacaciones y solicitudes de Fuera de oficina, y explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿qué le cotizamos a tal cliente?", "¿qué hallazgos siguen abiertos?" o "¿cómo cargo un hallazgo?".';
 let _maiaChatMessages = [];
 let _maiaChatLoading = false;
 let _maiaChatSourceCache = null;
@@ -6001,6 +6002,66 @@ function maiaChatFechaHoyTxt() {
   return `Hoy es ${legible} (${iso} en formato ISO). Usá esta fecha como referencia para cualquier pregunta que dependa del día de hoy, de "esta semana"/"este mes", o de comparar fechas (ej. quién está de vacaciones hoy, qué trámite ya venció). `;
 }
 
+// Quién escribe y qué hay en MAIA: se arma en cada consulta con el usuario logueado y con los mismos menús de la app, así siempre está al día
+function maiaChatContextoTxt() {
+  const u = currentUser || {}, mios = (typeof tabsPermitidas === 'function' ? tabsPermitidas() : []), todas = (typeof NAV_SECTIONS !== 'undefined' ? NAV_SECTIONS : []).concat(typeof NAV_CONFIG_SECTIONS !== 'undefined' ? NAV_CONFIG_SECTIONS : []);
+  const veo = todas.filter(x => mios.includes(x.id)).map(x => x.label), otras = todas.filter(x => !mios.includes(x.id)).map(x => x.label);
+  return `USUARIO QUE TE ESCRIBE (ya lo sabés, nunca le pidas su nombre, su email ni su sector): ${u.nombre || '(sin nombre)'} — email ${u.email || '(sin email)'} — sector ${currentSector || '(sin sector)'}${u.coordinador ? ' (coordinador)' : ''} — empresa activa ${typeof empresaNombre === 'function' ? empresaNombre(currentEmpresa) : currentEmpresa}. `
+    + `MAPA DE MAIA (se arma desde los menús reales de la app): solapas que este usuario ve: ${veo.join(', ') || '(ninguna)'}${otras.length ? '. Existen además, pero este usuario no las ve: ' + otras.join(', ') : ''}. `
+    + `FUERA DE OFICINA (vacaciones, licencias y home office): para cualquier pregunta sobre días de vacaciones (cuántos le corresponden, cuántos tomó o pidió, cuántos le quedan), solicitudes, estados de aprobación, quién está fuera o cómo se calculan los días, usá SIEMPRE consultar_fuera_de_oficina (consulta "mis_dias" para el propio usuario) y no busques eso en listas de SharePoint. Los días que corresponden salen de la antigüedad (fecha de ingreso) y la escala configurada en Cfg Fuera de oficina; los datos de otras personas solo los puede ver RR.HH. y Admin. `;
+}
+const maiaChatTokens = t => procesosNormTxt(String(t || '')).split(/[^a-z0-9]+/).filter(x => x.length > 1);
+// Fuera de oficina para el asistente: usa las mismas funciones y reglas que la solapa, así los números coinciden
+async function maiaChatFueraDeOficina(input) {
+  const q = (input && input.consulta) || 'mis_dias';
+  const cfg = await oooCfgCargar(); await initMsal().catch(() => {});
+  if (typeof msAccount === 'undefined' || !msAccount) return 'Para leer las solicitudes hace falta tener iniciada la sesión de Microsoft en MAIA (botón "Iniciar sesión" arriba a la derecha). Pedíselo al usuario y que vuelva a preguntar.';
+  if (q === 'reglas') {
+    return JSON.stringify({ regimen: cfg.regimen === 'habiles' ? 'días hábiles' : 'días corridos', escala_antiguedad_corridos: cfg.escalaCorridos.map(([a, d]) => `desde ${a} años: ${d} días`), escala_antiguedad_habiles: cfg.escalaHabiles.map(([a, d]) => `desde ${a} años: ${d} días`), periodo_inicia: cfg.periodoInicio, dias_acumulables: !!cfg.acumulables, acumula_desde: cfg.acumulables ? (cfg.acumDesde || 'el primer registro en las listas') : null,
+      tipos: cfg.tipos.map(t => ({ nombre: t.nombre, descuenta_del_saldo: !!t.descuenta })), feriados_proximos: (cfg.feriados || []).filter(f => f >= oooIso(new Date())).slice(0, 12),
+      nota: 'La antigüedad se mide al cierre del período. Los días corresponden por la fecha de ingreso de cada persona (la carga RR.HH.) y pueden tener ajustes o un valor a mano.' });
+  }
+  const perf = await oooPerfiles();
+  const items = (await oooLeerItems().catch(() => [])).concat(await oooLeerVieja().catch(() => []));
+  const yo = oooMiEmail(), rrhh = oooEsRRHH(cfg), hoy = new Date(), per = oooPeriodo(hoy, cfg, Number(input && input.periodo_offset) || 0);
+  const nombreDe = e => ((perf.find(p => p.email === e) || {}).nombre) || e;
+  const resumen = (email, anio) => {
+    const s = oooSaldo(email, items, per, cfg), mias = items.filter(i => i.email === email && (!anio || String(i.desde).startsWith(String(anio)))).sort((a, b) => b.desde.localeCompare(a.desde)).slice(0, 40);
+    return { persona: nombreDe(email), periodo: per.etiqueta, regimen: cfg.regimen === 'habiles' ? 'días hábiles' : 'días corridos',
+      dias: s.base == null ? { aviso: 'No tiene cargada la fecha de ingreso: RR.HH. tiene que cargarla en Cfg Fuera de oficina para poder calcular cuántos días le corresponden.' } : { corresponden: s.base + s.aj, acumulados_de_periodos_anteriores: cfg.acumulables ? s.acum : 'no se acumulan', tomados_aprobados: s.tomados, pendientes_de_aprobar: s.pend, quedan: s.quedan, como_se_calculo: s.origen },
+      solicitudes: mias.map(i => ({ tipo: oooTipoNombre(i.tipo), desde: i.desde, hasta: i.hasta, dias: i.dias, estado: (OOO_ESTADOS[i.estado] || [i.estado])[0], ronda: i.ronda, origen: i.vieja ? 'lista anterior de SharePoint' : 'MAIA' })),
+      aviso_anio: anio ? `Solicitudes filtradas por las que empiezan en ${anio}.` : undefined };
+  };
+  if (q === 'mis_dias') return JSON.stringify(resumen(yo, input && input.anio));
+  if (q === 'persona') {
+    const buscada = String((input && input.persona) || '').trim(); if (!buscada) return 'Falta indicar de quién (nombre o email).';
+    if (!rrhh && !(procesosNormTxt(buscada) === procesosNormTxt(yo))) { const pf = perf.find(p => p.email === yo); if (!pf || !maiaChatTokens(buscada).every(t => maiaChatTokens(pf.nombre).includes(t))) return 'Los días de otras personas solo los puede consultar RR.HH. o Admin. Este usuario puede ver los suyos con la consulta "mis_dias".'; }
+    const toks = maiaChatTokens(buscada), c = perf.filter(p => p.email === buscada.toLowerCase() || (toks.length && toks.every(t => maiaChatTokens(p.nombre).includes(t))));
+    if (!c.length) return `No encontré a nadie que coincida con "${buscada}".`; if (c.length > 1) return 'Hay varias personas que coinciden, preguntale cuál: ' + c.map(p => p.nombre).join('; ');
+    return JSON.stringify(resumen(c[0].email, input && input.anio));
+  }
+  if (q === 'calendario') {
+    const d1 = (input && input.desde) || oooIso(hoy), d2 = (input && input.hasta) || oooIso(oooSuma(hoy, 30));
+    const fuera = items.filter(i => (i.estado === 'aprobada' || i.estado.startsWith('pendiente')) && i.desde <= d2 && i.hasta >= d1).sort((a, b) => a.desde.localeCompare(b.desde));
+    return JSON.stringify({ rango: `${d1} al ${d2}`, nota: 'Las licencias de otras personas figuran sin el motivo. "Pendiente" = todavía sin aprobar.', fuera: fuera.map(i => ({ persona: i.nombre, sector: i.sector, tipo: oooTipoVisible(i), desde: i.desde, hasta: i.hasta, estado: i.estado === 'aprobada' ? 'aprobada' : 'pendiente' })) });
+  }
+  if (q === 'pendientes') {
+    const mias = items.filter(i => oooPuedeAprobar(i, cfg)); return JSON.stringify({ para_aprobar: mias.map(i => ({ persona: i.nombre, tipo: oooTipoNombre(i.tipo), desde: i.desde, hasta: i.hasta, dias: i.dias, etapa: i.estado === 'pendiente_coord' ? 'coordinador' : 'RR.HH.' })), nota: mias.length ? undefined : 'No tiene solicitudes pendientes de su aprobación.' });
+  }
+  return 'Consulta desconocida. Opciones: mis_dias, persona, calendario, pendientes, reglas.';
+}
+const MAIA_CHAT_TOOL_OOO = {
+  name: 'consultar_fuera_de_oficina',
+  description: 'Consulta Fuera de oficina de MAIA (vacaciones, licencias y home office): cuántos días le corresponden, tomó, tiene pendientes y le quedan a alguien; sus solicitudes con estado; quién está fuera en un rango de fechas; qué solicitudes tiene para aprobar el usuario; y cómo se calculan los días. Es de SOLO LECTURA. Para el propio usuario no hace falta pedirle ningún dato: "mis_dias" ya sabe quién es. Los datos de otras personas solo se devuelven si el usuario es de RR.HH. o Admin.',
+  input_schema: { type: 'object', properties: {
+    consulta: { type: 'string', enum: ['mis_dias', 'persona', 'calendario', 'pendientes', 'reglas'], description: 'mis_dias: saldo y solicitudes del usuario que escribe. persona: lo mismo de otra persona (solo RR.HH./Admin; pasar "persona"). calendario: quién está fuera (pasar desde/hasta, por defecto los próximos 30 días). pendientes: solicitudes que el usuario puede aprobar ahora. reglas: régimen, escala por antigüedad, período y tipos de solicitud.' },
+    persona: { type: 'string', description: 'Nombre o email de la persona (solo para consulta "persona").' },
+    anio: { type: 'number', description: 'Para mis_dias/persona: quedarse solo con las solicitudes que empiezan en ese año (ej. 2026), útil para "cuántos días pedí este año".' },
+    periodo_offset: { type: 'number', description: 'Para mis_dias/persona: 0 = período actual de vacaciones (por defecto), -1 = el anterior.' },
+    desde: { type: 'string', description: 'calendario: fecha inicial AAAA-MM-DD.' }, hasta: { type: 'string', description: 'calendario: fecha final AAAA-MM-DD.' }
+  }, required: ['consulta'] }
+};
+MAIA_CHAT_TOOLS.push(MAIA_CHAT_TOOL_OOO);
 async function maiaChatCallClaude(messages) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('Falta la clave de API (contactá a un Admin).');
@@ -6010,7 +6071,7 @@ async function maiaChatCallClaude(messages) {
     body: JSON.stringify({
       model: CASO_MODELOS.estandar.id,
       max_tokens: 1024,
-      system: maiaChatFechaHoyTxt() + 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan por datos reales de la empresa que vivan ADENTRO de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos de Procesos IA, flowsheets, catálogo de productos/precios, conciliación bancaria, viajes — no archivos ni Listas de SharePoint), usá consultar_datos_maia con el módulo que corresponda; si no estás segurx de en qué módulo puede estar algo, probá con el más parecido, y si hace falta llamala varias veces con módulos distintos para la misma pregunta antes de decir que no encontraste nada. Es de solo lectura: nunca la uses para intentar cambiar, borrar o crear algo — si te piden eso, explicá que para modificar datos hay que hacerlo desde la sección correspondiente de MAIA, vos solo podés consultar. Cuando muestres los resultados, resumilos en una respuesta clara (tabla o lista corta si son varios) en vez de pegar el JSON crudo, y si el resultado trae un "aviso" sobre que puede haber más datos de los que se muestran, contáselo al usuario. Nunca inventes ni completes con supuestos ningún dato (nombre, monto, fecha, estado) que no haya venido literalmente en el resultado de la herramienta — si algo no está, decilo así de claro. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer. Si te preguntan por datos que viven en una LISTA de SharePoint (un registro, un listado, una tabla de seguimiento — no un archivo) o por un botón/link/"vínculo rápido" en una PÁGINA de un sitio (por ejemplo un Microsoft Form u otro sistema externo que no es archivo ni Lista): PRIMERO llamá a buscar_conocimiento_sharepoint con el tema — si te devuelve un site_id (y list_id o pagina_id según corresponda) con una coincidencia razonable, usalos DIRECTAMENTE en leer_lista_sharepoint o leer_pagina_sharepoint, sin volver a buscar el sitio/lista/página de cero. Si no encuentra nada útil, encadená la búsqueda normal: para una Lista, 1) buscar_sitios_sharepoint para el sitio (te da un "id" de sitio); 2) buscar_listas_sharepoint con ese id (te da un "id" de lista); 3) leer_lista_sharepoint con ambos ids — pasale "filtro" con lo que el usuario esté buscando para no traer la lista entera de una. Para una página, 1) buscar_sitios_sharepoint para el sitio; 2) buscar_paginas_sharepoint con ese site_id (si no sabés el nombre exacto de la página, dejá el filtro vacío para ver todas y elegí la de Inicio u otra que corresponda); 3) leer_pagina_sharepoint con site_id y pagina_id para traer los links — identificá cuál es el que el usuario busca y pasáselo en su propia línea, copiado EXACTO tal cual vino, igual que hacés con los links de buscar_sharepoint (si hay varios candidatos ambiguos, mostráselos todos y preguntale cuál quiere). Copiá todos los ids EXACTOS tal cual vinieron en el resultado anterior, nunca los inventes ni los abrevies — aunque el usuario te haya dado el nombre exacto del sitio/lista/página, igual tenés que resolver los ids con estas herramientas, nunca los asumas. Cada vez que resolvés con ÉXITO (por la vía que sea) una Lista o página que le sirvió al usuario para responder, llamá a guardar_conocimiento_sharepoint con lo que encontraste (alias con palabras clave del tema, los ids, y en "notas" cualquier aclaración útil como qué campo interno corresponde a qué dato) — así la próxima consulta sobre ese tema, de cualquier usuario, es más rápida y no depende de la búsqueda por nombre. No hace falta pedirle permiso al usuario para guardar esto, es información interna del asistente. Si alguna herramienta de sitios, listas o páginas tira error, no encuentra nada, o el resultado no tiene la info que te piden, decíselo al usuario con claridad — nunca inventes ítems, nombres, fechas ni ningún otro dato que no haya venido literalmente en el resultado de la herramienta.',
+      system: maiaChatFechaHoyTxt() + maiaChatContextoTxt() + 'Sos el asistente virtual de MAIA para empleados de Aeration Argentina. Respondé en español, de forma breve y directa. Si te preguntan por datos reales de la empresa que vivan ADENTRO de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos de Procesos IA, flowsheets, catálogo de productos/precios, conciliación bancaria, viajes — no archivos ni Listas de SharePoint), usá consultar_datos_maia con el módulo que corresponda; si no estás segurx de en qué módulo puede estar algo, probá con el más parecido, y si hace falta llamala varias veces con módulos distintos para la misma pregunta antes de decir que no encontraste nada. Es de solo lectura: nunca la uses para intentar cambiar, borrar o crear algo — si te piden eso, explicá que para modificar datos hay que hacerlo desde la sección correspondiente de MAIA, vos solo podés consultar. Cuando muestres los resultados, resumilos en una respuesta clara (tabla o lista corta si son varios) en vez de pegar el JSON crudo, y si el resultado trae un "aviso" sobre que puede haber más datos de los que se muestran, contáselo al usuario. Nunca inventes ni completes con supuestos ningún dato (nombre, monto, fecha, estado) que no haya venido literalmente en el resultado de la herramienta — si algo no está, decilo así de claro. Si te preguntan dónde está un archivo, o sobre un procedimiento/plantilla de la empresa, usá la herramienta buscar_sharepoint para encontrarlo y devolvé el nombre y el link. Cada link va SOLO en su propia línea (nada de texto antes ni después en esa línea), copiado carácter por carácter tal cual viene en el resultado de la búsqueda — no lo edites, no lo acortes, no le saques ni agregues espacios ni caracteres, y no uses formato markdown para el link. Si no encontrás nada relevante después de buscar, decilo con claridad — no inventes links ni ubicaciones de archivos. Si te preguntan cómo hacer algo dentro de MAIA (por ejemplo "¿cómo cargo un hallazgo?" o "¿cómo agrego un archivo en Rendiciones?"), usá la herramienta leer_codigo_maia: primero llamala sin el parámetro seccion para ver el índice de secciones, elegí la que corresponda a la pregunta, y volvé a llamarla con esa sección para leer el código real. Nunca le muestres código al usuario ni le copies el código en la respuesta — traducí lo que leíste a instrucciones claras y en lenguaje simple, paso a paso, como si le explicaras a alguien que no programa. Si la sección elegida no tiene la respuesta, probá con otra sección relevante antes de rendirte. Si para responder hace falta el CONTENIDO de un archivo (por ejemplo "qué dice tal informe" o "cuánto cotizó tal proveedor en ese Excel"), primero buscalo con buscar_sharepoint. Después, SIEMPRE preguntale al usuario cuál(es) de los archivos encontrados querés que lea y analice — todos, uno en particular, o ninguno — nombrándolos, y esperá su confirmación en el mensaje siguiente. Nunca llames a leer_archivo_sharepoint sin esa confirmación explícita del usuario, aunque haya un solo candidato. Solo podés leer Word, Excel, PowerPoint, PDF e imágenes; si el archivo es de otro tipo o pesa demasiado, avisale al usuario que no lo podés leer. Si te preguntan por datos que viven en una LISTA de SharePoint (un registro, un listado, una tabla de seguimiento — no un archivo) o por un botón/link/"vínculo rápido" en una PÁGINA de un sitio (por ejemplo un Microsoft Form u otro sistema externo que no es archivo ni Lista): PRIMERO llamá a buscar_conocimiento_sharepoint con el tema — si te devuelve un site_id (y list_id o pagina_id según corresponda) con una coincidencia razonable, usalos DIRECTAMENTE en leer_lista_sharepoint o leer_pagina_sharepoint, sin volver a buscar el sitio/lista/página de cero. Si no encuentra nada útil, encadená la búsqueda normal: para una Lista, 1) buscar_sitios_sharepoint para el sitio (te da un "id" de sitio); 2) buscar_listas_sharepoint con ese id (te da un "id" de lista); 3) leer_lista_sharepoint con ambos ids — pasale "filtro" con lo que el usuario esté buscando para no traer la lista entera de una. Para una página, 1) buscar_sitios_sharepoint para el sitio; 2) buscar_paginas_sharepoint con ese site_id (si no sabés el nombre exacto de la página, dejá el filtro vacío para ver todas y elegí la de Inicio u otra que corresponda); 3) leer_pagina_sharepoint con site_id y pagina_id para traer los links — identificá cuál es el que el usuario busca y pasáselo en su propia línea, copiado EXACTO tal cual vino, igual que hacés con los links de buscar_sharepoint (si hay varios candidatos ambiguos, mostráselos todos y preguntale cuál quiere). Copiá todos los ids EXACTOS tal cual vinieron en el resultado anterior, nunca los inventes ni los abrevies — aunque el usuario te haya dado el nombre exacto del sitio/lista/página, igual tenés que resolver los ids con estas herramientas, nunca los asumas. Cada vez que resolvés con ÉXITO (por la vía que sea) una Lista o página que le sirvió al usuario para responder, llamá a guardar_conocimiento_sharepoint con lo que encontraste (alias con palabras clave del tema, los ids, y en "notas" cualquier aclaración útil como qué campo interno corresponde a qué dato) — así la próxima consulta sobre ese tema, de cualquier usuario, es más rápida y no depende de la búsqueda por nombre. No hace falta pedirle permiso al usuario para guardar esto, es información interna del asistente. Si alguna herramienta de sitios, listas o páginas tira error, no encuentra nada, o el resultado no tiene la info que te piden, decíselo al usuario con claridad — nunca inventes ítems, nombres, fechas ni ningún otro dato que no haya venido literalmente en el resultado de la herramienta.',
       tools: MAIA_CHAT_TOOLS,
       messages: maiaChatTrimForApi(messages, 8)
     })
@@ -6048,8 +6109,9 @@ async function maiaChatSend() {
         const usaCodigo = toolUses.some(t => t.name === 'leer_codigo_maia');
         const usaSp = toolUses.some(t => t.name === 'buscar_sharepoint');
         const usaDatos = toolUses.some(t => t.name === 'consultar_datos_maia');
+        const usaOoo = toolUses.some(t => t.name === 'consultar_fuera_de_oficina');
         const usaListas = toolUses.some(t => ['buscar_conocimiento_sharepoint','buscar_sitios_sharepoint','buscar_listas_sharepoint','leer_lista_sharepoint','buscar_paginas_sharepoint','leer_pagina_sharepoint','guardar_conocimiento_sharepoint'].includes(t.name));
-        const label = usaArchivo ? '📄 Leyendo el archivo...' : usaDatos ? '📊 Consultando datos de MAIA...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : usaListas ? '📋 Buscando en listas/páginas de SharePoint...' : '🔎 Buscando en SharePoint...';
+        const label = usaArchivo ? '📄 Leyendo el archivo...' : usaOoo ? '🗓 Consultando Fuera de oficina...' : usaDatos ? '📊 Consultando datos de MAIA...' : (usaCodigo && usaSp) ? '🔎 Buscando...' : usaCodigo ? '📄 Revisando cómo funciona MAIA...' : usaListas ? '📋 Buscando en listas/páginas de SharePoint...' : '🔎 Buscando en SharePoint...';
         hintEl = maiaChatRenderMsg('system-hint', label);
       }
       const toolResults = [];
@@ -6076,6 +6138,8 @@ async function maiaChatSend() {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatBuscarPaginas(tu.input?.site_id || '', tu.input?.query || '') });
           } else if (tu.name === 'leer_pagina_sharepoint') {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatLeerPagina(tu.input?.site_id || '', tu.input?.pagina_id || '') });
+          } else if (tu.name === 'consultar_fuera_de_oficina') {
+            toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatFueraDeOficina(tu.input || {}) });
           } else if (tu.name === 'consultar_datos_maia') {
             toolResults.push({ type:'tool_result', tool_use_id: tu.id, content: await maiaChatConsultarDatos(tu.input?.modulo || '', tu.input?.filtro || '', tu.input?.limite) });
           } else {
@@ -44393,6 +44457,74 @@ function tabsPermitidas() {
   return base;
 }
 
+// ── Accesos por sector (editable desde Admin) ──
+// Los valores del código son los de origen; lo que se edita en Admin se guarda en app_config (clave accesos_sectores) y manda al iniciar sesión.
+const ACCESOS_KEY = 'accesos_sectores';
+const ACCESOS_ORIGINAL = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)) };
+let _accEdit = null;
+function accesosAplicar(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  if (cfg.sectores && typeof cfg.sectores === 'object') Object.entries(cfg.sectores).forEach(([sec, tabs]) => { if (Array.isArray(tabs)) SECTOR_TABS[sec] = tabs.slice(); });
+  if (Array.isArray(cfg.usuarios)) { USUARIO_TABS_EXTRA.length = 0; cfg.usuarios.forEach(x => USUARIO_TABS_EXTRA.push(x)); }
+  if (SECTOR_TABS.Admin && !SECTOR_TABS.Admin.includes('admin')) SECTOR_TABS.Admin.push('admin');   // Admin nunca se queda sin el panel de Admin
+}
+async function accesosCargar() { try { accesosAplicar(await supaConfigGetSeguro(ACCESOS_KEY)); } catch (e) { /* sin config propia o sin red: valen los de origen */ } }
+const accesosTodas = () => NAV_SECTIONS.map(x => Object.assign({ cfg: false }, x)).concat(NAV_CONFIG_SECTIONS.map(x => Object.assign({ cfg: true }, x)));
+function accesosRender() {
+  const el = document.getElementById('admin-accesos-card'); if (!el) return;
+  if (!_accEdit) _accEdit = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)) };
+  const sectores = Object.keys(_accEdit.sectores), tabs = accesosTodas().concat([{ id: 'admin', label: 'Admin (panel de administración)', area: 'Admin', cfg: true }]);
+  const fila = t => `<tr><td style="padding:3px 6px;white-space:nowrap;font-size:13px">${esc(t.label)}<span class="hint" style="display:inline;margin-left:4px">${esc(t.area || '')}</span></td>${sectores.map(sec => `<td style="text-align:center;padding:3px 4px"><input type="checkbox" style="width:auto" ${(_accEdit.sectores[sec] || []).includes(t.id) ? 'checked' : ''} ${t.id === 'admin' && sec !== 'Admin' ? 'disabled' : ''} ${t.id === 'admin' && sec === 'Admin' ? 'disabled' : ''} onchange="accesosToggle('${esc(sec)}','${t.id}',this.checked)" /></td>`).join('')}<td style="padding:3px 6px">${t.id === 'admin' ? '' : `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',true)">todos</button> <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',false)">ninguno</button>`}</td></tr>`;
+  const exc = _accEdit.usuarios.map((x, i) => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select style="width:auto;padding:6px 8px;font-size:13px" onchange="accesosExcPersona(${i},this.value)"><option value="">— Elegir persona —</option>${(_oooPerf || []).map(pf => `<option value="${esc(pf.nombre)}" ${procesosNormTxt(pf.nombre) === x.palabras.join(' ') || x.palabras.every(w => procesosNormTxt(pf.nombre).includes(w)) && x.palabras.length ? 'selected' : ''}>${esc(pf.nombre)}</option>`).join('')}</select><span class="hint" style="margin:0">${x.palabras.length ? 'coincide con el nombre: ' + esc(x.palabras.join(' ')) : 'sin persona'}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="accesosExcQuitar(${i})">✕</button></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px"><label style="font-size:12px">Suma estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'agregar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.agregar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label><label style="font-size:12px">Le saca estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'quitar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.quitar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label></div></div>`).join('');
+  el.innerHTML = `<div class="card"><div class="card-label">Accesos por sector</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:8px">Qué solapas ve cada sector. Los cambios se guardan para todos y se aplican la próxima vez que cada persona entra (o recarga). El sector Admin siempre conserva el panel de Admin. Para habilitar una solapa nueva a todos (por ejemplo Fuera de oficina), tocá "todos" en su fila.</p>
+    <div style="overflow:auto;max-height:520px;border:1px solid var(--border);border-radius:8px"><table style="border-collapse:collapse;width:100%"><thead style="position:sticky;top:0;background:var(--surface);z-index:1"><tr><th style="text-align:left;padding:4px 6px;font-size:12px">Solapa</th>${sectores.map(sec => `<th style="padding:4px 4px;font-size:11px;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap">${esc(sec)}</th>`).join('')}<th></th></tr></thead><tbody>${tabs.map(fila).join('')}</tbody></table></div>
+    <div class="card-label" style="margin:14px 0 6px">Excepciones por persona</div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:6px">Sobre lo de su sector, a una persona se le pueden sumar o sacar solapas (por ejemplo, una persona de Servicios que también ve Comercial).</p>${exc}<button class="btn btn-secondary btn-sm" onclick="accesosExcAdd()">＋ Agregar excepción</button>
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn btn-primary" onclick="accesosGuardar()">Guardar accesos</button><button class="btn btn-secondary" onclick="accesosRestaurar()">Volver a los valores de origen</button></div><div id="admin-accesos-status" style="margin-top:8px"></div></div>`;
+}
+function accesosToggle(sec, tab, on) { const a = (_accEdit.sectores[sec] = _accEdit.sectores[sec] || []); const i = a.indexOf(tab); if (on && i < 0) a.push(tab); if (!on && i >= 0) a.splice(i, 1); }
+function accesosFila(tab, on) { Object.keys(_accEdit.sectores).forEach(sec => accesosToggle(sec, tab, on)); accesosRender(); }
+function accesosExcAdd() { _accEdit.usuarios.push({ palabras: [], agregar: [], quitar: [] }); accesosRender(); }
+function accesosExcQuitar(i) { _accEdit.usuarios.splice(i, 1); accesosRender(); }
+function accesosExcPersona(i, nombre) { _accEdit.usuarios[i].palabras = nombre ? procesosNormTxt(nombre).split(/[^a-z0-9]+/).filter(Boolean) : []; accesosRender(); }
+function accesosExcSet(i, campo, sel) { _accEdit.usuarios[i][campo] = Array.from(sel.selectedOptions).map(o => o.value); }
+async function accesosGuardar() {
+  const st = document.getElementById('admin-accesos-status');
+  try {
+    showMsg('admin-accesos-status', 'loading', 'Guardando…');
+    const cfg = { sectores: _accEdit.sectores, usuarios: _accEdit.usuarios.filter(x => x.palabras.length) };
+    if (!(cfg.sectores.Admin || []).includes('admin')) cfg.sectores.Admin = (cfg.sectores.Admin || []).concat(['admin']);
+    await supaConfigSet(ACCESOS_KEY, cfg); accesosAplicar(cfg);
+    if (typeof applyTabAccess === 'function') applyTabAccess();
+    showMsg('admin-accesos-status', 'success', '✓ Accesos guardados. Cada persona los ve al volver a entrar o recargar.');
+  } catch (e) { showMsg('admin-accesos-status', 'error', '✕ ' + e.message); }
+}
+async function accesosRestaurar() {
+  if (!confirm('¿Volver a los accesos de origen (los que vienen en el código)? Se pierden los cambios hechos desde acá.')) return;
+  _accEdit = JSON.parse(JSON.stringify(ACCESOS_ORIGINAL)); accesosRender(); await accesosGuardar();
+}
+// Revisión de la tabla de configuraciones: filas repetidas por clave (una causa de que "no se guarde" una configuración)
+let _adminCfgDup = {};
+async function adminConfigRevisar() {
+  const el = document.getElementById('admin-config-diag'); if (!el) return; el.innerHTML = '<p class="hint">Revisando…</p>';
+  try {
+    const session = JSON.parse(localStorage.getItem('daia_session') || 'null'), res = await supaFetch('/rest/v1/app_config?select=key,value&limit=5000', { headers: { Authorization: 'Bearer ' + session.token } });
+    if (!res.ok) throw new Error('HTTP ' + res.status); const rows = await res.json(), por = {};
+    rows.forEach(r => { (por[r.key] = por[r.key] || []).push(r.value); });
+    const canon = v => JSON.stringify(oooCanon(typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch (e) { return v; } })() : v)), dups = Object.entries(por).filter(([, v]) => v.length > 1);
+    _adminCfgDup = {}; const secreto = k => /key|token|secret|pass/i.test(k);
+    const filas = dups.map(([k, v]) => { const distintas = [...new Set(v.map(canon))]; _adminCfgDup[k] = v; return `<div style="border-top:1px solid var(--border);padding:8px 0"><b style="font-size:13px">${esc(k)}</b> <span class="hint" style="display:inline">· ${v.length} filas · ${distintas.length === 1 ? 'todas iguales (no pasa nada)' : distintas.length + ' versiones distintas'}</span>
+      ${distintas.length > 1 ? distintas.map((c, i) => `<div style="margin:4px 0;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hint" style="margin:0;flex:1;min-width:200px">Versión ${i + 1} (${c.length} caracteres): ${secreto(k) ? '(oculta)' : esc(c.slice(0, 110)) + (c.length > 110 ? '…' : '')}</span><button class="btn btn-secondary btn-sm" onclick="adminConfigUnificar('${esc(k)}',${v.findIndex(x => canon(x) === c)})">Dejar esta en todas las filas</button></div>`).join('') : ''}</div>`; }).join('');
+    el.innerHTML = `<p style="font-size:13px;margin-bottom:6px">${Object.keys(por).length} configuraciones guardadas, ${rows.length} filas. ${dups.length ? `<b style="color:#b8860b">${dups.length} configuración(es) con filas repetidas.</b> Mientras haya versiones distintas, MAIA puede leer la vieja; en cuanto alguien guarda esa pantalla (o la unificás acá) quedan todas iguales.` : '<span style="color:var(--green)">No hay filas repetidas: cada configuración tiene una sola fila.</span>'}</p>${filas}`;
+  } catch (e) { el.innerHTML = `<div class="status-msg" style="background:#fdecea;color:#b3261e">✕ ${esc(e.message)}</div>`; }
+}
+async function adminConfigUnificar(key, idx) {
+  if (!confirm(`¿Dejar esa versión de "${key}" en todas las filas? Las otras versiones se pisan.`)) return;
+  try { await supaConfigSet(key, _adminCfgDup[key][idx]); await adminConfigRevisar(); } catch (e) { alert(e.message); }
+}
+
 // supaFetch defined at top of script
 
 const PASS_OJO_SVG = '<svg class="ojo-a" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg><svg class="ojo-t" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
@@ -44566,7 +44698,7 @@ function confirmEmpresaSelection(empresa) {
   continueLoginAfterEmpresa();
 }
 
-function continueLoginAfterEmpresa() {
+async function continueLoginAfterEmpresa() {
   document.getElementById('app').style.display = '';
   const name = currentUser.nombre || currentUser.email.split('@')[0];
   const nameEl = document.getElementById('user-name-display');
@@ -44577,6 +44709,7 @@ function continueLoginAfterEmpresa() {
   if (initialEl) initialEl.textContent = name.charAt(0).toUpperCase();
   applyEmpresaSelector();
   refreshAllForEmpresa();
+  await accesosCargar();   // accesos por sector guardados desde Admin (si no hay, valen los de origen)
   applyTabAccess();
   initApp();
   notifStartPolling();
@@ -45911,9 +46044,16 @@ function renderAdmin() {
       <div class="card-label">Asistente MAIA — lo que aprendió de SharePoint</div>
       <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Cada vez que el chat flotante resuelve con éxito un sitio, Lista o página de SharePoint por nombre, lo guarda acá para no tener que volver a buscarlo — compartido entre todos los usuarios. Si asoció algo mal (por ejemplo, guardó una lista que no era la correcta para un tema), borralo acá.</p>
       <div id="admin-maia-conocimiento-list"></div>
+    </div>
+    <div id="admin-accesos-card"></div>
+    <div class="card">
+      <div class="card-label">Revisión de configuraciones guardadas</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Comprueba si alguna configuración tiene filas repetidas en la tabla de configuraciones (una causa de que algo "no se guarde"). Todas las pantallas ahora guardan actualizando todas las filas de su clave.</p>
+      <button class="btn btn-secondary" onclick="adminConfigRevisar()">Revisar ahora</button><div id="admin-config-diag" style="margin-top:10px"></div>
     </div>`;
   adminLoadUsers();
   renderAdminMaiaConocimiento();
+  oooPerfiles().then(() => accesosRender()).catch(() => accesosRender());
 }
 
 async function renderAdminMaiaConocimiento() {
