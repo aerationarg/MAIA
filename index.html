@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2625,6 +2625,8 @@ function rendNormalizarFecha(v) {
   const f = rendFechaPartes(v); if (!f) return null;
   return String(f.d).padStart(2, '0') + '/' + String(f.m).padStart(2, '0') + '/' + f.y;
 }
+// Campos que son identificadores y no cantidades (número de comprobante, de serie, CUIT…): van como texto para que Excel no los convierta en número ni en fecha (ni les saque los ceros)
+const rendEsCampoTexto = nombre => { const t = rendNormJur(nombre); return /(^| )(nro|n[°º]?|num|numero|serie|cuit|cuil|cae|cai|pv|codigo)( |$)/.test(t) || /punto de venta/.test(t); };
 const rendEsCampoFecha = nombre => { const t = String(nombre || '').toLowerCase(); return t.includes('fecha') && !t.includes('anal'); };
 function rendFechaASerial(str) {
   if (typeof str !== 'string') return null;
@@ -3163,8 +3165,10 @@ const rendNormJur = s => String(s || '').toLowerCase().normalize('NFD').replace(
 function rendJurisdiccionGrupo(txt) {
   const t = rendNormJur(txt); if (!t) return null;
   if (REND_PROVINCIAS_OTRAS.test(t)) return 'otras';
-  if (/\b(caba|c a b a|capital federal|capital|ciudad autonoma|ciudad de buenos aires|c f|cf|agip|gcba)\b/.test(t)) return 'caba';
-  if (/\b(buenos aires|bs as|bsas|pba|arba|provincia|prov)\b/.test(t)) return 'bsas';
+  // abreviaturas pegadas que traen algunos tickets (COTO, por ejemplo): IBCF / IIBBCF = Ingresos Brutos Capital Federal (CABA); IBBA / IIBBBA = Ingresos Brutos Buenos Aires (provincia)
+  const c = t.replace(/ /g, '');
+  if (/(ibcf|iibbcf|ibcaba|iibbcaba|ibcapital|iibbcapital|ibagip)/.test(c) || /\b(caba|c a b a|capital federal|capital|ciudad autonoma|ciudad de buenos aires|c f|cf|agip|gcba)\b/.test(t)) return 'caba';
+  if (/(ibba|iibbba|ibbsas|iibbbsas|ibpba|iibbpba|ibarba|iibbarba)/.test(c) || /\b(buenos aires|bs as|bsas|pba|arba|provincia|prov)\b/.test(t) || /\b(iibb|ib|i b)\s+ba\b/.test(t)) return 'bsas';
   return 'otras';
 }
 function rendGrupoDeCampo(nombre) {
@@ -3310,7 +3314,7 @@ async function analyzeAll() {
         headers: { 'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true' },
         body: JSON.stringify({
           model: CASO_MODELOS.estandar.id, max_tokens: 2000,
-          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__", "__percepciones_iibb__". Si no encontrás un valor usá null. FECHAS: todas las fechas van en formato DD/MM/AAAA (día/mes/año, formato argentino): en un comprobante argentino la fecha es SIEMPRE día/mes/año, nunca la interpretes como mes/día. IMPUESTOS Y PERCEPCIONES: no mezcles jurisdicciones. "CABA", "C.F.", "CF", "Capital Federal", "Ciudad Autónoma de Buenos Aires" y "AGIP" son la Ciudad de Buenos Aires (CABA), que NO es la provincia de Buenos Aires; "Buenos Aires", "Bs. As.", "PBA", "ARBA" y "Provincia de Buenos Aires" son la provincia de Buenos Aires; cualquier otra provincia (Neuquén, Córdoba, Santa Fe, Mendoza, Río Negro, etc.) es "otras jurisdicciones" y nunca va en el campo de Buenos Aires ni en el de CABA. Para "__percepciones_iibb__": array con TODAS las percepciones o retenciones de Ingresos Brutos (IIBB) que figuren en el comprobante, cada una como {"jurisdiccion":"<texto literal tal como figura, ej. 'Perc. IIBB C.F.', 'IIBB Bs.As.', 'Neuquén'>","monto":<número>}; [] si no hay ninguna. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si es "Aeration Uruguay" (o variación cercana, ej. "Aeration Uruguay S.A.S."), devolvé "SAS". Si no aparece ninguna de estas razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
+          system: `Sos un asistente experto en análisis de comprobantes financieros argentinos. El archivo que te paso puede contener UN SOLO comprobante o VARIOS comprobantes distintos (por ejemplo, un PDF con fotos de varias facturas, o varias páginas cada una con un comprobante distinto). Identificá cada comprobante por separado y extraé sus datos. Respondé SOLO con un array JSON válido, sin texto adicional ni markdown: cada elemento del array es un objeto con los datos de UN comprobante (si solo hay uno, el array tiene un único elemento). Claves de cada objeto: ${activeFields.map(f=>`"${f.name}"`).join(', ')}, "__empresa_receptora__", "__percepciones_iibb__". Si no encontrás un valor usá null. FECHAS: todas las fechas van en formato DD/MM/AAAA (día/mes/año, formato argentino): en un comprobante argentino la fecha es SIEMPRE día/mes/año, nunca la interpretes como mes/día. IMPUESTOS Y PERCEPCIONES: no mezcles jurisdicciones. "CABA", "C.F.", "CF", "Capital Federal", "Ciudad Autónoma de Buenos Aires" y "AGIP" son la Ciudad de Buenos Aires (CABA), que NO es la provincia de Buenos Aires; "Buenos Aires", "Bs. As.", "PBA", "ARBA" y "Provincia de Buenos Aires" son la provincia de Buenos Aires; cualquier otra provincia (Neuquén, Córdoba, Santa Fe, Mendoza, Río Negro, etc.) es "otras jurisdicciones" y nunca va en el campo de Buenos Aires ni en el de CABA. Abreviaturas que traen algunos tickets: "IBCF", "IIBB CF", "Perc. IB CABA" y "AGIP" son CABA; "IBBA", "IIBB BA", "Perc. IB Bs.As." y "ARBA" son la provincia de Buenos Aires; ninguna de estas es "otras jurisdicciones". Si un mismo comprobante trae percepciones de CABA y de Buenos Aires, devolvé UNA entrada por cada una (cada una con su texto literal y su monto), sin sumarlas. Para "__percepciones_iibb__": array con TODAS las percepciones o retenciones de Ingresos Brutos (IIBB) que figuren en el comprobante, cada una como {"jurisdiccion":"<texto literal tal como figura, ej. 'Perc. IIBB C.F.', 'IIBB Bs.As.', 'Neuquén'>","monto":<número>}; [] si no hay ninguna. Para "__empresa_receptora__": fijate a nombre de cuál empresa está dirigido el comprobante (el RECEPTOR/comprador que figura en la factura — nunca el proveedor que la emite). Si el receptor es "Aeration Argentina" o "Aeration Argentina S.A." (o una variación cercana de ese nombre), devolvé "AA". Si es "Aeration Servicios" (o variación cercana), devolvé "AS". Si es "Aeration Uruguay" (o variación cercana, ej. "Aeration Uruguay S.A.S."), devolvé "SAS". Si no aparece ninguna de estas razones sociales como receptor, o no podés determinarlo con certeza, devolvé null — no adivines.`,
           messages: [{ role:'user', content:[
             isPdf ? {type:'document',source:{type:'base64',media_type:mediaType,data:b64}} : {type:'image',source:{type:'base64',media_type:mediaType,data:b64}},
             {type:'text',text:`Extraé estos campos para cada comprobante distinto que encuentres en el archivo:\n${fieldPrompt}\nRespondé solo con el array JSON.`}
@@ -3975,6 +3979,8 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
     }
     // las fechas van como número de serie (nada que Excel interprete solo: antes salían con el día y el mes cambiados) y con formato fijo dd/mm/yyyy
     const colsFecha = rendConvertirFechasEnFila(newRow, hdrs);
+    const colsTexto = [];   // columnas de identificadores: con valor y que no son de fecha
+    newRow.forEach((v, ci) => { if (v === '' || v == null || colsFecha.includes(ci)) return; const nombre = useMapping ? (savedMapping[ci] != null ? savedMapping[ci] : '') : (hdrs[ci] || ''); if (!/^__/.test(String(nombre)) && rendEsCampoTexto(nombre)) { colsTexto.push(ci); newRow[ci] = String(v); } });
     let rowNum, usedInsert = false;
     if (nextBlankRow) {
       rowNum = nextBlankRow;
@@ -3988,6 +3994,10 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
       rowNum = firstEmptyRow + ri;
     }
     const lastCol = rendColLetra(Math.max(newRow.length, 1) - 1);
+    for (const ci of colsTexto) {   // formato Texto ANTES de escribir el valor (la plantilla puede traer formato de fecha o número en esas celdas)
+      const cl = rendColLetra(ci);
+      await fetch(excelBase + `range(address='${cl}${rowNum}:${cl}${rowNum}')`, { method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({ numberFormat: [['@']] }) }).catch(() => {}); // si falla, queda como estaba
+    }
     const patchResp = await fetch(excelBase + `range(address='A${rowNum}:${lastCol}${rowNum}')`, {
       method:'PATCH', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}, body: JSON.stringify({values:[newRow]})
     });
@@ -4190,7 +4200,9 @@ async function rendGenerarNueva() {
     const { siteId, folderId } = await rendResolveDestFolder(token);
 
     showMsg(statusId,'loading','Copiando plantilla...');
-    const newFileName = spRendicionFileName();
+    let existentes = [];
+    try { const lr = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=name&$top=999`, {headers:{Authorization:'Bearer '+token}}); if (lr.ok) existentes = ((await lr.json()).value || []).map(x => x.name); } catch (e) { existentes = []; }
+    let newFileName = spRendicionFileNameUnico(existentes);
     // La plantilla (rend_template) y la carpeta destino (rend_base_folder) son dos
     // referencias de SharePoint configuradas por separado, y pueden vivir en
     // sitios/bibliotecas distintas. Si no le decimos a Graph explícitamente en
@@ -4202,12 +4214,14 @@ async function rendGenerarNueva() {
     const destDriveResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive?$select=id`, {headers:{Authorization:'Bearer '+token}});
     if (!destDriveResp.ok) throw new Error('No se pudo identificar la biblioteca de SharePoint de la carpeta destino.');
     const destDriveId = (await destDriveResp.json()).id;
-    const copyResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/copy`, {
+    const copiar = nombre => fetch(`https://graph.microsoft.com/v1.0/sites/${tmpl.siteId}/drive/items/${tmpl.id}/copy`, {
       method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-      body: JSON.stringify({ parentReference: { driveId: destDriveId, id: folderId }, name: newFileName })
+      body: JSON.stringify({ parentReference: { driveId: destDriveId, id: folderId }, name: nombre })
     });
+    let copyResp = await copiar(newFileName);
+    for (let k = 0; copyResp.status === 409 && k < 5; k++) { existentes.push(newFileName); newFileName = spRendicionFileNameUnico(existentes); copyResp = await copiar(newFileName); }   // si justo apareció otra con ese nombre, se prueba con el número siguiente
     if (copyResp.status !== 202 && !copyResp.ok) {
-      if (copyResp.status === 409) throw new Error(`Ya existe "${newFileName}" en esa carpeta (rendición de hoy ya generada). Usá "Insertar en última rendición".`);
+      if (copyResp.status === 409) throw new Error(`No pude encontrar un nombre libre para la rendición de hoy en esa carpeta (último intento: "${newFileName}"). Revisá la carpeta.`);
       const copyErr = await copyResp.json().catch(()=>({}));
       const detalle = copyErr.error?.message || `HTTP ${copyResp.status}`;
       const pista = copyResp.status === 404 ? ' (puede ser que tu cuenta no tenga permiso para ver la plantilla, o que se haya movido/borrado — Graph a veces devuelve 404 en vez de "sin permiso")' : '';
@@ -22865,6 +22879,13 @@ function spModalClose() {
 function spYearMonth() {
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+// Nombre de la rendición del día; si ya hay una (o más) con ese nombre en la carpeta, se numera: Rendicion_2026_10_30 (1).xlsx, (2)…
+function spRendicionFileNameUnico(existentes) {
+  const base = spRendicionFileName().replace(/\.xlsx$/i, ''), usados = new Set((existentes || []).map(n => String(n).toLowerCase()));
+  if (!usados.has((base + '.xlsx').toLowerCase())) return base + '.xlsx';
+  for (let n = 1; n < 200; n++) { const c = `${base} (${n}).xlsx`; if (!usados.has(c.toLowerCase())) return c; }
+  return `${base} (${Date.now()}).xlsx`;
 }
 function spRendicionFileName() {
   const d = new Date();
