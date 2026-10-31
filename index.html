@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -37891,7 +37891,7 @@ const SIM_GLOBAL_PARAMS = [
 // ═══════════════════════════════════════════════════════════════════════
 const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'anoxico', 'lodos_activados'];
 const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], anoxico: ['volumen', 'rec_interna'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana', 'volumen', 'edad_lodos', 'mlss'], daf: ['area'], tamiz: ['ancho_canal'] };
-const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'], preset: ['📚', 'coeficientes de referencia (planilla Máster / bibliografía)'], calibrado: ['⚙', 'calibrado con datos medidos de la planta'] };
+const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'], prompt: ['✍', 'dicho en tu descripción'], supuesto: ['🤖', 'supuesto de la IA (no figuraba en tu descripción): revisalo'], preset: ['📚', 'coeficientes de referencia (planilla Máster / bibliografía)'], calibrado: ['⚙', 'calibrado con datos medidos de la planta'] };
 let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
 const simU = id => _simDoc && _simDoc.datos.unidades.find(u => u.id === id);
 
@@ -38147,6 +38147,76 @@ async function simImportarArchivos() {
     showMsg(st, n ? 'success' : 'error', n ? `✓ La IA armó ${n} unidad(es) a partir de los archivos. Revisá lo que cargó antes de confiar en los resultados.` : '✕ La IA no encontró unidades que pueda simular en esos archivos.');
   } catch (e) { _simIa.ocupado = false; simRender(); showMsg(st, 'error', '✕ ' + e.message); }
 }
+// ── Armar la planta escribiendo qué se quiere simular ──
+// El usuario describe la planta (o pide un cambio) y la IA arma las unidades y los datos generales. Lo que el usuario dijo queda marcado ✍; lo que la IA completó con criterios de diseño típicos, 🤖 (y se lista con su motivo);
+// lo que no se puede asumir (por ejemplo, el caudal) vuelve como pregunta. Con "asumir" apagado, solo se carga lo dicho y el resto se pregunta.
+const SIM_TOOL_PLANTA_PROMPT = (() => {
+  const t = JSON.parse(JSON.stringify(SIM_TOOL_PLANTA)); t.description = 'Planta para el simulador armada a partir de la descripción del usuario, con los supuestos hechos y los datos que faltan.';
+  Object.assign(t.input_schema.properties, {
+    resumen: { type: 'string', description: 'En 1 a 3 líneas, qué armaste.' },
+    supuestos: { type: 'array', description: 'TODO valor que cargaste y que el usuario NO dijo.', items: { type: 'object', properties: { unidad: { type: 'string', description: 'Nombre de la unidad tal como la nombraste en "unidades", o "general" para un dato general.' }, clave: { type: 'string', description: 'Clave del parámetro o del dato general.' }, valor: { type: ['number', 'string'] }, motivo: { type: 'string', description: 'Por qué ese valor, en pocas palabras (ej. "TRH típico de 8 h para lodos activados").' } }, required: ['unidad', 'clave', 'motivo'] } },
+    faltan: { type: 'array', description: 'Datos que ni el usuario dio ni se pueden asumir con criterio.', items: { type: 'object', properties: { dato: { type: 'string' }, pregunta: { type: 'string', description: 'Pregunta concreta para el usuario.' }, importante: { type: 'boolean', description: 'true si sin ese dato la simulación no sirve.' } }, required: ['dato', 'pregunta'] } }
+  });
+  return t;
+})();
+function simPromptHtml() {
+  const d = _simDoc.datos, pi = d.prompt_info || null, ocup = _simIa.ocupado ? 'disabled' : '', hay = d.unidades.length > 0;
+  const fm = x => x == null || x === '' ? '—' : esc(String(x));
+  return `<div class="card" style="border-color:var(--blue)">
+    <div class="card-label">✍ Describí la planta y la IA la arma</div>
+    <textarea id="sim-prompt" rows="4" style="width:100%;margin:6px 0" placeholder="Ej: planta de 200 m3/d de efluente de frigorífico, DBO 2500 y SST 1200 mg/L. Ecualizador, flotación DAF, reactor de lodos activados con sedimentador secundario y desinfección con cloro. Vuelco con DBO máxima de 100 mg/L." oninput="_simIa.prompt=this.value">${esc(_simIa.prompt || '')}</textarea>
+    <label style="display:flex;gap:6px;align-items:flex-start;font-size:12.5px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="sim-prompt-asumir" style="width:auto;margin-top:2px" ${_simIa.sinAsumir ? '' : 'checked'} onchange="_simIa.sinAsumir=!this.checked" /> <span>Si faltan datos, que la IA asuma valores típicos de diseño. Los marca con 🤖 y te lista qué asumió y por qué, para que lo revises. Apagado: solo carga lo que escribiste y te pregunta el resto.</span></label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="simArmarDesdePrompt('nueva')" ${ocup}>✨ Armar planta con IA</button>${hay ? `<button class="btn btn-secondary btn-sm" onclick="simArmarDesdePrompt('ajustar')" ${ocup} title="La IA recibe la planta actual y aplica lo que pidas (cambiar un dato, sumar o sacar una unidad, responder sus preguntas)">✎ Modificar la planta actual</button>` : ''}</div>
+    <div id="sim-prompt-status" style="margin-top:8px"></div>
+    ${pi ? `${pi.resumen ? `<p class="hint" style="margin:8px 0 0"><b>Lo que armó:</b> ${esc(pi.resumen)} <button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px" onclick="_simDoc.datos.prompt_info=null;simGuardar();simRender()">ocultar</button></p>` : ''}
+    ${(pi.faltan || []).length ? `<div style="margin-top:8px;border-left:3px solid ${pi.faltan.some(f => f.importante) ? 'var(--red)' : '#b8860b'};padding:4px 10px;background:var(--surface2);border-radius:6px"><b style="font-size:12.5px">❓ Faltan datos</b>${pi.faltan.map(f => `<div style="font-size:12.5px;margin-top:3px">${f.importante ? '<b>' : ''}${esc(f.dato)}${f.importante ? '</b>' : ''}: ${esc(f.pregunta)}</div>`).join('')}<div class="hint" style="margin:4px 0 0">Escribí las respuestas en la caja de arriba y tocá "Modificar la planta actual".</div></div>` : ''}
+    ${(pi.supuestos || []).length ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12.5px;font-weight:600">🤖 Lo que asumió la IA (${pi.supuestos.length}) — revisalo</summary><table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px"><thead><tr style="text-align:left;color:var(--text2)"><th style="padding:3px 6px">Dónde</th><th style="padding:3px 6px">Dato</th><th style="padding:3px 6px">Valor</th><th style="padding:3px 6px">Por qué</th></tr></thead><tbody>${pi.supuestos.map(x => `<tr style="border-top:1px solid var(--border)"><td style="padding:3px 6px">${esc(x.unidad)}</td><td style="padding:3px 6px">${esc(x.etiqueta || x.clave)}</td><td style="padding:3px 6px">${fm(x.valor)}</td><td style="padding:3px 6px">${esc(x.motivo)}</td></tr>`).join('')}</tbody></table></details>` : ''}` : ''}
+  </div>`;
+}
+function simPlantaActualJson(d) {
+  return JSON.stringify({ general: d.global, unidades: d.unidades.map(u => ({ tipo: u.tipo, nombre: u.nombre, params: u.params })) });
+}
+async function simArmarDesdePrompt(modo) {
+  const st = 'sim-prompt-status', d = _simDoc.datos, texto = String((document.getElementById('sim-prompt') || {}).value || _simIa.prompt || '').trim(), asumir = !_simIa.sinAsumir;
+  if (!texto) { showMsg(st, 'error', '✕ Escribí qué planta querés simular (o qué querés cambiar).'); return; }
+  if (_simIa.ocupado) return;
+  if (modo === 'nueva' && d.unidades.length && !confirm('Ya hay una planta cargada. ¿Reemplazarla por la que describís? (Para cambiarle algo a la actual usá "Modificar la planta actual".)')) return;
+  try {
+    _simIa.ocupado = true; showMsg(st, 'loading', modo === 'ajustar' ? 'La IA está modificando la planta...' : 'La IA está armando la planta...');
+    const reglas = `Reglas:\n- Devolvé cada valor en LA UNIDAD indicada entre corchetes (convertí: m3/d → m3/h, L/s → m3/h, mm → m, etc.). Si el usuario da el diámetro de un sedimentador circular y no el área, podés usar la clave "diametro".\n- Lo que el usuario dijo explícitamente va tal cual.\n- Los DATOS DEL USUARIO (caudal, concentraciones del afluente, límites de vuelco, qué etapas quiere) NO se asumen nunca: si falta alguno que la simulación necesita, no lo inventes: ponelo en "faltan" con una pregunta concreta (importante: true si sin eso no sirve). Si el usuario no dijo cuánto caudal, no armes valores de dimensionamiento que dependan de él.\n` + (asumir
+      ? `- Para que la simulación pueda correr, lo que NO dijo el usuario y es DISEÑO (dimensiones de cada unidad, tiempos de retención, cargas, edad de lodos, recirculaciones, dosis…) completalo vos con criterios típicos de ingeniería (Metcalf & Eddy y práctica habitual), dimensionando cada unidad a partir del caudal y la carga que dio el usuario. TODO valor que cargues y que el usuario no dijo tiene que figurar en "supuestos" (unidad, clave, valor y motivo corto).\n`
+      : `- NO asumas ni uses valores típicos: incluí SOLO lo que dijo el usuario; lo demás listalo en "faltan".\n`) +
+      `- Una unidad por cada etapa de tratamiento que tenga un tipo disponible arriba, en orden hidráulico (las que no tengan tipo, mencionalas en "avisos").\n- Nombrá cada unidad de forma clara y única (es la clave con la que se la referencia en "supuestos").\n- "resumen": 1 a 3 líneas con qué armaste.`;
+    const prompt = `Sos ingeniero de procesos de tratamiento de efluentes. El usuario describe una planta (o pide un cambio) y vos armás el modelo para un simulador de verificación de diseño.\n\nDESCRIPCIÓN DEL USUARIO:\n"""\n${texto}\n"""\n\n${modo === 'ajustar' ? `PLANTA ACTUAL (JSON):\n${simPlantaActualJson(d)}\n\nDevolvé la planta COMPLETA con los cambios pedidos aplicados: conservá tal cual todo lo que el usuario no pidió cambiar (mismos nombres de unidad y mismos valores). Si el usuario responde preguntas que quedaron pendientes, incorporá esas respuestas.\n\n` : ''}${simDescripcionModelos()}\n\n${reglas}`;
+    const r = await dfsLlamar([{ type: 'text', text: prompt }], SIM_TOOL_PLANTA_PROMPT, 8000);
+    const previoInfo = (d.prompt_info && d.prompt_info.supuestos) || [];
+    const supu = new Set((r.supuestos || []).map(x => procesosNormTxt(x.unidad) + '|' + String(x.clave).trim()));
+    const fuente = (nombre, k) => supu.has(procesosNormTxt(nombre || 'general') + '|' + k) ? 'supuesto' : 'prompt';
+    const previas = new Map(d.unidades.map(u => [procesosNormTxt(u.nombre), u]));
+    if (modo === 'nueva') d.global = {}, d.global_fuente = {};
+    Object.entries(r.general || {}).forEach(([k, v]) => { if (SIM_GLOBAL_PARAMS.some(x => x.k === k) && v != null && isFinite(v) && !(modo === 'ajustar' && d.global[k] === Number(v))) { d.global[k] = Number(v); d.global_fuente[k] = fuente('general', k); } });
+    const unidades = []; let n = 0;
+    (r.unidades || []).forEach(x => {
+      const tipo = SIM_MODELOS[x.tipo] ? x.tipo : simTipoDe(x.tipo + ' ' + x.nombre); if (!tipo) return;
+      const vieja = modo === 'ajustar' ? previas.get(procesosNormTxt(x.nombre || '')) : null, u = vieja && vieja.tipo === tipo ? vieja : simUnidadNueva(tipo, x.nombre || SIM_MODELOS[tipo].nombre);
+      Object.entries(x.params || {}).forEach(([k, v]) => { const df = SIM_MODELOS[tipo].params.find(y => y.k === k); if (df && v != null && v !== '') { const vv = df.serie24 ? sim24(v) : (df.texto ? String(v) : Number(v)); if (vv != null && (df.serie24 || df.texto || isFinite(vv)) && !(vieja && JSON.stringify(u.params[k]) === JSON.stringify(vv))) { u.params[k] = vv; u.fuentes[k] = fuente(x.nombre, k); } } });
+      unidades.push(u); n++;
+    });
+    if (!unidades.length) throw new Error('La IA no pudo armar ninguna unidad que se pueda simular con lo que escribiste: sumá qué etapas tiene la planta (por ejemplo ecualizador, reactor biológico, sedimentador…).');
+    d.unidades = unidades; d.fuente = { tipo: 'archivo', id: null, nombre: 'Descripción escrita en MAIA' }; d.avisos = (r.avisos || []).map(String); simAplicarPerfilesEq(d);
+    SIM_GLOBAL_PARAMS.forEach(x => { if (d.global[x.k] == null && x.tipico != null) { d.global[x.k] = x.tipico; d.global_fuente[x.k] = 'tipico'; } });
+    const etiqueta = (nombre, k) => { const u = unidades.find(y => procesosNormTxt(y.nombre) === procesosNormTxt(nombre)); const df = u && SIM_MODELOS[u.tipo].params.find(y => y.k === k) || SIM_GLOBAL_PARAMS.find(y => y.k === k); return df ? df.l : k; };
+    d.prompt_info = { resumen: String(r.resumen || ''), faltan: (r.faltan || []).map(f => ({ dato: String(f.dato || ''), pregunta: String(f.pregunta || ''), importante: !!f.importante })), supuestos: [] };
+    const supNuevos = (r.supuestos || []).map(x => ({ unidad: x.unidad || 'general', clave: x.clave, etiqueta: etiqueta(x.unidad, x.clave), valor: x.valor, motivo: x.motivo || '' })), kS = x => procesosNormTxt(x.unidad) + '|' + x.clave;
+    // al modificar, lo que se había asumido antes y no se tocó sigue en la lista (mientras conserve la marca 🤖)
+    const fuenteDe = x => x.unidad === 'general' ? (d.global_fuente || {})[x.clave] : ((unidades.find(y => procesosNormTxt(y.nombre) === procesosNormTxt(x.unidad)) || { fuentes: {} }).fuentes[x.clave]);
+    const previosSup = modo === 'ajustar' ? previoInfo.filter(x => !supNuevos.some(y => kS(y) === kS(x)) && fuenteDe(x) === 'supuesto') : [];
+    d.prompt_info.supuestos = previosSup.concat(supNuevos);
+    _simIa.ocupado = false; if (modo === 'nueva') _simIa.prompt = ''; await simGuardar(true); simRender();
+    const nF = d.prompt_info.faltan.length, nS = d.prompt_info.supuestos.length;
+    showMsg(st, nF && d.prompt_info.faltan.some(f => f.importante) ? 'error' : 'success', `${modo === 'ajustar' ? '✓ Planta modificada' : `✓ La IA armó ${n} unidad(es)`}${nS ? `, asumió ${nS} dato(s) (🤖)` : ''}${nF ? ` y te hace ${nF} pregunta(s)` : ''}. Revisá lo que cargó antes de confiar en los resultados.`);
+  } catch (e) { _simIa.ocupado = false; simRender(); showMsg(st, 'error', '✕ ' + e.message); }
+}
 // ── Plantilla Excel (carga determinística, sin IA) ──
 function simPlantillaExcel() {
   const wb = XLSX.utils.book_new();
@@ -38372,6 +38442,7 @@ function simRender() {
   el.innerHTML = `
     ${hdCab('simulador', 'simVolver()', 'Volver a Simulaciones', `value="${esc(_simDoc.nombre)}" placeholder="Nombre de la simulación" onchange="simSetNombre(this.value)"`)}
     ${d.unidades.length ? simPlayerHtml() : ''}
+    ${simPromptHtml()}
     ${simSec('cargar', '🧪 Cargar los datos de la planta' + (d.unidades.length ? ' <span class="hint" style="display:inline;margin:0;font-weight:400">(ya hay datos cargados: abrí para importar de nuevo)</span>' : ''), cargarH, !d.unidades.length, 'style="border-color:var(--blue)"')}
     ${simSec('generales', 'Datos generales de la planta', generalesH, true)}
     ${simEscCardHtml(d)}
