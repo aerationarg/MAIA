@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -2557,7 +2557,7 @@ function switchPanel(name) {
   if (name === 'cfg-np-int') { npLoadFieldsConfig('np-int').then(()=>npCfgRender('np-int')); renderAutoFields('np-int'); }
   if (name === 'rend') {
     Promise.all([rendLoadClientesProveedores(), rendLoadManualFields(), rendLoadFields(), rendLoadMapping(), rendLoadAutoFields(), rendLoadSpDefaults()]).then(renderRendResults);
-    renderRendResults();
+    renderRendResults(); rendRestaurarArchivos();
   }
   if (name === 'np-loc' || name === 'np-int') { npLoadFieldsConfig(name).then(()=>npStep0InitAndCalc(name)); npRenderAprobacionesPendientes(name); npRenderRechazadas(name); npRenderMisAprobaciones(name); npHistorialRender(name); }
   if (name === 'viajes') renderViajesForm();
@@ -2970,10 +2970,42 @@ dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classL
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
 dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); handleFiles(e.dataTransfer.files); });
 
+// ── Archivos de comprobantes guardados en el navegador (IndexedDB) ──
+// Los resultados del análisis se guardaban en localStorage pero los archivos no: si se recargaba la página (por ejemplo después de un error al generar la rendición)
+// los comprobantes seguían en pantalla pero sin su archivo, y la rendición se generaba SIN las fotos. Ahora cada archivo se guarda al cargarlo y se borra cuando se subió a SharePoint.
+function rendIdb() {
+  return new Promise((res, rej) => {
+    if (window._rendIdb) return res(window._rendIdb);
+    try { const rq = indexedDB.open('maia_rend', 1); rq.onupgradeneeded = () => rq.result.createObjectStore('archivos'); rq.onsuccess = () => { window._rendIdb = rq.result; res(rq.result); }; rq.onerror = () => rej(rq.error); } catch (e) { rej(e); }
+  });
+}
+const rendArchivoClave = nombre => currentEmpresa + '|' + nombre;
+async function rendArchivoGuardar(file) {
+  try { const db = await rendIdb(); await new Promise((res, rej) => { const tx = db.transaction('archivos', 'readwrite'); tx.objectStore('archivos').put({ blob: file, name: file.name, type: file.type }, rendArchivoClave(file.name)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) { /* sin IndexedDB todo sigue como antes: el archivo vive mientras no se recargue la página */ }
+}
+async function rendArchivoObtener(nombre) {
+  try { const db = await rendIdb(); const r = await new Promise((res, rej) => { const rq = db.transaction('archivos').objectStore('archivos').get(rendArchivoClave(nombre)); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); return r && r.blob ? new File([r.blob], nombre, { type: r.type || r.blob.type || 'application/octet-stream' }) : null; } catch (e) { return null; }
+}
+async function rendArchivoBorrar(nombre) {
+  try { const db = await rendIdb(); await new Promise((res, rej) => { const tx = db.transaction('archivos', 'readwrite'); tx.objectStore('archivos').delete(rendArchivoClave(nombre)); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) { /* nada */ }
+}
+async function rendArchivosLimpiar() {
+  try { const db = await rendIdb(); await new Promise((res, rej) => { const tx = db.transaction('archivos', 'readwrite'), st = tx.objectStore('archivos'), pre = currentEmpresa + '|'; st.openCursor().onsuccess = e => { const c = e.target.result; if (c) { if (String(c.key).startsWith(pre)) c.delete(); c.continue(); } }; tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) { /* nada */ }
+}
+// Vuelve a poner en la lista los archivos de los comprobantes que quedaron en pantalla (tras recargar la página)
+async function rendRestaurarArchivos() {
+  const nombres = [...new Set(results.map(r => r['__archivo__']).filter(Boolean))].filter(n => !files.some(f => f.file.name === n));
+  let cambio = false;
+  for (const n of nombres) { const f = await rendArchivoObtener(n); if (f && !files.some(x => x.file.name === n)) { files.push({ file: f, status: 'done', error: null, restaurado: true }); cambio = true; } }
+  if (cambio) renderFileList();
+}
 function handleFiles(list) {
   Array.from(list).forEach(f => {
-    if (!files.find(x => x.file.name===f.name && x.file.size===f.size))
-      files.push({ file:f, status:'pending', error:null });
+    if (files.find(x => x.file.name===f.name && x.file.size===f.size)) return;
+    // si ya hay comprobantes analizados de un archivo con este nombre (quedaron en pantalla sin su archivo), se vuelve a asociar sin analizarlo de nuevo
+    if (!files.some(x => x.file.name === f.name) && results.some(r => r['__archivo__'] === f.name)) files.push({ file:f, status:'done', error:null, restaurado:true });
+    else files.push({ file:f, status:'pending', error:null });
+    rendArchivoGuardar(f);
   });
   renderFileList();
   document.getElementById('analyzeBtn').disabled = !files.length || !getApiKey();
@@ -3003,14 +3035,14 @@ function removeFile(i) {
   if (!item) return;
   if (item.manual) { // adjunto de un comprobante cargado a mano: se saca el archivo, el comprobante queda
     results.forEach(r => { if (r.__manual_sin_ia__ && r['__archivo__'] === item.file.name) r['__archivo__'] = ''; });
-    saveResults(); files.splice(i, 1); renderFileList(); renderRendResults(); return;
+    saveResults(); files.splice(i, 1); rendArchivoBorrar(item.file.name); renderFileList(); renderRendResults(); return;
   }
   // Un mismo archivo puede haber generado varios comprobantes (varias filas en results) —
   // hay que sacarlos todos, no solo el primero que matchee.
   const before = results.length;
   results = results.filter(r => r['__archivo__'] !== item.file.name);
   if (results.length !== before) saveResults();
-  files.splice(i, 1);
+  files.splice(i, 1); rendArchivoBorrar(item.file.name);
   renderFileList();
   renderRendResults();
 }
@@ -3032,19 +3064,19 @@ function rendAdjuntarManual(ri, input) {
   const f = input.files && input.files[0]; input.value = '';
   const r = results[ri]; if (!f || !r) return;
   if (files.some(x => x.file.name === f.name) || results.some((x, k) => k !== ri && x['__archivo__'] === f.name)) { alert(`Ya hay un archivo llamado "${f.name}" en la lista. Renombralo antes de adjuntarlo.`); return; }
-  files.push({ file: f, status: 'done', error: null, manual: true });
+  files.push({ file: f, status: 'done', error: null, manual: true }); rendArchivoGuardar(f);
   r['__archivo__'] = f.name; saveResults(); renderFileList(); renderRendResults();
 }
 function rendQuitarAdjuntoManual(ri) {
   const r = results[ri]; if (!r) return;
   const i = files.findIndex(x => x.manual && x.file.name === r['__archivo__']);
-  if (i >= 0) files.splice(i, 1);
+  if (i >= 0) { rendArchivoBorrar(files[i].file.name); files.splice(i, 1); }
   r['__archivo__'] = ''; saveResults(); renderFileList(); renderRendResults();
 }
 function rendQuitarManual(ri) {
   const r = results[ri]; if (!r || !confirm('¿Quitar este comprobante?')) return;
   const i = files.findIndex(x => x.manual && x.file.name === r['__archivo__']);
-  if (i >= 0) files.splice(i, 1);
+  if (i >= 0) { rendArchivoBorrar(files[i].file.name); files.splice(i, 1); }
   results.splice(ri, 1); saveResults(); renderFileList(); renderRendResults();
 }
 // Fecha escrita a mano: se pasa a DD/MM/AAAA (el formato que espera el Excel); si no se entiende, se marca
@@ -3733,7 +3765,7 @@ async function rendMoverComprobanteAOtraEmpresa(ri) {
 // resultados ACTUALES: usa el archivo vivo de esta sesión si está cargado, o
 // lo reconstruye desde el base64 embebido (comprobantes que se "pasaron" desde
 // el otro entorno con rendMoverComprobanteAOtraEmpresa).
-function rendArchivosParaSubir() {
+async function rendArchivosParaSubir() {
   const nombres = [...new Set(results.map(r => r['__archivo__']).filter(Boolean))];
   const items = [];
   for (const nombre of nombres) {
@@ -3745,10 +3777,19 @@ function rendArchivosParaSubir() {
         const bytes = Uint8Array.from(atob(conB64.__archivo_b64__), c => c.charCodeAt(0));
         const file = new File([bytes], nombre, { type: conB64.__archivo_mime__ || 'application/octet-stream' });
         items.push({ file, status: 'done' });
-      } catch(e) { /* si no se puede reconstruir, se sigue sin ese adjunto */ }
+        continue;
+      } catch(e) { /* si no se puede reconstruir, se prueba con lo guardado en el navegador */ }
     }
+    const guardado = await rendArchivoObtener(nombre);
+    if (guardado) items.push({ file: guardado, status: 'done' });
   }
   return items;
+}
+// Si hay comprobantes sin archivo (no se pudo recuperar), avisa antes de seguir: se cargarían al Excel sin su foto/PDF
+function rendConfirmarSinArchivo(doneFiles) {
+  const tienen = new Set(doneFiles.map(it => it.file.name)), faltan = [...new Set(results.map(r => r['__archivo__']).filter(n => n && !tienen.has(n)))];
+  if (!faltan.length) return true;
+  return confirm(`Estos comprobantes ya están analizados pero NO tienen su archivo cargado (se perdió al recargar la página):\n\n${faltan.join('\n')}\n\nSi seguís, se escriben en el Excel pero SIN subir la foto/PDF.\n\nPara que se suban, cancelá y volvé a arrastrar esos archivos a la zona de carga (no se analizan de nuevo, solo se vuelven a asociar).\n\n¿Seguir igual sin los archivos?`);
 }
 
 function rendManualValueFor(f, record) {
@@ -4129,19 +4170,52 @@ async function rendFinalizarLote(token, siteId, folderId, excelId, sheetName, do
   files = files.filter(f => f.status !== 'done' || results.some(r => r['__archivo__'] === f.file.name));
   if (!w.fallidas.length) { rendManualValues = {}; rendPersonaOverrideEnabled = false; rendPersonaOverrideValue = ''; }
   saveResults(); renderFileList(); renderRendResults();
-  const sinSubir = Object.entries(subidos).filter(([, v]) => v.error).map(([k]) => k);
+  const sinSubir = Object.entries(subidos).filter(([, v]) => v.error).map(([k]) => k).concat(Object.keys(filaPorArchivo).filter(n => !(n in subidos)).map(n => n + ' (no tenía archivo cargado)'));
+  Object.entries(subidos).forEach(([n, v]) => { if (!v.error && !results.some(r => r['__archivo__'] === n)) rendArchivoBorrar(n); });
   const avisos = [];
   if (w.fallidas.length) avisos.push(`${w.fallidas.length} fila(s) NO se pudieron escribir en el Excel y quedaron en pantalla para reintentar: ${w.fallidas.map(f => `${f.archivo} (${f.motivo})`).join('; ')}`);
   if (sinSubir.length) avisos.push(`no se pudo subir el comprobante de: ${sinSubir.join(', ')}`);
   return { ok: !avisos.length, cantidad: lote.length, mensaje: avisos.length ? `⚠ ${lote.length} comprobante(s) enviados, pero ${avisos.join(' · ')}` : null };
 }
 
+// Cada rendición vive en su propia carpeta dentro del Año-Mes: Rendicion_AAAA_MM_DD, y si ese día ya hay otra, Rendicion_AAAA_MM_DD (2), (3)…
+// Ahí van el Excel (se llama igual que la carpeta) y los comprobantes. Una carpeta que quedó vacía de un intento fallido se reutiliza.
+async function rendCrearCarpetaRendicion(token, siteId, mesId) {
+  const base = spRendicionFileName().replace(/\.xlsx$/i, ''), api = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/`, H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+  for (let n = 1; n < 200; n++) {
+    const nombre = n === 1 ? base : `${base} (${n})`;
+    const cr = await fetch(api + mesId + '/children', { method: 'POST', headers: H, body: JSON.stringify({ name: nombre, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }) });
+    if (cr.ok) { const it = await cr.json(); return { id: it.id, nombre }; }
+    if (cr.status !== 409) { const e = await cr.json().catch(() => ({})); throw new Error('No se pudo crear la carpeta de la rendición: ' + (e.error?.message || 'HTTP ' + cr.status)); }
+    try {   // ya existe: si está vacía (intento anterior que falló) se reutiliza
+      const ex = await fetch(`${api}${mesId}:/${encodeURIComponent(nombre)}?$select=id,folder`, { headers: { Authorization: 'Bearer ' + token } });
+      if (ex.ok) { const it = await ex.json(); if (it.folder && it.folder.childCount === 0) return { id: it.id, nombre }; }
+    } catch (e) { /* se prueba con el número siguiente */ }
+  }
+  throw new Error('No se pudo encontrar un nombre libre para la carpeta de la rendición. Revisá la carpeta del mes en SharePoint.');
+}
+// Última rendición del mes: la más reciente entre las carpetas Rendicion_… (con su Excel adentro) y los Excel sueltos de cuando no había carpetas
+async function rendBuscarUltima(token, siteId, mesId) {
+  const api = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/`, H = { Authorization: 'Bearer ' + token };
+  const lr = await fetch(`${api}${mesId}/children?$select=id,name,file,folder,createdDateTime&$top=999`, { headers: H });
+  if (!lr.ok) throw new Error('No se pudo leer la carpeta destino.');
+  const items = ((await lr.json()).value || []).filter(x => (x.file && /\.xlsx$/i.test(x.name)) || (x.folder && /^rendicion/i.test(x.name))).sort((a, b) => new Date(b.createdDateTime) - new Date(a.createdDateTime));
+  for (const it of items) {
+    if (it.file) return { excel: it, carpetaId: mesId };
+    const cr = await fetch(`${api}${it.id}/children?$select=id,name,file,createdDateTime&$top=200`, { headers: H });
+    if (!cr.ok) continue;
+    const xl = ((await cr.json()).value || []).filter(f => f.file && /\.xlsx$/i.test(f.name)).sort((a, b) => new Date(b.createdDateTime) - new Date(a.createdDateTime))[0];
+    if (xl) return { excel: xl, carpetaId: it.id };
+  }
+  return null;
+}
 async function rendInsertarUltima() {
   if (!results.length) { alert('No hay comprobantes para guardar: analizá archivos con IA o cargá uno a mano.'); return; }
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
-  const doneFiles = rendArchivosParaSubir();
+  const doneFiles = await rendArchivosParaSubir();
+  if (!rendConfirmarSinArchivo(doneFiles)) return;
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
   try {
@@ -4152,18 +4226,11 @@ async function rendInsertarUltima() {
     const sesionMaia = JSON.parse(localStorage.getItem('daia_session')||'null');
     if (!sesionMaia?.token) throw new Error('Tu sesión de MAIA venció o no es válida — recargá la página e iniciá sesión de nuevo antes de reintentar.');
     const token = await getMsToken();
-    const { siteId, folderId } = await rendResolveDestFolder(token);
+    const { siteId, folderId: mesId } = await rendResolveDestFolder(token);
     showMsg(statusId,'loading','Buscando la última rendición...');
-    const listResp = await fetch(
-      `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=id,name,file,createdDateTime`,
-      {headers:{Authorization:'Bearer '+token}}
-    );
-    if (!listResp.ok) throw new Error('No se pudo leer la carpeta destino.');
-    const listData = await listResp.json();
-    const excelFiles = (listData.value||[]).filter(f => f.file && /\.xlsx$/i.test(f.name))
-      .sort((a,b) => new Date(b.createdDateTime) - new Date(a.createdDateTime));
-    if (!excelFiles.length) throw new Error('No hay ninguna rendición generada todavía en esa carpeta. Usá "Generar nueva rendición" primero.');
-    const excelItem = excelFiles[0];
+    const ultima = await rendBuscarUltima(token, siteId, mesId);
+    if (!ultima) throw new Error('No hay ninguna rendición generada todavía en esa carpeta. Usá "Generar nueva rendición" primero.');
+    const excelItem = ultima.excel, folderId = ultima.carpetaId;
 
     showMsg(statusId,'loading','Leyendo el Excel...');
     const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
@@ -4183,7 +4250,8 @@ async function rendGenerarNueva() {
   const missingMsg = rendValidateRequiredFields();
   if (missingMsg) { alert(missingMsg); return; }
   if (!rendConfirmarAdvertencias()) return;
-  const doneFiles = rendArchivosParaSubir();
+  const doneFiles = await rendArchivosParaSubir();
+  if (!rendConfirmarSinArchivo(doneFiles)) return;
   const statusId = 'rend-save-status';
   showMsg(statusId,'loading','Conectando...');
   try {
@@ -4197,12 +4265,12 @@ async function rendGenerarNueva() {
     const tmplRaw = await rendCfgGet('rend_template');
     if (!tmplRaw) throw new Error('No hay plantilla configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
     const tmpl = JSON.parse(tmplRaw);
-    const { siteId, folderId } = await rendResolveDestFolder(token);
+    const { siteId, folderId: mesId } = await rendResolveDestFolder(token);
 
+    showMsg(statusId,'loading','Creando la carpeta de la rendición...');
+    const carpeta = await rendCrearCarpetaRendicion(token, siteId, mesId), folderId = carpeta.id;
     showMsg(statusId,'loading','Copiando plantilla...');
-    let existentes = [];
-    try { const lr = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${folderId}/children?$select=name&$top=999`, {headers:{Authorization:'Bearer '+token}}); if (lr.ok) existentes = ((await lr.json()).value || []).map(x => x.name); } catch (e) { existentes = []; }
-    let newFileName = spRendicionFileNameUnico(existentes);
+    const newFileName = carpeta.nombre + '.xlsx';
     // La plantilla (rend_template) y la carpeta destino (rend_base_folder) son dos
     // referencias de SharePoint configuradas por separado, y pueden vivir en
     // sitios/bibliotecas distintas. Si no le decimos a Graph explícitamente en
@@ -4218,10 +4286,9 @@ async function rendGenerarNueva() {
       method:'POST', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
       body: JSON.stringify({ parentReference: { driveId: destDriveId, id: folderId }, name: nombre })
     });
-    let copyResp = await copiar(newFileName);
-    for (let k = 0; copyResp.status === 409 && k < 5; k++) { existentes.push(newFileName); newFileName = spRendicionFileNameUnico(existentes); copyResp = await copiar(newFileName); }   // si justo apareció otra con ese nombre, se prueba con el número siguiente
+    const copyResp = await copiar(newFileName);
     if (copyResp.status !== 202 && !copyResp.ok) {
-      if (copyResp.status === 409) throw new Error(`No pude encontrar un nombre libre para la rendición de hoy en esa carpeta (último intento: "${newFileName}"). Revisá la carpeta.`);
+      if (copyResp.status === 409) throw new Error(`Ya existe "${newFileName}" en la carpeta de la rendición. Revisá la carpeta en SharePoint.`);
       const copyErr = await copyResp.json().catch(()=>({}));
       const detalle = copyErr.error?.message || `HTTP ${copyResp.status}`;
       const pista = copyResp.status === 404 ? ' (puede ser que tu cuenta no tenga permiso para ver la plantilla, o que se haya movido/borrado — Graph a veces devuelve 404 en vez de "sin permiso")' : '';
@@ -4266,7 +4333,7 @@ async function rendGenerarNueva() {
     const sheetsData = await sheetsResp.json();
     const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
     const fin = await rendFinalizarLote(token, siteId, folderId, copiedItem.id, sheetName, doneFiles, newFileName, statusId, 'nueva');
-    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ Rendición "${newFileName}" generada con ${fin.cantidad} comprobante(s) y movida al historial.` : fin.mensaje);
+    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ Rendición "${carpeta.nombre}" generada (carpeta con el Excel y ${fin.cantidad} comprobante(s)) y movida al historial.` : fin.mensaje);
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
   }
@@ -4286,7 +4353,7 @@ function exportExcel() {
 
 function clearResults() {
   if (!confirm('¿Borrar todos los resultados?')) return;
-  results = []; files = []; rendManualValues = {}; saveResults(); renderFileList(); renderRendResults();
+  results = []; files = []; rendManualValues = {}; saveResults(); rendArchivosLimpiar(); renderFileList(); renderRendResults();
 }
 
 // ── Microsoft Auth ─────────────────────────────────────
@@ -45282,7 +45349,7 @@ function switchEmpresa(empresa) {
 function refreshAllForEmpresa() {
   // Reset in-memory working state (files in progress are kept separate per empresa)
   results = JSON.parse(localStorage.getItem('rend_results_' + currentEmpresa) || '[]');
-  files = [];
+  files = []; rendRestaurarArchivos();
   rendManualValues = {};
   rendManualMode = {};
   npState['np-loc'] = { files: [], extracted: [], manualValues: {} };
