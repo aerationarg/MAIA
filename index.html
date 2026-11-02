@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -37214,6 +37214,146 @@ function simSbrDin(o) {
   ['dbo', 'dqo', 'sst', 'ntk'].forEach(kk => { const prim = out[kk].find((x, i) => out.Q[i] > 0); if (prim != null) ult[kk] = prim; for (let i = 0; i < NT; i++) { if (out.Q[i] > 0) ult[kk] = out[kk][i]; else out[kk][i] = ult[kk]; } });
   return out;
 }
+// ── ICEAS (SBR de ingreso continuo): zona de preselección (opcional) + zona principal separadas por un tabique con abertura al pie ──
+// El agua entra SIEMPRE (aireación, sedimentación y decantación) por la preselección y pasa a la zona principal por debajo del tabique, dentro del manto de lodos.
+// Ciclo de cada tanque: aireación → sedimentación → decantación → reposo (opcional); el nivel sube todo el tiempo y baja solo al decantar. Los tanques están desfasados.
+// o: { V, Hmax, Hdec, X0, SRT, ivl, sed, nTanques, ciclos, tReact, tSed, tDec, tIdle, preFrac, preAire, recFrac, cap, DOsp, T, nitrif, Qin[], cin{}, dtH, NT, d }
+// Pluma: volumen de agua cruda que entra a la zona principal desde que arranca la sedimentación; recorre el manto de lodos de la zona principal y se compara con ese volumen (si llega a 1, alcanza el decantador).
+function simIceasDin(o) {
+  const kn = simKinMotor(o.kin, o.kinA), d = o.d, YH = kn.YH, YA = 0.24, bH = kn.bH, bA = kn.bA, fd = 0.15, Ks = kn.Ks, KOH = 0.2, KOA = 0.4, KNH = 1.0, muH = kn.muH, muA = kn.muA, iN = 0.12, VSS = 0.85;
+  const dt = 15 / 3600, dtH = o.dtH, NT = o.NT, ns = Math.max(1, Math.round(dtH / dt)), mean = a => a.reduce((x, y) => x + y, 0) / a.length, th = (k, T) => Math.pow(k, T - 20);
+  const Qd = mean(o.Qin) * 24, nt = Math.max(1, o.nTanques), Tc = 24 / o.ciclos, A = o.V / o.Hmax, Vf = Qd / (nt * o.ciclos), qm = Qd / nt / 24, fp = Math.min(0.5, Math.max(0, o.preFrac || 0)), hayPre = fp > 0.005, rec = Math.max(0, o.recFrac || 0);
+  const Vtop = o.V, Vmin = Math.max(0.05 * o.V, o.V - qm * (Tc - o.tDec)), Hmin = o.Hmax - (o.V - Vmin) / A, Qdmax = Vf / Math.max(0.05, o.tDec);
+  const XbMax = Math.min(0.8e6 / o.ivl, 15000), S0m = mean(o.cin.dbo) / 0.68, NTKm = mean(o.cin.ntk), Tb = o.T, SRT = o.SRT;
+  const bHT = bH * th(1.04, Tb), muHT = muH * th(1.07, Tb), S = Math.max(3, Ks * (1 + bHT * SRT) / (SRT * (muHT - bHT) - 1) || 3);
+  const XHv = YH * Qd * (S0m - S) * SRT / (o.V * (1 + bHT * SRT)) / nt, XPv = fd * bHT * XHv * SRT, muAT = muA * th(1.10, Tb) * (o.DOsp || 2) / (KOA + (o.DOsp || 2)), bAT = bA * th(1.04, Tb), nit = o.nitrif && SRT > 1.3 / Math.max(1e-6, muAT - bAT);
+  const NOx0 = nit ? Math.max(0, NTKm - 0.12 * XHv * o.V * nt / (Qd * SRT) - 2) : 0, XAv = nit ? YA * (Qd / nt) * NOx0 * SRT / (o.V * (1 + bAT * SRT)) : 0.02 * XHv;
+  const XIs = Math.max(0.03 * o.X0, o.X0 - (XHv + XAv + XPv) / VSS), TSS = z => (z.XH + z.XA + z.XP) / VSS + z.XI;
+  const fases = [0, o.tReact, o.tSed, o.tDec, o.tIdle], limites = [o.tReact, o.tReact + o.tSed, o.tReact + o.tSed + o.tDec, Tc];   // p = 0 aireación, 1 sedimentación, 2 decantación, 3 reposo
+  const phi = Math.max(0.1, o.tReact / Tc), demanda = ((1 - 1.42 * YH) * (Qd / nt) * (S0m - S) + 4.33 * (Qd / nt) * NOx0 + 1.42 * 0.85 * (bHT * XHv + bAT * XAv) * o.V) / o.V;
+  const capMg = o.cap && o.cap > 0 ? o.cap * 24000 / o.V : 1.7 * demanda / phi;
+  const mk = () => ({ S, XH: XHv, XA: XAv, XP: XPv, XI: XIs, NH: nit ? 1.0 : Math.max(2, NTKm - 6), NO: NOx0, DO: o.DOsp });
+  const tanks = []; for (let j = 0; j < nt; j++) tanks.push({ pre: mk(), main: mk(), vol: Vmin, p: 3, tf: ((j * Tc / nt) + limites[2] + 0.01) % Tc, aireI: 0.5, aireIp: 0.5, aire: 0, hSedEnd: o.Hmax, Xmix: o.X0, vz: 1, tSed0: 0, hS0: o.Hmax, mixT: 0, Vpl: 0, plM: { S: 0, NH: 0, NO: 0, DO: 0, XH: 0, XA: 0, XP: 0, XI: 0 }, plume: 0, hint: o.Hmax });
+  const out = { iceas: true, faseT: tanks.map(() => []), Q: [], qin: [], dbo: [], dqo: [], sst: [], ntk: [], bufMax: 0, spillTotal: 0, plumeMax: 0, tanque: { ext: [], vol: [], hw: [], hint: [], fase: [], DO: [], MLSS: [], NH: [], NO: [], S: [], tssEff: [], qdec: [], qfill: [], buf: [], aire: [], plume: [], preDO: [], preNH: [], preNO: [], preS: [], preMLSS: [] }, Hmax: o.Hmax, Hmin, Hdec: o.Hdec, Vf, V: o.V, A, ciclos: o.ciclos, nt, Tc, fasesH: fases, margenMin: 99, XbMax, dtH, cap: capMg * o.V / 24000, preFrac: hayPre ? fp : 0, recFrac: rec };
+  const warmH = Tc * 3, pasos = Math.round((warmH + NT * dtH) / dt);
+  const bin = { qin: 0, Q: 0, dboQ: 0, dqoQ: 0, sstQ: 0, ntkQ: 0, n: 0, sample: null };
+  for (let k = 0; k < pasos; k++) {
+    const tr = k * dt - warmH, f = simFactores(tr, d), Tt = Tb + f.dT, dtd = dt / 24, i = tr >= 0 ? Math.min(NT - 1, Math.floor(tr / dtH)) : (((Math.floor(tr / dtH) % NT) + NT) % NT), cin = o.cin;   // en el calentamiento se repiten las últimas horas del día
+    const qinTot = o.Qin[i], raw = { S: cin.dbo[i] / 0.68, NH: cin.ntk[i], NO: 0, DO: 0, XH: 0, XA: 0, XP: 0, XI: cin.sst[i] * 0.4 }, dqoIn = cin.dqo[i], sstIn = cin.sst[i];
+    let sQ = 0, sD = 0, sDq = 0, sS = 0, sN = 0; const power = f.pozoOn > 0 || f.aireMax > 0;
+    const fTh = th(1.07, Tt), fTa = th(1.10, Tt), fTd = th(1.04, Tt), inh = 1 - Math.min(0.95, f.tox), nutL = 1 - 0.45 * f.nut, sat = simDOsat(Tt), spO = f.od != null ? f.od : o.DOsp;
+    // un paso de una zona de mezcla completa: ins = [[caudal m3/h, composición de lo que entra]]; qdecP = caudal que sale como agua clara (solo concentra los sólidos)
+    const zona = (z, V, ins, qdecP, activo, aireOn, ctl) => {
+      const fDOH = z.DO / (KOH + z.DO), fDOA = z.DO / (KOA + z.DO);
+      let rsu = 0, rn = 0, anox = 0; const dec = bH * fTd * z.XH * (activo ? 1 : 0.5), decA = bA * fTd * z.XA * (activo ? 1 : 0.5);
+      if (activo) {
+        rsu = (muH * fTh * inh * nutL / YH) * (z.S / (Ks + z.S)) * fDOH * z.XH; rn = (muA * fTa * inh / YA) * (z.NH / (KNH + z.NH)) * fDOA * z.XA;
+        anox = z.DO < 0.5 ? (muH * fTh * inh * 0.6 / YH) * (z.S / (Ks + z.S)) * (KOH / (KOH + z.DO)) * (z.NO / (0.5 + z.NO)) * z.XH : 0;
+      }
+      const our = (1 - 1.42 * YH) * rsu + 1.42 * (1 - fd) * (dec + decA) + 4.33 * rn; let supply = 0;
+      if (aireOn) { const err = spO - z.DO; ctl.i = Math.min(1, Math.max(0, ctl.i + (2 * err) * dt)); const a = Math.min(Math.min(1, Math.max(0, ctl.i + 0.15 * err)), f.aireMax); supply = a * capMg * Math.max(0, sat - z.DO) / Math.max(1, sat - 2); ctl.a = a; } else ctl.a = 0;
+      const ad = (key) => { let s = 0; ins.forEach(([q, c]) => { s += q * 24 * (c[key] - z[key]) / V; }); return s; }, conc = qdecP * 24 / V;
+      z.XH = Math.max(0, z.XH + (ad('XH') + conc * z.XH + YH * rsu - dec) * dtd); z.XA = Math.max(0, z.XA + (ad('XA') + conc * z.XA + YA * rn - decA) * dtd); z.XP = Math.max(0, z.XP + (ad('XP') + conc * z.XP + fd * (dec + decA)) * dtd); z.XI = Math.max(0, z.XI + (ad('XI') + conc * z.XI) * dtd);
+      z.S = Math.max(0, z.S + (ad('S') - rsu - anox) * dtd); z.NH = Math.max(0, z.NH + (ad('NH') - iN * YH * rsu - rn * (1 + iN * YA)) * dtd);
+      z.NO = Math.max(0, z.NO + (ad('NO') + rn - anox * (1 - YH) / 2.86) * dtd); z.DO = Math.min(sat, Math.max(0, z.DO + (ad('DO') + supply - our) * dtd));
+    };
+    tanks.forEach((tk, jj) => {
+      const qt = qinTot / nt, pre = tk.pre, st = tk.main;
+      if (power) tk.tf = (tk.tf + dt) % Tc;                            // sin energía el controlador se frena (el agua sigue entrando)
+      let p = 0; while (p < 3 && tk.tf >= limites[p]) p++;
+      if (power && tk.vol >= 0.96 * Vtop) {                              // nivel máximo: el control acorta el ciclo (pasa a sedimentar, y después a decantar, antes de tiempo)
+        if (p === 0) { tk.tf = limites[0] + 1e-6; p = 1; } else if (p === 1 && tk.p === 1 && tk.tf - tk.tSed0 >= 0.4 * o.tSed) { tk.tf = limites[1] + 1e-6; p = 2; }
+      }
+      const antes = tk.p; tk.p = p;
+      if (antes !== p) {
+        if (p === 1) { tk.Xmix = TSS(st); const v = simVesilind(o.ivl * f.ivl, o.sed || {}); tk.vz = Math.max(0.05, v.v0 * Math.exp(-v.n * tk.Xmix / 1000)) * (1 - 0.3 * f.clump); tk.tSed0 = tk.tf; tk.hS0 = Math.max(0.3, o.Hmax - (Vtop - tk.vol) / A); tk.Vpl = 0; Object.keys(tk.plM).forEach(kk => { tk.plM[kk] = 0; }); }
+        if (p === 2) tk.hSedEnd = Math.max(Math.max(tk.Xmix * tk.hS0 / XbMax, 0.15), tk.hS0 - tk.vz * (tk.tf - tk.tSed0));
+        if (antes === 2) {                                             // purga del lodo sedimentado al terminar la decantación
+          const Xw = Math.min(XbMax, Math.max(2 * tk.Xmix, 1.5 * TSS(st))), mass = tk.vol * (1 - fp) * TSS(st), Vw = (o.V * o.X0 / (SRT * o.ciclos * Xw)) * f.purga, red = Math.min(0.5, Vw * Xw / Math.max(1, mass));
+          st.XH *= 1 - red; st.XA *= 1 - red; st.XP *= 1 - red; st.XI *= 1 - red;
+        }
+        if (p === 0) {                                                 // al airear se mezcla la zona principal: el agua que entró durante la sedimentación y la decantación se incorpora (la pluma deja de existir)
+          const Vm0 = Math.max(1, (1 - (hayPre ? fp : 0)) * tk.vol), Vc = Math.max(0.5, Vm0 - tk.Vpl);
+          Object.keys(tk.plM).forEach(kk => { st[kk] = (st[kk] * Vc + tk.plM[kk]) / Vm0; tk.plM[kk] = 0; }); tk.Vpl = 0;
+        }
+      }
+      const aireM = p === 0 && power, aireP = aireM && o.preAire;
+      let qdec = 0; if (p === 2 && power && tk.vol > Vmin) qdec = Math.min(Qdmax, Math.max(0, (tk.vol - Vmin) / dt + qt));
+      const qrec = aireM && hayPre ? rec * qt : 0, dvol = (qt - qdec) * dt, Vz = Math.max(1, tk.vol), Vp = hayPre ? Math.max(0.5, fp * Vz) : 0, Vm = Math.max(0.5, (1 - (hayPre ? fp : 0)) * Vz);
+      const qtr = hayPre ? Math.max(0, qt * (1 - fp) + qrec + fp * qdec) : qt;   // lo que pasa de la preselección a la zona principal (la preselección sigue el nivel del tanque)
+      const pre0 = Object.assign({}, pre), main0 = Object.assign({}, st);
+      if (hayPre) zona(pre, Vp, [[qt, raw], [qrec, main0]], 0, true, aireP, { get i() { return tk.aireIp; }, set i(v) { tk.aireIp = v; }, a: 0 });
+      const ctlM = { get i() { return tk.aireI; }, set i(v) { tk.aireI = v; }, a: 0 };
+      const fuente = hayPre ? pre0 : raw, qM = hayPre ? qtr : qt;
+      // sedimentando/decantando el agua que entra no se mezcla con el sobrenadante: va por el fondo (pluma) y recién se incorpora al airear
+      if (p >= 1) { Object.keys(tk.plM).forEach(kk => { tk.plM[kk] += qM * dt * fuente[kk]; }); zona(st, Vm, [], qdec, false, false, ctlM); }
+      else zona(st, Vm, [[qM, fuente]], 0, true, aireM, ctlM);
+      tk.aire = ctlM.a;
+      if (p >= 1) tk.Vpl += qM * dt;
+      tk.vol += dvol; if (tk.vol > Vtop) { if (tr >= 0) out.spillTotal += tk.vol - Vtop; tk.vol = Vtop; }
+      const hw = o.Hmax - (Vtop - tk.vol) / A, mezcla = p === 0 && power; tk.mixT = mezcla ? tk.mixT + dt : 0;
+      const hint = p === 1 ? Math.max(Math.max(tk.Xmix * tk.hS0 / XbMax, 0.15), tk.hS0 - tk.vz * (tk.tf - tk.tSed0)) : (mezcla ? Math.min(hw, tk.hSedEnd + (hw - tk.hSedEnd) * Math.min(1, tk.mixT / 0.2)) : Math.min(hw, tk.hSedEnd));
+      tk.plume = p >= 1 ? Math.min(1.5, tk.Vpl / (A * (1 - (hayPre ? fp : 0)) * Math.max(0.5, hint))) : 0; if (tr >= 0 && tk.plume > out.plumeMax) out.plumeMax = tk.plume;
+      let tssE = 0, tssEf = 0;
+      if (qdec > 0) {
+        const clear = Math.max(5, 0.00228 * tk.Xmix) + 20 * f.foam + 12 * f.clump, marg = 0.3, leak = tk.plume > 0.9 ? Math.min(1, (tk.plume - 0.9) / 0.2) : 0;
+        tssE = hw >= tk.hSedEnd + marg ? clear : Math.min(0.8 * XbMax, clear + 0.8 * XbMax * Math.min(1, (tk.hSedEnd + marg - hw) / 0.6));
+        const lost = qdec * dt * tssE, mass = Math.max(1, Vm * TSS(st)), red = Math.min(0.2, lost / mass);
+        st.XH *= 1 - red; st.XA *= 1 - red; st.XP *= 1 - red; st.XI *= 1 - red;
+        const mrg = Hmin - tk.hSedEnd; if (tr >= 0 && mrg < out.margenMin) out.margenMin = mrg;
+        const Se = hayPre ? (1 - leak) * st.S + leak * pre.S : st.S, NHe = hayPre ? (1 - leak) * st.NH + leak * pre.NH : st.NH; tssEf = hayPre ? (1 - leak) * tssE + leak * TSS(pre) : tssE;
+        sQ += qdec; sD += qdec * (0.68 * Se + 0.3 * 0.8 * tssEf); sDq += qdec * (0.06 * dqoIn + Se + 1.2 * 0.8 * tssEf); sS += qdec * tssEf; sN += qdec * (NHe + 1.5 + 0.08 * tssEf);
+      }
+      tk.hint = hint; tk.hw = hw;
+      if (jj === 0) bin.sample = { ext: 0, vol: tk.vol, hw, hint, fase: p + 1, DO: st.DO, MLSS: TSS(st), NH: st.NH, NO: st.NO, S: st.S, tssEff: tssEf, qdec, qfill: qt, buf: 0, aire: tk.aire, plume: tk.plume, preDO: pre.DO, preNH: pre.NH, preNO: pre.NO, preS: pre.S, preMLSS: TSS(pre) };
+    });
+    if (tr >= 0) {
+      bin.Q += sQ; bin.qin += qinTot / nt; bin.dboQ += sD; bin.dqoQ += sDq; bin.sstQ += sS; bin.ntkQ += sN; bin.n++;
+      if (bin.n === ns) {
+        out.Q.push(bin.Q / ns); out.qin.push(bin.qin / ns); const w = bin.Q || 1; out.dbo.push(bin.dboQ / w); out.dqo.push(bin.dqoQ / w); out.sst.push(bin.sstQ / w); out.ntk.push(bin.ntkQ / w);
+        Object.keys(out.tanque).forEach(kk => { out.tanque[kk].push(bin.sample[kk]); }); tanks.forEach((t, j) => out.faseT[j].push(t.p + 1));
+        bin.Q = 0; bin.qin = 0; bin.dboQ = 0; bin.dqoQ = 0; bin.sstQ = 0; bin.ntkQ = 0; bin.n = 0;
+      }
+    }
+  }
+  const ult = { dbo: S * 0.68, dqo: 50, sst: 10, ntk: 3 };
+  ['dbo', 'dqo', 'sst', 'ntk'].forEach(kk => { const prim = out[kk].find((x, i) => out.Q[i] > 0); if (prim != null) ult[kk] = prim; for (let i = 0; i < NT; i++) { if (out.Q[i] > 0) ult[kk] = out[kk][i]; else out[kk][i] = ult[kk]; } });
+  return out;
+}
+function simIceasFases(p) {
+  const n = simPos(p.ciclos_dia), Tc = 24 / n, tSed = simPos(p.t_sed), tDec = simPos(p.t_decant) || 0.25 * Tc, tIdle = simNum(p.t_reposo) != null && p.t_reposo !== '' ? Math.max(0, Number(p.t_reposo)) : 0;
+  const tReact = simPos(p.t_reaccion) || Math.max(0.3, Tc - tSed - tDec - tIdle), suma = tReact + tSed + tDec + tIdle;
+  return { n, Tcp: Tc, tFill: 0, tReact, tSed, tDec, tIdle, suma, ciclosReal: 24 / suma };
+}
+function simVerificarICEAS(p, g, ev, o) {
+  const V = simPos(p.volumen), n = simPos(p.ciclos_dia), tsed = simPos(p.t_sed), Q = simPos(g.q_med), X = simPos(p.mlss), ivl = simPos(p.ivl), Hd = simPos(p.altura_decant), S0 = simPos(g.dbo), H = simPos(p.profundidad) || 5, nt = Math.max(1, Math.round(simNum(p.n_tanques) || 2)), falt = [];
+  if (!V) falt.push('Volumen del reactor'); if (!n) falt.push('Ciclos por día'); if (!tsed) falt.push('Tiempo de sedimentación (h)'); if (!Q) falt.push('Caudal medio'); if (!X) falt.push('MLSS'); if (!ivl) falt.push('IVL'); if (!Hd) falt.push('Altura a decantar (m)');
+  if (falt.length) return { faltan: falt, ind: [] };
+  const fa = simIceasFases(p), nc = fa.ciclosReal, Vf = Q * 24 / (nt * nc), qt = Q / nt, ive = Vf / V, A = V / H, carrera = Math.max(0, (Vf - qt * fa.tDec) / A), ves = simVesilind(ivl, p), vz = ves.v0 * Math.exp(-ves.n * X / 1000), hSed = vz * tsed;
+  const pre = Math.min(0.5, Math.max(0, (simNum(p.pre_pct) != null && p.pre_pct !== '' ? Number(p.pre_pct) : 12) / 100)), rec = (simNum(p.rec_pct) != null && p.rec_pct !== '' ? Number(p.rec_pct) : 25) / 100, necesita = carrera - qt * tsed / A + 0.3;
+  const ind = [
+    simInd('Suma de las fases del ciclo', fa.suma, 'h', fa.Tcp * 0.97, fa.Tcp * 1.03, `Aireación ${fa.tReact.toFixed(2)} + sedimentación ${fa.tSed.toFixed(2)} + decantación ${fa.tDec.toFixed(2)} + reposo ${fa.tIdle.toFixed(2)} h; con ${n} ciclos/día por tanque el ciclo dura ${fa.Tcp.toFixed(2)} h. En un ICEAS el agua entra durante todo el ciclo.`),
+    simInd('Relación de intercambio volumétrico (V por ciclo / V total)', ive, '', 0.2, 0.35, `Cada ciclo toma ${Vf.toFixed(0)} m3 con ${nt} tanque(s).`),
+    simInd('Carrera de decantación necesaria', carrera, 'm', null, Hd * 1.05, `El nivel sube todo el ciclo y baja ${carrera.toFixed(2)} m al decantar (la decantación saca lo que entró en el ciclo menos lo que entra mientras se decanta); la altura a decantar de diseño es ${Hd} m.`),
+    simInd('Descenso de la interfaz en el tiempo de sedimentación', hSed, 'm', necesita, null, `Velocidad zonal estimada ${vz.toFixed(2)} m/h × ${tsed} h; con el nivel subiendo durante la sedimentación tiene que superar ${necesita.toFixed(2)} m (carrera menos lo que sube el nivel, más 0,3 m de resguardo).`)];
+  if (S0) { const fm = Q * 24 * S0 / (V * nt * X * 0.75); ind.push(simInd('Relación F/M', fm, 'kg DBO/kg SSV·d', 0.04, 0.3, 'Típico 0,05–0,3.')); }
+  if (pre > 0.005) ind.push(simInd('Tiempo de retención de la preselección (caudal medio)', pre * V * 0.9 / Math.max(1e-9, qt), 'h', null, null, `Preselección = ${(pre * 100).toFixed(0)} % del tanque. Recircula ${(rec * 100).toFixed(0)} % del caudal desde la zona principal mientras se airea.`));
+  const res = { faltan: [], ind, fases: fa };
+  if (o && o.Qin && S0) {
+    const nit = String(p.nitrifica == null || p.nitrifica === '' ? 'si' : p.nitrifica).toLowerCase().startsWith('s'), kcS = simKinDeParams(p);
+    const sim = simIceasDin({ kin: kcS.kin, kinA: kcS.kinA, V, Hmax: H, Hdec: Hd, X0: X, SRT: simNum(p.edad_lodos) > 0 ? Number(p.edad_lodos) : 20, ivl, sed: { v0: simPos(p.v0), n: simPos(p.n) }, nTanques: nt, ciclos: nc, tReact: fa.tReact, tSed: fa.tSed, tDec: fa.tDec, tIdle: fa.tIdle, preFrac: pre, preAire: String(p.pre_aireada || 'no').toLowerCase().startsWith('s'), recFrac: rec, cap: simPos(p.capacidad_o2), DOsp: simPos(p.oxigeno_disuelto) || 2, T: simNum(g.temp) != null ? Number(g.temp) : 20, nitrif: nit, Qin: o.Qin, cin: o.cin, dtH: o.dtH, NT: o.NT, d: o.d });
+    const ef = sim.Q, w = (a) => { let s = 0, sw = 0; a.forEach((x, i) => { s += x * ef[i]; sw += ef[i]; }); return sw ? s / sw : 0; }, limD = simPos(g.lim_dbo), limS = simPos(g.sst_vuelco) || 30;
+    ind.push(simInd('Margen entre el fondo de decantación y la interfaz de lodos', sim.margenMin, 'm', 0.3, null, 'Si el decantador baja más que la interfaz arrastra lodo: aparecen picos de SST.'));
+    ind.push(simInd('Avance máximo de la pluma de agua cruda hacia el decantador (1 = llega)', sim.plumeMax, '', null, 0.8, pre > 0.005 ? 'El agua que entra durante la sedimentación y la decantación recorre la zona principal por el manto de lodos; si llega al decantador contamina el efluente.' : 'Sin tabique ni preselección el ingreso no queda guiado: el avance real puede ser mayor que el calculado.'));
+    ind.push(simInd('SST promedio del efluente', w(sim.sst), 'mg/L', null, limS, 'Promedio ponderado por el caudal que sale en cada decantación.'));
+    ind.push(simInd('SST máximo del efluente', Math.max(...sim.sst.filter((x, i) => ef[i] > 0)), 'mg/L', null, limS * 1.5, 'Pico durante la decantación.'));
+    ind.push(simInd('DBO promedio del efluente', w(sim.dbo), 'mg/L', null, limD || null, ''));
+    if (nit) { const nhFin = sim.tanque.NH.filter((x, i) => sim.tanque.fase[i] === 3); ind.push(simInd('Amonio máximo al decantar (zona principal)', nhFin.length ? Math.max(...nhFin) : Math.max(...sim.tanque.NH), 'mg/L', null, 10, 'Lo que sale al decantar sale de la zona principal.')); }
+    ind.push(simInd('Volumen que rebalsa por falta de lugar', sim.spillTotal, 'm3', null, 0, sim.spillTotal > 0 ? 'El tanque llega al nivel máximo antes de decantar (caudal mayor que el de diseño o ciclo muy largo).' : ''));
+    res.sim = sim;
+  }
+  return res;
+}
 // ── MBBR: biopelícula sobre carriers, con aireación controlada ──
 function simMbbrDin(o) {
   const d = o.d, dt = 15 / 3600, dtH = o.dtH, NT = o.NT, ns = Math.max(1, Math.round(dtH / dt)), mean = a => a.reduce((x, y) => x + y, 0) / a.length, th = (k, T) => Math.pow(k, T - 20);
@@ -37437,7 +37577,7 @@ function simGraficosMbr(u, res) {
 // ═══ Unidades "hidráulicas": tamiz, DAF, fisicoquímico y cámara de contacto (laberinto). Simulan caudales y cómo varían sus parámetros ═══
 // Sin bomba de salida: el caudal que sale es el que entra (la unidad es de paso). Con bomba de salida: la unidad es un tanque con
 // arranque/paro por nivel y el caudal que sale es el de la bomba (si no alcanza, el nivel sube y rebalsa).
-const SIM_TIPOS_ENTRADAS = ['ecualizador', 'sbr', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion', 'desengrasadora', 'espesador', 'digestor', 'deshidratacion'];
+const SIM_TIPOS_ENTRADAS = ['ecualizador', 'sbr', 'iceas', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion', 'desengrasadora', 'espesador', 'digestor', 'deshidratacion'];
 const SIM_HID_PARAMS = [
   { k: 'q_bomba', l: 'Caudal de la bomba de salida (vacío = sale por gravedad, depende de lo que entra)', u: 'm3/h', dim: 'flow', alias: [/^(?!.*(dosific|quimic|reactivo|polimero|coagul|floculante|cloro|hipoclor|recircul|aire|lodo|purga|retrolav|nutrient|soda|acido|antiespum))(?=.*(caudal.*bomba|bomba.*caudal))/] },
   { k: 'vol_hid', l: 'Volumen que almacena (solo importa con bomba de salida; vacío = el de las dimensiones)', u: 'm3', dim: 'vol', alias: [] },
@@ -37804,6 +37944,23 @@ const SIM_MODELOS = {
     { k: 'volumen', l: 'Volumen adoptado (Vadp)', u: 'm3', dim: 'vol', req: 1, alias: [/volumen adoptado/, /volumen/] }, { k: 'llenado', l: '% llenado de carriers', u: '%', req: 1, tipico: 50, alias: [/llenado|relleno|fill/] },
     { k: 'sup_especifica', l: 'Superficie específica carrier', u: 'm2/m3', req: 1, tipico: 500, alias: [/superficie.*especifica|area.*especifica|sup.*carrier|\bsse\b/] }, { k: 'nitrifica', l: '¿Debe nitrificar? (si / no)', u: '', texto: true, tipico: 'no', alias: [/nitrific/] },
     { k: 'oxigeno_disuelto', l: 'Oxígeno disuelto (set point)', u: 'mg/L', tipico: 3, alias: [/oxigeno disuelto|\bod\b/] }, { k: 'capacidad_o2', l: 'Capacidad de aireación instalada (opcional)', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] }] },
+  iceas: { nombre: 'ICEAS (SBR de ingreso continuo)', det: /iceas|ingreso continuo|intermittent cycle|ciclo intermitente/, dinamico: true, verificar: simVerificarICEAS, params: [
+    { k: 'volumen', l: 'Volumen útil (a nivel máximo) de cada tanque, preselección incluida', u: 'm3', dim: 'vol', req: 1, alias: [/volumen util/, /volumen/] },
+    { k: 'profundidad', l: 'Altura útil del tanque', u: 'm', dim: 'len', tipico: 5, alias: [/altura util/, /profundidad|altura.*(agua|maxim|liquido)|tirante/] },
+    { k: 'n_tanques', l: 'Cantidad de tanques (en paralelo, desfasados)', u: 'u', tipico: 2, alias: [/(cantidad|numero|nro).*(tanque|reactor|camara|modulo)|\btanques\b|\breactores\b/] },
+    { k: 'ciclos_dia', l: 'Número de ciclos (por día y por tanque)', u: '1/d', req: 1, alias: [/numero.*ciclos|ciclos|batch/] },
+    { k: 't_reaccion', l: 'Tiempo de aireación', u: 'h', dim: 'horas', alias: [/tiempo.*(reaccion|aireacion)|aireacion.*tiempo/] },
+    { k: 't_sed', l: 'Tiempo de sedimentación', u: 'h', dim: 'horas', req: 1, alias: [/tiempo.*sedimenta|sedimentacion.*tiempo/] },
+    { k: 't_decant', l: 'Tiempo de decantación', u: 'h', dim: 'horas', alias: [/tiempo.*decant|decantacion.*tiempo/] },
+    { k: 't_reposo', l: 'Tiempo de reposo (opcional)', u: 'h', dim: 'horas', alias: [/tiempo.*(reposo|purga)|reposo/] },
+    { k: 'altura_decant', l: 'Altura de decantación (lo que baja el nivel al decantar)', u: 'm', dim: 'len', req: 1, alias: [/altura.*(ciclo|decant)|carrera/] },
+    { k: 'mlss', l: 'Concentración de lodos (MLSS)', u: 'mg/L', req: 1, alias: [/concentracion|mlss|ssla|\bxt\b/] }, { k: 'ivl', l: 'IVL', u: 'mL/g', req: 1, tipico: 120, alias: [/ivl|svi/] }, { k: 'edad_lodos', l: 'Edad media del lodo', u: 'd', dim: 'dias', tipico: 20, alias: [/edad.*(media|lodos|barro|celular)|srt|theta/] },
+    { k: 'pre_pct', l: 'Volumen de la zona de preselección (% del tanque; 0 = sin tabique ni preselección)', u: '%', tipico: 12, alias: [/preseleccion|pre.?reaccion|zona.*(selector|contacto)|selector/] },
+    { k: 'pre_aireada', l: '¿Se airea la preselección? (si / no)', u: '', texto: true, tipico: 'no', alias: [/preseleccion.*aire|aire.*preseleccion/] },
+    { k: 'rec_pct', l: 'Recirculación de lodo de la zona principal a la preselección (% del caudal)', u: '%', tipico: 25, alias: [/recircul/] },
+    { k: 'oxigeno_disuelto', l: 'Oxígeno disuelto (set point)', u: 'mg/L', tipico: 2, alias: [/oxigeno disuelto|\bod\b/] },
+    { k: 'nitrifica', l: '¿Debe nitrificar? (si / no)', u: '', texto: true, tipico: 'si', alias: [/nitrific/] },
+    { k: 'capacidad_o2', l: 'Capacidad de aireación instalada en cada tanque (opcional)', u: 'kg O2/h', alias: [/capacidad.*(oxigen|aireacion)|sotr|aor/] }].concat(SIM_COEF_PARAMS) },
   sbr: { nombre: 'SBR', det: /\bsbr\b|secuencial/, dinamico: true, verificar: simVerificarSBR, params: [
     { k: 'volumen', l: 'Volumen útil (Vu, a nivel máximo) de cada tanque', u: 'm3', dim: 'vol', req: 1, alias: [/volumen util/, /volumen/] },
     { k: 'profundidad', l: 'Altura útil del tanque (Hu)', u: 'm', dim: 'len', tipico: 5, alias: [/altura util/, /profundidad|altura.*(agua|maxim|liquido)|tirante/] },
@@ -37895,7 +38052,7 @@ const SIM_GLOBAL_PARAMS = [
 // Simulador de plantas — pantalla, importación de datos (Procesos IA, archivos/Excel con IA, plantilla Excel) y gráficos.
 // Se guarda en doc_documentos con tipo = 'simulacion' (datos: {global, unidades[], fuente...}).
 // ═══════════════════════════════════════════════════════════════════════
-const SIM_TIPOS_ORDEN = ['mbbr', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'anoxico', 'lodos_activados'];
+const SIM_TIPOS_ORDEN = ['mbbr', 'iceas', 'sbr', 'mbr', 'daf', 'digestor', 'espesador', 'deshidratacion', 'desengrasadora', 'sedimentador', 'ecualizador', 'pozo', 'tamiz', 'desinfeccion', 'fisicoquimico', 'anoxico', 'lodos_activados'];
 const SIM_SLIDERS = { espesador: ['area'], digestor: ['volumen'], deshidratacion: ['capacidad_kgh'], desengrasadora: ['volumen'], ecualizador: ['volumen'], desinfeccion: ['volumen'], sedimentador: ['area', 'profundidad', 'relacion_rec', 'q_rec', 'mlss', 'ivl'], pozo: ['area', 'q_bomba'], anoxico: ['volumen', 'rec_interna'], lodos_activados: ['volumen', 'mlss', 'edad_lodos'], mbbr: ['volumen', 'llenado'], sbr: ['volumen', 'ciclos_dia', 't_sed'], mbr: ['area_membrana', 'volumen', 'edad_lodos', 'mlss'], daf: ['area'], tamiz: ['ancho_canal'] };
 const SIM_FUENTE_TAG = { geometria: ['📐', 'calculado de las dimensiones del diseño (largo × ancho, diámetro, altura…), las mismas que usa el Flowsheet'], proyecto: ['📥', 'del proyecto de Procesos IA'], archivo: ['📄', 'de un archivo (IA)'], excel: ['📊', 'del Excel'], ia: ['✨', 'completado por la IA'], manual: ['✎', 'cargado a mano'], tipico: ['≈', 'valor típico (no es un dato del proyecto)'], prompt: ['✍', 'dicho en tu descripción'], supuesto: ['🤖', 'supuesto de la IA (no figuraba en tu descripción): revisalo'], preset: ['📚', 'coeficientes de referencia (planilla Máster / bibliografía)'], calibrado: ['⚙', 'calibrado con datos medidos de la planta'] };
 let _simDoc = null, _simIa = { ocupado: false }, _simProyectos = [], _simFlowsheets = [], _simGuardarT = null;
@@ -38040,7 +38197,7 @@ function simGeoParams(tipo, m) {
     put('area', area, tagA); if (H) { put('nivel_alarma', H, tagH); const arr = Math.max(0.5, H - 1.0); put('nivel_arranque', arr, 'tipico'); put('nivel_paro', Math.max(0.25, arr - 1.0), 'tipico'); }
   } else if (tipo === 'sedimentador' || tipo === 'espesador') {
     put('area', area, tagA); put('profundidad', H, tagH); put('long_vertedero', circ ? (m.diametro ? Math.PI * m.diametro : null) : (m.ancho ? 2 * m.ancho : null), tagA);
-  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr') put('profundidad', H, tagH); }
+  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'iceas', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(tipo)) { put('volumen', area && H ? area * H : null, tagV); if (tipo === 'sbr' || tipo === 'iceas') put('profundidad', H, tagH); }
   else if (tipo === 'daf') put('area', area, tagA);
   return { params, fuentes };
 }
@@ -38340,7 +38497,7 @@ function simGrafico(o) {
 }
 function simGraficosUnidad(u, res) {
   if (!res || res.error || res.faltan.length) return '';
-  if (['ecualizador', 'sbr', 'mbbr'].includes(u.tipo)) return res.sim ? simGraficosEqSbrMbbr(u, res) : '';
+  if (['ecualizador', 'sbr', 'iceas', 'mbbr'].includes(u.tipo)) return res.sim ? simGraficosEqSbrMbbr(u, res) : '';
   if (u.tipo === 'mbr' && res.sim) return simGraficosMbr(u, res);
   if (res.sim && res.sim.pars) return simGraficosHid(u, res);
   const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', naranja: '#d98a00' };
@@ -38402,7 +38559,7 @@ function simUnidadHtml(u, i, n) {
       <td style="${PROCESOS_EQ_TD};width:170px">${sl ? `<input type="range" class="sim-rng" min="${sl[0]}" max="${sl[1]}" step="${(sl[1] - sl[0]) / 200}" value="${simNum(v)}" oninput="simSlider('${u.id}','${df.k}',this.value)" title="Mover para ver cómo cambian los resultados" />` : ''}</td>
       <td style="${PROCESOS_EQ_TD};width:34px;text-align:center" title="${tag ? esc(tag[1]) : (falta ? 'Falta este dato' : '')}">${tag ? tag[0] : (falta ? '<span style="color:var(--red)">falta</span>' : '')}</td></tr>`;
   };
-  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
+  const evHtml = ['pozo', 'sedimentador', 'ecualizador', 'sbr', 'iceas', 'mbbr', 'mbr', 'tamiz', 'daf', 'fisicoquimico', 'desinfeccion'].includes(u.tipo) ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12.5px"><b>Escenario:</b> caudal de evento ×<input type="number" step="any" value="${e.mult || ''}" placeholder="0 = sin evento" style="width:110px" onchange="simEsc('${u.id}','mult',this.value)" /> caudal medio, desde las <input type="number" value="${e.inicio}" style="width:60px" onchange="simEsc('${u.id}','inicio',this.value)" /> h durante <input type="number" step="any" value="${e.dur}" style="width:60px" onchange="simEsc('${u.id}','dur',this.value)" /> h
     <button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',2.5,4)">Pico ×2,5 (4 h)</button><button class="btn btn-secondary btn-sm" onclick="simEscPreset('${u.id}',0,0)">Sin evento</button></div>` : '';
   const rr0 = simCorrer(u), peor0 = rr0.faltan && rr0.faltan.length ? 'info' : (rr0.ind && rr0.ind.some(x => x.estado === 'mal') ? 'mal' : rr0.ind && rr0.ind.some(x => x.estado === 'justo') ? 'justo' : rr0.ind && rr0.ind.length ? 'ok' : 'info');
   return `<details class="card" style="margin-bottom:8px" ${u.abierta === true ? 'open' : ''} ontoggle="simUAbierta('${u.id}',this.open)"><summary style="cursor:pointer;font-weight:600;font-size:13.5px">${i + 1}. ${esc(u.nombre)} <span class="badge" style="background:${SIM_ESTADO[peor0][1]};color:#fff;font-size:11px;margin-left:6px">${rr0.faltan && rr0.faltan.length ? 'faltan datos' : SIM_ESTADO[peor0][0]}</span> <span class="hint" style="display:inline;margin:0 0 0 6px;font-weight:400">${esc(m.nombre)}</span></summary>
@@ -38413,7 +38570,7 @@ function simUnidadHtml(u, i, n) {
     ${simComoHtml(u.tipo)}
     <details open><summary style="cursor:pointer;font-size:12.5px;color:var(--text2)">Datos de la unidad</summary>
       <div style="overflow-x:auto;margin-top:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px">${m.params.map(fila).join('')}</table></div>
-      ${['lodos_activados', 'sbr', 'mbr'].includes(u.tipo) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px"><span class="hint" style="margin:0">Coeficientes cinéticos:</span><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','master')" title="k 5 · Ks 60 · Y 0,6 · kd 0,06: los de la planilla Máster (hoja Coeficientes cinéticos)">Máster (cloacal típico)</button><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','asm1')" title="Los que usaba el simulador antes: biomasa más rápida (μ 6 1/d, kd 0,12)">Más rápidos (ASM1)</button><button class="btn btn-secondary btn-sm" onclick="simCalibrar('${u.id}')" title="Ajusta k y μn para que la simulación dé los valores medidos que cargaste en los campos de calibración">⚙ Calibrar con los datos medidos</button></div>` : ''}
+      ${['lodos_activados', 'sbr', 'iceas', 'mbr'].includes(u.tipo) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px"><span class="hint" style="margin:0">Coeficientes cinéticos:</span><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','master')" title="k 5 · Ks 60 · Y 0,6 · kd 0,06: los de la planilla Máster (hoja Coeficientes cinéticos)">Máster (cloacal típico)</button><button class="btn btn-secondary btn-sm" onclick="simCoefPreset('${u.id}','asm1')" title="Los que usaba el simulador antes: biomasa más rápida (μ 6 1/d, kd 0,12)">Más rápidos (ASM1)</button><button class="btn btn-secondary btn-sm" onclick="simCalibrar('${u.id}')" title="Ajusta k y μn para que la simulación dé los valores medidos que cargaste en los campos de calibración">⚙ Calibrar con los datos medidos</button></div>` : ''}
       ${u.tipo === 'ecualizador' && sim24(u.params.perfil_in) ? `<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-secondary btn-sm" onclick="simEqAplicarPerfil('${u.id}')">↳ Usar este ingreso como caudal de toda la planta</button><span class="hint" style="display:inline;margin:0">Cambia la variación del caudal en el día de los datos generales (escalonada hora a hora).</span></div>` : ''}
       ${u.crudo ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px;color:var(--text2)">Ver los datos de la planilla del proyecto (${Object.keys(u.crudo).length})</summary><div style="columns:2;font-size:11.5px;margin-top:4px">${Object.entries(u.crudo).map(([k2, x]) => `<div>${esc(k2)}: <b>${esc(typeof x === 'object' ? '' : x)}</b></div>`).join('')}</div></details>` : ''}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><button class="btn btn-secondary btn-sm" onclick="simCompletarIA('${u.id}')" ${u.crudo ? '' : 'disabled'} title="${u.crudo ? 'Busca en la planilla del proyecto los datos que faltan' : 'Solo para unidades importadas de Procesos IA'}">✨ Completar con IA desde la planilla</button></div>
@@ -38482,6 +38639,7 @@ const SIM_COMO = {
   lodos_activados: ['Con volumen, MLSS y edad de lodos calcula el balance de diseño: carga, F/M, producción de lodo, purga necesaria y oxígeno que hay que entregar.', 'En la planta, el reactor y el sedimentador se simulan juntos en el tiempo: las bacterias crecen y consumen DBO y amonio (cinética de Monod con los coeficientes), el aire sube o baja para sostener el oxígeno disuelto, y la purga y la recirculación salen del fondo del sedimentador.', 'La purga es una bomba programable: si no cargás su caudal se calcula para lograr la edad de lodos.'],
   sedimentador: ['Calcula la carga superficial (caudal / área) y la carga de sólidos con el MLSS y la recirculación, y las compara con el flujo límite de sedimentación (modelo de Vesilind a partir del IVL).', 'Si lo que entra supera el flujo límite, el manto de lodos sube. En la planta se simula por capas en el tiempo.', 'La recirculación es una bomba programable (siempre encendida, por ciclos u hora a hora).'],
   mbbr: ['Biopelícula sobre carriers: con la superficie total calcula cuánta DBO y amonio se consume por m2 (SALR) y cómo cambia el oxígeno disuelto hora a hora.', 'Verifica la carga superficial, el tiempo de retención y que el aire alcance.'],
+  iceas: ['SBR de ingreso continuo: el agua entra SIEMPRE (aireación, sedimentación y decantación) a una zona de preselección chica, separada de la zona principal por un tabique con una abertura al pie. La preselección puede no existir (volumen 0) o estar aireada.', 'Cada tanque repite aireación → sedimentación → decantación (→ reposo). El nivel sube todo el ciclo y baja solo al decantar; los tanques están desfasados. Durante la aireación se recircula lodo de la zona principal a la preselección.', 'Mientras se sedimenta y se decanta, el agua cruda que entra pasa por debajo del tabique y avanza dentro del manto de lodos: se calcula cuánto recorre hasta el decantador (la "pluma"). Si llega a 1, sale con el efluente.', 'Verifica el intercambio volumétrico, la carrera de decantación, que la interfaz baje lo suficiente con el nivel subiendo, y el avance de la pluma.'],
   sbr: ['Simula los ciclos de cada tanque: llenado, reacción, sedimentación, decantación y reposo. Los tanques están desfasados y cada uno recibe solo durante su llenado; el agua que llega mientras tanto espera en un tanque de carga (se muestra en los gráficos). Si llega menos agua que la de diseño (por ejemplo de noche), el llenado sigue hasta alcanzar el nivel máximo (hasta un ciclo extra de espera) y durante esa espera el tanque se airea y se mezcla; el nivel sube muy despacio porque entra poco caudal.', 'Calcula la carrera de decantación, hasta dónde baja la interfaz de lodos en el tiempo de sedimentación (si el nivel baja más que la interfaz se arrastra lodo) y el volumen que espera para entrar.'],
   mbr: ['Reactor biológico con membranas en lugar de sedimentador. Calcula el flujo de permeado (L/m2·h) contra el flux crítico, el ensuciamiento (presión transmembrana y permeabilidad) y el aire de limpieza.', 'Si las membranas no dejan pasar el caudal que entra, el tanque rebalsa.'],
   desinfeccion: ['Cámara de contacto: calcula el tiempo de retención (volumen / caudal) y, si cargás dosis de cloro, la cinética del cloro (decae con el tiempo) y la inactivación de coliformes (Chick-Watson).', 'Verifica que el tiempo de contacto y el CT alcancen para el límite de coliformes.'],
@@ -38517,7 +38675,7 @@ function simChatContexto() {
     else if (res && res.error) L.push('   Error de cálculo: ' + res.error);
     else if (res) {
       (res.ind || []).forEach(x => L.push(`   · ${x.nombre}: ${f(x.valor)} ${x.unidad || ''} [${(SIM_ESTADO[x.estado] || [x.estado])[0]}${x.min != null ? ', mín ' + x.min : ''}${x.max != null ? ', máx ' + x.max : ''}]${x.nota ? ' — ' + x.nota : ''}`));
-      if (u.tipo === 'sbr' && res.sim) { const q = res.sim; L.push(`   · Ciclo del SBR (por tanque, ${q.nt} tanque(s) desfasados): llenado ${q.fasesH[0].toFixed(2)} h, reacción ${q.fasesH[1].toFixed(2)} h, sedimentación ${q.fasesH[2].toFixed(2)} h, decantación ${q.fasesH[3].toFixed(2)} h, reposo ${q.fasesH[4].toFixed(2)} h; nivel entre ${q.Hmin.toFixed(2)} y ${q.Hmax.toFixed(2)} m; volumen por ciclo ${q.Vf.toFixed(0)} m3 por tanque; espera de carga máxima ${q.bufMax.toFixed(0)} m3.`); }
+      if ((u.tipo === 'sbr' || u.tipo === 'iceas') && res.sim) { const q = res.sim; L.push(`   · Ciclo del ${q.iceas ? 'ICEAS (ingreso continuo; llenado = 0)' : 'SBR'} (por tanque, ${q.nt} tanque(s) desfasados): llenado ${q.fasesH[0].toFixed(2)} h, reacción ${q.fasesH[1].toFixed(2)} h, sedimentación ${q.fasesH[2].toFixed(2)} h, decantación ${q.fasesH[3].toFixed(2)} h, reposo ${q.fasesH[4].toFixed(2)} h; nivel entre ${q.Hmin.toFixed(2)} y ${q.Hmax.toFixed(2)} m; volumen por ciclo ${q.Vf.toFixed(0)} m3 por tanque; espera de carga máxima ${q.bufMax.toFixed(0)} m3.`); }
     }
   });
   let pl = null; try { pl = simPlantaCache(d); } catch (e) { L.push('\nNo se pudo calcular el balance de la planta: ' + e.message); }
@@ -38654,7 +38812,7 @@ function simDetalleClave(nd, k) {
   else if (t === 'sedimentador' && ex.perf) l.push(['Manto de lodos', f(ex.manto[k], 2) + ' m de ' + f(ex.H) + ' m'], ['SST en el efluente', f(ex.tssEfl[k]) + ' mg/L'], ['Caudal de recirculación', f(ex.Qr[k]) + ' m3/h'], ['Lodo del fondo', f(ex.xu[k]) + ' g/L']);
   else if (t === 'anoxico' && ex.anox) l.push(['Nitrato', f(ex.no[k]) + ' mg N/L'], ['Amonio', f(ex.nh[k]) + ' mg N/L'], ['Recirculación interna', f(ex.qri[k]) + ' m3/h']);
   else if (t === 'ecualizador' && ex.vol) l.push(['Nivel', f(ex.vol[k] / ex.V * 100, 0) + ' % (' + f(ex.vol[k], 0) + ' de ' + f(ex.V, 0) + ' m3)']);
-  else if (t === 'sbr' && ex.sbr) l.push(['Fase del ciclo (tanque 1)', SIM_FASES_SBR[ex.sbr.tanque.fase[k]]], ['Oxígeno disuelto', f(ex.sbr.tanque.DO[k], 2) + ' mg/L'], ['Amonio', f(ex.sbr.tanque.NH[k]) + ' mg N/L']);
+  else if ((t === 'sbr' || t === 'iceas') && ex.sbr) l.push(['Fase del ciclo (tanque 1)', simFaseNom(ex.sbr, ex.sbr.tanque.fase[k])], ['Oxígeno disuelto', f(ex.sbr.tanque.DO[k], 2) + ' mg/L'], ['Amonio', f(ex.sbr.tanque.NH[k]) + ' mg N/L'], ...(ex.sbr.iceas ? [['Pluma de agua cruda (recorrido hasta el decantador)', (Math.min(1, ex.sbr.tanque.plume[k]) * 100).toFixed(0) + ' %']] : []));
   else if (t === 'mbbr' && ex.sim) l.push(['Oxígeno disuelto', f(ex.sim.DO[k], 2) + ' mg/L'], ['Amonio', f(ex.sim.NH[k]) + ' mg N/L']);
   else if (t === 'mbr' && ex.sim && ex.sim.TMP) l.push(['Presión transmembrana', f(ex.sim.TMP[k], 0) + ' kPa'], ['Flux', f(ex.sim.J[k], 0) + ' L/m2·h'], ['MLSS', f(ex.mlss[k], 0) + ' mg/L']);
   else if (ex.lodo && ex.sim && ex.sim.vol) { const sm = ex.sim; l.push(['Nivel del tanque', f(sm.vol[k] / sm.V * 100, 0) + ' % (' + f(sm.vol[k]) + ' de ' + f(sm.V) + ' m3)']); if (sm.enc) l.push([t === 'deshidratacion' ? 'Equipo' : 'Bomba de extracción', sm.enc[k] > 0.5 ? '▶ encendida' : '⏸ apagada']); }
@@ -38850,6 +39008,16 @@ function simPlantaDin1(d, ret) {
       if (Math.min(...s.DO) < 0.5) avisos.push(`"${u.nombre}": el oxígeno disuelto cae por debajo de 0,5 mg/L durante la simulación (falta de aire): la biopelícula pierde actividad.`);
       const sig = us[i + 1]; if (!sig || !['sedimentador', 'daf', 'fisicoquimico', 'mbr'].includes(sig.tipo)) avisos.push(`"${u.nombre}" (MBBR) no tiene a continuación una etapa que separe los sólidos: el efluente sale con la biopelícula desprendida.`);
       pasa(u, ent, { sim: s, mbbr: true, salr: s.salr });
+    } else if (u.tipo === 'iceas') {
+      const s = res.sim;
+      if (!s) { avisos.push(`"${u.nombre}": falta la DBO del afluente en los datos generales; no se simula en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
+      cur = { Q: s.Q.slice(), dbo: s.dbo.slice(), dqo: s.dqo.slice(), sst: s.sst.slice(), ntk: s.ntk.slice() };
+      const SRT = simNum(p.edad_lodos) > 0 ? Number(p.edad_lodos) : 20, masa = s.nt * p.volumen * p.mlss / SRT / 1000; srcC(u, masa, masa / 8);
+      lodos.push({ nombre: 'Lodo en exceso (' + u.nombre + ')', kg_d: masa, q_m3d: masa / 8, sequedad: 0.8, nota: 'Purga al terminar la decantación de cada ciclo, estimado al 0,8% de sólidos' });
+      if (s.margenMin < 0) avisos.push(`⚠ ICEAS "${u.nombre}": en la decantación el nivel baja más que la interfaz de lodos (${(-s.margenMin).toFixed(2)} m): se arrastra lodo con el efluente (SST de hasta ${Math.max(...s.sst).toFixed(0)} mg/L).`);
+      if (s.plumeMax >= 0.9) avisos.push(`⚠ ICEAS "${u.nombre}": el agua cruda que entra durante la sedimentación y la decantación llega al ${(s.plumeMax * 100).toFixed(0)} % del recorrido hasta el decantador y contamina el efluente (más lodo sedimentado, más preselección o menos caudal por tanque lo evitan).`);
+      if (s.spillTotal > 0.5) avisos.push(`⚠ ICEAS "${u.nombre}": el tanque rebalsa ${s.spillTotal.toFixed(0)} m3 en el período (llega al nivel máximo antes de decantar).`);
+      pasa(u, ent, { sim: s, sbr: s });
     } else if (u.tipo === 'sbr') {
       const s = res.sim;
       if (!s) { avisos.push(`"${u.nombre}": falta la DBO del afluente en los datos generales; no se simula en el balance.`); pasa(u, ent, { incompleta: true }); continue; }
@@ -38952,7 +39120,7 @@ function simPlantaVista(plant, d) {
     if (sed && nd.extra && nd.extra.perf) { const N = 10, hh = (bh - 4) / N; for (let j = 0; j < N; j++) agua += `<rect id="pv-s-${id}-${j}" x="${x}" y="${yT + 4 + j * hh}" width="${bw}" height="${hh + 0.6}" fill="#d6eafa"/>`; agua += `<rect id="pv-sh-${id}" x="${x}" y="${yT + bh - hop}" width="${bw}" height="${hop}" fill="#d6eafa"/>`; }
     else agua = `<rect id="pv-w-${id}" x="${x}" y="${yT + 4}" width="${bw}" height="${bh - 4}" fill="#d6eafa"/>`;
     const bomb = pozo ? `<circle id="pv-b1-${id}" cx="${x + bw - 14}" cy="${yT + bh - 12}" r="6" fill="#bbb" stroke="#555"/><circle id="pv-b2-${id}" cx="${x + bw - 32}" cy="${yT + bh - 12}" r="6" fill="#bbb" stroke="#555"/>` : '';
-    const burb = ['lodos_activados', 'sbr', 'mbbr'].includes(nd.tipo) ? Array.from({ length: 7 }, (_, j) => `<circle class="pv-bub-${id}" cx="${x + 10 + j * 13}" cy="${yT + bh - 6}" r="2.2" fill="#fff" fill-opacity=".8"/>`).join('') : '', espuma = nd.tipo === 'lodos_activados' ? `<rect id="pv-foam-${id}" x="${x}" y="${yT - 2}" width="${bw}" height="0" fill="#f1e6d0" stroke="#c9b48a"/>` : '';
+    const burb = ['lodos_activados', 'sbr', 'iceas', 'mbbr'].includes(nd.tipo) ? Array.from({ length: 7 }, (_, j) => `<circle class="pv-bub-${id}" cx="${x + 10 + j * 13}" cy="${yT + bh - 6}" r="2.2" fill="#fff" fill-opacity=".8"/>`).join('') : '', espuma = nd.tipo === 'lodos_activados' ? `<rect id="pv-foam-${id}" x="${x}" y="${yT - 2}" width="${bw}" height="0" fill="#f1e6d0" stroke="#c9b48a"/>` : '';
     const tipoTxt = nd.incompleta || (nd.extra && nd.extra.incompleta) ? '<text x="' + (x + bw / 2) + '" y="' + (yT + bh / 2) + '" text-anchor="middle" font-size="10" fill="#c0392b">faltan datos</text>' : '';
     cuerpo += `<g class="sim-click" style="cursor:pointer" onclick="simDetalle('${id}')"><title>Tocá para ver los datos de ${esc(nd.nombre)}</title><g clip-path="url(#pv-clip-${id})">${agua}${burb}${nd.tipo === 'mbbr' ? Array.from({ length: 12 }, (_, j) => `<circle cx="${x + 10 + (j * 29) % (bw - 20)}" cy="${yT + 14 + (j * 41) % (bh - 28)}" r="4.5" fill="#d9a441" stroke="#8a6d00" stroke-width=".8"/>`).join('') : ''}</g>${espuma}<path d="${clip}" fill="none" stroke="#1b1b1b" stroke-width="2"/>${sed ? `<line id="pv-man-${id}" x1="${x}" x2="${x + bw}" y1="${yT + bh}" y2="${yT + bh}" stroke="#8a5a1a" stroke-width="1.5" stroke-dasharray="4 3" clip-path="url(#pv-clip-${id})"/>` : ''}${bomb}${tipoTxt}
       <text x="${x + bw / 2}" y="${yT + bh + 18}" text-anchor="middle" font-size="11" font-weight="600">${esc(nd.nombre.length > 18 ? nd.nombre.slice(0, 17) + '…' : nd.nombre)}</text><text id="pv-v-${id}" x="${x + bw / 2}" y="${yT + bh + 32}" text-anchor="middle" font-size="10" fill="#555"></text>${(pozo || ['lodos_activados', 'anoxico', 'ecualizador', 'sbr', 'mbbr'].includes(nd.tipo)) ? `<text id="pv-n-${id}" x="${x + bw / 2}" y="${yT - 8}" text-anchor="middle" font-size="10" fill="#555"></text>` : ''}</g>`;
@@ -38980,13 +39148,13 @@ function simPlantaVista(plant, d) {
       if (nd.tipo === 'sedimentador' && nd.extra && nd.extra.perf) { const pf = nd.extra.perf[Math.min(k, nd.extra.perf.length - 1)]; pf.forEach((x, j) => set(`pv-s-${nd.id}-${j}`, 'fill', simColorConc(x, 8))); set('pv-sh-' + nd.id, 'fill', simColorConc(pf[pf.length - 1], 8)); const mH = nd.extra.manto[Math.min(k, nd.extra.manto.length - 1)] / nd.extra.H; set('pv-man-' + nd.id, 'y1', yT + 4 + (bh - 4 - hopDe()) * (1 - Math.min(1, mH))); set('pv-man-' + nd.id, 'y2', yT + 4 + (bh - 4 - hopDe()) * (1 - Math.min(1, mH))); }
       else if (nd.tipo === 'pozo' && nd.extra && nd.extra.nivel) { const e = nd.extra, fr = Math.min(1, e.nivel[k] / (e.hmax * 1.05)), hh = (bh - 4) * fr; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); const sobre = (e.rebalseSerie && e.rebalseSerie[k] > 0) || e.nivel[k] >= e.hmax - 1e-6; set('pv-w-' + nd.id, 'fill', sobre ? '#e57373' : col); set('pv-b1-' + nd.id, 'fill', e.bombas[k] >= 0.5 ? '#2ecc71' : '#bbb'); set('pv-b2-' + nd.id, 'fill', e.bombas[k] >= 1.5 ? '#2ecc71' : '#bbb'); txt('pv-n-' + nd.id, sobre ? '⚠ REBALSA' : `nivel ${e.nivel[k].toFixed(2)} m`); }
       else if (nd.tipo === 'ecualizador' && nd.extra && nd.extra.vol) { const e = nd.extra, fr = Math.min(1, e.vol[k] / e.V), hh = (bh - 4) * fr, sobre = e.spill[k] > 0; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', sobre ? '#e57373' : col); txt('pv-n-' + nd.id, sobre ? '⚠ REBALSA' : `nivel ${(fr * 100).toFixed(0)}%`); }
-      else if (nd.tipo === 'sbr' && nd.extra && nd.extra.sbr) { const sb = nd.extra.sbr, q = sb.tanque, fr = Math.max(0, Math.min(1, q.hw[k] / sb.Hmax)), hh = (bh - 4) * fr; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', simColorConc(q.MLSS[k], 7000)); txt('pv-n-' + nd.id, `${SIM_FASES_SBR[q.fase[k]].split(' ')[0]} · OD ${q.DO[k].toFixed(1)}`); }
+      else if ((nd.tipo === 'sbr' || nd.tipo === 'iceas') && nd.extra && nd.extra.sbr) { const sb = nd.extra.sbr, q = sb.tanque, fr = Math.max(0, Math.min(1, q.hw[k] / sb.Hmax)), hh = (bh - 4) * fr; set('pv-w-' + nd.id, 'y', yT + bh - hh); set('pv-w-' + nd.id, 'height', hh); set('pv-w-' + nd.id, 'fill', simColorConc(q.MLSS[k], 7000)); txt('pv-n-' + nd.id, `${simFaseNom(sb, q.fase[k]).split(' ')[0]} · OD ${q.DO[k].toFixed(1)}`); }
       else if (nd.tipo === 'mbbr' && nd.extra && nd.extra.mbbr) { const s = nd.extra.sim; set('pv-w-' + nd.id, 'fill', simColorMbbr(s.film[k])); txt('pv-n-' + nd.id, `OD ${s.DO[k].toFixed(1)} · NH4 ${s.NH[k].toFixed(1)}`); }
       else if (nd.tipo === 'anoxico' && nd.extra && nd.extra.anox) { set('pv-w-' + nd.id, 'fill', simColorConc(nd.extra.mlss[k], 7000)); txt('pv-n-' + nd.id, `NO3 ${nd.extra.no[k].toFixed(1)} · NH4 ${nd.extra.nh[k].toFixed(1)}`); }
       else set('pv-w-' + nd.id, 'fill', col);
       if (nd.tipo === 'lodos_activados' && nd.extra && nd.extra.do) { const ex = nd.extra, fh = 16 * Math.min(1, ex.foam[k]); set('pv-foam-' + nd.id, 'height', fh); set('pv-foam-' + nd.id, 'y', yT - fh); txt('pv-n-' + nd.id, `OD ${ex.do[k].toFixed(1)} · NH4 ${ex.nh[k].toFixed(1)} · NO3 ${ex.no[k].toFixed(0)}`); set('pv-w-' + nd.id, 'fill', simColorConc(ex.mlss[k], 7000)); }
       if (nd.tipo === 'lodos_activados' && nd.extra && nd.extra.aor) { const dem = nd.extra.aire ? Math.max(0.05, nd.extra.aire[k] * 2.2) : nd.extra.aor[k] / (nd.extra.aor.reduce((a, b) => a + b, 0) / nd.extra.aor.length || 1); document.querySelectorAll('.pv-bub-' + nd.id).forEach((c, j) => { const y0 = yT + bh - 6, ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', y0 - ciclo * (bh - 14)); c.setAttribute('fill-opacity', (0.9 - ciclo * 0.7).toFixed(2)); c.setAttribute('r', (1.6 + 1.2 * dem).toFixed(1)); }); }
-      if ((nd.tipo === 'sbr' && nd.extra && nd.extra.sbr) || (nd.tipo === 'mbbr' && nd.extra && nd.extra.mbbr)) { const ar = nd.tipo === 'sbr' ? nd.extra.sbr.tanque.aire[k] : nd.extra.sim.aire[k], dem = Math.min(1, ar * 1.2); document.querySelectorAll('.pv-bub-' + nd.id).forEach((c, j) => { const y0 = yT + bh - 6, ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', y0 - ciclo * (bh - 14)); c.setAttribute('fill-opacity', ar < 0.02 ? 0 : (0.9 - ciclo * 0.7).toFixed(2)); }); }
+      if (((nd.tipo === 'sbr' || nd.tipo === 'iceas') && nd.extra && nd.extra.sbr) || (nd.tipo === 'mbbr' && nd.extra && nd.extra.mbbr)) { const ar = nd.tipo !== 'mbbr' ? nd.extra.sbr.tanque.aire[k] : nd.extra.sim.aire[k], dem = Math.min(1, ar * 1.2); document.querySelectorAll('.pv-bub-' + nd.id).forEach((c, j) => { const y0 = yT + bh - 6, ciclo = ((fase * (0.4 + dem) + j * 17) % 90) / 90; c.setAttribute('cy', y0 - ciclo * (bh - 14)); c.setAttribute('fill-opacity', ar < 0.02 ? 0 : (0.9 - ciclo * 0.7).toFixed(2)); }); }
       txt('pv-v-' + nd.id, `${fmt(nd.sal.Q[k])} m3/h · ${varNombre} ${fmt(nd.sal[VAR][k])}${VAR === 'Q' ? '' : ' mg/L'}`);
     });
     { const ban = document.getElementById('pv-evento'); if (ban) { const oc = d.examen && d.examen.activo && !d.examen.respondido, act = oc ? [] : (plant.eventos || []).filter(e => t >= e.inicio && t < e.inicio + (e.dur || 0)); ban.textContent = act.length ? act.map(e => ((SIM_ESC_TIPOS[e.tipo] || {}).icono || '⚠') + ' ' + simEvNombre(e.tipo)).join('   ·   ') : (oc && plant.eventos.some(e => t >= e.inicio && t < e.inicio + Math.max(2, e.dur || 0)) ? '⚠ Algo no anda bien en la planta: mirá el tablero' : ''); } }
@@ -39020,8 +39188,8 @@ function simGeoUnidad(u) {
   } else if (t === 'sedimentador' || t === 'espesador') {
     circ = g.forma !== 'rect'; const A = p.area || (p.diametro ? Math.PI * p.diametro * p.diametro / 4 : 78); col = p.profundidad || colGeo || 3.5;
     w = circ ? (p.diametro && !p.area ? p.diametro : Math.sqrt(4 * A / Math.PI)) : Math.sqrt(A * ratio); alto = col + free; ang = g.angulo || 22; ent = Math.min(g.enterrado || 0, alto);
-  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(t)) {
-    col = t === 'sbr' ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : (t === 'desinfeccion' || t === 'desengrasadora') ? 2.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
+  } else if (['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'iceas', 'ecualizador', 'desinfeccion', 'desengrasadora', 'digestor'].includes(t)) {
+    col = (t === 'sbr' || t === 'iceas') ? (p.profundidad || 5) : (colGeo || (t === 'ecualizador' ? 3.5 : (t === 'desinfeccion' || t === 'desengrasadora') ? 2.5 : 4.5)); const V = p.volumen || (g.largo && g.ancho ? g.largo * g.ancho * col : 400);
     w = porVol(V, col); alto = col + free; ent = Math.min(g.enterrado || 0, alto);
   } else {
     const def = { daf: [6, 2], tamiz: [1.6, 1.3], mbr: [5, 3.5], fisicoquimico: [4, 2.5], deshidratacion: [3.5, 2] }[t] || [4, 2.5];
@@ -39053,11 +39221,15 @@ function simPlantaCorte(plant, d) {
     let agua = '';
     if (t === 'sedimentador' && nd.extra && nd.extra.perf) { const hh = P.colPx / 10; for (let j = 0; j < 10; j++) agua += `<rect id="cp-s-${id}-${j}" x="${P.x0}" y="${P.yS + j * hh}" width="${ws}" height="${hh + 0.6}" fill="#d6eafa"/>`; }
     else agua += `<rect id="cp-w-${id}" x="${P.x0}" y="${P.yS}" width="${ws}" height="${P.colPx}" fill="#d6eafa"/>`;
-    if (t === 'sbr') agua += `<rect id="cp-z-${id}" x="${P.x0}" y="${P.bot}" width="${ws}" height="0" fill="${SIM_ZONA_COL.res}"/><rect id="cp-u-${id}" x="${P.x0}" y="${P.bot}" width="${ws}" height="0" fill="#8a6a3a"/>`;
+    if (t === 'sbr' || t === 'iceas') agua += `<rect id="cp-z-${id}" x="${P.x0}" y="${P.bot}" width="${ws}" height="0" fill="${SIM_ZONA_COL.res}"/><rect id="cp-u-${id}" x="${P.x0}" y="${P.bot}" width="${ws}" height="0" fill="#8a6a3a"/>`;
+    if (t === 'iceas') { const fpz = nd.extra && nd.extra.sbr ? nd.extra.sbr.preFrac : 0, wz = ws * fpz;
+      if (fpz > 0) agua += `<rect id="cp-pre-${id}" x="${P.x0}" y="${P.bot}" width="${wz}" height="0" fill="#c9b88f"/>`;
+      agua += `<rect id="cp-pl-${id}" x="${P.x0 + wz}" y="${P.bot}" width="0" height="0" fill="#5a2d1a" fill-opacity=".55"/>`;
+      if (fpz > 0) agua += `<line x1="${P.x0 + wz}" x2="${P.x0 + wz}" y1="${P.yS}" y2="${P.bot - Math.max(6, P.colPx * 0.1)}" stroke="#444" stroke-width="2.6"/><text x="${P.x0 + wz / 2}" y="${P.yS + 11}" text-anchor="middle" font-size="8.5" fill="#444">preselección</text><text x="${P.x0 + wz + (ws - wz) / 2}" y="${P.yS + 11}" text-anchor="middle" font-size="8.5" fill="#444">zona principal →  decantador</text>`; }
     if (t === 'mbbr') { const nc = Math.min(50, Math.max(12, Math.round(ws * P.colPx / 900))), rr = Math.max(2.5, Math.min(5, ws / 18)); for (let j = 0; j < nc; j++) { const cx = P.x0 + 6 + ((j * 53) % Math.max(10, ws - 12)), cy = P.yS + 8 + ((j * 37) % Math.max(10, P.colPx - 16)); agua += `<circle class="cp-c-${id}" cx="${cx}" cy="${cy}" r="${rr}" fill="#d9a441" stroke="#8a6d00" stroke-width=".8" data-cx="${cx}" data-cy="${cy}" data-ph="${j * 0.7}"/>`; } }
-    if (['lodos_activados', 'sbr', 'mbbr'].includes(t)) { const nb = Math.max(5, Math.floor(ws / 16)); for (let j = 0; j < nb; j++) agua += `<circle class="cp-b-${id}" cx="${P.x0 + ws * (j + 0.5) / nb}" cy="${P.bot - 4}" r="2.2" fill="#fff" fill-opacity="0"/>`; }
+    if (['lodos_activados', 'sbr', 'iceas', 'mbbr'].includes(t)) { const nb = Math.max(5, Math.floor(ws / 16)); for (let j = 0; j < nb; j++) agua += `<circle class="cp-b-${id}" cx="${P.x0 + ws * (j + 0.5) / nb}" cy="${P.bot - 4}" r="2.2" fill="#fff" fill-opacity="0"/>`; }
     let eq = '';
-    if (t === 'sbr' && nd.extra && nd.extra.sbr) { const z = simSbrZonas(nd.extra.sbr), yz = h => P.bot - P.colPx * h / z.hmax; [[z.hmin, '#d98a00', 'decantación'], [z.hl, '#8a6a3a', 'lodos']].forEach(([v, c, tx], jx) => { const y = yz(v); eq += `<line x1="${P.x0}" x2="${P.x1}" y1="${y}" y2="${y}" stroke="${c}" stroke-width="1" stroke-dasharray="4 3"/><text x="${P.x1 - 3}" y="${jx ? y + 9 : y - 2}" text-anchor="end" font-size="8.5" fill="${c}">${jx ? 'zona de ' + tx + ' ↓' : '↑ zona de ' + tx}</text>`; }); const ym = yz((z.hmin + z.hl) / 2); eq += `<text x="${P.x1 - 3}" y="${ym + 3}" text-anchor="end" font-size="8.5" fill="#7a6a30">resguardo</text>`; }
+    if ((t === 'sbr' || t === 'iceas') && nd.extra && nd.extra.sbr) { const z = simSbrZonas(nd.extra.sbr), yz = h => P.bot - P.colPx * h / z.hmax; [[z.hmin, '#d98a00', 'decantación'], [z.hl, '#8a6a3a', 'lodos']].forEach(([v, c, tx], jx) => { const y = yz(v); eq += `<line x1="${P.x0}" x2="${P.x1}" y1="${y}" y2="${y}" stroke="${c}" stroke-width="1" stroke-dasharray="4 3"/><text x="${P.x1 - 3}" y="${jx ? y + 9 : y - 2}" text-anchor="end" font-size="8.5" fill="${c}">${jx ? 'zona de ' + tx + ' ↓' : '↑ zona de ' + tx}</text>`; }); const ym = yz((z.hmin + z.hl) / 2); eq += `<text x="${P.x1 - 3}" y="${ym + 3}" text-anchor="end" font-size="8.5" fill="#7a6a30">resguardo</text>`; }
     if (t === 'pozo') {
       const nTot = Math.max(1, (nd.extra && nd.extra.nd) || 1, simNum((us[i] || { params: {} }).params.n_bombas) || 0), sz = Math.min(26, ws / (nTot + 0.6));
       for (let j = 0; j < nTot; j++) { const cx = P.x0 + ws * (j + 1) / (nTot + 1); eq += `<g id="cp-pb-${id}-${j}-off">${procesosFlowsheetIconoSvg('bomba_sumerg', cx, P.bot - sz / 2 - 3, sz, '#9a9a9a')}</g><g id="cp-pb-${id}-${j}-on" style="display:none">${procesosFlowsheetIconoSvg('bomba_sumerg', cx, P.bot - sz / 2 - 3, sz, '#1a8f4d')}</g>`; }
@@ -39068,7 +39240,7 @@ function simPlantaCorte(plant, d) {
     }
     const nombre = nd.nombre.length > 22 ? nd.nombre.slice(0, 21) + '…' : nd.nombre, esp = t === 'lodos_activados' ? `<rect id="cp-foam-${id}" x="${P.x0}" y="${P.yS}" width="${ws}" height="0" fill="#f1e6d0" stroke="#c9b48a"/>` : '';
     const incompleta = nd.extra && nd.extra.incompleta ? `<text x="${P.cx}" y="${P.yS + P.colPx / 2}" text-anchor="middle" font-size="10" fill="#c0392b">faltan datos</text>` : '';
-    const dec = t === 'sbr' ? `<path id="cp-d-${id}" d="" fill="none" stroke="#1a8f4d" stroke-width="3"/>` : '';
+    const dec = (t === 'sbr' || t === 'iceas') ? `<path id="cp-d-${id}" d="" fill="none" stroke="#1a8f4d" stroke-width="3"/>` : '';
     cuerpo += `<g class="sim-click" style="cursor:pointer" onclick="simDetalle('${id}')"><title>Tocá para ver los datos de ${esc(nd.nombre)}</title><g clip-path="url(#cp-clip-${id})">${agua}</g>${esp}<path d="${contorno}" fill="none" stroke="#1b5e20" stroke-width="2.4"/>${t === 'sedimentador' ? `<line id="cp-m-${id}" x1="${P.x0}" x2="${P.x1}" y1="${P.bot}" y2="${P.bot}" stroke="#8a5a1a" stroke-width="1.5" stroke-dasharray="4 3" clip-path="url(#cp-clip-${id})"/>` : ''}${eq}${dec}${incompleta}
       <text x="${P.cx}" y="${P.top - 8}" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">${esc(nombre)}</text>
       <text id="cp-n-${id}" x="${P.cx}" y="${P.top - 21}" text-anchor="middle" font-size="10" fill="#c0392b" font-weight="700"></text>
@@ -39109,13 +39281,18 @@ function simPlantaCorte(plant, d) {
       if (t0 === 'sedimentador' && ex.perf) { const pf = ex.perf[Math.min(k, ex.perf.length - 1)]; pf.forEach((x, j) => set(`cp-s-${id}-${j}`, 'fill', simColorConc(x, 8))); const mt = ex.manto[Math.min(k, ex.manto.length - 1)], yM = P.bot - Math.min(1, mt / ex.H) * P.colPx; set('cp-m-' + id, 'y1', yM); set('cp-m-' + id, 'y2', yM); t3 = `manto ${mt.toFixed(1)} m`; }
       else if (t0 === 'pozo' && ex.nivel) { const h = Math.min(g.alto, ex.nivel[k]), sobre = (ex.rebalseSerie && ex.rebalseSerie[k] > 0) || ex.nivel[k] >= ex.hmax - 1e-6; set('cp-w-' + id, 'y', P.bot - h * s); set('cp-w-' + id, 'height', h * s); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; t3 = `nivel ${ex.nivel[k].toFixed(2)} m`; for (let j = 0; j < 8; j++) { const on = ex.bombas[k] > j, a = document.getElementById(`cp-pb-${id}-${j}-on`), b = document.getElementById(`cp-pb-${id}-${j}-off`); if (a && b) { a.style.display = on ? '' : 'none'; b.style.display = on ? 'none' : ''; } } }
       else if (t0 === 'ecualizador' && ex.vol) { const fr = Math.min(1, ex.vol[k] / ex.V), sobre = ex.spill[k] > 0; set('cp-w-' + id, 'y', P.bot - P.colPx * fr); set('cp-w-' + id, 'height', P.colPx * fr); set('cp-w-' + id, 'fill', sobre ? '#e57373' : col); top = sobre ? '⚠ REBALSA' : ''; t3 = `nivel ${(fr * 100).toFixed(0)}% · ${ex.vol[k].toFixed(0)} m3`; }
-      else if (t0 === 'sbr' && ex.sbr) {
+      else if ((t0 === 'sbr' || t0 === 'iceas') && ex.sbr) {
         const sb = ex.sbr, q = sb.tanque, hw = Math.max(0, Math.min(1, q.hw[k] / sb.Hmax)), hs = Math.max(0, Math.min(q.hw[k], q.hint[k])) / sb.Hmax, f = q.fase[k];
         const cs = simSbrColores(q, k), zs = simSbrZonas(sb), clar = f >= 2; set('cp-w-' + id, 'y', P.bot - P.colPx * hw); set('cp-w-' + id, 'height', P.colPx * hw); set('cp-w-' + id, 'fill', clar ? SIM_ZONA_COL.dec : cs.agua);
         { const top = Math.min(q.hw[k], zs.hmin), hz = clar ? Math.max(0, top - Math.min(q.hw[k], q.hint[k])) / sb.Hmax : 0; set('cp-z-' + id, 'y', P.bot - P.colPx * (hz + Math.min(q.hw[k], q.hint[k]) / sb.Hmax)); set('cp-z-' + id, 'height', P.colPx * hz); }
         set('cp-u-' + id, 'y', P.bot - P.colPx * hs); set('cp-u-' + id, 'height', P.colPx * hs); set('cp-u-' + id, 'fill', cs.lodo);
         const ys = P.bot - P.colPx * hw; set('cp-d-' + id, 'd', f === 3 ? `M${P.x0 + P.wp * 0.2},${ys} H${P.x0 + P.wp * 0.8}` : '');
-        top = SIM_FASES_SBR[f].split(' ')[0] + (f === 0 && q.ext[k] ? ' lento (esperando agua, con aire)' : ''); t3 = f === 0 && q.qfill[k] > 0 ? `entra ${q.qfill[k].toFixed(0)} m3/h · espera ${q.buf[k].toFixed(0)} m3` : (f === 3 && q.qdec[k] > 0 ? `sale ${q.qdec[k].toFixed(0)} m3/h` : `OD ${q.DO[k].toFixed(1)} · NH4 ${q.NH[k].toFixed(1)} · espera ${q.buf[k].toFixed(0)} m3`);
+        if (sb.iceas) {
+          top = simFaseNom(sb, f).split(' ')[0] + ' · ingreso continuo'; t3 = f >= 2 ? `pluma ${(Math.min(1, q.plume[k]) * 100).toFixed(0)} % del recorrido${f === 3 && q.qdec[k] > 0 ? ` · sale ${q.qdec[k].toFixed(0)} m3/h` : ''}` : `OD ${q.DO[k].toFixed(1)} · NH4 ${q.NH[k].toFixed(1)} · entra ${q.qfill[k].toFixed(0)} m3/h`;
+          const fpz = sb.preFrac, wz = P.wp * fpz, wm = P.wp - wz, hsl = Math.max(6, hs * P.colPx), on = f >= 2;
+          if (fpz > 0) { set('cp-pre-' + id, 'y', P.bot - P.colPx * hw); set('cp-pre-' + id, 'height', P.colPx * hw); set('cp-pre-' + id, 'fill', simColorConc(Math.max(q.preMLSS[k], 0.4 * q.MLSS[k]), 7000)); }
+          set('cp-pl-' + id, 'x', P.x0 + wz); set('cp-pl-' + id, 'y', P.bot - hsl); set('cp-pl-' + id, 'height', hsl); set('cp-pl-' + id, 'width', on ? wm * Math.min(1, q.plume[k]) : 0);
+        } else { top = SIM_FASES_SBR[f].split(' ')[0] + (f === 0 && q.ext[k] ? ' lento (esperando agua, con aire)' : ''); t3 = f === 0 && q.qfill[k] > 0 ? `entra ${q.qfill[k].toFixed(0)} m3/h · espera ${q.buf[k].toFixed(0)} m3` : (f === 3 && q.qdec[k] > 0 ? `sale ${q.qdec[k].toFixed(0)} m3/h` : `OD ${q.DO[k].toFixed(1)} · NH4 ${q.NH[k].toFixed(1)} · espera ${q.buf[k].toFixed(0)} m3`); }
         document.querySelectorAll('.cp-b-' + id).forEach((c, j) => { const ciclo = ((fase * (0.4 + q.aire[k]) + j * 17) % 90) / 90; c.setAttribute('cy', P.bot - 4 - ciclo * Math.max(4, P.colPx * hw - 8)); c.setAttribute('fill-opacity', q.aire[k] < 0.02 ? 0 : (0.9 - ciclo * 0.7).toFixed(2)); });
       } else if (t0 === 'mbbr' && ex.mbbr) {
         const sm = ex.sim, aire = sm.aire[k], mov = 0.5 + 4 * Math.min(1, aire), ag = Math.min(1, aire * 1.6 + 0.1);
@@ -39253,6 +39430,8 @@ function simSbrZonasTxt(s) {
   const z = simSbrZonas(s), p = x => (x / z.hmax * 100).toFixed(0) + ' %';
   return `<div class="hint" style="margin:0 0 6px"><b>Zonas del tanque al terminar la sedimentación</b> (de abajo hacia arriba): <span style="color:#8a6a3a;font-weight:600">lodos ${z.lodo.toFixed(2)} m (${p(z.lodo)})</span> · <span style="color:#8a7a3a;font-weight:600">resguardo ${z.res.toFixed(2)} m (${p(z.res)})</span> · <span style="color:#2f7fc1;font-weight:600">decantación ${z.dec.toFixed(2)} m (${p(z.dec)})</span>. De diseño suelen ser tercios.</div>`;
 }
+const SIM_FASES_ICEAS = ['Llenado continuo', 'Aireación', 'Sedimentación', 'Decantación', 'Reposo'];
+const simFaseNom = (s, f) => (s && s.iceas ? SIM_FASES_ICEAS : SIM_FASES_SBR)[f];
 const SIM_FASES_SBR = ['Llenado', 'Reacción (aireación)', 'Sedimentación', 'Decantación', 'Reposo / purga'];
 function simVistaSbr(u, s) {
   const id = u.id, tq = s.tanque, zn = simSbrZonas(s), W = 520, H = 300, x0 = 80, x1 = 300, yT = 40, yB = 220, yH = h => yB - (h / s.Hmax) * (yB - yT), dt = s.dtH || SIM_DTH, L = tq.vol.length, qmx = Math.max(1, ...tq.qdec, ...tq.qfill);
@@ -39301,8 +39480,18 @@ function simVistaMbbr(u, s) {
 // Cronograma de un ciclo de cada tanque: en qué fase está en cada momento (los tanques están desfasados un ciclo / n)
 function simSbrCronograma(s) {
   const Tc = s.Tc, nt = s.nt, cols = ['#2f7fc1', '#4aa86b', '#b08a4a', '#7a8a99', '#c9b458'], fs = s.fasesH.slice(), tot = fs.reduce((a, b) => a + b, 0);
-  const fila = j => { const off = (j * Tc / nt) % Tc; let ac = 0; return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:62px;font-size:11px">Tanque ${j + 1}</span><div style="position:relative;flex:1;height:18px;background:var(--bg3,#eee);border-radius:3px;overflow:hidden">${fs.map((d, i) => { const ini = (ac + (tot - off % tot)) % tot; ac += d; return { i, d, ini }; }).map(({ i, d, ini }) => { const w = d / tot * 100, l = ini / tot * 100, seg = (l2, w2) => `<span title="${SIM_FASES_SBR[i]} · ${d.toFixed(2)} h" style="position:absolute;left:${l2}%;width:${w2}%;top:0;bottom:0;background:${cols[i]}"></span>`; return l + w > 100 ? seg(l, 100 - l) + seg(0, l + w - 100) : seg(l, w); }).join('')}</div></div>`; };
-  return `<div class="hint" style="margin:0 0 4px"><b>Esquema de un ciclo de cada tanque</b> (${tot.toFixed(1)} h; los tanques están desfasados ${(Tc / nt).toFixed(1)} h; en la simulación el llenado se alarga si llega menos agua que la de diseño):</div>${Array.from({ length: nt }, (_, j) => fila(j)).join('')}<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:11px;margin-top:4px">${SIM_FASES_SBR.map((n, i) => `<span><span style="display:inline-block;width:10px;height:10px;background:${cols[i]};border-radius:2px;margin-right:4px"></span>${n} ${fs[i].toFixed(2)} h</span>`).join('')}</div>`;
+  const fila = j => { const off = (j * Tc / nt) % Tc; let ac = 0; return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:62px;font-size:11px">Tanque ${j + 1}</span><div style="position:relative;flex:1;height:18px;background:var(--bg3,#eee);border-radius:3px;overflow:hidden">${fs.map((d, i) => { const ini = (ac + (tot - off % tot)) % tot; ac += d; return { i, d, ini }; }).map(({ i, d, ini }) => { const w = d / tot * 100, l = ini / tot * 100, seg = (l2, w2) => `<span title="${(s.iceas ? SIM_FASES_ICEAS : SIM_FASES_SBR)[i]} · ${d.toFixed(2)} h" style="position:absolute;left:${l2}%;width:${w2}%;top:0;bottom:0;background:${cols[i]}"></span>`; return l + w > 100 ? seg(l, 100 - l) + seg(0, l + w - 100) : seg(l, w); }).join('')}</div></div>`; };
+  return `<div class="hint" style="margin:0 0 4px"><b>Esquema de un ciclo de cada tanque</b> (${tot.toFixed(1)} h; los tanques están desfasados ${(Tc / nt).toFixed(1)} h; en la simulación el llenado se alarga si llega menos agua que la de diseño):</div>${Array.from({ length: nt }, (_, j) => fila(j)).join('')}<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:11px;margin-top:4px">${(s.iceas ? SIM_FASES_ICEAS : SIM_FASES_SBR).map((n, i) => fs[i] <= 0 ? '' : `<span><span style="display:inline-block;width:10px;height:10px;background:${cols[i]};border-radius:2px;margin-right:4px"></span>${n} ${fs[i].toFixed(2)} h</span>`).join('')}</div>`;
+}
+function simGraficosIceas(s) {
+  const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', nar: '#d98a00', marron: '#8a5a1a' }, q = s.tanque, base = { w: 540, h: 170, xl: 'Horas desde el inicio', xmin: 0 }, T = a => a.map((v, i) => [i * (s.dtH || SIM_DTH), v]), horas = q.vol.length * (s.dtH || SIM_DTH), sp = '<div style="height:8px"></div>';
+  return simSbrCronograma(s) + sp + simSbrZonasTxt(s) +
+    simGrafico(Object.assign({}, base, { titulo: 'Nivel del agua e interfaz de lodos en el tanque 1 (m): el nivel sube todo el ciclo y baja solo al decantar', series: [{ n: 'Nivel del agua', c: C.azul, pts: T(q.hw) }, { n: 'Interfaz de lodos', c: C.marron, pts: T(q.hint) }], hl: [{ y: s.Hmin, c: C.nar, t: 'mín. decantación' }], xmax: horas, yl: 'm', ymin: 0 })) + sp +
+    simGrafico(Object.assign({}, base, { titulo: 'Avance de la pluma de agua cruda hacia el decantador (0 = recién entra, 1 = llega a salir)', series: [{ n: 'Pluma (tanque 1)', c: C.rojo, pts: T(q.plume.map(x => Math.min(1.2, x))) }], hl: [{ y: 1, c: C.rojo, t: 'llega al decantador' }, { y: 0.8, c: C.nar, t: 'límite recomendado' }], xmax: horas, yl: 'fracción del recorrido', ymin: 0, ymax: 1.25 })) + sp +
+    simGrafico(Object.assign({}, base, { titulo: 'Caudales en el tanque 1 (m3/h): entra todo el tiempo y sale solo al decantar', series: [{ n: 'Entra (continuo)', c: C.azul, pts: T(q.qfill) }, { n: 'Sale (decantación)', c: C.verde, pts: T(q.qdec) }], xmax: horas, yl: 'm3/h', ymin: 0 })) + sp +
+    simGrafico(Object.assign({}, base, { titulo: 'OD, amonio y nitrato en la zona principal del tanque 1 (mg/L)', series: [{ n: 'OD', c: C.azul, pts: T(q.DO) }, { n: 'Amonio', c: C.rojo, pts: T(q.NH) }, { n: 'Nitrato', c: C.verde, pts: T(q.NO) }], xmax: horas, yl: 'mg/L', ymin: 0 })) + sp +
+    (s.preFrac > 0 ? simGrafico(Object.assign({}, base, { titulo: 'Zona de preselección del tanque 1: DBO soluble, amonio y nitrato (mg/L)', series: [{ n: 'DBO soluble', c: C.nar, pts: T(q.preS.map(x => x * 0.68)) }, { n: 'Amonio', c: C.rojo, pts: T(q.preNH) }, { n: 'Nitrato', c: C.verde, pts: T(q.preNO) }], xmax: horas, yl: 'mg/L', ymin: 0 })) + sp : '') +
+    simGrafico(Object.assign({}, base, { titulo: 'Caudal decantado de toda la planta (m3/h) y SST del efluente (mg/L)', series: [{ n: 'Decantado', c: C.verde, pts: T(s.Q) }, { n: 'SST', c: C.rojo, pts: T(s.sst), dash: '4 3' }], xmax: horas, yl: '', ymin: 0 }));
 }
 function simGraficosEqSbrMbbr(u, res) {
   const C = { azul: '#0056a1', rojo: '#c0392b', verde: '#1a8f4d', gris: '#6b7b8b', nar: '#d98a00', marron: '#8a5a1a' }, s = res.sim; if (!s) return '';
@@ -39314,6 +39503,7 @@ function simGraficosEqSbrMbbr(u, res) {
       simGrafico(Object.assign({}, base, { titulo: 'Volumen en el ecualizador (m3)', series: [{ n: 'Volumen', c: C.azul, pts: T(s.vol) }], hl: [{ y: s.V, c: C.rojo, t: 'rebalse' }, { y: s.vmax, c: C.nar, t: 'máx. operativo' }, { y: s.vmin, c: C.gris, t: 'mínimo' }], xmax: horas, yl: 'm3', ymin: 0 })) + '<div style="height:8px"></div>' +
       simGrafico(Object.assign({}, base, { titulo: 'DBO a la entrada y a la salida (mg/L)', series: [{ n: 'Entrada', c: C.rojo, pts: T(s.dboIn || s.dbo) }, { n: 'Salida', c: C.azul, pts: T(s.dbo) }], xmax: horas, yl: 'mg/L', ymin: 0 }));
   }
+  if (u.tipo === 'iceas') return simGraficosIceas(s);
   if (u.tipo === 'sbr') { const q = s.tanque; return simSbrCronograma(s) + '<div style="height:8px"></div>' + simSbrZonasTxt(s) + simGrafico(Object.assign({}, base, { titulo: 'Nivel del agua e interfaz de lodos en el tanque 1 (m)', series: [{ n: 'Nivel del agua', c: C.azul, pts: T(q.hw) }, { n: 'Interfaz de lodos', c: C.marron, pts: T(q.hint) }], hl: [{ y: s.Hmin, c: C.nar, t: 'mín. decantación' }], xmax: horas, yl: 'm', ymin: 0 })) + '<div style="height:8px"></div>' +
       simGrafico(Object.assign({}, base, { titulo: 'OD, amonio y nitrato en el tanque 1 (mg/L)', series: [{ n: 'OD', c: C.azul, pts: T(q.DO) }, { n: 'Amonio', c: C.rojo, pts: T(q.NH) }, { n: 'Nitrato', c: C.verde, pts: T(q.NO) }], xmax: horas, yl: 'mg/L', ymin: 0 })) + '<div style="height:8px"></div>' +
       simGrafico(Object.assign({}, base, { titulo: 'Caudales por etapa en el tanque 1 (m3/h): llega a la planta, entra en el llenado y sale en la decantación', series: [{ n: 'Llega a este tanque', c: C.gris, pts: T(s.qin || q.qfill.map(() => 0)), dash: '4 3' }, { n: 'Entra (llenado)', c: C.azul, pts: T(q.qfill) }, { n: 'Sale (decantación)', c: C.verde, pts: T(q.qdec) }], xmax: horas, yl: 'm3/h', ymin: 0 })) + '<div style="height:8px"></div>' +
@@ -39419,7 +39609,7 @@ function simSerieRellenar(id, k, modo) {
 function simSerieLimpiar(id, k) { const u = simU(id); u.params[k] = null; delete u.fuentes[k]; simGuardar(); simRender(); }
 // ── Tablero de las unidades con simulación propia (ecualizador, SBR, MBBR) ──
 function simTableroOtros(pl, d) {
-  const nodos = pl.nodos.filter(n => ['ecualizador', 'sbr', 'mbbr'].includes(n.tipo) && n.extra && n.extra.sim && simU(n.id)); if (!nodos.length) return '';
+  const nodos = pl.nodos.filter(n => ['ecualizador', 'sbr', 'iceas', 'mbbr'].includes(n.tipo) && n.extra && n.extra.sim && simU(n.id)); if (!nodos.length) return '';
   const bloques = nodos.map(n => `<div style="margin-top:8px"><div style="font-size:12.5px;font-weight:600;margin-bottom:2px">${esc(n.nombre)}</div><div style="max-width:560px">${simGraficosEqSbrMbbr(simU(n.id), { sim: n.extra.sim })}</div></div>`).join('');
   void d; return `<div style="margin-top:10px"><div style="font-size:12.5px;font-weight:600;margin-bottom:4px">📊 Gráficos del ecualizador, SBR y MBBR</div>${bloques}</div>`;
 }
@@ -39623,7 +39813,7 @@ function simRecCandidatos(d, problemas) {
         grupo(u, 'area', m(1.25, 1.6, 2));
       }
       if (t === 'anoxico') grupo(u, 'rec_interna', m(0.7, 1.3, 1.6));
-      if (['mbbr', 'sbr', 'mbr'].includes(t)) grupo(u, t === 'mbr' ? 'area_membrana' : 'volumen', m(1.25, 1.6, 2));
+      if (['mbbr', 'sbr', 'iceas', 'mbr'].includes(t)) grupo(u, t === 'mbr' ? 'area_membrana' : 'volumen', m(1.25, 1.6, 2));
     }
     if (reb.has(u.id) || (lodoReb && t === 'deshidratacion')) {   // si rebalsa el digestor o el tanque previo, también se prueba lo que puede hacer la deshidratación (más horas, ciclos, capacidad)
       if (t === 'pozo') { grupo(u, 'q_bomba', m(1.25, 1.6, 2)); grupo(u, 'n_bombas', suma(1)); grupo(u, 'nivel_arranque', m(0.6, 0.8), null, v => v > (simNum(P.nivel_paro) || 0) + 0.15); }
@@ -39821,7 +40011,7 @@ function simHorarioHtml(plant, d) {
     const ex = nd.extra || {}, rs = simRebalseSerie(nd); let reb = 0; if (rs) for (let k = 0; k < pasosH; k++) reb += rs[(dia * 24 + h) * pasosH + k] || 0;
     if (reb > 0.001) return f1(x) + `<div style="margin:0;font-size:10.5px;line-height:1.2;color:#a93226;font-weight:700">⚠ rebalsa ${f1(reb)} m3</div>`;
     if (v === 'Q' && nd.tipo === 'pozo' && ex.bombas && ex.qb) { let pm = 0; for (let k = 0; k < pasosH; k++) pm += (ex.bombas[(dia * 24 + h) * pasosH + k] || 0) * plant.dtH * 60; return f1(x) + `<div class="hint" style="margin:0;font-size:10.5px;line-height:1.2">bomba ${f1(pm)} min</div>`; }
-    if (v === 'Q' && nd.tipo === 'sbr' && ex.sbr && ex.sbr.faseT) { const ab = ['llenando', 'reacción', 'sedimentando', 'decantando', 'reposo'], t = ex.sbr.faseT.map((fa, j) => { const cnt = [0, 0, 0, 0, 0]; for (let k = 0; k < pasosH; k++) { const f = fa[(dia * 24 + h) * pasosH + k]; if (f != null) cnt[f]++; } const mx = cnt.indexOf(Math.max(...cnt)); return `T${j + 1} ${ab[mx]} ${Math.round(cnt[mx] * plant.dtH * 60)}′`; }).join(' · '); return f1(x) + `<div class="hint" style="margin:0;font-size:10.5px;line-height:1.2">${t}</div>`; }
+    if (v === 'Q' && (nd.tipo === 'sbr' || nd.tipo === 'iceas') && ex.sbr && ex.sbr.faseT) { const ab = ex.sbr.iceas ? ['', 'aireando', 'sedimentando', 'decantando', 'reposo'] : ['llenando', 'reacción', 'sedimentando', 'decantando', 'reposo'], t = ex.sbr.faseT.map((fa, j) => { const cnt = [0, 0, 0, 0, 0]; for (let k = 0; k < pasosH; k++) { const f = fa[(dia * 24 + h) * pasosH + k]; if (f != null) cnt[f]++; } const mx = cnt.indexOf(Math.max(...cnt)); return `T${j + 1} ${ab[mx]} ${Math.round(cnt[mx] * plant.dtH * 60)}′`; }).join(' · '); return f1(x) + `<div class="hint" style="margin:0;font-size:10.5px;line-height:1.2">${t}</div>`; }
     return f1(x);
   };
   const filas = Array.from({ length: 24 }, (_, h) => {
@@ -39837,9 +40027,9 @@ function simHorarioHtml(plant, d) {
   const selV = `<select style="width:auto" onchange="simHorVar(this.value)"><option value="Q" ${v === 'Q' ? 'selected' : ''}>Caudal (m3/h)</option><option value="dqo" ${v === 'dqo' ? 'selected' : ''}>DQO (mg/L)</option></select>`;
   const selD = dias > 1 ? `<select style="width:auto" onchange="simHorDia(this.value)">${Array.from({ length: dias }, (_, i) => `<option value="${i}" ${i === dia ? 'selected' : ''}>Día ${i + 1}</option>`).join('')}</select>` : '';
   return `<details id="sim-horario" style="margin-top:10px" ${simUiAbierto('horario', false) ? 'open' : ''} ontoggle="simUiToggle('horario',this.open,false)"><summary style="cursor:pointer;font-size:12.5px;font-weight:600">⏱ Hora a hora por etapa: caudal y DQO</summary>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><label style="font-size:12px;margin:0">Ver</label>${selV}${selD}<span class="hint" style="margin:0">Cada columna es lo que <b>sale</b> de esa etapa en esa hora (promedio de la hora${v === 'dqo' ? '; la DQO ponderada por caudal' : ''}).${v === 'Q' ? ' El caudal promedio es igual a los m3 que pasaron en esa hora. Una bomba entrega siempre el mismo caudal, pero si trabaja solo parte de la hora el promedio es menor: en el pozo se indican los minutos que trabajó la bomba. Podés cambiar el caudal del afluente directamente en su columna.' + (nodos.some(n => n.tipo === "sbr") ? ' En el SBR el caudal que sale es lo que se <b>decanta</b>: sale a golpes, solo durante la decantación de cada tanque (no es continuo); debajo se indica la fase en que estuvo cada tanque (T1, T2…) la mayor parte de esa hora.' : '') : ''}</span></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><label style="font-size:12px;margin:0">Ver</label>${selV}${selD}<span class="hint" style="margin:0">Cada columna es lo que <b>sale</b> de esa etapa en esa hora (promedio de la hora${v === 'dqo' ? '; la DQO ponderada por caudal' : ''}).${v === 'Q' ? ' El caudal promedio es igual a los m3 que pasaron en esa hora. Una bomba entrega siempre el mismo caudal, pero si trabaja solo parte de la hora el promedio es menor: en el pozo se indican los minutos que trabajó la bomba. Podés cambiar el caudal del afluente directamente en su columna.' + (nodos.some(n => n.tipo === "sbr" || n.tipo === "iceas") ? ' En el SBR el caudal que sale es lo que se <b>decanta</b>: sale a golpes, solo durante la decantación de cada tanque (no es continuo); debajo se indica la fase en que estuvo cada tanque (T1, T2…) la mayor parte de esa hora.' : '') : ''}</span></div>
     ${evs.length ? `<div class="hint" style="margin:0 0 6px;color:#a93226">${evs.map(e => esc(simEvResumen(e))).join('<br>')} <span style="color:var(--text2)">(las horas con evento van en rojo)</span></div>` : ''}
-    <div style="overflow:auto;max-height:420px;border:1px solid var(--border);border-radius:8px"><table style="width:auto;min-width:min(100%,420px);max-width:100%;border-collapse:collapse;font-size:12.5px"><tr style="position:sticky;top:0;background:var(--surface,#fff);z-index:1"><th style="${TH};width:1%;white-space:nowrap">Hora</th>${nodos.map((nd, j) => `<th style="${TH};text-align:right;min-width:112px;border-bottom:2px solid ${SIM_HOR_COLORES[j % SIM_HOR_COLORES.length]}">${esc(nom(nd))}${nd.tipo === 'sbr' && v === 'Q' ? '<div class="hint" style="margin:0;font-weight:400;font-size:10.5px">lo que decanta</div>' : ''}</th>`).join('')}</tr>${filas}</table></div>
+    <div style="overflow:auto;max-height:420px;border:1px solid var(--border);border-radius:8px"><table style="width:auto;min-width:min(100%,420px);max-width:100%;border-collapse:collapse;font-size:12.5px"><tr style="position:sticky;top:0;background:var(--surface,#fff);z-index:1"><th style="${TH};width:1%;white-space:nowrap">Hora</th>${nodos.map((nd, j) => `<th style="${TH};text-align:right;min-width:112px;border-bottom:2px solid ${SIM_HOR_COLORES[j % SIM_HOR_COLORES.length]}">${esc(nom(nd))}${(nd.tipo === 'sbr' || nd.tipo === 'iceas') && v === 'Q' ? '<div class="hint" style="margin:0;font-weight:400;font-size:10.5px">lo que decanta</div>' : ''}</th>`).join('')}</tr>${filas}</table></div>
     ${v === 'Q' && !evs.length ? `<div class="hint" style="margin:6px 0 0">Afluente del día: <b>${f1(tab[0].reduce((x, y) => x + (y || 0), 0))} m3</b> — igual al caudal medio × 24 definido en los datos generales; las horas que fijás (borde azul) se respetan y las otras se reparten el resto. <a href="#" onclick="simPatronTipo('tipico');return false">Volver a la variación típica</a></div>` : ''}
     <div style="margin-top:8px">${grafico}</div></details>`;
 }
