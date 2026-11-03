@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1051,7 +1051,8 @@
       <div class="card">
         <div class="card-label">Catálogo de productos</div>
         <p class="hint" style="margin-bottom:10px">Marca/modelo/código/descripción estándar de lo que vende la empresa, y las cantidades en cada estado — se usa como referencia al cargar una venta o armar una cotización. Los precios (costo, precio de venta y sus variantes) se manejan en "Lista de precios".</p>
-        <button class="btn btn-primary" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
+        <button class="btn btn-primary" id="cotiz-catalogo-add-btn" onclick="cotizCatalogoAdd()" style="margin-bottom:12px">+ Agregar producto</button>
+        <div id="cotiz-catalogo-nuevo" style="display:none"></div>
         <input id="cotiz-catalogo-buscar" placeholder="Buscar por marca, modelo, código o descripción..." style="margin-bottom:6px" oninput="cotizCatalogoBuscarDebounced()" />
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
           <input id="cotiz-catalogo-filtro-marca" list="cotiz-marcas-datalist" placeholder="Filtrar por marca" style="flex:1;min-width:110px;font-size:12px" oninput="cotizCatalogoBuscarDebounced()" />
@@ -28036,15 +28037,89 @@ async function cotizCatalogoVerMas(todo) {
     if (_cotizCatalogoEstado === e) cotizCatalogoVerMasRender();
   }
 }
+// "+ Agregar producto" despliega un formulario arriba de la lista (código AAXXXX automático, editable); recién al tocar "Agregar"
+// se crea el producto y entra a las filas del Stock. Antes se creaba una fila vacía en el medio de la lista y no se notaba.
+function cotizCatalogoNuevoInput(id, label, ancho, extra) {
+  return `<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--text2);font-weight:600;${ancho}">${label}<input id="cn-${id}" ${extra || ''} style="font-size:12px;padding:6px 8px;font-weight:400" /></label>`;
+}
+let _cotizCatalogoNuevoCodigo = ''; // el código que se sugirió, para saber si lo cambiaron a mano
 async function cotizCatalogoAdd() {
-  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
-  const codigoSugerido = await cotizCatalogoProximoCodigo(); // AAXXXX: el siguiente al último (se puede cambiar en la fila)
-  const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
-    method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
-    body: JSON.stringify({ empresa: currentEmpresa, marca:'', modelo:'', codigo: codigoSugerido, descripcion:'', moneda_lista:'USD' })
-  });
-  if (!res.ok) { alert('No se pudo agregar.'); return; }
-  cotizCatalogoRender();
+  const box = document.getElementById('cotiz-catalogo-nuevo'), btn = document.getElementById('cotiz-catalogo-add-btn');
+  if (!box) return;
+  if (box.style.display !== 'none') { cotizCatalogoNuevoCerrar(); return; }
+  const obs = _cotizStockObsOk === true;
+  box.style.display = 'block';
+  if (btn) btn.textContent = '✕ Cancelar';
+  box.innerHTML = `<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:14px">
+    <div class="card-label">Producto nuevo</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      ${cotizCatalogoNuevoInput('marca', 'Marca', 'flex:1;min-width:130px', 'list="cotiz-marcas-datalist"')}
+      ${cotizCatalogoNuevoInput('modelo', 'Modelo', 'flex:1;min-width:150px')}
+      ${cotizCatalogoNuevoInput('codigo', 'Código (automático, se puede cambiar)', 'width:190px', 'placeholder="Calculando..."')}
+    </div>
+    <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--text2);font-weight:600;margin-bottom:8px">Descripción
+      <textarea id="cn-descripcion" rows="2" style="font-size:12px;padding:6px 8px;font-weight:400;resize:vertical"></textarea></label>
+    ${obs ? `<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--text2);font-weight:600;margin-bottom:8px">Observaciones
+      <textarea id="cn-observaciones" rows="2" style="font-size:12px;padding:6px 8px;font-weight:400;resize:vertical"></textarea></label>` : ''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      ${COTIZ_STOCK_COLS.map(([campo, label]) => cotizCatalogoNuevoInput(campo, label, 'width:84px', 'type="number" min="0" step="1" placeholder="0"')).join('')}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" id="cn-confirmar" style="width:auto" onclick="cotizCatalogoNuevoConfirmar()">Agregar</button>
+      <button class="btn btn-secondary btn-sm" style="width:auto" onclick="cotizCatalogoNuevoCerrar()">Cancelar</button>
+      <span id="cn-msg" class="hint" style="margin:0"></span>
+    </div>
+  </div>`;
+  document.getElementById('cn-marca')?.focus();
+  const cod = await cotizCatalogoProximoCodigo(); // AAXXXX: el siguiente al último
+  _cotizCatalogoNuevoCodigo = cod;
+  const ci = document.getElementById('cn-codigo');
+  if (ci && !ci.value) { ci.value = cod; ci.placeholder = cod ? '' : 'No se pudo calcular: escribilo a mano'; }
+}
+function cotizCatalogoNuevoCerrar() {
+  const box = document.getElementById('cotiz-catalogo-nuevo'), btn = document.getElementById('cotiz-catalogo-add-btn');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+  if (btn) btn.textContent = '+ Agregar producto';
+}
+async function cotizCatalogoNuevoConfirmar() {
+  const val = campo => (document.getElementById('cn-' + campo)?.value || '').trim();
+  const msg = document.getElementById('cn-msg'), btn = document.getElementById('cn-confirmar');
+  if (!val('marca') && !val('modelo') && !val('descripcion')) { if (msg) { msg.style.color = 'var(--red)'; msg.textContent = 'Completá al menos la marca, el modelo o la descripción.'; } return; }
+  if (btn) btn.disabled = true;
+  if (msg) { msg.style.color = ''; msg.textContent = 'Agregando...'; }
+  try {
+    let codigo = val('codigo');
+    // Si dejaron el código sugerido, se vuelve a calcular recién ahora por si otra persona cargó un producto mientras tanto
+    if (!codigo || codigo === _cotizCatalogoNuevoCodigo) codigo = (await cotizCatalogoProximoCodigo()) || codigo;
+    const body = { empresa: currentEmpresa, marca: val('marca'), modelo: val('modelo'), codigo, descripcion: val('descripcion'), moneda_lista: 'USD' };
+    if (_cotizStockObsOk === true && document.getElementById('cn-observaciones')) body.observaciones = val('observaciones');
+    COTIZ_STOCK_COLS.forEach(([campo]) => { body[campo] = Math.max(0, Number(val(campo)) || 0); });
+    const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+    const res = await supaFetch('/rest/v1/cotizaciones_catalogo', {
+      method:'POST', headers:{Authorization:'Bearer '+session.token, Prefer:'return=representation'},
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) { if (msg) { msg.style.color = 'var(--red)'; msg.textContent = 'No se pudo agregar.'; } if (btn) btn.disabled = false; return; }
+    const creado = (await res.json())[0] || {};
+    cotizCatalogoNuevoCerrar();
+    _cotizMarcasCache = null; cotizMarcasCargar();
+    await cotizCatalogoRender();
+    // Que se vea dónde quedó: si no está entre las filas cargadas (la lista va ordenada por marca), se filtra por su código
+    let ta = document.getElementById(`cc-${creado.id}-marca`);
+    if (!ta && creado.codigo) {
+      const fc = document.getElementById('cotiz-catalogo-filtro-codigo');
+      if (fc) { fc.value = creado.codigo; await cotizCatalogoRender(); ta = document.getElementById(`cc-${creado.id}-marca`); }
+    }
+    const tr = ta && ta.closest('tr');
+    if (tr) {
+      tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      tr.style.transition = 'background .8s'; tr.style.background = 'rgba(46,160,67,.25)';
+      setTimeout(() => { tr.style.background = ''; }, 2500);
+    }
+  } catch (e) {
+    if (msg) { msg.style.color = 'var(--red)'; msg.textContent = 'No se pudo agregar.'; }
+    if (btn) btn.disabled = false;
+  }
 }
 function cotizCatalogoRecalcularTotalFila(id) {
   const total = COTIZ_STOCK_COLS.reduce((acc,[campo]) => acc + (Number(document.getElementById(`cc-${id}-${campo}`)?.value) || 0), 0);
