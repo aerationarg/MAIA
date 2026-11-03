@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45503,7 +45503,7 @@ function applyTabAccess() {
 const OOO_CFG_KEY = 'ooo_cfg';
 const OOO_CFG_DEF = {
   sitio: 'aerationargentina.sharepoint.com:/sites/VacacionesyLicencias', lista: 'OOO Solicitudes',
-  periodoInicio: '01-01', regimen: 'habiles', disponibleDesde: '10-01', libres: 5, bloque: 5, inicioAnio: 2026, reglaV2: false,   // año calendario; los días de un año se usan desde el 1/10 de ese año hasta el 31/12 del siguiente; de cada período, 'libres' días se parten como se quiera y el resto va en bloques (semanas completas de lunes a viernes, que no se pueden partir); inicioAnio = primer año que cuenta MAIA con estas reglas (los días que quedaron del año anterior se cargan por persona en personas[email].previos, por defecto 0)
+  periodoInicio: '01-01', regimen: 'habiles', disponibleDesde: '10-01', libres: 5, bloque: 5, inicioAnio: 2026, reglaV2: false,   // año calendario; los días de un año se usan desde el 1/10 de ese año hasta el 31/12 del siguiente; de cada período, 'libres' días se parten como se quiera y el resto va en bloques (semanas completas de lunes a viernes, que no se pueden partir); inicioAnio = primer año que cuenta MAIA con estas reglas (del año anterior se calculan los días que correspondían por ingreso y se descuentan los ya tomados antes de MAIA: personas[email].tomadosAntes)
   escalaCorridos: [[0, 14], [5, 21], [10, 28], [20, 35]], escalaHabiles: [[0, 10], [5, 15], [10, 20], [20, 25]],   // [años de antigüedad desde, días]
   feriados: [], escalamientoEmail: '', rrhhEmails: [], notificar: false, acumulables: false, acumDesde: '', listaVieja: 'Calendario', usarVieja: true,   // la lista anterior se lee (solo lectura) para el calendario, la vista de RR.HH. y los saldos
   tipos: [
@@ -45644,10 +45644,10 @@ const oooMD = dd => String(dd).split('-').reverse().map(Number).join('/');   // 
 const oooReglas = cfg => ({ dd: String(cfg.disponibleDesde || '10-01'), L: cfg.libres == null || cfg.libres === '' ? 5 : Number(cfg.libres), B: 5, ini: Number(cfg.inicioAnio) || 2026 });   // un bloque es una semana de lunes a viernes (5 días)
 function oooBolsa(email, anio, cfg, rg) {
   let c = oooCorresponden(email, { ini: `${anio}-01-01`, fin: `${anio}-12-31` }, cfg);
-  if (anio === rg.ini - 1) c = { base: Math.max(0, Number((cfg.personas[email] || {}).previos) || 0), aj: c.aj, origen: `días que le quedaron de ${anio} (los carga RR.HH.)` };   // lo que sobró del año anterior al primero que cuenta MAIA
-  const sinCargar = anio === rg.ini - 1 && (cfg.personas[email] || {}).previos == null;   // RR.HH. todavía no cargó lo que le quedó de ese año
-  const E = Math.max(0, (c.base || 0) + c.aj), bl = rg.B * Math.floor(Math.max(0, E - rg.L) / rg.B), fr = E - bl;
-  return { anio, sinCargar, base: c.base, aj: c.aj, origen: c.origen, E, libre0: fr, bloque0: bl, libre: fr, bloque: bl, tomL: 0, tomB: 0, pendL: 0, pendB: 0, det: [], disp: `${anio}-${rg.dd}`, vence: `${anio + 1}-12-31` };
+  const ant = anio === rg.ini - 1, ta = (cfg.personas[email] || {}).tomadosAntes, sinCargar = ant && (ta == null || ta === ''), yaTom = ant ? Math.max(0, Number(ta) || 0) : 0;   // año anterior al primero que cuenta MAIA: corresponde por ingreso y RR.HH. carga cuántos ya tomó (antes no hay registro)
+  if (ant && yaTom) c = Object.assign({}, c, { origen: c.origen + ` · menos ${yaTom} ya tomados antes de MAIA` });
+  const E = Math.max(0, (c.base || 0) + c.aj - yaTom), bl = rg.B * Math.floor(Math.max(0, E - rg.L) / rg.B), fr = E - bl;
+  return { anio, sinCargar, yaTom, base: c.base, aj: c.aj, origen: c.origen, E, libre0: fr, bloque0: bl, libre: fr, bloque: bl, tomL: 0, tomB: 0, pendL: 0, pendB: 0, det: [], disp: `${anio}-${rg.dd}`, vence: `${anio + 1}-12-31` };
 }
 // Una solicitud en unidades: cada semana de lunes a viernes que se toma completa es un bloque (5 días; si tiene un feriado cuenta igual como bloque) y el resto son días sueltos (libres)
 function oooUnidades(i, cfg) {
@@ -45713,14 +45713,15 @@ function oooEvalHtml(ev, quien2) {
   const errPartir = `<div style="color:#b3261e">No se puede partir un bloque: para esas fechas ${quien2 ? 'te' : 'le'} ${ev.libresAntes === 1 ? 'queda 1 día libre' : 'quedan ' + ev.libresAntes + ' días libres'} para días sueltos, y el resto son bloques (semanas completas de lunes a viernes).</div>`;
   if (ev.error) return errPartir;
   let h = `<div>${L === 1 ? '1 día libre' : L + ' días libres'} y ${B / ev.rg.B} bloque${B / ev.rg.B === 1 ? '' : 's'} (semanas completas de lunes a viernes: ${B} días).</div>`;
-  ev.partes.forEach(x => { const bk = x.bolsa; if (bk.sinCargar) { h += `<div>Se descuenta del año ${bk.anio} (se puede usar hasta el ${esc(oooFmt(bk.vence))}), pero RR.HH. todavía no cargó cuántos días ${quien2 ? 'te' : 'le'} quedaron de ese año.</div>`; return; } h += `<div>Del año ${bk.anio} (se puede usar hasta el ${esc(oooFmt(bk.vence))}): ${q[0]} ${lib(x.l)} y ${x.b} de bloque. ${q[1]} ${lib(Math.max(0, bk.libre))} y ${Math.max(0, bk.bloque)} de bloque.</div>`; });
+  ev.partes.forEach(x => { const bk = x.bolsa; h += `<div>Del año ${bk.anio} (se puede usar hasta el ${esc(oooFmt(bk.vence))}): ${q[0]} ${lib(x.l)} y ${x.b} de bloque. ${q[1]} ${lib(Math.max(0, bk.libre))} y ${Math.max(0, bk.bloque)} de bloque.</div>`; });
+  if (ev.partes.some(x => x.bolsa.sinCargar)) h += `<div style="color:#7a5b00">RR.HH. todavía no cargó cuántos días ${quien2 ? 'tomaste' : 'tomó'} del ${ev.anio - 1} antes de MAIA: ese saldo puede estar de más.</div>`;
   if (ev.exceso) h += `<div style="color:#b3261e">${q[2]} en ${ev.exceso} día${ev.exceso === 1 ? '' : 's'}: ${ev.causa === 'no_disp' ? `los días de ${ev.anio} se pueden usar recién desde el ${esc(oooFmt(`${ev.anio}-${ev.rg.dd}`))}` : 'no alcanza el saldo'}.</div>`;
   return h;
 }
 // Tabla de bolsas (año anterior que todavía no venció + año del período)
 function oooBolsasHtml(s) {
   if (s.base == null) return '';
-  const td = 'padding:4px 6px;border-bottom:1px solid var(--border)', fila = bk => { const rem = bk.libre + bk.bloque; if (bk.sinCargar) return `<tr style="text-align:center"><td style="${td}"><b>${bk.anio}</b></td><td style="${td}" class="hint" title="Lo que le quedó de ${bk.anio} lo carga RR.HH. en Cfg">sin cargar</td><td style="${td}">${bk.tomL + bk.tomB}</td><td style="${td}">${bk.pendL + bk.pendB || ''}</td><td style="${td}">—</td><td style="${td}">—</td><td style="${td}">—</td><td style="${td};text-align:left" class="hint">${esc(oooFmt(bk.disp))} al ${esc(oooFmt(bk.vence))}</td></tr>`; return `<tr style="text-align:center"><td style="${td}"><b>${bk.anio}</b></td><td style="${td}">${bk.E}</td><td style="${td}">${bk.tomL + bk.tomB}</td><td style="${td}">${bk.pendL + bk.pendB || ''}</td><td style="${td};font-weight:600;${rem < 0 ? 'color:var(--red)' : ''}">${rem}</td><td style="${td}">${bk.libre}</td><td style="${td}">${bk.bloque}</td><td style="${td};text-align:left" class="hint">${esc(oooFmt(bk.disp))} al ${esc(oooFmt(bk.vence))}</td></tr>`; };
+  const td = 'padding:4px 6px;border-bottom:1px solid var(--border)', fila = bk => { const rem = bk.libre + bk.bloque; return `<tr style="text-align:center"><td style="${td}"><b>${bk.anio}</b></td><td style="${td}">${bk.E}</td><td style="${td}">${bk.tomL + bk.tomB}</td><td style="${td}">${bk.pendL + bk.pendB || ''}</td><td style="${td};font-weight:600;${rem < 0 ? 'color:var(--red)' : ''}">${rem}</td><td style="${td}">${bk.libre}</td><td style="${td}">${bk.bloque}</td><td style="${td};text-align:left" class="hint">${esc(oooFmt(bk.disp))} al ${esc(oooFmt(bk.vence))}${bk.sinCargar ? ' · <b style="color:#7a5b00">falta cargar lo ya tomado antes de MAIA</b>' : ''}</td></tr>`; };
   const hoy = s.hoy;
   return `<div style="overflow-x:auto;margin-top:8px"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr style="text-align:center"><th style="${td}">Días del año</th><th style="${td}">Corresponden</th><th style="${td}">Tomados</th><th style="${td}">Pendientes</th><th style="${td}">Quedan</th><th style="${td}">Libres</th><th style="${td}">En bloques</th><th style="${td};text-align:left">Se pueden usar</th></tr></thead><tbody>${s.ant ? fila(s.ant) : ''}${fila(s.bolsa)}</tbody></table></div>
     <p class="hint">Hoy se pueden usar ${hoy.total} día${hoy.total === 1 ? '' : 's'} (${hoy.libres} libres y ${hoy.bloques} en bloques). Los días de cada año se usan desde el ${oooMD(oooReglas(_oooCfg).dd)} de ese año hasta el 31/12 del siguiente: lo que no se tomó para esa fecha se pierde. Libres = se pueden partir como se quiera; el resto va en bloques: semanas completas de lunes a viernes, que no se pueden partir.</p>`;
@@ -46079,7 +46080,7 @@ async function oooCfgTraerFeriados() {
 function oooCfgTipo(i, k, v) { _oooCfg.tipos[i][k] = v; oooCfgCambio(); }
 function oooCfgTipoNuevo() { const n = prompt('Nombre del tipo de solicitud:'); if (!n || !n.trim()) return; _oooCfg.tipos.push({ id: procesosNormTxt(n).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') + '_' + Date.now().toString(36).slice(-3), nombre: n.trim(), descuenta: false, cuenta: 'corridos' }); oooCfgCambio(); oooCfgRender(); }
 function oooCfgTipoQuitar(i) { if (!confirm('¿Quitar este tipo? Las solicitudes ya hechas lo siguen mostrando por su código.')) return; _oooCfg.tipos.splice(i, 1); oooCfgCambio(); oooCfgRender(); }
-function oooCfgPersona(email, k, v) { const p = (_oooCfg.personas[email] = _oooCfg.personas[email] || {}); if (k === 'dias') p.dias = v === '' ? null : Number(v); else if (k === 'previos') p.previos = v === '' ? null : Math.max(0, Number(v) || 0); else p[k] = v; oooCfgCambio(); }
+function oooCfgPersona(email, k, v) { const p = (_oooCfg.personas[email] = _oooCfg.personas[email] || {}); if (k === 'dias') p.dias = v === '' ? null : Number(v); else if (k === 'tomadosAntes') p.tomadosAntes = v === '' ? null : Math.max(0, Number(v) || 0); else p[k] = v; oooCfgCambio(); }
 function oooCfgAjuste(email) {
   const d = prompt('Días a sumar (o restar con signo −), por ejemplo 2 o -1:'); if (d == null || isNaN(Number(d)) || String(d).trim() === '') return; const m = prompt('Motivo del ajuste:') || '';
   const p = (_oooCfg.personas[email] = _oooCfg.personas[email] || {}); (p.ajustes = p.ajustes || []).push({ fecha: oooIso(new Date()), dias: Number(d), motivo: m, por: (currentUser && currentUser.nombre) || '' }); oooCfgCambio(); oooCfgRender();
@@ -46096,7 +46097,7 @@ function oooCfgRender() {
     <td style="text-align:center"><input type="checkbox" style="width:auto" ${t.bordes ? 'checked' : ''} onchange="oooCfgTipo(${i},'bordes',this.checked)" /></td><td><button class="btn btn-secondary btn-sm" onclick="oooCfgTipoQuitar(${i})">✕</button></td></tr>`).join('');
   const personas = emails.map(p => { const d = cfg.personas[p.email] || {}, per = oooPeriodo(new Date(), cfg, 0), c = oooCorresponden(p.email, per, cfg);
     return `<tr><td>${esc(p.nombre)}<div class="hint">${esc(p.sector || '')}</div></td><td><input type="date" value="${esc(d.ingreso || '')}" style="${sel}" onchange="oooCfgPersona('${esc(p.email)}','ingreso',this.value)" /></td><td><input type="number" value="${d.dias == null ? '' : esc(String(d.dias))}" placeholder="auto" style="width:80px;padding:6px 8px;font-size:13px" onchange="oooCfgPersona('${esc(p.email)}','dias',this.value)" /></td>
-      <td><input type="number" min="0" value="${d.previos == null ? '' : esc(String(d.previos))}" placeholder="sin cargar" style="width:80px;padding:6px 8px;font-size:13px" onchange="oooCfgPersona('${esc(p.email)}','previos',this.value)" /></td>
+      <td><input type="number" min="0" value="${d.tomadosAntes == null ? '' : esc(String(d.tomadosAntes))}" placeholder="sin cargar" style="width:80px;padding:6px 8px;font-size:13px" onchange="oooCfgPersona('${esc(p.email)}','tomadosAntes',this.value)" /></td>
       <td style="font-size:12px">${c.base == null ? '<span class="hint">—</span>' : c.base + c.aj}${(d.ajustes || []).length ? ` <span class="hint" title="${esc((d.ajustes || []).map(a => `${a.fecha}: ${a.dias > 0 ? '+' : ''}${a.dias} ${a.motivo || ''}`).join('\n'))}">(${d.ajustes.length} ajuste${d.ajustes.length === 1 ? '' : 's'})</span>` : ''}</td><td><button class="btn btn-secondary btn-sm" onclick="oooCfgAjuste('${esc(p.email)}')">＋ Ajuste</button></td></tr>`; }).join('');
   el.innerHTML = `<div class="card"><div class="card-label">Fuera de oficina — Configuración</div><p class="hint" id="cfg-ooo-estado" style="margin-top:0">${_oooCfgErrLectura ? '✕ No pude leer la configuración guardada: ' + esc(_oooCfgErrLectura) : 'Los cambios se guardan solos; abajo a la derecha aparece si quedó guardado.'}</p>
     <button class="btn btn-secondary btn-sm" onclick="oooCfgGuardarYa()">Guardar ahora</button></div>
@@ -46115,7 +46116,7 @@ function oooCfgRender() {
     <label>De los días de cada período, cuántos son libres (se parten como se quiera)</label><input type="number" min="0" value="${esc(cfg.libres == null ? 5 : cfg.libres)}" style="width:100px;margin-bottom:8px" onchange="oooCfgSet('libres',Number(this.value)||0)" />
     <p class="hint" style="margin:0 0 8px">El resto va en bloques: semanas completas de lunes a viernes de 5 días, que no se pueden partir.</p>
     <label>Primer año que cuenta MAIA con estas reglas</label><input type="number" value="${esc(cfg.inicioAnio || 2026)}" style="width:100px;margin-bottom:4px" onchange="oooCfgSet('inicioAnio',Number(this.value)||2026)" />
-    <p class="hint">El período es el año calendario (1/1 al 31/12) y la antigüedad se mide al cierre. Los días de un año se pueden usar desde el ${oooMD(cfg.disponibleDesde || '10-01')} de ese año hasta el 31/12 del año siguiente: lo que sobra después se pierde. Lo que se toma sale primero de los días más viejos. Los días que a cada persona le quedaron del año anterior a ese primer año se cargan abajo: mientras no se carguen, lo que tome antes del 1/10 se anota en ese año sin marcar exceso. Cada persona puede tener también sus días a mano y ajustes.</p></div>
+    <p class="hint">El período es el año calendario (1/1 al 31/12) y la antigüedad se mide al cierre. Los días de un año se pueden usar desde el ${oooMD(cfg.disponibleDesde || '10-01')} de ese año hasta el 31/12 del año siguiente: lo que sobra después se pierde. Lo que se toma sale primero de los días más viejos. Del año anterior a ese primer año MAIA calcula cuántos días le correspondían a cada persona por la fecha de ingreso; abajo se carga cuántos ya tomó antes de MAIA (sin cargarlo, el saldo de ese año puede estar de más). Cada persona puede tener también sus días a mano y ajustes.</p></div>
   <div class="card"><div class="card-label">Tipos de solicitud</div><div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Nombre</th><th>Descuenta del saldo</th><th>Cuenta</th><th>Exige fechas de borde</th><th></th></tr></thead><tbody>${tipos}</tbody></table></div>
     <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="oooCfgTipoNuevo()">＋ Agregar tipo</button>
     <p class="hint">"Exige fechas de borde": en corridos, el último día es el último no laborable antes de volver; en hábiles, el primero y el último tienen que ser hábiles.</p></div>
@@ -46126,7 +46127,7 @@ function oooCfgRender() {
     <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" style="width:auto" ${cfg.notificar ? 'checked' : ''} onchange="oooCfgSet('notificar',this.checked)" /> Avisar por campanita y por mail (apagado = modo prueba, no le llega nada a nadie)</label>
     <p class="hint">Aprueban primero los coordinadores del sector de quien pide, y después RR.HH. (cualquier persona del sector RR.HH. puede aprobar, pero el aviso de "para aprobar" le llega solo a la coordinadora de RR.HH.).</p></div>
   <div class="card"><div class="card-label">Personas: ingreso, días y ajustes</div>
-<div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th title="Días que le quedaron sin tomar del año anterior al primero que cuenta MAIA (se pueden usar hasta el 31/12 del primer año)">Le quedaron del año anterior</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="6" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
+<div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th title="Días del año anterior al primero que cuenta MAIA que la persona ya tomó antes de MAIA. MAIA calcula cuántos le correspondían por la fecha de ingreso y descuenta estos; lo que queda se puede usar hasta el 31/12 del primer año">Ya tomó del año anterior (antes de MAIA)</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="6" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
 }
 // Tarjeta del dashboard: RR.HH. ve lo pendiente y quién está fuera hoy; el resto, su propio saldo
 async function dashOOO() {
