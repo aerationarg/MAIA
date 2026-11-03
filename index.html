@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45641,7 +45641,7 @@ function oooPorTipo(email, items, per, cfg) {
 // Reglas: el período es el año calendario. Los días de un año se pueden usar desde el 1/10 de ese año hasta el 31/12 del año siguiente (después se pierden).
 // De los días de cada período, `libres` se pueden partir como se quiera y el resto va en bloques de `bloque` días. Lo que se toma sale primero de la bolsa más vieja.
 // Días hábiles (un bloque cuenta 5) de una solicitud que descuenta, dentro de un período: es lo que usan las bolsas, así los totales coinciden con la tabla
-const oooUnidadesEn = (i, per, cfg) => oooUnidades(i, cfg).filter(u => u.f >= per.ini && u.f <= per.fin).reduce((n, u) => n + (u.bloque ? 5 : 1), 0);
+const oooUnidadesEn = (i, per, cfg) => oooUnidades(i, cfg).filter(u => u.f >= per.ini && u.f <= per.fin).reduce((n, u) => n + (u.bloque ? 5 : u.semana ? u.n : 1), 0);
 // Cómo se muestran los días de una solicitud: las de la lista anterior vienen en corridos, y acá se agrega cuántos son hábiles
 function oooDiasTxt(i) {
   const t = _oooCfg.tipos.find(x => x.id === i.tipo) || {}, d1 = oooD(i.desde), d2 = oooD(i.hasta), pl = n => `${n} día${n === 1 ? '' : 's'}`;
@@ -45664,7 +45664,9 @@ function oooUnidades(i, cfg) {
   const u = [], d1 = oooD(i.desde), d2 = oooD(i.hasta); if (!d1 || !d2) return u;
   for (let lun = oooSuma(d1, -((d1.getDay() + 6) % 7)); lun <= d2; lun = oooSuma(lun, 7)) {
     const habiles = [0, 1, 2, 3, 4].map(k => oooSuma(lun, k)).filter(d => oooHabil(d, cfg)), dentro = habiles.filter(d => d >= d1 && d <= d2); if (!dentro.length) continue;
-    if (habiles.length && lun >= d1 && oooSuma(lun, 4) <= d2) u.push({ bloque: true, f: oooIso(habiles[0]) }); else dentro.forEach(d => u.push({ bloque: false, f: oooIso(d) }));   // bloque: el pedido cubre de lunes a viernes de esa semana
+    if (habiles.length && lun >= d1 && oooSuma(lun, 4) <= d2) u.push({ bloque: true, f: oooIso(habiles[0]) });   // bloque: el pedido cubre de lunes a viernes de esa semana
+    else if (dentro.length === habiles.length && habiles.length < 5) u.push({ bloque: false, semana: true, n: dentro.length, f: oooIso(dentro[0]) });   // semana con feriado donde se piden todos los días hábiles: son días libres, pero si no alcanzan se descuenta un bloque
+    else dentro.forEach(d => u.push({ bloque: false, f: oooIso(d) }));
   }
   return u;
 }
@@ -45672,7 +45674,7 @@ function oooUnidades(i, cfg) {
 function oooBolsas(email, items, cfg, anioVista, extra) {
   const rg = oooReglas(cfg), mis = (items || []).filter(i => i.email === email && (cfg.tipos.find(t => t.id === i.tipo) || {}).descuenta && (i.estado === 'aprobada' || String(i.estado).startsWith('pendiente'))).concat(extra ? [extra] : []).filter(i => i.desde && i.hasta)
     .sort((a, b) => a.desde.localeCompare(b.desde) || String(a.id).localeCompare(String(b.id)));
-  const y1 = Math.max(anioVista, rg.ini, ...mis.map(i => +i.hasta.slice(0, 4))), r = { b: {}, exc: {}, causa: {}, err: {}, rg };
+  const y1 = Math.max(anioVista, rg.ini, ...mis.map(i => +i.hasta.slice(0, 4))), r = { b: {}, exc: {}, causa: {}, err: {}, semBloque: {}, uso: {}, rg };
   for (let y = rg.ini - 1; y <= y1; y++) r.b[y] = oooBolsa(email, y, cfg, rg);
   mis.forEach(i => {
     const k = i.estado === 'aprobada' ? 'tom' : 'pend';
@@ -45685,9 +45687,15 @@ function oooBolsas(email, items, cfg, anioVista, extra) {
       if (partir) r.causa[i.id] = 'partir'; else if (r.causa[i.id] !== 'partir') r.causa[i.id] = f < `${f.slice(0, 4)}-${rg.dd}` ? 'no_disp' : 'saldo';
     };
     oooUnidades(i, cfg).forEach(un => {
+      const yy = +un.f.slice(0, 4), us = r.uso[yy] = r.uso[yy] || { tom: 0, pend: 0 }; us[k] += un.bloque ? rg.B : un.semana ? un.n : 1;   // lo tomado en el año (días hábiles; un bloque cuenta 5)
       if (un.f < `${rg.ini}-01-01`) return;   // antes del primer año que cuenta MAIA no se sabe qué había
-      const yy = +un.f.slice(0, 4), elig = [yy - 1].concat(un.f >= `${yy}-${rg.dd}` ? [yy] : []).map(y => r.b[y]).filter(Boolean);
-      if (un.bloque) {
+      const elig = [yy - 1].concat(un.f >= `${yy}-${rg.dd}` ? [yy] : []).map(y => r.b[y]).filter(Boolean);
+      if (un.semana) {
+        const libresTot = elig.reduce((a, x) => a + Math.max(0, x.libre), 0);
+        if (libresTot < un.n) { const bk = elig.find(x => x.bloque >= rg.B); if (bk) { sacar(bk, 0, rg.B); r.semBloque[i.id] = true; us[k] += rg.B - un.n; return; } }   // no alcanzan los libres pero tiene un bloque: se descuenta el bloque entero
+        let n = un.n; elig.forEach(x => { const t = Math.min(n, Math.max(0, x.libre)); if (t > 0) { sacar(x, t, 0); n -= t; } });
+        if (n > 0) falta(elig, un.f, n, false);
+      } else if (un.bloque) {
         const bk = elig.find(x => x.bloque >= rg.B); if (bk) { sacar(bk, 0, rg.B); return; }
         let n = rg.B; elig.forEach(x => { const t = Math.min(n, Math.max(0, x.libre)); if (t > 0) { sacar(x, t, 0); n -= t; } });   // sin bloques, la semana se paga con días libres
         if (n > 0) falta(elig, un.f, n, false);
@@ -45707,15 +45715,15 @@ function oooSaldo(email, items, per, cfg) {
   const Y = +per.ini.slice(0, 4), r = oooBolsas(email, items, cfg, Y), b = r.b[Y], hoy = oooDisponible(r, oooIso(new Date()));
   if (!b) return { base: null, aj: 0, origen: 'es anterior al primer año que cuenta MAIA con las reglas nuevas', tomados: 0, pend: 0, acum: 0, ant: null, bolsa: null, total: null, quedan: null, libresTot: null, bloquesTot: null, hoy };
   const p = r.b[Y - 1], sin = b.base == null, ant = p && !sin ? p : null, acum = ant ? Math.max(0, ant.libre + ant.bloque) : 0, rem = b.libre + b.bloque;
-  const mios = (items || []).filter(i => i.email === email && (cfg.tipos.find(t => t.id === i.tipo) || {}).descuenta && i.desde <= per.fin && i.hasta >= per.ini), suma = f => mios.filter(f).reduce((n, i) => n + oooUnidadesEn(i, per, cfg), 0);   // lo tomado en el año (en días hábiles, como las bolsas), salga de la bolsa que salga
-  return { base: b.base, aj: b.aj, origen: b.origen, tomados: suma(i => i.estado === 'aprobada'), pend: suma(i => i.estado === 'pendiente_coord' || i.estado === 'pendiente_rrhh'), acum, ant, bolsa: b, total: sin ? null : b.E + acum, quedan: sin ? null : rem + acum,
+  const uso = r.uso[Y] || { tom: 0, pend: 0 };   // lo tomado en el año (en días hábiles, como las bolsas), salga de la bolsa que salga
+  return { base: b.base, aj: b.aj, origen: b.origen, tomados: uso.tom, pend: uso.pend, acum, ant, bolsa: b, total: sin ? null : b.E + acum, quedan: sin ? null : rem + acum,
     libresTot: sin ? null : Math.max(0, b.libre) + (ant ? Math.max(0, ant.libre) : 0), bloquesTot: sin ? null : Math.max(0, b.bloque) + (ant ? Math.max(0, ant.bloque) : 0), hoy };
 }
 // Cómo quedaría una solicitud nueva: de qué bolsa sale cada día (libres o de bloque), qué saldo queda y si hay algo para avisar (error = parte un bloque, no se puede)
 function oooEvaluar(email, items, nuevo, cfg) {
   const Y = +nuevo.desde.slice(0, 4), r = oooBolsas(email, items, cfg, Y, nuevo), partes = [], bY = r.b[Y];
   Object.values(r.b).forEach(bk => { const d = bk.det.filter(x => x.id === nuevo.id); if (d.length) partes.push({ bolsa: bk, l: d.reduce((n, x) => n + x.l - x.ex, 0), b: d.reduce((n, x) => n + x.b, 0) }); });
-  return { partes, exceso: r.exc[nuevo.id] || 0, causa: r.causa[nuevo.id] || '', error: !!r.err[nuevo.id], libresAntes: oooDisponible(oooBolsas(email, items, cfg, Y), nuevo.desde).libres, anio: Y, sinIngreso: !bY || bY.base == null, rg: r.rg };
+  return { partes, exceso: r.exc[nuevo.id] || 0, causa: r.causa[nuevo.id] || '', error: !!r.err[nuevo.id], semBloque: !!r.semBloque[nuevo.id], libresAntes: oooDisponible(oooBolsas(email, items, cfg, Y), nuevo.desde).libres, anio: Y, sinIngreso: !bY || bY.base == null, rg: r.rg };
 }
 function oooEvalHtml(ev, quien2) {
   if (ev.sinIngreso) return quien2 ? ' No puedo calcular tu saldo: falta tu fecha de ingreso.' : ' No se puede calcular el saldo: falta la fecha de ingreso.';
@@ -45725,6 +45733,7 @@ function oooEvalHtml(ev, quien2) {
   let h = `<div>${L === 1 ? '1 día libre' : L + ' días libres'} y ${B / ev.rg.B} bloque${B / ev.rg.B === 1 ? '' : 's'} (semanas completas de lunes a viernes: ${B} días).</div>`;
   ev.partes.forEach(x => { const bk = x.bolsa; h += `<div>Del año ${bk.anio} (se puede usar hasta el ${esc(oooFmt(bk.vence))}): ${q[0]} ${lib(x.l)} y ${x.b} de bloque. ${q[1]} ${lib(Math.max(0, bk.libre))} y ${Math.max(0, bk.bloque)} de bloque.</div>`; });
   if (ev.partes.some(x => x.bolsa.sinCargar)) h += `<div style="color:#7a5b00">RR.HH. todavía no cargó cuántos días ${quien2 ? 'tomaste' : 'tomó'} del ${ev.anio - 1} antes de MAIA: ese saldo puede estar de más.</div>`;
+  if (ev.semBloque) h += `<div style="color:#7a5b00">Esa semana tiene feriado y ${quien2 ? 'no te alcanzan' : 'no le alcanzan'} los días libres: se descuenta como un bloque de ${ev.rg.B} días.</div>`;
   if (ev.exceso) h += `<div style="color:#b3261e">${q[2]} en ${ev.exceso} día${ev.exceso === 1 ? '' : 's'}: ${ev.causa === 'no_disp' ? `los días de ${ev.anio} se pueden usar recién desde el ${esc(oooFmt(`${ev.anio}-${ev.rg.dd}`))}` : 'no alcanza el saldo'}.</div>`;
   return h;
 }
