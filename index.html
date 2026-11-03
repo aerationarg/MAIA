@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45653,11 +45653,18 @@ function oooAprobadoresCoord(perf, cfg, sector, email) {
   }
   return coords;
 }
+// A quién avisa RR.HH.: solo la coordinadora (o coordinadores) del sector RR.HH.; si no hay ninguna cargada como coordinadora, a todos los de RR.HH. para que no se pierda el aviso
+const oooRRHHCoordPerfiles = (perf, cfg) => { const c = perf.filter(p => p.sector === 'RRHH' && p.coordinador); return c.length ? c : oooRRHHPerfiles(perf, cfg); };
 const oooRRHHPerfiles = (perf, cfg) => perf.filter(p => p.sector === 'RRHH' || (cfg.rrhhEmails || []).map(e => e.toLowerCase()).includes(p.email));
 const oooPuedeAprobar = (it, cfg) => !it.vieja && ((it.estado === 'pendiente_coord' && (currentSector === 'Admin' || it.aprobCoord.includes(oooMiEmail()))) || (it.estado === 'pendiente_rrhh' && oooEsRRHH(cfg)));
+// Campanita + mail (el mail sale de la cuenta de Microsoft de quien hace la acción, igual que en Hallazgos)
 async function oooAvisar(perfiles, titulo, cuerpo) {
   if (!_oooCfg || !_oooCfg.notificar) return;
-  for (const p of perfiles) { try { await notifCreate(p.id, titulo, cuerpo, 'ooo'); } catch (e) { /* un aviso que falla no frena la solicitud */ } }
+  const html = `<p><b>${esc(titulo)}</b></p><p>${esc(cuerpo)}</p><p>Entrá a la solapa <b>Fuera de oficina</b> de MAIA para verla: <a href="https://aerationarg.github.io/MAIA/">aerationarg.github.io/MAIA</a></p>`;
+  for (const p of perfiles) {
+    try { await notifCreate(p.id, titulo, cuerpo, 'ooo'); } catch (e) { /* un aviso que falla no frena la solicitud */ }
+    if (p.email) { try { await hallazgosSendMail(`Fuera de oficina: ${titulo}`, html, p.email); } catch (e) { console.warn('No se pudo enviar el mail a ' + p.email + ':', e.message); } }
+  }
 }
 
 // ── Acciones sobre solicitudes ──
@@ -45692,7 +45699,7 @@ async function oooResolver(id, ok, comentario) {
   const coord = cur.estado === 'pendiente_coord', nuevo = ok ? (coord ? 'pendiente_rrhh' : 'aprobada') : 'rechazada', ahora = oooAhora(), r = ok ? 'Aprobado' : 'Rechazado';
   await oooPatch(id, Object.assign(coord ? { RtaCoord: r, FechaCoord: ahora, ComentCoord: comentario || '' } : { RtaRRHH: r, FechaRRHH: ahora, ComentRRHH: comentario || '' }, { Estado: nuevo, Historial: JSON.stringify(oooHist(cur, `${ok ? 'Aprobó' : 'Rechazó'} (${coord ? 'coordinador' : 'RR.HH.'})`, comentario, nuevo)) }));
   const tipo = (cfg.tipos.find(t => t.id === cur.tipo) || {}).nombre || cur.tipo, yo = perf.find(p => p.email === cur.email);
-  if (ok && coord) await oooAvisar(oooRRHHPerfiles(perf, cfg), 'Solicitud para aprobar (RR.HH.)', `${cur.nombre}: ${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}. Ya la aprobó su coordinador.`);
+  if (ok && coord) await oooAvisar(oooRRHHCoordPerfiles(perf, cfg), 'Solicitud para aprobar (RR.HH.)', `${cur.nombre}: ${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}. Ya la aprobó su coordinador.`);
   if (yo) await oooAvisar([yo], ok ? (coord ? 'Tu solicitud pasó a RR.HH.' : 'Solicitud aprobada') : 'Solicitud rechazada', `${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}${!ok ? '. Motivo: ' + comentario : ''}${!ok ? '. Podés corregirla y reenviarla.' : ''}`);
 }
 async function oooCancelar(id) {
@@ -45957,8 +45964,8 @@ function oooCfgRender() {
     <div style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="cfg-ooo-anio" type="number" value="${new Date().getFullYear()}" style="width:90px" /><button class="btn btn-secondary btn-sm" onclick="oooCfgTraerFeriados()">Traer feriados del año</button></div><div id="cfg-ooo-fer-msg" class="hint"></div></div>
   <div class="card"><div class="card-label">Aprobación y avisos</div>
     <label>Si pide un coordinador, aprueba</label><select style="width:100%;margin-bottom:8px" onchange="oooCfgSet('escalamientoEmail',this.value)"><option value="">Roberto Martín Derosa (automático por nombre)</option>${emails.map(p => `<option value="${esc(p.email)}" ${String(cfg.escalamientoEmail || '').toLowerCase() === p.email ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select>
-    <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" style="width:auto" ${cfg.notificar ? 'checked' : ''} onchange="oooCfgSet('notificar',this.checked)" /> Avisar por campanita y push (apagado = modo prueba, no le llega nada a nadie)</label>
-    <p class="hint">Aprueban primero los coordinadores del sector de quien pide, y después RR.HH. (las personas del sector RR.HH.).</p></div>
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" style="width:auto" ${cfg.notificar ? 'checked' : ''} onchange="oooCfgSet('notificar',this.checked)" /> Avisar por campanita y por mail (apagado = modo prueba, no le llega nada a nadie)</label>
+    <p class="hint">Aprueban primero los coordinadores del sector de quien pide, y después RR.HH. (cualquier persona del sector RR.HH. puede aprobar, pero el aviso de "para aprobar" le llega solo a la coordinadora de RR.HH.).</p></div>
   <div class="card"><div class="card-label">Personas: ingreso, días y ajustes</div>
 <div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="5" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
 }
