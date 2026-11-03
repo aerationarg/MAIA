@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45633,13 +45633,23 @@ function oooAcumulado(email, items, per, cfg) {
 function oooPorTipo(email, items, per, cfg) {
   const r = {};
   (items || []).filter(i => i.email === email && i.desde <= per.fin && i.hasta >= per.ini).forEach(i => {
-    const o = r[i.tipo] = r[i.tipo] || { tipo: i.tipo, n: 0, aprob: 0, pend: 0, no: 0 }, d = oooDiasEnPeriodo(i.desde, i.hasta, i.regimen, per, cfg, i.dias);
+    const o = r[i.tipo] = r[i.tipo] || { tipo: i.tipo, n: 0, aprob: 0, pend: 0, no: 0 }, d = (cfg.tipos.find(t => t.id === i.tipo) || {}).descuenta ? oooUnidadesEn(i, per, cfg) : oooDiasEnPeriodo(i.desde, i.hasta, i.regimen, per, cfg, i.dias);
     if (i.estado === 'aprobada') { o.n++; o.aprob += d; } else if (i.estado === 'pendiente_coord' || i.estado === 'pendiente_rrhh') { o.n++; o.pend += d; } else o.no++;
   });
   const orden = cfg.tipos.map(t => t.id); return Object.values(r).sort((a, b) => (orden.indexOf(a.tipo) + 1 || 99) - (orden.indexOf(b.tipo) + 1 || 99));
 }
 // Reglas: el período es el año calendario. Los días de un año se pueden usar desde el 1/10 de ese año hasta el 31/12 del año siguiente (después se pierden).
 // De los días de cada período, `libres` se pueden partir como se quiera y el resto va en bloques de `bloque` días. Lo que se toma sale primero de la bolsa más vieja.
+// Días hábiles (un bloque cuenta 5) de una solicitud que descuenta, dentro de un período: es lo que usan las bolsas, así los totales coinciden con la tabla
+const oooUnidadesEn = (i, per, cfg) => oooUnidades(i, cfg).filter(u => u.f >= per.ini && u.f <= per.fin).reduce((n, u) => n + (u.bloque ? 5 : 1), 0);
+// Cómo se muestran los días de una solicitud: las de la lista anterior vienen en corridos, y acá se agrega cuántos son hábiles
+function oooDiasTxt(i) {
+  const t = _oooCfg.tipos.find(x => x.id === i.tipo) || {}, d1 = oooD(i.desde), d2 = oooD(i.hasta), pl = n => `${n} día${n === 1 ? '' : 's'}`;
+  if (d1 && d2 && d2 < d1) return 'fechas invertidas en la lista';
+  if (!t.descuenta || i.regimen === 'habiles') return pl(i.dias);
+  const h = oooUnidades(i, _oooCfg).reduce((n, u) => n + (u.bloque ? 5 : 1), 0);
+  return `${pl(i.dias)} corridos · ${h} hábil${h === 1 ? '' : 'es'}`;
+}
 const oooMD = dd => String(dd).split('-').reverse().map(Number).join('/');   // '10-01' → '1/10'
 const oooReglas = cfg => ({ dd: String(cfg.disponibleDesde || '10-01'), L: cfg.libres == null || cfg.libres === '' ? 5 : Number(cfg.libres), B: 5, ini: Number(cfg.inicioAnio) || 2026 });   // un bloque es una semana de lunes a viernes (5 días)
 function oooBolsa(email, anio, cfg, rg) {
@@ -45697,7 +45707,7 @@ function oooSaldo(email, items, per, cfg) {
   const Y = +per.ini.slice(0, 4), r = oooBolsas(email, items, cfg, Y), b = r.b[Y], hoy = oooDisponible(r, oooIso(new Date()));
   if (!b) return { base: null, aj: 0, origen: 'es anterior al primer año que cuenta MAIA con las reglas nuevas', tomados: 0, pend: 0, acum: 0, ant: null, bolsa: null, total: null, quedan: null, libresTot: null, bloquesTot: null, hoy };
   const p = r.b[Y - 1], sin = b.base == null, ant = p && !sin ? p : null, acum = ant ? Math.max(0, ant.libre + ant.bloque) : 0, rem = b.libre + b.bloque;
-  const mios = (items || []).filter(i => i.email === email && (cfg.tipos.find(t => t.id === i.tipo) || {}).descuenta && i.desde <= per.fin && i.hasta >= per.ini), suma = f => mios.filter(f).reduce((n, i) => n + oooDiasEnPeriodo(i.desde, i.hasta, i.regimen, per, cfg, i.dias), 0);   // lo tomado en el año, salga de la bolsa que salga
+  const mios = (items || []).filter(i => i.email === email && (cfg.tipos.find(t => t.id === i.tipo) || {}).descuenta && i.desde <= per.fin && i.hasta >= per.ini), suma = f => mios.filter(f).reduce((n, i) => n + oooUnidadesEn(i, per, cfg), 0);   // lo tomado en el año (en días hábiles, como las bolsas), salga de la bolsa que salga
   return { base: b.base, aj: b.aj, origen: b.origen, tomados: suma(i => i.estado === 'aprobada'), pend: suma(i => i.estado === 'pendiente_coord' || i.estado === 'pendiente_rrhh'), acum, ant, bolsa: b, total: sin ? null : b.E + acum, quedan: sin ? null : rem + acum,
     libresTot: sin ? null : Math.max(0, b.libre) + (ant ? Math.max(0, ant.libre) : 0), bloquesTot: sin ? null : Math.max(0, b.bloque) + (ant ? Math.max(0, ant.bloque) : 0), hoy };
 }
@@ -45952,7 +45962,7 @@ function oooPersonasHtml() {
   const s = oooSaldo(p.email, _ooo.items || [], per, cfg), pc = (cfg.personas || {})[p.email] || {}, mias = (_ooo.items || []).filter(i => i.email === p.email).sort((a, b) => b.desde.localeCompare(a.desde));
   const ajustes = (pc.ajustes || []).map(a => `<div class="hint" style="margin:2px 0">${esc(oooFmt(a.fecha))}: ${a.dias > 0 ? '+' : ''}${a.dias} día${Math.abs(a.dias) === 1 ? '' : 's'} — ${esc(a.motivo || 'sin motivo')} (${esc(a.por || '')})</div>`).join('');
   const reqs = mias.map(i => { const ab = !!_ooo.abierto[i.id];
-    return `<div style="border-top:1px solid var(--border);padding:8px 0"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:180px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span>${oooPeriodoTxt(i) ? `<div class="hint" style="margin:2px 0 0">${esc(oooPeriodoTxt(i))}</div>` : ''}</div>${oooChip(i.estado)}<button class="btn btn-secondary btn-sm" onclick="_ooo.abierto['${i.id}']=!_ooo.abierto['${i.id}'];oooRender()">${ab ? 'Ocultar' : 'Historial'}</button></div>
+    return `<div style="border-top:1px solid var(--border);padding:8px 0"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:180px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${oooDiasTxt(i)}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span>${oooPeriodoTxt(i) ? `<div class="hint" style="margin:2px 0 0">${esc(oooPeriodoTxt(i))}</div>` : ''}</div>${oooChip(i.estado)}<button class="btn btn-secondary btn-sm" onclick="_ooo.abierto['${i.id}']=!_ooo.abierto['${i.id}'];oooRender()">${ab ? 'Ocultar' : 'Historial'}</button></div>
       ${ab ? `<div style="font-size:12px;margin-top:6px">${i.historial.map(h => `<div><b>${esc(oooFmt(String(h.f || '').slice(0, 10)))}</b> · ronda ${esc(h.r || 1)} · ${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ` — «${esc(h.c)}»` : ''}</div>`).join('') || '<span class="hint">' + (i.vieja ? 'Viene de la lista anterior de SharePoint.' : 'Sin movimientos.') + '</span>'}</div>` : ''}</div>`; }).join('');
   const tile = (v, l, c) => dashTile(v == null ? '—' : v, l, '', c);
   const pt = oooPorTipo(p.email, _ooo.items || [], per, cfg), tdd = 'padding:4px 6px;border-bottom:1px solid var(--border)';
@@ -45981,7 +45991,7 @@ function oooMisHtml() {
     if (i.estado === 'rechazada' && !i.vieja) acc.push(`<button class="btn btn-primary btn-sm" onclick="oooEditar('${i.id}')">Corregir y reenviar</button>`);
     if (!i.vieja && ['pendiente_coord', 'pendiente_rrhh', 'rechazada'].includes(i.estado)) acc.push(`<button class="btn btn-secondary btn-sm" onclick="oooCancelarUI('${i.id}')">Cancelar</button>`);
     const hist = abierto ? `<div style="margin-top:8px;font-size:12px;border-top:1px solid var(--border);padding-top:8px">${i.vieja ? '<span class="hint">Viene de la lista anterior de SharePoint (solo lectura).</span>' : ''}${i.historial.map(h => `<div style="margin-bottom:4px"><b>${esc(oooFmt(String(h.f || '').slice(0, 10)))}</b> · ronda ${esc(h.r || 1)} · ${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ` — «${esc(h.c)}»` : ''}</div>`).join('') || '<span class="hint">Sin movimientos.</span>'}</div>` : '';
-    return `<div class="card" style="margin-bottom:8px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:200px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span>${oooPeriodoTxt(i) ? `<div class="hint" style="margin:2px 0 0">${esc(oooPeriodoTxt(i))}</div>` : ''}</div>${oooChip(i.estado)}</div>${hist}
+    return `<div class="card" style="margin-bottom:8px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><div style="flex:1;min-width:200px"><b>${esc(oooTipoNombre(i.tipo))}</b> · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${oooDiasTxt(i)}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''}${i.vieja ? ' · lista anterior' : ''})</span>${oooPeriodoTxt(i) ? `<div class="hint" style="margin:2px 0 0">${esc(oooPeriodoTxt(i))}</div>` : ''}</div>${oooChip(i.estado)}</div>${hist}
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="_ooo.abierto['${i.id}']=!_ooo.abierto['${i.id}'];oooRender()">${abierto ? 'Ocultar historial' : 'Ver historial'}</button>${acc.join('')}</div></div>`;
   }).join('');
   return resumen + `<div class="card-label" style="margin:14px 2px 8px">Mis solicitudes</div>` + (filas || '<p class="hint">Todavía no hiciste ninguna solicitud.</p>');
@@ -46031,7 +46041,7 @@ function oooAprobarHtml(pend) {
     const tipo = cfg.tipos.find(t => t.id === i.tipo) || {}, ev = tipo.descuenta ? oooEvaluar(i.email, (_ooo.items || []).filter(x => x.id !== i.id), { id: '__nuevo', email: i.email, tipo: i.tipo, desde: i.desde, hasta: i.hasta, regimen: i.regimen, dias: i.dias, estado: 'pendiente_coord' }, cfg) : null;
     const etapa = i.estado === 'pendiente_coord' ? 'coordinador' : 'RR.HH.';
     return `<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px"><div style="flex:1;min-width:200px"><b>${esc(i.nombre)}</b> <span class="hint">${esc(i.sector)}</span></div>${oooChip(i.estado)}</div>
-      <div style="font-size:14px">${esc(oooTipoNombre(i.tipo))} · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${i.dias} día${i.dias === 1 ? '' : 's'}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''})</span></div>
+      <div style="font-size:14px">${esc(oooTipoNombre(i.tipo))} · ${esc(oooFmt(i.desde))} al ${esc(oooFmt(i.hasta))} <span class="hint">(${oooDiasTxt(i)}${i.ronda > 1 ? ' · ronda ' + i.ronda : ''})</span></div>
       ${oooPeriodoTxt(i) ? `<div class="hint">${esc(oooPeriodoTxt(i))}</div>` : ''}${ev ? `<div class="hint">${oooEvalHtml(ev, false)}</div>` : ''}
       ${i.sup === 'Si' ? `<div style="font-size:13px;margin-top:6px"><b>Se superpone.</b> ${esc(i.gestion)}</div>` : ''}${i.coment ? `<div style="font-size:13px;margin-top:6px">${esc(i.coment)}</div>` : ''}
       ${i.historial.length > 1 ? `<div class="hint" style="margin-top:6px">${i.historial.slice(-3).map(h => `${esc(h.por || '')}: ${esc(h.accion || '')}${h.c ? ' — «' + esc(h.c) + '»' : ''}`).join(' · ')}</div>` : ''}
