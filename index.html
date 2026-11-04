@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45505,7 +45505,7 @@ const OOO_CFG_DEF = {
   sitio: 'aerationargentina.sharepoint.com:/sites/VacacionesyLicencias', lista: 'OOO Solicitudes',
   periodoInicio: '01-01', regimen: 'habiles', disponibleDesde: '10-01', libres: 5, bloque: 5, inicioAnio: 2026, reglaV2: false,   // año calendario; los días de un año se usan desde el 1/10 de ese año hasta el 31/12 del siguiente; de cada período, 'libres' días se parten como se quiera y el resto va en bloques (semanas completas de lunes a viernes, que no se pueden partir); inicioAnio = primer año que cuenta MAIA con estas reglas (del año anterior se calculan los días que correspondían por ingreso y se descuentan los ya tomados antes de MAIA: personas[email].tomadosAntes)
   escalaCorridos: [[0, 14], [5, 21], [10, 28], [20, 35]], escalaHabiles: [[0, 10], [5, 15], [10, 20], [20, 25]],   // [años de antigüedad desde, días]
-  feriados: [], escalamientoEmail: '', rrhhEmails: [], notificar: false, acumulables: false, acumDesde: '', listaVieja: 'Calendario', usarVieja: true,   // la lista anterior se lee (solo lectura) para el calendario, la vista de RR.HH. y los saldos
+  feriados: [], escalamientoEmail: '', rrhhEmails: [], notificar: false, aprobPorMail: false, acumulables: false, acumDesde: '', listaVieja: 'Calendario', usarVieja: true,   // la lista anterior se lee (solo lectura) para el calendario, la vista de RR.HH. y los saldos
   tipos: [
     { id: 'vacaciones', nombre: 'Vacaciones', descuenta: true, cuenta: 'regimen', bordes: true },
     { id: 'sin_goce', nombre: 'Licencia sin goce de sueldo', descuenta: false, cuenta: 'corridos' },
@@ -45782,6 +45782,10 @@ async function oooLista(crear, log) {
 }
 function oooItemDe(it) {
   const f = it.fields || {}; let h = []; try { h = JSON.parse(f.Historial || '[]'); } catch (e) { h = []; }
+  // Las respuestas dadas desde el mail (flujo de Power Automate) completan Rta/Fecha/Coment pero no el historial: se agregan acá si faltan
+  h = Array.isArray(h) ? h.slice() : []; const rondaH = Number(f.Ronda) || 1;
+  const porMail = (rta, fecha, com, quien, apr) => { if (!rta || h.some(x => (x.r || 1) === rondaH && String(x.accion || '').toLowerCase().includes(quien.toLowerCase()) && /aprob|rechaz/i.test(x.accion || ''))) return; const ok = !/rechaz/i.test(rta); h.push({ f: fecha || '', por: 'Aprobación por mail', accion: `${ok ? 'Aprobó' : 'Rechazó'} (${quien}, por mail)`, c: com || '', e: ok ? apr : 'rechazada', r: rondaH }); };
+  porMail(f.RtaCoord, f.FechaCoord, f.ComentCoord, 'coordinador', 'pendiente_rrhh'); porMail(f.RtaRRHH, f.FechaRRHH, f.ComentRRHH, 'RR.HH.', 'aprobada');
   const lista = s => String(s || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
   return { id: String(it.id), email: String(f.EmpleadoEmail || '').toLowerCase(), nombre: f.EmpleadoNombre || '', sector: f.Sector || '', tipo: f.Tipo || '', desde: f.Desde || '', hasta: f.Hasta || '', dias: Number(f.Dias) || 0, regimen: f.Regimen || '',
     sup: f.Superposicion || '', gestion: f.Gestion || '', coment: f.Comentarios || '', estado: f.Estado || '', ronda: Number(f.Ronda) || 1, aprobCoord: lista(f.AprobCoord), historial: Array.isArray(h) ? h : [], creado: it.createdDateTime || '' };
@@ -45839,12 +45843,12 @@ const oooRRHHCoordPerfiles = (perf, cfg) => { const c = perf.filter(p => p.secto
 const oooRRHHPerfiles = (perf, cfg) => perf.filter(p => p.sector === 'RRHH' || (cfg.rrhhEmails || []).map(e => e.toLowerCase()).includes(p.email));
 const oooPuedeAprobar = (it, cfg) => !it.vieja && ((it.estado === 'pendiente_coord' && (currentSector === 'Admin' || it.aprobCoord.includes(oooMiEmail()))) || (it.estado === 'pendiente_rrhh' && oooEsRRHH(cfg)));
 // Campanita + mail (el mail sale de la cuenta de Microsoft de quien hace la acción, igual que en Hallazgos)
-async function oooAvisar(perfiles, titulo, cuerpo) {
+async function oooAvisar(perfiles, titulo, cuerpo, soloCampanita) {
   if (!_oooCfg || !_oooCfg.notificar) return;
   const html = `<p><b>${esc(titulo)}</b></p><p>${esc(cuerpo)}</p><p>Entrá a la solapa <b>Fuera de oficina</b> de MAIA para verla: <a href="https://aerationarg.github.io/MAIA/">aerationarg.github.io/MAIA</a></p>`;
   for (const p of perfiles) {
     try { await notifCreate(p.id, titulo, cuerpo, 'ooo'); } catch (e) { /* un aviso que falla no frena la solicitud */ }
-    if (p.email) { try { await hallazgosSendMail(`Fuera de oficina: ${titulo}`, html, p.email); } catch (e) { console.warn('No se pudo enviar el mail a ' + p.email + ':', e.message); } }
+    if (p.email && !soloCampanita) { try { await hallazgosSendMail(`Fuera de oficina: ${titulo}`, html, p.email); } catch (e) { console.warn('No se pudo enviar el mail a ' + p.email + ':', e.message); } }
   }
 }
 
@@ -45872,7 +45876,7 @@ async function oooEnviar(f, editId) {
     cur.ronda += 1;
     await oooPatch(editId, Object.assign({ Title: titulo, Estado: 'pendiente_coord', Ronda: cur.ronda, RtaCoord: '', FechaCoord: '', ComentCoord: '', RtaRRHH: '', FechaRRHH: '', ComentRRHH: '', Historial: JSON.stringify(oooHist(cur, 'Corrigió y reenvió la solicitud', '', 'pendiente_coord')) }, base));
   }
-  await oooAvisar(aprob, 'Solicitud para aprobar', `${currentUser.nombre || email}: ${tipo.nombre}, ${oooFmt(f.desde)} al ${oooFmt(f.hasta)} (${calc.dias} días).`);
+  await oooAvisar(aprob, 'Solicitud para aprobar', `${currentUser.nombre || email}: ${tipo.nombre}, ${oooFmt(f.desde)} al ${oooFmt(f.hasta)} (${calc.dias} días).`, cfg.aprobPorMail);
 }
 async function oooResolver(id, ok, comentario) {
   const cfg = await oooCfgCargar(), perf = await oooPerfiles(), cur = await oooLeerItem(id);
@@ -45881,7 +45885,7 @@ async function oooResolver(id, ok, comentario) {
   const coord = cur.estado === 'pendiente_coord', nuevo = ok ? (coord ? 'pendiente_rrhh' : 'aprobada') : 'rechazada', ahora = oooAhora(), r = ok ? 'Aprobado' : 'Rechazado';
   await oooPatch(id, Object.assign(coord ? { RtaCoord: r, FechaCoord: ahora, ComentCoord: comentario || '' } : { RtaRRHH: r, FechaRRHH: ahora, ComentRRHH: comentario || '' }, { Estado: nuevo, Historial: JSON.stringify(oooHist(cur, `${ok ? 'Aprobó' : 'Rechazó'} (${coord ? 'coordinador' : 'RR.HH.'})`, comentario, nuevo)) }));
   const tipo = (cfg.tipos.find(t => t.id === cur.tipo) || {}).nombre || cur.tipo, yo = perf.find(p => p.email === cur.email);
-  if (ok && coord) await oooAvisar(oooRRHHCoordPerfiles(perf, cfg), 'Solicitud para aprobar (RR.HH.)', `${cur.nombre}: ${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}. Ya la aprobó su coordinador.`);
+  if (ok && coord) await oooAvisar(oooRRHHCoordPerfiles(perf, cfg), 'Solicitud para aprobar (RR.HH.)', `${cur.nombre}: ${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}. Ya la aprobó su coordinador.`, cfg.aprobPorMail);
   if (yo) await oooAvisar([yo], ok ? (coord ? 'Tu solicitud pasó a RR.HH.' : 'Solicitud aprobada') : 'Solicitud rechazada', `${tipo}, ${oooFmt(cur.desde)} al ${oooFmt(cur.hasta)}${!ok ? '. Motivo: ' + comentario : ''}${!ok ? '. Podés corregirla y reenviarla.' : ''}`);
 }
 async function oooCancelar(id) {
@@ -46147,6 +46151,8 @@ function oooCfgRender() {
   <div class="card"><div class="card-label">Aprobación y avisos</div>
     <label>Si pide un coordinador, aprueba</label><select style="width:100%;margin-bottom:8px" onchange="oooCfgSet('escalamientoEmail',this.value)"><option value="">Roberto Martín Derosa (automático por nombre)</option>${emails.map(p => `<option value="${esc(p.email)}" ${String(cfg.escalamientoEmail || '').toLowerCase() === p.email ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select>
     <label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" style="width:auto" ${cfg.notificar ? 'checked' : ''} onchange="oooCfgSet('notificar',this.checked)" /> Avisar por campanita y por mail (apagado = modo prueba, no le llega nada a nadie)</label>
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;margin-top:8px"><input type="checkbox" style="width:auto" ${cfg.aprobPorMail ? 'checked' : ''} onchange="oooCfgSet('aprobPorMail',this.checked)" /> Quien aprueba recibe un mail de aprobación de Power Automate (MAIA solo le avisa por campanita)</label>
+    <p class="hint">Hace falta el flujo de Power Automate que dispara el approval (guía: docs/OOO - flujo de aprobacion por mail.md). Sin el flujo, dejá esto apagado. Aprobar desde el mail y desde MAIA vale lo mismo: lo que se responda primero cuenta.</p>
     <p class="hint">Aprueban primero los coordinadores del sector de quien pide, y después RR.HH. (cualquier persona del sector RR.HH. puede aprobar, pero el aviso de "para aprobar" le llega solo a la coordinadora de RR.HH.).</p></div>
   <div class="card"><div class="card-label">Personas: ingreso, días y ajustes</div>
 <div style="overflow-x:auto"><table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr><th style="text-align:left">Persona</th><th>Ingreso</th><th>Días a mano</th><th title="Días del año anterior al primero que cuenta MAIA que la persona ya tomó antes de MAIA. MAIA calcula cuántos le correspondían por la fecha de ingreso y descuenta estos; lo que queda se puede usar hasta el 31/12 del primer año">Ya tomó del año anterior (antes de MAIA)</th><th>Le corresponden</th><th></th></tr></thead><tbody>${personas || '<tr><td colspan="6" class="hint">No se pudo leer la lista de usuarios.</td></tr>'}</tbody></table></div></div>`;
