@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -548,6 +548,8 @@
     <!-- ═══ PANEL: Fuera de oficina (OOO) ═══ -->
     <div class="panel" id="panel-ooo"><div id="ooo-root"><p class="hint">Cargando…</p></div></div>
     <div class="panel" id="panel-cfg-ooo"><div id="cfg-ooo-root"><p class="hint">Cargando…</p></div></div>
+    <div class="panel" id="panel-auditorias"><div id="aud-root"><p class="hint">Cargando…</p></div></div>
+    <div class="panel" id="panel-cfg-auditorias"><div id="cfg-auditorias-root"><p class="hint">Cargando…</p></div></div>
 
     <!-- ═══ PANEL: Dashboard ═══ -->
     <div class="panel" id="panel-dashboard">
@@ -2543,6 +2545,8 @@ function switchPanel(name) {
   if (name === 'admin') renderAdmin();
   if (name === 'ooo') oooAbrir();
   if (name === 'cfg-ooo') oooCfgAbrir();
+  if (name === 'auditorias') audAbrir();
+  if (name === 'cfg-auditorias') audCfgAbrir();
   if (name === 'cfg-rend') {
     renderRendFields(); rendLoadFields().then(renderRendFields);
     rendLoadManualFields().then(renderRendManualFields);
@@ -5396,6 +5400,365 @@ async function renderHallazgos() {
   }
 }
 
+// ══ Auditorías internas de áreas (SGI) — formulario F-SGI-38 ══
+// SGI programa qué persona audita y a qué área (auditorías cruzadas entre áreas); el auditor completa el checklist en MAIA y lo envía; la coordinadora de SGI lo revisa
+// (Conforme / Requiere ajuste), igual que Hallazgos. Al quedar Conforme se arma el registro (Word + PDF) y se guarda en la carpeta de Calidad de SharePoint.
+// Datos en la tabla auditorias_internas (docs/auditorias.sql). Configuración (preguntas base, textos fijos, carpeta) en app_config.
+const AUD_RESULTADOS = [['C', 'Conforme'], ['NC', 'No conforme'], ['O', 'Oportunidad de mejora'], ['NA', 'No aplica']];
+const AUD_AUTONOMIA = ['Sí', 'Con acompañamiento', 'Aún no'];
+const AUD_ESTADOS = { programada: ['Programada', '#6b7280'], en_curso: ['En curso', '#2563eb'], enviada: ['En revisión de SGI', '#b8860b'], ajuste: ['Requiere ajuste', '#c2410c'], aprobada: ['Aprobada', '#15803d'] };
+const AUD_TINTE = { C: 'rgba(46,160,67,.10)', NC: 'rgba(224,36,36,.10)', O: 'rgba(234,170,0,.14)', NA: 'rgba(120,120,120,.10)' };
+const AUD_CFG_DEF = {
+  titulo: 'AUDITORÍA INTERNA DE ÁREAS', codigo: 'F-SGI-38', rev: '01', fecha: '02/11/26', libres: 6,
+  objetivo: 'Verificar el cumplimiento y la eficacia de los controles del área, detectar desvíos y oportunidades de mejora.',
+  criterios: 'Procedimientos e instructivos del SGI, requisitos internos y del cliente, registros aplicables y requisitos ISO que correspondan.',
+  preguntas: [
+    '¿El área conoce la Política de SGI y su acceso dentro del SharePoint?',
+    'Los procedimientos del área ¿se encuentran vigentes y trazables con respecto al F-SGI-01 “Listado de Documentos y Registros Controlados”? Solicitar documentos.',
+    'Los formularios, check list y registros del área ¿se encuentran vigentes y trazables con respecto al F-SGI-01 “Listado de Documentos y Registros Controlados”? Solicitar documentos.',
+    '¿El área cuenta con hallazgos vencidos sin tratamiento? Planilla F-SGI-19.',
+    '¿El área mantiene actualizado el seguimiento de sus objetivos SGI? Planilla F-SGI-07.',
+    '¿El área cuenta con riesgos y oportunidades sin tratar a la fecha? Planilla F-SGI-08.',
+    '¿Qué indicadores utilizan para medir el desempeño del área?'
+  ]
+};
+function AUD_CFG_KEY() { return 'auditorias_cfg_' + currentEmpresa; }
+function AUD_CARPETA_KEY() { return 'auditorias_carpeta_' + currentEmpresa; }
+let _audCfg = null, _audEmp = null, _audPerf = null, _audLista = [], _audErr = '', _audMsg = '', _audAbierta = null, _audEdita = false, _audRevisa = false, _audOcupado = false, _audProgAbierta = false;
+const audEsSGI = () => currentSector === 'SGI' || currentSector === 'Admin';
+const audEsCoord = () => currentSector === 'Admin' || (currentSector === 'SGI' && !!(currentUser && currentUser.coordinador));
+const audH = extra => Object.assign({ Authorization: 'Bearer ' + ((JSON.parse(localStorage.getItem('daia_session') || 'null') || {}).token || '') }, extra || {});
+const audFecha = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+const audCuenta = a => { const fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim()); return { nc: fs.filter(f => f.resultado === 'NC').length, o: fs.filter(f => f.resultado === 'O').length }; };
+
+async function audCfgCargar(forzar) {
+  if (_audEmp !== currentEmpresa) { _audCfg = null; _audPerf = null; _audEmp = currentEmpresa; }
+  if (_audCfg && !forzar) return _audCfg;
+  let guardada = {};
+  try { const raw = await supaConfigGet(AUD_CFG_KEY()); if (raw) guardada = JSON.parse(raw) || {}; } catch (e) { guardada = {}; }
+  _audCfg = Object.assign({}, AUD_CFG_DEF, guardada);
+  if (!Array.isArray(_audCfg.preguntas) || !_audCfg.preguntas.length) _audCfg.preguntas = AUD_CFG_DEF.preguntas.slice();
+  return _audCfg;
+}
+async function audPerfilesCargar() {
+  if (_audPerf) return _audPerf;
+  try { const r = await supaFetch('/rest/v1/profiles?select=id,nombre,email,sector,coordinador&order=nombre', { headers: audH() }); _audPerf = r.ok ? await r.json() : []; } catch (e) { _audPerf = []; }
+  return _audPerf;
+}
+async function audListar() {
+  _audErr = '';
+  try {
+    const r = await supaFetch(`/rest/v1/auditorias_internas?select=*&empresa=eq.${currentEmpresa}&order=created_at.desc&limit=300`, { headers: audH() });
+    if (!r.ok) { _audLista = []; _audErr = `No pude leer las auditorías (HTTP ${r.status}). ¿Se corrió el SQL docs/auditorias.sql en Supabase?`; return; }
+    _audLista = await r.json();
+  } catch (e) { _audLista = []; _audErr = 'No pude leer las auditorías: ' + e.message; }
+}
+async function audAbrir() {
+  const el = document.getElementById('aud-root'); if (!el) return;
+  if (!_audAbierta) el.innerHTML = '<p class="hint">Cargando…</p>';
+  await Promise.all([audCfgCargar(), audPerfilesCargar()]);
+  await audListar();
+  if (_audAbierta) { const f = _audLista.find(x => x.id === _audAbierta.id); if (!f) _audAbierta = null; }
+  audRender();
+  if (typeof notifLoad === 'function') notifLoad();
+}
+
+// ── Pantalla ──
+function audItemHtml(a) {
+  const [txt, col] = AUD_ESTADOS[a.estado] || [a.estado, '#6b7280'], c = audCuenta(a), enviada = ['enviada', 'aprobada', 'ajuste'].includes(a.estado);
+  return `<div class="result-card" style="cursor:pointer" onclick="audAbrirForm('${a.id}')">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Auditoría a ${esc(a.area_auditada)}</b><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span><span class="hint" style="margin:0 0 0 auto">${esc(audFecha(a.fecha || a.fecha_prevista))}</span></div>
+    <div class="hint" style="margin:4px 0 0">Auditor/a: ${esc(a.auditor_nombre || '—')}${a.area_auditora ? ' (' + esc(a.area_auditora) + ')' : ''}${enviada ? ` · ${c.nc} NC · ${c.o} oportunidad(es) de mejora` : ''}${a.estado === 'ajuste' && a.revision_comentario ? ' · <b>SGI pidió ajustes</b>' : ''}</div></div>`;
+}
+function audRender() {
+  const el = document.getElementById('aud-root'); if (!el) return;
+  const mias = _audLista.filter(a => a.auditor_id === (currentUser && currentUser.id));
+  const pendMias = mias.filter(a => ['programada', 'en_curso', 'ajuste'].includes(a.estado));
+  const hechasMias = mias.filter(a => !['programada', 'en_curso', 'ajuste'].includes(a.estado));
+  const lista = (arr, vacio) => arr.length ? arr.map(audItemHtml).join('') : `<div class="empty">${vacio}</div>`;
+  const perf = _audPerf || [];
+  const areas = hallazgosAreaOptions().filter(s => s !== 'Admin');
+  const prog = audEsSGI() ? `<div class="card"><div class="card-label">Programar una auditoría</div>
+    <button class="btn btn-primary" onclick="_audProgAbierta=!_audProgAbierta;audRender()">${_audProgAbierta ? '– Cancelar' : '+ Programar una auditoría'}</button>
+    ${_audProgAbierta ? `<div style="margin-top:12px"><p class="hint" style="margin-top:0">Elegí quién audita y qué área auditan (por ejemplo, Compras audita a Ingeniería). Al programarla, la persona recibe un aviso en MAIA y completa el formulario F-SGI-38 desde acá.</p>
+      <label>Auditor/a</label><select id="aud-p-auditor" style="margin-bottom:10px"><option value="">Seleccionar…</option>${perf.map(p => `<option value="${p.id}">${esc(p.nombre || p.email)}${p.sector ? ' — ' + esc(p.sector) : ''}</option>`).join('')}</select>
+      <label>Área auditada</label><select id="aud-p-area" style="margin-bottom:10px" onchange="audProgAreaCambio()"><option value="">Seleccionar…</option>${areas.map(s => `<option>${esc(s)}</option>`).join('')}</select>
+      <label>Responsable del área</label><input id="aud-p-resp" placeholder="Se sugiere el coordinador del área" style="margin-bottom:10px" />
+      <label>Fecha prevista</label><input type="date" id="aud-p-fecha" style="margin-bottom:10px" />
+      <label>Alcance (opcional: proceso / área / actividades)</label><input id="aud-p-alcance" style="margin-bottom:10px" />
+      <button class="btn btn-primary" onclick="audProgramar()">✓ Programar auditoría</button><div id="aud-p-status"></div></div>` : ''}</div>` : '';
+  el.innerHTML = `${_audErr ? `<div class="status-msg" style="display:block;background:#fdecea;color:#b3261e;margin-bottom:12px">✕ ${esc(_audErr)}</div>` : ''}
+    ${_audMsg ? `<div class="status-msg" style="display:block;background:#e3f4e3;color:#1b7f1b;margin-bottom:12px">${esc(_audMsg)}</div>` : ''}
+    ${prog}
+    ${_audAbierta ? `<div class="card" id="aud-form-card" style="border-color:var(--blue)">${audFormHtml(_audAbierta, _audEdita, _audRevisa)}</div>` : ''}
+    <div class="card"><div class="card-label">Mis auditorías</div><p class="hint" style="margin-top:-6px">Las que te asignó SGI para completar${hechasMias.length ? ' y las que ya enviaste' : ''}.</p>${lista(pendMias, 'No tenés auditorías pendientes.')}${hechasMias.length ? '<div class="card-label" style="margin-top:14px">Enviadas y aprobadas</div>' + lista(hechasMias, '') : ''}</div>
+    ${audEsCoord() ? `<div class="card"><div class="card-label">Para revisar (SGI)</div><p class="hint" style="margin-top:-6px">Auditorías enviadas por los auditores: revisalas y marcá Conforme o Requiere ajuste.</p>${lista(_audLista.filter(a => a.estado === 'enviada'), 'No hay auditorías esperando revisión.')}</div>` : ''}
+    ${audEsSGI() ? `<div class="card"><div class="card-label">Todas las auditorías (SGI)</div>${lista(_audLista, 'Todavía no hay auditorías programadas.')}</div>` : ''}`;
+}
+function audProgAreaCambio() {
+  const area = (document.getElementById('aud-p-area') || {}).value, inp = document.getElementById('aud-p-resp');
+  if (!inp || inp.value.trim()) return;
+  const c = (_audPerf || []).filter(p => p.sector === area && p.coordinador);
+  if (c.length === 1) inp.value = c[0].nombre || c[0].email || '';
+}
+function audChecklistNuevo() {
+  const cfg = _audCfg || AUD_CFG_DEF;
+  const base = (cfg.preguntas || []).map(p => ({ base: true, pregunta: p, evidencia: '', resultado: '', comentario: '' }));
+  const libres = Array.from({ length: Math.max(0, Number(cfg.libres) || 0) }, () => ({ base: false, pregunta: '', evidencia: '', resultado: '', comentario: '' }));
+  return base.concat(libres);
+}
+async function audProgramar() {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim(), st = 'aud-p-status';
+  const auditor = (_audPerf || []).find(p => p.id === v('aud-p-auditor')), area = v('aud-p-area');
+  if (!auditor) { showMsg(st, 'error', '✕ Elegí quién audita.'); return; }
+  if (!area) { showMsg(st, 'error', '✕ Elegí el área auditada.'); return; }
+  if (auditor.sector === area) { showMsg(st, 'error', `✕ ${auditor.nombre || 'La persona'} es del área ${area}: en una auditoría cruzada audita otra área.`); return; }
+  try {
+    showMsg(st, 'loading', 'Programando…');
+    await audCfgCargar();
+    const body = { empresa: currentEmpresa, area_auditada: area, area_auditora: auditor.sector || null, auditor_id: auditor.id, auditor_nombre: auditor.nombre || auditor.email, responsable_area: v('aud-p-resp') || null, fecha_prevista: v('aud-p-fecha') || null, alcance: v('aud-p-alcance') || null, estado: 'programada', checklist: audChecklistNuevo(), programada_por_nombre: (currentUser && (currentUser.nombre || currentUser.email)) || null };
+    const r = await supaFetch('/rest/v1/auditorias_internas', { method: 'POST', headers: audH({ Prefer: 'return=representation' }), body: JSON.stringify(body) });
+    const rows = await r.json().catch(() => null);
+    if (!r.ok || !rows || !rows.length) throw new Error((rows && rows.message) || 'No se pudo guardar (¿se corrió el SQL docs/auditorias.sql?).');
+    logEvento('auditoria', rows[0].id, 'programada', `${auditor.nombre || auditor.email} audita a ${area}`);
+    await notifCreate(auditor.id, 'Te asignaron una auditoría interna', `Auditás el área ${area}${body.fecha_prevista ? ' (prevista para el ' + audFecha(body.fecha_prevista) + ')' : ''}. Completá el formulario en Auditorías.`, 'auditorias');
+    _audProgAbierta = false; _audMsg = `✓ Auditoría programada: ${auditor.nombre || auditor.email} audita a ${area}. Se le avisó en MAIA.`;
+    await audListar(); audRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+
+// ── Formulario ──
+function audAbrirForm(id) {
+  const a = _audLista.find(x => x.id === id); if (!a) return;
+  _audAbierta = JSON.parse(JSON.stringify(a)); if (!Array.isArray(_audAbierta.checklist)) _audAbierta.checklist = [];
+  const mio = a.auditor_id === (currentUser && currentUser.id);
+  _audRevisa = audEsCoord() && a.estado === 'enviada';
+  _audEdita = (mio && ['programada', 'en_curso', 'ajuste'].includes(a.estado)) || _audRevisa;
+  _audMsg = ''; audRender();
+  const c = document.getElementById('aud-form-card'); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function audCerrarForm() { _audAbierta = null; _audMsg = ''; audRender(); }
+function audSet(k, v) { if (_audAbierta) _audAbierta[k] = v; }
+function audResumenAct() {
+  if (!_audAbierta) return; const c = audCuenta(_audAbierta);
+  const nc = document.getElementById('aud-cnt-nc'), o = document.getElementById('aud-cnt-o');
+  if (nc) nc.textContent = c.nc; if (o) o.textContent = c.o;
+}
+function audFila(i, k, v) {
+  const f = _audAbierta && _audAbierta.checklist[i]; if (!f) return; f[k] = v;
+  if (k === 'resultado') { const row = document.getElementById('aud-fila-' + i); if (row) row.style.background = AUD_TINTE[v] || ''; audResumenAct(); }
+}
+function audFilaAdd() { _audAbierta.checklist.push({ base: false, pregunta: '', evidencia: '', resultado: '', comentario: '' }); audRender(); }
+function audFilaDel(i) { _audAbierta.checklist.splice(i, 1); audRender(); }
+function audFormHtml(a, edit, revisa) {
+  const dis = edit ? '' : 'disabled', cfg = _audCfg || AUD_CFG_DEF, perf = _audPerf || [];
+  const inp = (k, ph, tipo) => `<input type="${tipo || 'text'}" value="${esc(a[k] || '')}" placeholder="${esc(ph || '')}" ${dis} oninput="audSet('${k}',this.value)" />`;
+  const campo = (lab, html) => `<div style="flex:1;min-width:200px"><label>${lab}</label>${html}</div>`;
+  const [txt, col] = AUD_ESTADOS[a.estado] || [a.estado, '#6b7280'], c = audCuenta(a);
+  const filas = (a.checklist || []).map((f, i) => `<div id="aud-fila-${i}" style="border-top:1px solid var(--border);padding:8px 6px;background:${AUD_TINTE[f.resultado] || ''}">
+      <div style="display:flex;gap:8px;align-items:flex-start"><b style="min-width:22px">${i + 1}</b>
+        ${f.base ? `<div style="flex:1;font-size:13px">${esc(f.pregunta)}</div>` : `<input style="flex:1" value="${esc(f.pregunta)}" placeholder="Otra pregunta (tipeala acá)" ${dis} oninput="audFila(${i},'pregunta',this.value)" />`}
+        ${edit && !f.base ? `<button class="remove-btn" onclick="audFilaDel(${i})" title="Quitar esta pregunta">&#x2715;</button>` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+        <input style="flex:2;min-width:160px" value="${esc(f.evidencia)}" placeholder="Evidencia revisada" ${dis} oninput="audFila(${i},'evidencia',this.value)" />
+        <select style="flex:1;min-width:150px" ${dis} onchange="audFila(${i},'resultado',this.value)"><option value="">Resultado…</option>${AUD_RESULTADOS.map(([k, n]) => `<option value="${k}" ${f.resultado === k ? 'selected' : ''}>${k} — ${n}</option>`).join('')}</select>
+        <input style="flex:3;min-width:200px" value="${esc(f.comentario)}" placeholder="Comentario / hallazgo" ${dis} oninput="audFila(${i},'comentario',this.value)" /></div></div>`).join('');
+  const aviso = a.estado === 'ajuste' && a.revision_comentario ? `<div class="status-msg" style="display:block;background:#fff3cd;color:#8a6d00;margin-bottom:10px"><b>SGI pidió ajustes${a.revisado_por_nombre ? ' (' + esc(a.revisado_por_nombre) + ')' : ''}:</b> ${esc(a.revision_comentario)}</div>` : '';
+  const reg = a.estado === 'aprobada' ? `<div class="hint" style="margin:6px 0 0">${a.registro && a.registro.nombre ? `✓ Registro guardado en ${esc(a.registro.ruta || 'SharePoint')}: ${a.registro.web_url ? `<a href="${esc(a.registro.web_url)}" target="_blank">${esc(a.registro.nombre)}</a>` : esc(a.registro.nombre)}${a.registro.pdf ? ' (y en PDF)' : ''}.` : 'El registro todavía no está guardado en la carpeta de Calidad.'}</div>` : '';
+  return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><div class="card-label" style="margin:0">${esc(cfg.titulo)} · ${esc(cfg.codigo)} Rev. ${esc(cfg.rev)}</div><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="audCerrarForm()">✕ Cerrar</button></div>
+    <p class="hint" style="margin-top:0">Una planilla por cada área auditada. Completar durante la auditoría y conservar junto con las evidencias y hallazgos.</p>${aviso}
+    <div class="card-label">1. Datos generales</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${campo('Área auditada', `<input value="${esc(a.area_auditada)}" disabled />`)}${campo('Auditor/a', `<input value="${esc(a.auditor_nombre || '')}" disabled />`)}${campo('Responsable del área', inp('responsable_area'))}</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">${campo('Fecha', inp('fecha', '', 'date'))}${campo('Horario', inp('horario', 'Ej. 10:00 a 11:30'))}${campo('Lugar / modalidad', inp('lugar', 'Ej. Sala de reuniones / Teams'))}</div>
+    <div class="card-label" style="margin-top:14px">2. Objetivo, alcance y criterios</div>
+    <p style="font-size:13px;margin:0 0 4px"><b>Objetivo:</b> ${esc(cfg.objetivo)}</p><p style="font-size:13px;margin:0 0 8px"><b>Criterios:</b> ${esc(cfg.criterios)}</p>
+    <label>Alcance (proceso / área / actividades)</label>${inp('alcance')}
+    <div class="card-label" style="margin-top:14px">3. Checklist y evidencia objetiva</div>
+    <p class="hint" style="margin-top:0">Resultado: C = Conforme · NC = No conforme · O = Oportunidad de mejora · NA = No aplica. Las preguntas en blanco son para las que surjan en el momento de la auditoría (no son generales a todas las áreas): las que queden vacías no salen en el registro.</p>
+    ${filas}${edit ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="audFilaAdd()">+ Agregar pregunta</button>' : ''}
+    <div class="card-label" style="margin-top:14px">4. Resumen de hallazgos y gestión en MAIA</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end"><div style="min-width:140px"><label>Cantidad de NC</label><div style="font-size:18px;font-weight:700" id="aud-cnt-nc">${c.nc}</div></div><div style="min-width:200px"><label>Cantidad de oportunidades de mejora</label><div style="font-size:18px;font-weight:700" id="aud-cnt-o">${c.o}</div></div>
+      ${campo('Responsable de cargar las NC en MAIA', `<select ${dis} onchange="audSet('resp_carga_nombre',this.value)"><option value="">Seleccionar…</option>${perf.map(p => { const n = p.nombre || p.email; return `<option value="${esc(n)}" ${a.resp_carga_nombre === n ? 'selected' : ''}>${esc(n)}</option>`; }).join('')}</select>`)}${campo('Fecha de carga en MAIA', inp('fecha_carga', '', 'date'))}</div>
+    <div class="card-label" style="margin-top:14px">5. Conclusión general de la auditoría</div>
+    <textarea rows="4" style="width:100%;resize:vertical" placeholder="Conclusión general, principales puntos detectados y sugerencias" ${dis} oninput="audSet('conclusion',this.value)">${esc(a.conclusion || '')}</textarea>
+    <div class="card-label" style="margin-top:14px">6. Cierre y revisión del Responsable SGI</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><div style="flex:1;min-width:200px"><label>Auditor/a</label><div style="font-size:13px">${esc(a.auditor_nombre || '—')}</div></div><div style="flex:1;min-width:200px"><label>Responsable del área</label><div style="font-size:13px">${esc(a.responsable_area || '—')}</div></div>
+      <div style="flex:1;min-width:200px"><label>Revisión Responsable SGI</label><div style="font-size:13px">${a.revision ? esc(a.revision) + (a.revisado_por_nombre ? ' — ' + esc(a.revisado_por_nombre) : '') : '—'}</div></div></div>
+    <div style="margin-top:8px"><label>Autonomía del auditor${revisa ? ' (la define SGI)' : ''}</label><div style="display:flex;gap:14px;flex-wrap:wrap">${AUD_AUTONOMIA.map(o => `<label style="font-weight:400;font-size:13px;display:flex;gap:4px;align-items:center"><input type="radio" name="aud-autonomia" style="width:auto" ${a.autonomia === o ? 'checked' : ''} ${revisa ? '' : 'disabled'} onchange="audSet('autonomia','${o}')" /> ${o}</label>`).join('')}</div></div>
+    ${revisa ? `<div style="margin-top:10px"><label>Comentario de la revisión (obligatorio si requiere ajuste)</label><textarea rows="2" style="width:100%;resize:vertical" oninput="audSet('_revcom',this.value)">${esc(a._revcom || '')}</textarea></div>` : ''}
+    ${reg}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      ${edit && !revisa ? `<button class="btn btn-secondary" onclick="audGuardar(false)">💾 Guardar borrador</button><button class="btn btn-primary" onclick="audGuardar(true)">✓ Enviar a revisión de SGI</button>` : ''}
+      ${revisa ? `<button class="btn btn-primary" onclick="audRevisar(true)">✓ Conforme: aprobar y archivar</button><button class="btn btn-secondary" style="color:var(--red)" onclick="audRevisar(false)">↩ Requiere ajuste</button><button class="btn btn-secondary" onclick="audGuardar(false,true)">💾 Guardar cambios</button>` : ''}
+      ${['enviada', 'aprobada', 'ajuste'].includes(a.estado) || (a.checklist || []).some(f => f.resultado) ? '<button class="btn btn-secondary" onclick="audDescargar()">⬇ Descargar Word</button>' : ''}
+      ${a.estado === 'aprobada' && audEsSGI() && !(a.registro && a.registro.nombre) ? '<button class="btn btn-secondary" onclick="audArchivarAhora()">📁 Guardar en la carpeta de Calidad</button>' : ''}
+      ${audEsSGI() && a.estado !== 'aprobada' ? `<button class="btn btn-secondary" style="color:var(--red);margin-left:auto" onclick="audEliminar('${a.id}')">🗑 Eliminar</button>` : ''}
+    </div><div id="aud-form-status"></div>`;
+}
+function audPayload(a) {
+  return { responsable_area: a.responsable_area || null, fecha: a.fecha || null, horario: a.horario || null, lugar: a.lugar || null, alcance: a.alcance || null, checklist: a.checklist || [], resp_carga_nombre: a.resp_carga_nombre || null, fecha_carga: a.fecha_carga || null, conclusion: a.conclusion || null, autonomia: a.autonomia || null, updated_at: new Date().toISOString() };
+}
+async function audPatch(id, body) {
+  const r = await supaFetch(`/rest/v1/auditorias_internas?id=eq.${id}`, { method: 'PATCH', headers: audH({ Prefer: 'return=representation' }), body: JSON.stringify(body) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows || !rows.length) throw new Error('No se pudo guardar (revisá permisos en Supabase).');
+  return rows[0];
+}
+// Auditor: guarda borrador o envía a revisión. SGI (revisor) puede guardar sus cambios sin cambiar el estado (soloCampos).
+async function audGuardar(enviar, soloCampos) {
+  const a = _audAbierta; if (!a || _audOcupado) return; const st = 'aud-form-status';
+  if (enviar) {
+    const faltan = [];
+    if (!a.fecha) faltan.push('la fecha de la auditoría');
+    if (!String(a.alcance || '').trim()) faltan.push('el alcance');
+    if ((a.checklist || []).filter(f => String(f.pregunta || '').trim()).some(f => !f.resultado)) faltan.push('el resultado de todas las preguntas (C, NC, O o NA)');
+    if (!String(a.conclusion || '').trim()) faltan.push('la conclusión general');
+    if (faltan.length) { showMsg(st, 'error', '✕ Falta completar: ' + faltan.join(', ') + '.'); return; }
+    a.checklist = a.checklist.filter(f => String(f.pregunta || '').trim());   // las preguntas libres que quedaron en blanco no van
+  }
+  try {
+    _audOcupado = true; showMsg(st, 'loading', enviar ? 'Enviando…' : 'Guardando…');
+    const body = audPayload(a);
+    if (!soloCampos) { body.estado = enviar ? 'enviada' : (a.estado === 'programada' ? 'en_curso' : a.estado); if (enviar) { body.revision = null; } }
+    const fila = await audPatch(a.id, body);
+    logEvento('auditoria', a.id, enviar ? 'enviada' : 'guardada', null);
+    if (enviar) {
+      try { const coord = await hallazgosFindCoordinadorSGI(); if (coord && coord.id) await notifCreate(coord.id, 'Auditoría interna para revisar', `${a.auditor_nombre || 'Un auditor'} envió la auditoría al área ${a.area_auditada}.`, 'auditorias'); } catch (e) { console.warn('No se pudo avisar a SGI:', e.message); }
+      _audAbierta = null; _audMsg = '✓ Auditoría enviada a revisión de SGI.';
+    } else { _audMsg = ''; Object.assign(_audAbierta, fila, { checklist: a.checklist, _revcom: a._revcom }); showMsg(st, 'success', '✓ Guardado.'); }
+    await audListar(); if (enviar) audRender(); else { const f = _audLista.find(x => x.id === a.id); if (f) { _audAbierta.estado = f.estado; } }
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _audOcupado = false; }
+}
+// Coordinadora de SGI: Conforme (aprueba y archiva el registro) o Requiere ajuste (vuelve al auditor)
+async function audRevisar(conforme) {
+  const a = _audAbierta; if (!a || _audOcupado || !_audRevisa) return; const st = 'aud-form-status', com = String(a._revcom || '').trim();
+  if (conforme && !a.autonomia) { showMsg(st, 'error', '✕ Marcá la autonomía del auditor antes de aprobar.'); return; }
+  if (!conforme && !com) { showMsg(st, 'error', '✕ Escribí en el comentario qué hay que ajustar.'); return; }
+  try {
+    _audOcupado = true; showMsg(st, 'loading', conforme ? 'Aprobando…' : 'Enviando el pedido de ajuste…');
+    const body = Object.assign(audPayload(a), { estado: conforme ? 'aprobada' : 'ajuste', revision: conforme ? 'Conforme' : 'Requiere ajuste', revision_comentario: com || null, revisado_por_nombre: (currentUser && (currentUser.nombre || currentUser.email)) || null, revisado_at: new Date().toISOString() });
+    const fila = await audPatch(a.id, body);
+    logEvento('auditoria', a.id, conforme ? 'aprobada' : 'ajuste', com || null);
+    let extra = '';
+    if (conforme) {
+      try {
+        showMsg(st, 'loading', 'Armando el registro y guardándolo en la carpeta de Calidad…');
+        const r = await audArchivar(fila);
+        if (r.local) extra = ' No hay carpeta de Calidad vinculada (Cfg Auditorías): el Word se descargó.';
+        else { await audPatch(a.id, { registro: { ruta: r.ruta, nombre: r.nombre, web_url: r.web_url, pdf: r.pdf, at: new Date().toISOString() } }); extra = ` Registro guardado en ${r.ruta}${r.pdf ? ' (Word y PDF)' : ' (Word; el PDF no se pudo generar)'}.`; }
+      } catch (e) { extra = ' ⚠ Quedó aprobada pero no se pudo guardar el registro (' + e.message + '): abrila y tocá "Guardar en la carpeta de Calidad".'; }
+    }
+    if (a.auditor_id) await notifCreate(a.auditor_id, conforme ? 'Auditoría interna aprobada' : 'Auditoría interna: requiere ajuste', conforme ? `SGI aprobó tu auditoría al área ${a.area_auditada}.` : `SGI pidió ajustes en tu auditoría al área ${a.area_auditada}: ${com}`, 'auditorias');
+    _audAbierta = null; _audMsg = (conforme ? '✓ Auditoría aprobada.' : '✓ Se la devolviste al auditor con tu comentario.') + extra;
+    await audListar(); audRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _audOcupado = false; }
+}
+async function audEliminar(id) {
+  if (!confirm('¿Eliminar esta auditoría? No se puede deshacer.')) return;
+  try {
+    const r = await supaFetch(`/rest/v1/auditorias_internas?id=eq.${id}`, { method: 'DELETE', headers: audH() });
+    if (!r.ok) throw new Error('No se pudo eliminar.');
+    logEvento('auditoria', id, 'eliminada', null); _audAbierta = null; _audMsg = '✓ Auditoría eliminada.'; await audListar(); audRender();
+  } catch (e) { showMsg('aud-form-status', 'error', '✕ ' + e.message); }
+}
+
+// ── Registro (Word + PDF) y carpeta de Calidad ──
+function audBloques(a, cfg) {
+  const B = [], c = audCuenta(a), fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim());
+  const tabla = (head, rows, widths) => B.push({ t: 'table', estilo: 'datos', head, rows, widths });
+  B.push({ t: 'p', text: 'Una planilla por cada área auditada. Completada durante la auditoría y conservada junto con las evidencias y hallazgos.', italic: true });
+  B.push({ t: 'h2', text: '1. Datos generales' });
+  tabla(['Dato', 'Detalle'], [['Área auditada', a.area_auditada], ['Auditor/a', a.auditor_nombre || ''], ['Responsable del área', a.responsable_area || ''], ['Fecha', audFecha(a.fecha)], ['Horario', a.horario || ''], ['Lugar / modalidad', a.lugar || '']], [3000, 6638]);
+  B.push({ t: 'h2', text: '2. Objetivo, alcance y criterios' });
+  tabla(['Dato', 'Detalle'], [['Objetivo', cfg.objetivo], ['Alcance', a.alcance || ''], ['Criterios', cfg.criterios]], [3000, 6638]);
+  B.push({ t: 'h2', text: '3. Checklist y evidencia objetiva' });
+  B.push({ t: 'p', text: 'Resultado: C = Conforme | NC = No conforme | O = Oportunidad de mejora | NA = No aplica', italic: true });
+  tabla(['N°', 'Pregunta / verificación', 'Evidencia revisada', 'Resultado', 'Comentario / hallazgo'], fs.map((f, i) => [String(i + 1), f.pregunta, f.evidencia || '', f.resultado || '', f.comentario || '']), [500, 3000, 2000, 1000, 3138]);
+  B.push({ t: 'h2', text: '4. Resumen de hallazgos y gestión en MAIA' });
+  tabla(['Dato', 'Detalle'], [['Cantidad de NC', String(c.nc)], ['Cantidad de oportunidades de mejora', String(c.o)], ['Responsable de cargar las NC en MAIA', a.resp_carga_nombre || ''], ['Fecha de carga en MAIA', audFecha(a.fecha_carga)]], [4200, 5438]);
+  B.push({ t: 'h2', text: '5. Conclusión general de la auditoría' });
+  B.push({ t: 'p', text: a.conclusion || '—' });
+  B.push({ t: 'h2', text: '6. Cierre y revisión del Responsable SGI' });
+  tabla(['Dato', 'Detalle'], [['Auditor/a', a.auditor_nombre || ''], ['Responsable del área', a.responsable_area || ''], ['Revisión Responsable SGI', a.revision ? a.revision + (a.revisado_por_nombre ? ' — ' + a.revisado_por_nombre + (a.revisado_at ? ' (' + audFecha(a.revisado_at) + ')' : '') : '') : 'Pendiente'], ['Autonomía del auditor', a.autonomia || '']], [4200, 5438]);
+  B.push({ t: 'p', text: 'Archivo SGI sugerido: Plan de auditoría + evidencias revisadas + hallazgos MAIA + seguimiento/cierre.', italic: true });
+  return B;
+}
+async function audGenerarDocx(a) { const cfg = await audCfgCargar(); return docxGenerar(audBloques(a, cfg), { titulo: cfg.titulo, codigo: cfg.codigo, rev: cfg.rev, fecha: cfg.fecha }); }
+function audNombreArchivo(a) { return cotizSanitizeNombre(`${(_audCfg || AUD_CFG_DEF).codigo} Auditoría ${a.area_auditada} ${String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 10)}`); }
+async function audDescargar() { if (!_audAbierta) return; try { docxDescargar(await audGenerarDocx(_audAbierta), audNombreArchivo(_audAbierta)); } catch (e) { showMsg('aud-form-status', 'error', '✕ ' + e.message); } }
+async function audCarpetaLeer() { try { const raw = await supaConfigGet(AUD_CARPETA_KEY()); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
+// Sube el Word (y su PDF) a ‹carpeta de Calidad›/‹año›/. Sin carpeta vinculada, descarga el Word y devuelve {local:true}.
+async function audArchivar(a) {
+  const blob = await audGenerarDocx(a), nombre = audNombreArchivo(a), carpeta = await audCarpetaLeer();
+  if (!carpeta) { docxDescargar(blob, nombre); return { local: true }; }
+  const token = await getMsToken(), anio = String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 4);
+  const anioId = await spEnsureFolder(token, carpeta.siteId, carpeta.itemId, anio);
+  const subir = async (cuerpo, fname) => {
+    const r = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${anioId}:/${encodeURIComponent(fname)}:/content`, { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: await cuerpo.arrayBuffer() });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error('No se pudo subir a SharePoint: ' + (e.error && e.error.message || 'HTTP ' + r.status)); }
+    return r.json();
+  };
+  const item = await subir(blob, nombre + '.docx');
+  let pdf = false;
+  try { const pr = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${item.id}/content?format=pdf`, { headers: { Authorization: 'Bearer ' + token } }); if (pr.ok) { await subir(await pr.blob(), nombre + '.pdf'); pdf = true; } } catch (e) { console.warn('PDF de la auditoría:', e.message); }
+  return { ruta: `${carpeta.label} › ${anio}`, nombre: nombre + '.docx', web_url: item.webUrl || '', pdf };
+}
+async function audArchivarAhora() {
+  const a = _audAbierta; if (!a || _audOcupado) return; const st = 'aud-form-status';
+  try {
+    _audOcupado = true; showMsg(st, 'loading', 'Guardando el registro…');
+    const r = await audArchivar(a);
+    if (r.local) { showMsg(st, 'error', '✕ No hay carpeta de Calidad vinculada (Cfg Auditorías). Se descargó el Word.'); return; }
+    a.registro = { ruta: r.ruta, nombre: r.nombre, web_url: r.web_url, pdf: r.pdf, at: new Date().toISOString() };
+    await audPatch(a.id, { registro: a.registro }); await audListar(); audRender(); showMsg('aud-form-status', 'success', `✓ Registro guardado en ${r.ruta}.`);
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+  finally { _audOcupado = false; }
+}
+
+// ── Cfg Auditorías (SGI) ──
+async function audCfgAbrir() {
+  const el = document.getElementById('cfg-auditorias-root'); if (!el) return; el.innerHTML = '<p class="hint">Cargando…</p>';
+  const cfg = await audCfgCargar(true), carp = await audCarpetaLeer();
+  const f = (id, lab, val, extra) => `<div style="flex:1;min-width:160px"><label>${lab}</label><input id="${id}" value="${esc(val)}" ${extra || ''} /></div>`;
+  el.innerHTML = `<div class="card"><div class="card-label">Auditorías internas — Formulario</div>
+      <p class="hint" style="margin-top:-6px">Las preguntas base y los textos fijos del F-SGI-38. Un cambio vale para las auditorías que se programen de ahora en más; las ya programadas conservan las preguntas con las que se crearon.</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">${f('aud-c-titulo', 'Título', cfg.titulo)}${f('aud-c-codigo', 'Código', cfg.codigo, 'style="max-width:130px"')}${f('aud-c-rev', 'Revisión', cfg.rev, 'style="max-width:90px"')}${f('aud-c-fecha', 'Fecha de la revisión', cfg.fecha, 'style="max-width:130px"')}</div>
+      <label>Objetivo (texto fijo)</label><textarea id="aud-c-objetivo" rows="2" style="width:100%;margin-bottom:10px">${esc(cfg.objetivo)}</textarea>
+      <label>Criterios (texto fijo)</label><textarea id="aud-c-criterios" rows="2" style="width:100%;margin-bottom:10px">${esc(cfg.criterios)}</textarea>
+      <label>Preguntas base (una por línea)</label><textarea id="aud-c-preguntas" rows="9" style="width:100%;margin-bottom:10px">${esc((cfg.preguntas || []).join('\n'))}</textarea>
+      <label>Espacios en blanco para preguntas propias de cada auditoría</label><input id="aud-c-libres" type="number" min="0" max="30" value="${esc(String(cfg.libres))}" style="width:90px;margin-bottom:10px" />
+      <div><button class="btn btn-primary" onclick="audCfgGuardar()">Guardar</button> <span id="aud-c-status" class="hint"></span></div></div>
+    <div class="card"><div class="card-label">Carpeta de Calidad (SharePoint)</div>
+      <p class="hint" style="margin-bottom:10px">Cuando SGI aprueba una auditoría, el registro (Word y PDF) se guarda en "‹esta carpeta›/‹año›/". Sin carpeta vinculada, se descarga el Word.</p>
+      <div class="sp-selected"><span id="aud-carpeta-label" style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(carp ? carp.label : 'Sin vincular (se descarga localmente)')}</span><button class="sp-browse-btn" onclick="fbOpen('folder','aud-carpeta')">Vincular carpeta</button><button class="sp-browse-btn" onclick="audCarpetaQuitar()">Quitar</button></div></div>`;
+}
+async function audCfgGuardar() {
+  const v = id => (document.getElementById(id) || {}).value || '', st = document.getElementById('aud-c-status');
+  const preguntas = v('aud-c-preguntas').split('\n').map(x => x.trim()).filter(Boolean);
+  if (!preguntas.length) { if (st) st.textContent = '✕ Dejá al menos una pregunta base.'; return; }
+  const cfg = { titulo: v('aud-c-titulo').trim() || AUD_CFG_DEF.titulo, codigo: v('aud-c-codigo').trim() || AUD_CFG_DEF.codigo, rev: v('aud-c-rev').trim(), fecha: v('aud-c-fecha').trim(), objetivo: v('aud-c-objetivo').trim(), criterios: v('aud-c-criterios').trim(), preguntas, libres: Math.max(0, Math.min(30, Number(v('aud-c-libres')) || 0)) };
+  try { if (st) st.textContent = 'Guardando…'; await supaConfigSet(AUD_CFG_KEY(), JSON.stringify(cfg)); _audCfg = Object.assign({}, AUD_CFG_DEF, cfg); if (st) st.textContent = '✓ Guardado.'; }
+  catch (e) { if (st) st.textContent = '✕ ' + e.message; }
+}
+async function audCarpetaQuitar() {
+  if (!confirm('¿Quitar la carpeta de Calidad? Las próximas auditorías aprobadas van a descargar el Word en vez de guardarlo en SharePoint.')) return;
+  try { await supaConfigSet(AUD_CARPETA_KEY(), ''); } catch (e) { /* queda como estaba */ }
+  audCfgAbrir();
+}
+var _origFbSCAud = fbSelectCurrent;
+fbSelectCurrent = function() {
+  if (fbTarget === 'aud-carpeta') {
+    const btn = document.getElementById('fb-select-btn'), path = btn && btn.dataset.path, itemId = btn && btn.dataset.id;
+    const label = (fbCurrentSiteName || '') + (path ? ' › ' + path.replace(/\//g, ' › ') : '');
+    fbClose();
+    supaConfigSet(AUD_CARPETA_KEY(), JSON.stringify({ path, itemId, siteId: fbCurrentSiteId, label })).then(audCfgAbrir).catch(e => alert('No se pudo guardar la carpeta: ' + e.message));
+    return;
+  }
+  _origFbSCAud();
+};
+
 // ── Asistente MAIA (chat flotante, con búsqueda en SharePoint) ──
 const MAIA_CHAT_WELCOME = '¡Hola! Puedo ayudarte a encontrar archivos y carpetas en el SharePoint de Aeration, consultar Listas de SharePoint, buscar en los datos guardados dentro de MAIA (clientes, cotizaciones, hallazgos, notas de pedido, mantenimiento, proyectos, etc.), decirte tus días de vacaciones y solicitudes de Fuera de oficina, y explicarte cómo usar cualquier función de MAIA. Preguntame, por ejemplo, "¿qué le cotizamos a tal cliente?", "¿qué hallazgos siguen abiertos?" o "¿cómo cargo un hallazgo?".';
 let _maiaChatMessages = [];
@@ -5408,6 +5771,7 @@ let _maiaChatSourceCache = null;
 // Al sumar un módulo nuevo con datos en Supabase, agregarlo acá con su solapa.
 const MAIA_DATOS_MODULOS = {
   hallazgos: { tabla: 'hallazgos', label: 'Hallazgos (SGI)', orderBy: 'created_at.desc', tabs: ['hallazgos'] },
+  auditorias_internas: { tabla: 'auditorias_internas', label: 'Auditorías internas de áreas (SGI): quién audita a qué área, estado, checklist con resultados C/NC/O/NA y conclusión', orderBy: 'created_at.desc', tabs: ['auditorias'] },
   clientes: { tabla: 'clientes', label: 'Clientes (con contactos, sucursales y lugares de entrega)', select: '*,clientes_contactos(*),clientes_sucursales(*),clientes_lugares_entrega(*)', tabs: ['clientes'] },
   cotizaciones: { tabla: 'cotizaciones', label: 'Cotizaciones en armado/curso', orderBy: 'created_at.desc', tabs: ['cotizaciones', 'stock', 'cotiz-precios'] },
   cotizaciones_historial_ventas: { tabla: 'cotizaciones_historial_ventas', label: 'Historial de cotizaciones/ventas cerradas (ganadas y perdidas)', tabs: ['cotizaciones', 'stock', 'cotiz-precios'] },
@@ -36033,6 +36397,7 @@ const NAV_SECTIONS = [
   { id:'rend',      label:'Rendiciones',      area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>' },
   { id:'viajes',    label:'Viajes',           area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>' },
   { id:'hallazgos', label:'Hallazgos',        area:'General',        icon:'<svg viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
+  { id:'auditorias', label:'Auditorías',      area:'General',        icon:'<svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><path d="M9 14l2 2 4-4"/></svg>' },
   { id:'ooo',       label:'Fuera de oficina', area:'General',        icon:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>' },
   { id:'concil',    label:'Conciliación bancaria', area:'Administración', icon:'<svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/></svg>' },
   { id:'np-loc',    label:'NP Local',         area:'Compras y Comex',  icon:'<svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>' },
@@ -36057,6 +36422,7 @@ const NAV_CONFIG_SECTIONS = [
   { id:'cfg-viajes',    label:'Cfg Viajes',           area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-hallazgos', label:'Cfg Hallazgos',        area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-ooo',       label:'Cfg Fuera de oficina', area:'General',       icon:NAV_GEAR_ICON },
+  { id:'cfg-auditorias', label:'Cfg Auditorías',      area:'General',       icon:NAV_GEAR_ICON },
   { id:'cfg-concil',    label:'Cfg Conciliación bancaria', area:'Administración', icon:NAV_GEAR_ICON },
   { id:'cfg-np-loc',    label:'Cfg NP Local',         area:'Compras y Comex', icon:NAV_GEAR_ICON },
   { id:'cfg-np-int',    label:'Cfg NP Internacional', area:'Compras y Comex', icon:NAV_GEAR_ICON },
@@ -45016,19 +45382,19 @@ async function procesosIAFetch(url, opts, intentos) {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', procesosModeloAplicar); else procesosModeloAplicar();
 const SECTOR_TABS = {
-  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','ooo','cfg-ooo','concil','procesos','casos','propuestas','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','presentaciones','simulador','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
-  'Administración':    ['rend','viajes','hallazgos','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
+  'Admin':             ['rend','np-loc','np-int','viajes','hallazgos','auditorias','ooo','cfg-ooo','concil','procesos','casos','propuestas','flowsheets','clientes','stock','cotiz-precios','cotizaciones','microorganismos','mantenimiento','dfs','manual-operacion','presentaciones','simulador','cfg-rend','cfg-comercial','cfg-np-loc','cfg-np-int','cfg-viajes','cfg-hallazgos','cfg-auditorias','cfg-concil','cfg-microorganismos','cfg-procesos','cfg-documentacion','cfg-propuestas','admin'],
+  'Administración':    ['rend','viajes','hallazgos','auditorias','concil','cfg-rend','cfg-comercial','cfg-viajes','cfg-concil'],
   'Cadista':           ['rend','viajes','hallazgos'],
-  'Comercial':         ['rend','viajes','hallazgos','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
-  'Compras y Comex':   ['rend','np-loc','np-int','viajes','hallazgos','cfg-np-loc','cfg-np-int'],
+  'Comercial':         ['rend','viajes','hallazgos','auditorias','clientes','stock','cotiz-precios','cotizaciones','cfg-comercial'],
+  'Compras y Comex':   ['rend','np-loc','np-int','viajes','hallazgos','auditorias','cfg-np-loc','cfg-np-int'],
   'Dirección':         ['rend','viajes','hallazgos'],
   'Ingeniería':        ['rend','viajes','hallazgos'],
   'Marketing':         ['rend','viajes','hallazgos'],
-  'Procesos':          ['rend','viajes','hallazgos','procesos','casos','propuestas','flowsheets','mantenimiento','dfs','manual-operacion','presentaciones','simulador','cfg-procesos','cfg-documentacion','cfg-propuestas'],
-  'RRHH':              ['rend','viajes','hallazgos','ooo','cfg-ooo'],
-  'Servicios':         ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
-  'SGI':               ['rend','viajes','hallazgos','cfg-hallazgos'],
-  'Técnicos':          ['rend','viajes','hallazgos','microorganismos','mantenimiento'],
+  'Procesos':          ['rend','viajes','hallazgos','auditorias','procesos','casos','propuestas','flowsheets','mantenimiento','dfs','manual-operacion','presentaciones','simulador','cfg-procesos','cfg-documentacion','cfg-propuestas'],
+  'RRHH':              ['rend','viajes','hallazgos','auditorias','ooo','cfg-ooo'],
+  'Servicios':         ['rend','viajes','hallazgos','auditorias','microorganismos','mantenimiento'],
+  'SGI':               ['rend','viajes','hallazgos','auditorias','cfg-hallazgos','cfg-auditorias'],
+  'Técnicos':          ['rend','viajes','hallazgos','auditorias','microorganismos','mantenimiento'],
 };
 
 // Excepciones por usuario: sobre los accesos de su sector se suman o se sacan solapas. El usuario se reconoce por el nombre de su perfil
@@ -45055,6 +45421,11 @@ function accesosAplicar(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
   if (cfg.sectores && typeof cfg.sectores === 'object') Object.entries(cfg.sectores).forEach(([sec, tabs]) => { if (Array.isArray(tabs)) SECTOR_TABS[sec] = tabs.slice(); });
   if (Array.isArray(cfg.usuarios)) { USUARIO_TABS_EXTRA.length = 0; cfg.usuarios.forEach(x => USUARIO_TABS_EXTRA.push(x)); }
+  // Solapas nuevas que la configuración guardada todavía no conoce (no figuran en ningún sector): entran con su acceso de origen, sin tener que tocarlas en Admin
+  if (cfg.sectores && typeof cfg.sectores === 'object') Object.entries({ 'auditorias': null, 'cfg-auditorias': ['SGI', 'Admin'] }).forEach(([tab, secs]) => {
+    if (Object.values(cfg.sectores).some(l => Array.isArray(l) && l.includes(tab))) return;
+    Object.keys(SECTOR_TABS).forEach(sec => { if ((!secs || secs.includes(sec)) && !SECTOR_TABS[sec].includes(tab)) SECTOR_TABS[sec].push(tab); });
+  });
   if (SECTOR_TABS.Admin && !SECTOR_TABS.Admin.includes('admin')) SECTOR_TABS.Admin.push('admin');   // Admin nunca se queda sin el panel de Admin
 }
 async function accesosCargar() { try { accesosAplicar(await supaConfigGetSeguro(ACCESOS_KEY)); } catch (e) { /* sin config propia o sin red: valen los de origen */ } }
@@ -45309,6 +45680,8 @@ const PANEL_TITLES = {
   'dashboard': 'Dashboard',
   'ooo': 'Fuera de oficina',
   'cfg-ooo': 'Cfg Fuera de oficina',
+  'auditorias': 'Auditorías internas',
+  'cfg-auditorias': 'Configuración — Auditorías',
   'rend': 'Rendiciones',
   'viajes': 'Viajes',
   'hallazgos': 'Hallazgos',
