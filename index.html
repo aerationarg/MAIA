@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -30452,6 +30452,12 @@ async function cotizArmadoAgregarDesde(origen, id, tipoPrecio) {
   cotizArmadoRender();
 }
 
+// Fecha para escribir en una celda de Excel vía Graph: número de serie (días desde 1899-12-30), no texto. Un texto "04/11/2026" lo interpreta Excel según su configuración
+// regional (mes/día) y da vuelta día y mes; el número es una fecha real y se ve con el formato de la columna.
+function cotizFechaSerialExcel(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? Math.round(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000) + 25569 : cotizFormatFechaDDMMYYYY(iso);
+}
 function cotizFormatFechaDDMMYYYY(iso) {
   if (!iso) return '';
   const [y,m,d] = iso.split('-');
@@ -30862,7 +30868,7 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
   }
   const excelBase = `https://graph.microsoft.com/v1.0/sites/${ref.siteId}/drive/items/${ref.id}/workbook/worksheets('Q-')/`;
   const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
-  const valores = [cotizFormatFechaDDMMYYYY(st.fecha), cotizArmadoIniciales(currentUser?.nombre || currentUser?.email || ''), st.cliente || '', st.referencia || '', qNumeroCompleto];
+  const valores = [cotizFechaSerialExcel(st.fecha), cotizArmadoIniciales(currentUser?.nombre || currentUser?.email || ''), st.cliente || '', st.referencia || '', qNumeroCompleto];
   let viaTabla = false;
   if (nextRow > 2 && !filaExiste) {
     const tabla = await cotizExcelTablaDelRegistro(token, excelBase, nextRow - 1).catch(() => null);
@@ -30877,6 +30883,8 @@ async function cotizArmadoRegistrarEnExcelQ(st, qNumeroCompleto) {
     const resp = await fetch(excelBase + `range(address='A${nextRow}:${mismoQ ? 'D' : 'E'}${nextRow}')`, { method: 'PATCH', headers: H, body: JSON.stringify({ values: [mismoQ ? valores.slice(0, 4) : valores] }) });
     if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || 'HTTP ' + resp.status); }
   }
+  // La fecha va como número: se le pone formato día/mes/año (si después se copia el formato de la fila de arriba, queda ese)
+  try { await fetch(excelBase + `range(address='A${nextRow}')`, { method: 'PATCH', headers: H, body: JSON.stringify({ numberFormat: [['d/m/yyyy']] }) }); } catch (eNf) { /* queda con el formato que tenga la celda */ }
   // La fila modelo tiene que ser una fila de datos (la 1 es el título y la 2 el encabezado).
   if (!filaExiste && filaModelo >= 3 && filaModelo < nextRow) {
     try { await cotizExcelCopiarFormatoFila(token, excelBase, filaModelo, nextRow); }
