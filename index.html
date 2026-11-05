@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -5432,7 +5432,8 @@ const audEsSGI = () => currentSector === 'SGI' || currentSector === 'Admin';
 const audEsCoord = () => currentSector === 'Admin' || (currentSector === 'SGI' && !!(currentUser && currentUser.coordinador));
 const audH = extra => Object.assign({ Authorization: 'Bearer ' + ((JSON.parse(localStorage.getItem('daia_session') || 'null') || {}).token || '') }, extra || {});
 const audFecha = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
-const audCuenta = a => { const fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim()); return { nc: fs.filter(f => f.resultado === 'NC').length, o: fs.filter(f => f.resultado === 'O').length, hz: fs.filter(f => ['NC', 'O'].includes(f.resultado) && f.hallazgo_id).length }; };
+const audVencida = a => ['planificada', 'programada', 'en_curso', 'ajuste'].includes(a.estado) && !!a.fecha_prevista && a.fecha_prevista < new Date().toISOString().slice(0, 10);
+const audCuenta = a => { const fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim()); return { nc: fs.filter(f => f.resultado === 'NC').length, o: fs.filter(f => f.resultado === 'O').length, hz: fs.filter(f => ['NC', 'O'].includes(f.resultado) && f.hallazgo_id && (!_audHzOk || _audHz[f.hallazgo_id])).length }; };   // no cuenta el hallazgo que ya se eliminó
 
 async function audCfgCargar(forzar) {
   if (_audEmp !== currentEmpresa) { _audCfg = null; _audPerf = null; _audEmp = currentEmpresa; }
@@ -5465,6 +5466,7 @@ async function audAbrir() {
     const f = _audLista.find(x => x.id === _audAbierta.id);
     if (!f) _audAbierta = null;
     else (_audAbierta.checklist || []).forEach(fi => { const nuevo = fi.rid && (f.checklist || []).find(x => x.rid === fi.rid); if (nuevo && nuevo.hallazgo_id) fi.hallazgo_id = nuevo.hallazgo_id; });   // un hallazgo creado desde una fila mientras se estaba en Hallazgos
+    await audHzCargar(_audAbierta);
   }
   audRender();
   if (typeof notifLoad === 'function') notifLoad();
@@ -5474,7 +5476,7 @@ async function audAbrir() {
 function audItemHtml(a) {
   const [txt, col] = AUD_ESTADOS[a.estado] || [a.estado, '#6b7280'], c = audCuenta(a), enviada = ['enviada', 'aprobada', 'ajuste'].includes(a.estado);
   return `<div class="result-card" style="cursor:pointer" onclick="audAbrirForm('${a.id}')">
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Auditoría a ${esc(a.area_auditada)}</b><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span><span class="hint" style="margin:0 0 0 auto">${esc(audFecha(a.fecha || a.fecha_prevista))}</span></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Auditoría a ${esc(a.area_auditada)}</b><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span>${audVencida(a) ? '<span class="badge" style="background:#b3261e;color:#fff">Vencida</span>' : ''}<span class="hint" style="margin:0 0 0 auto">${esc(audFecha(a.fecha || a.fecha_prevista))}</span></div>
     <div class="hint" style="margin:4px 0 0">Auditor/a: ${esc(a.auditor_nombre || '—')}${a.area_auditora ? ' (' + esc(a.area_auditora) + ')' : ''}${enviada ? ` · ${c.nc} NC · ${c.o} oportunidad(es) de mejora` : ''}${a.estado === 'ajuste' && a.revision_comentario ? ' · <b>SGI pidió ajustes</b>' : ''}</div></div>`;
 }
 function audRender() {
@@ -5536,13 +5538,13 @@ async function audProgramar() {
 }
 
 // ── Formulario ──
-function audAbrirForm(id) {
+async function audAbrirForm(id) {
   const a = _audLista.find(x => x.id === id); if (!a) return;
   _audAbierta = JSON.parse(JSON.stringify(a)); if (!Array.isArray(_audAbierta.checklist)) _audAbierta.checklist = [];
   const mio = a.auditor_id === (currentUser && currentUser.id);
   _audRevisa = audEsCoord() && a.estado === 'enviada';
   _audEdita = (mio && ['programada', 'en_curso', 'ajuste'].includes(a.estado)) || _audRevisa;
-  _audMsg = ''; audRender();
+  _audMsg = ''; await audHzCargar(_audAbierta); audRender();
   const c = document.getElementById('aud-form-card'); if (c) c.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function audCerrarForm() { _audAbierta = null; _audMsg = ''; audRender(); }
@@ -5684,7 +5686,7 @@ function audBloques(a, cfg) {
   tabla(['Dato', 'Detalle'], [['Objetivo', cfg.objetivo], ['Alcance', a.alcance || ''], ['Criterios', cfg.criterios]], [3000, 6638]);
   B.push({ t: 'h2', text: '3. Checklist y evidencia objetiva' });
   B.push({ t: 'p', text: 'Resultado: C = Conforme | NC = No conforme | O = Oportunidad de mejora | NA = No aplica', italic: true });
-  tabla(['N°', 'Pregunta / verificación', 'Evidencia revisada', 'Resultado', 'Comentario / hallazgo'], fs.map((f, i) => [String(i + 1), f.pregunta, f.evidencia || '', f.resultado || '', f.comentario || '']), [500, 3000, 2000, 1000, 3138]);
+  tabla(['N°', 'Pregunta / verificación', 'Evidencia revisada', 'Resultado', 'Comentario / hallazgo'], fs.map((f, i) => [String(i + 1), f.pregunta, f.evidencia || '', f.resultado || '', [f.comentario || '', audHaDe(f) ? 'Hallazgo ' + audHaDe(f) : (f.hallazgo_id ? 'Hallazgo cargado en MAIA' : '')].filter(Boolean).join(' — ')]), [500, 3000, 2000, 1000, 3138]);
   B.push({ t: 'h2', text: '4. Resumen de hallazgos y gestión en MAIA' });
   tabla(['Dato', 'Detalle'], [['Cantidad de NC', String(c.nc)], ['Cantidad de oportunidades de mejora', String(c.o)], ['Responsable de cargar las NC en MAIA', a.resp_carga_nombre || ''], ['Fecha de carga en MAIA', audFecha(a.fecha_carga)]], [4200, 5438]);
   B.push({ t: 'h2', text: '5. Conclusión general de la auditoría' });
@@ -5694,7 +5696,7 @@ function audBloques(a, cfg) {
   B.push({ t: 'p', text: 'Archivo SGI sugerido: Plan de auditoría + evidencias revisadas + hallazgos MAIA + seguimiento/cierre.', italic: true });
   return B;
 }
-async function audGenerarDocx(a) { const cfg = await audCfgCargar(); return docxGenerar(audBloques(a, cfg), { titulo: cfg.titulo, codigo: cfg.codigo, rev: cfg.rev, fecha: cfg.fecha }); }
+async function audGenerarDocx(a) { const cfg = await audCfgCargar(); await audHzCargar(a); return docxGenerar(audBloques(a, cfg), { titulo: cfg.titulo, codigo: cfg.codigo, rev: cfg.rev, fecha: cfg.fecha }); }
 function audNombreArchivo(a) { return cotizSanitizeNombre(`${(_audCfg || AUD_CFG_DEF).codigo} Auditoría ${a.area_auditada} ${String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 10)}`); }
 async function audDescargar() { if (!_audAbierta) return; try { docxDescargar(await audGenerarDocx(_audAbierta), audNombreArchivo(_audAbierta)); } catch (e) { showMsg('aud-form-status', 'error', '✕ ' + e.message); } }
 async function audCarpetaLeer() { try { const raw = await supaConfigGet(AUD_CARPETA_KEY()); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
@@ -5734,11 +5736,26 @@ async function audArchivarAhora() {
 // ── Hallazgos desde las NC / oportunidades de mejora de la auditoría ──
 // El botón abre el formulario de Hallazgos ya completado (origen "Auditoría Interna", área, descripción, evidencia): quien lo carga lo revisa y lo guarda por el circuito de
 // siempre (SGI revisa e inserta en el Excel). Al crearse, el hallazgo queda marcado en la fila de la planilla y se completa "Fecha de carga en MAIA".
-let _hallazgoPrefill = null, _audVinculo = null;
+let _hallazgoPrefill = null, _audVinculo = null, _audHz = {}, _audHzOk = false;
+// Datos de los hallazgos vinculados a las filas (número HA-### que asigna SGI al insertarlo en el Excel, y estado)
+async function audHzCargar(a) {
+  const ids = [...new Set(((a && a.checklist) || []).map(f => f.hallazgo_id).filter(Boolean))]; _audHzOk = false; if (!ids.length) { _audHzOk = true; return; }
+  try {
+    const r = await supaFetch(`/rest/v1/hallazgos?select=id,ha_id,estado&id=in.(${ids.join(',')})`, { headers: audH() });
+    if (!r.ok) return; const rows = await r.json();
+    ids.forEach(id => { delete _audHz[id]; }); (rows || []).forEach(h => { _audHz[h.id] = h; }); _audHzOk = true;
+  } catch (e) { /* se muestra sin el número */ }
+}
+const audHaDe = f => { const h = f && f.hallazgo_id && _audHz[f.hallazgo_id]; return h && h.ha_id ? h.ha_id : ''; };
 function audHzHtml(a, i, edit) {
   const f = (a.checklist || [])[i];
   if (!f || !['NC', 'O'].includes(f.resultado) || !String(f.pregunta || '').trim()) return '';
-  if (f.hallazgo_id) return '<span class="hint" style="margin:0;color:var(--green)">✓ Hallazgo cargado en MAIA</span>';
+  if (f.hallazgo_id) {
+    const h = _audHz[f.hallazgo_id], verde = t => `<span class="hint" style="margin:0;color:var(--green)">✓ ${esc(t)}</span>`;
+    if (h) return verde(h.ha_id ? 'Hallazgo ' + h.ha_id + (h.estado === 'insertado' ? ' (insertado en el Excel)' : '') : h.estado === 'completado' ? 'Hallazgo cargado en MAIA · en revisión de SGI' : 'Hallazgo cargado en MAIA · pendiente de completar');
+    if (!_audHzOk) return verde('Hallazgo cargado en MAIA');   // todavía no se pudo consultar
+    /* el hallazgo ya no existe (se eliminó): se puede volver a crear */
+  }
   if (!(edit || audEsSGI())) return '';
   return `<button class="btn btn-secondary btn-sm" onclick="audCrearHallazgo(${i})">➕ Crear hallazgo${f.resultado === 'O' ? ' (oportunidad de mejora)' : ''}</button>`;
 }
@@ -5801,7 +5818,7 @@ function audPlanHtml() {
   const personas = a => { const perf = (_audPerf || []).filter(p => p.sector !== a.area_auditada), mias = perf.filter(p => p.sector === a.area_auditora), otras = perf.filter(p => p.sector !== a.area_auditora); const o = p => `<option value="${p.id}">${esc(p.nombre || p.email)}${p.sector ? ' — ' + esc(p.sector) : ''}</option>`; return `<option value="">Seleccionar…</option>${mias.length ? `<optgroup label="${esc(a.area_auditora || 'Área auditora')}">${mias.map(o).join('')}</optgroup>` : ''}<optgroup label="Otras áreas">${otras.map(o).join('')}</optgroup>`; };
   const fila = a => {
     const plan = a.estado === 'planificada', [txt, col] = AUD_ESTADOS[a.estado] || [a.estado, '#6b7280'];
-    const venc = ['planificada', 'programada', 'en_curso', 'ajuste'].includes(a.estado) && a.fecha_prevista && a.fecha_prevista < hoy;
+    const venc = audVencida(a);
     const td = 'padding:4px 6px;border-top:1px solid var(--border);vertical-align:middle';
     const celda = plan ? {
       fecha: `<input type="date" value="${esc(a.fecha_prevista || '')}" style="padding:4px 6px;font-size:12px" onchange="audPlanCampo('${a.id}','fecha_prevista',this.value)" />`,
@@ -46912,6 +46929,25 @@ async function notifLoadHallazgosLive() {
   return items;
 }
 
+// Auditorías internas vencidas (fecha prevista pasada y sin enviar), en vivo: al auditor le avisa de las suyas; a SGI, de todas (incluidas las del plan sin auditor asignado).
+async function notifLoadAuditoriasLive() {
+  const session = JSON.parse(localStorage.getItem('daia_session')||'null');
+  if (!session?.token || !currentUser?.id) return [];
+  try {
+    const hoy = new Date().toISOString().slice(0, 10), esSGI = currentSector === 'SGI';
+    const res = await supaFetch(`/rest/v1/auditorias_internas?select=id,area_auditada,area_auditora,auditor_id,auditor_nombre,fecha_prevista,estado&empresa=eq.${currentEmpresa}&estado=in.(planificada,programada,en_curso,ajuste)&fecha_prevista=lt.${hoy}&order=fecha_prevista.asc`, {headers:{Authorization:'Bearer '+session.token}});
+    const rows = await res.json(); if (!res.ok || !Array.isArray(rows)) return [];
+    const f = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+    const items = [];
+    rows.forEach(a => {
+      const mia = a.auditor_id === currentUser.id, creado = a.fecha_prevista + 'T00:00:00';
+      if (mia) items.push({ id: 'aud-venc-' + a.id, live: true, leida: false, seccion: 'auditorias', created_at: creado, titulo: 'Auditoría interna vencida', cuerpo: `Tu auditoría al área ${a.area_auditada} estaba prevista para el ${f(a.fecha_prevista)}${a.estado === 'ajuste' ? ' y SGI pidió ajustes' : ''}. Completala y enviala.` });
+      else if (esSGI) items.push({ id: 'aud-venc-sgi-' + a.id, live: true, leida: false, seccion: 'auditorias', created_at: creado, titulo: 'Auditoría interna vencida', cuerpo: a.auditor_id ? `${a.auditor_nombre || 'El auditor'} no envió la auditoría al área ${a.area_auditada} (prevista para el ${f(a.fecha_prevista)}).` : `La auditoría planificada de ${a.area_auditora || 'un área'} a ${a.area_auditada} (${f(a.fecha_prevista)}) sigue sin auditor asignado.` });
+    });
+    return items;
+  } catch(e) { return []; }
+}
+
 // Igual que los hallazgos: pedidos de aprobación de NP pendientes dirigidos a mí, calculados en vivo.
 async function notifLoadNpAprobLive() {
   const session = JSON.parse(localStorage.getItem('daia_session')||'null');
@@ -46953,8 +46989,8 @@ async function notifLoad() {
     generic = await res.json();
     if (!res.ok) generic = [];
   } catch(e) {}
-  const [liveHallazgos, liveNpAprob, liveNpRech, livePend] = await Promise.all([notifLoadHallazgosLive(), notifLoadNpAprobLive(), notifLoadNpRechazadasLive(), notifLoadPendientesLive()]);
-  _notifCache = [...liveHallazgos, ...liveNpAprob, ...liveNpRech, ...livePend, ...generic].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+  const [liveHallazgos, liveNpAprob, liveNpRech, livePend, liveAud] = await Promise.all([notifLoadHallazgosLive(), notifLoadNpAprobLive(), notifLoadNpRechazadasLive(), notifLoadPendientesLive(), notifLoadAuditoriasLive()]);
+  _notifCache = [...liveHallazgos, ...liveNpAprob, ...liveNpRech, ...livePend, ...liveAud, ...generic].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
   notifRenderBadge();
   notifRenderList();
 }
