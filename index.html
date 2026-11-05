@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.10</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.10</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4946,7 +4946,9 @@ function hallazgosCollectFieldsForm(idPrefix) {
 }
 function hallazgosRenderNewForm() {
   const el = document.getElementById('hallazgos-new-campos-wrap');
-  if (el) el.innerHTML = hallazgosRenderFieldsForm('hnew', {});
+  // Venir desde una NC de una auditoría: el formulario llega completado y, al guardarlo, el hallazgo queda vinculado a la planilla. Si se vuelve a abrir sin ese origen, se borra el vínculo.
+  const pre = _hallazgoPrefill; _hallazgoPrefill = null; if (!pre) _audVinculo = null;
+  if (el) el.innerHTML = (pre && _audVinculo ? `<div class="hint" style="margin:0 0 10px">📋 Hallazgo desde la auditoría interna al área <b>${esc(_audVinculo.area)}</b>: revisá y completá los campos; al guardarlo queda vinculado a la planilla.</div>` : '') + hallazgosRenderFieldsForm('hnew', pre || {});
   const btn = document.getElementById('hallazgos-new-submit-btn');
   if (btn) btn.textContent = hallazgosSubmitBtnLabel();
   hallazgosLoadAssigneeOptions();
@@ -5083,6 +5085,7 @@ async function hallazgosGuardar(id) {
       hRow = created[0];
       hallazgoId = hRow.id;
       logEvento('hallazgo', hallazgoId, 'creado', fields.descripcion.slice(0,150));
+      if (typeof audHallazgoCreado === 'function') audHallazgoCreado(hallazgoId);   // si venía de una NC de una auditoría, se marca en la planilla
       if (asignadoId) {
         logEvento('hallazgo', hallazgoId, 'asignado', 'Asignado a '+asignadoNombre);
         try {
@@ -5406,7 +5409,7 @@ async function renderHallazgos() {
 // Datos en la tabla auditorias_internas (docs/auditorias.sql). Configuración (preguntas base, textos fijos, carpeta) en app_config.
 const AUD_RESULTADOS = [['C', 'Conforme'], ['NC', 'No conforme'], ['O', 'Oportunidad de mejora'], ['NA', 'No aplica']];
 const AUD_AUTONOMIA = ['Sí', 'Con acompañamiento', 'Aún no'];
-const AUD_ESTADOS = { programada: ['Programada', '#6b7280'], en_curso: ['En curso', '#2563eb'], enviada: ['En revisión de SGI', '#b8860b'], ajuste: ['Requiere ajuste', '#c2410c'], aprobada: ['Aprobada', '#15803d'] };
+const AUD_ESTADOS = { planificada: ['Planificada', '#7c3aed'], programada: ['Programada', '#6b7280'], en_curso: ['En curso', '#2563eb'], enviada: ['En revisión de SGI', '#b8860b'], ajuste: ['Requiere ajuste', '#c2410c'], aprobada: ['Aprobada', '#15803d'] };
 const AUD_TINTE = { C: 'rgba(46,160,67,.10)', NC: 'rgba(224,36,36,.10)', O: 'rgba(234,170,0,.14)', NA: 'rgba(120,120,120,.10)' };
 const AUD_CFG_DEF = {
   titulo: 'AUDITORÍA INTERNA DE ÁREAS', codigo: 'F-SGI-38', rev: '01', fecha: '02/11/26', libres: 6,
@@ -5429,7 +5432,7 @@ const audEsSGI = () => currentSector === 'SGI' || currentSector === 'Admin';
 const audEsCoord = () => currentSector === 'Admin' || (currentSector === 'SGI' && !!(currentUser && currentUser.coordinador));
 const audH = extra => Object.assign({ Authorization: 'Bearer ' + ((JSON.parse(localStorage.getItem('daia_session') || 'null') || {}).token || '') }, extra || {});
 const audFecha = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
-const audCuenta = a => { const fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim()); return { nc: fs.filter(f => f.resultado === 'NC').length, o: fs.filter(f => f.resultado === 'O').length }; };
+const audCuenta = a => { const fs = (a.checklist || []).filter(f => String(f.pregunta || '').trim()); return { nc: fs.filter(f => f.resultado === 'NC').length, o: fs.filter(f => f.resultado === 'O').length, hz: fs.filter(f => ['NC', 'O'].includes(f.resultado) && f.hallazgo_id).length }; };
 
 async function audCfgCargar(forzar) {
   if (_audEmp !== currentEmpresa) { _audCfg = null; _audPerf = null; _audEmp = currentEmpresa; }
@@ -5458,7 +5461,11 @@ async function audAbrir() {
   if (!_audAbierta) el.innerHTML = '<p class="hint">Cargando…</p>';
   await Promise.all([audCfgCargar(), audPerfilesCargar()]);
   await audListar();
-  if (_audAbierta) { const f = _audLista.find(x => x.id === _audAbierta.id); if (!f) _audAbierta = null; }
+  if (_audAbierta) {
+    const f = _audLista.find(x => x.id === _audAbierta.id);
+    if (!f) _audAbierta = null;
+    else (_audAbierta.checklist || []).forEach(fi => { const nuevo = fi.rid && (f.checklist || []).find(x => x.rid === fi.rid); if (nuevo && nuevo.hallazgo_id) fi.hallazgo_id = nuevo.hallazgo_id; });   // un hallazgo creado desde una fila mientras se estaba en Hallazgos
+  }
   audRender();
   if (typeof notifLoad === 'function') notifLoad();
 }
@@ -5491,9 +5498,10 @@ function audRender() {
     ${_audMsg ? `<div class="status-msg" style="display:block;background:#e3f4e3;color:#1b7f1b;margin-bottom:12px">${esc(_audMsg)}</div>` : ''}
     ${prog}
     ${_audAbierta ? `<div class="card" id="aud-form-card" style="border-color:var(--blue)">${audFormHtml(_audAbierta, _audEdita, _audRevisa)}</div>` : ''}
+    ${audEsSGI() ? audPlanHtml() : ''}
     <div class="card"><div class="card-label">Mis auditorías</div><p class="hint" style="margin-top:-6px">Las que te asignó SGI para completar${hechasMias.length ? ' y las que ya enviaste' : ''}.</p>${lista(pendMias, 'No tenés auditorías pendientes.')}${hechasMias.length ? '<div class="card-label" style="margin-top:14px">Enviadas y aprobadas</div>' + lista(hechasMias, '') : ''}</div>
     ${audEsCoord() ? `<div class="card"><div class="card-label">Para revisar (SGI)</div><p class="hint" style="margin-top:-6px">Auditorías enviadas por los auditores: revisalas y marcá Conforme o Requiere ajuste.</p>${lista(_audLista.filter(a => a.estado === 'enviada'), 'No hay auditorías esperando revisión.')}</div>` : ''}
-    ${audEsSGI() ? `<div class="card"><div class="card-label">Todas las auditorías (SGI)</div>${lista(_audLista, 'Todavía no hay auditorías programadas.')}</div>` : ''}`;
+    ${audEsSGI() ? `<div class="card"><div class="card-label">Todas las auditorías (SGI)</div>${lista(_audLista.filter(a => a.estado !== 'planificada'), 'Todavía no hay auditorías programadas.')}</div>` : ''}`;
 }
 function audProgAreaCambio() {
   const area = (document.getElementById('aud-p-area') || {}).value, inp = document.getElementById('aud-p-resp');
@@ -5543,10 +5551,11 @@ function audResumenAct() {
   if (!_audAbierta) return; const c = audCuenta(_audAbierta);
   const nc = document.getElementById('aud-cnt-nc'), o = document.getElementById('aud-cnt-o');
   if (nc) nc.textContent = c.nc; if (o) o.textContent = c.o;
+  const hz = document.getElementById('aud-cnt-hz'); if (hz) hz.textContent = `${c.hz} de ${c.nc + c.o}`;
 }
 function audFila(i, k, v) {
   const f = _audAbierta && _audAbierta.checklist[i]; if (!f) return; f[k] = v;
-  if (k === 'resultado') { const row = document.getElementById('aud-fila-' + i); if (row) row.style.background = AUD_TINTE[v] || ''; audResumenAct(); }
+  if (k === 'resultado') { const row = document.getElementById('aud-fila-' + i); if (row) row.style.background = AUD_TINTE[v] || ''; const hz = document.getElementById('aud-hz-' + i); if (hz) hz.innerHTML = audHzHtml(_audAbierta, i, _audEdita); audResumenAct(); }
 }
 function audFilaAdd() { _audAbierta.checklist.push({ base: false, pregunta: '', evidencia: '', resultado: '', comentario: '' }); audRender(); }
 function audFilaDel(i) { _audAbierta.checklist.splice(i, 1); audRender(); }
@@ -5562,7 +5571,7 @@ function audFormHtml(a, edit, revisa) {
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
         <input style="flex:2;min-width:160px" value="${esc(f.evidencia)}" placeholder="Evidencia revisada" ${dis} oninput="audFila(${i},'evidencia',this.value)" />
         <select style="flex:1;min-width:150px" ${dis} onchange="audFila(${i},'resultado',this.value)"><option value="">Resultado…</option>${AUD_RESULTADOS.map(([k, n]) => `<option value="${k}" ${f.resultado === k ? 'selected' : ''}>${k} — ${n}</option>`).join('')}</select>
-        <input style="flex:3;min-width:200px" value="${esc(f.comentario)}" placeholder="Comentario / hallazgo" ${dis} oninput="audFila(${i},'comentario',this.value)" /></div></div>`).join('');
+        <input style="flex:3;min-width:200px" value="${esc(f.comentario)}" placeholder="Comentario / hallazgo" ${dis} oninput="audFila(${i},'comentario',this.value)" /></div><div id="aud-hz-${i}" style="margin-top:6px">${audHzHtml(a, i, edit)}</div></div>`).join('');
   const aviso = a.estado === 'ajuste' && a.revision_comentario ? `<div class="status-msg" style="display:block;background:#fff3cd;color:#8a6d00;margin-bottom:10px"><b>SGI pidió ajustes${a.revisado_por_nombre ? ' (' + esc(a.revisado_por_nombre) + ')' : ''}:</b> ${esc(a.revision_comentario)}</div>` : '';
   const reg = a.estado === 'aprobada' ? `<div class="hint" style="margin:6px 0 0">${a.registro && a.registro.nombre ? `✓ Registro guardado en ${esc(a.registro.ruta || 'SharePoint')}: ${a.registro.web_url ? `<a href="${esc(a.registro.web_url)}" target="_blank">${esc(a.registro.nombre)}</a>` : esc(a.registro.nombre)}${a.registro.pdf ? ' (y en PDF)' : ''}.` : 'El registro todavía no está guardado en la carpeta de Calidad.'}</div>` : '';
   return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><div class="card-label" style="margin:0">${esc(cfg.titulo)} · ${esc(cfg.codigo)} Rev. ${esc(cfg.rev)}</div><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="audCerrarForm()">✕ Cerrar</button></div>
@@ -5577,7 +5586,7 @@ function audFormHtml(a, edit, revisa) {
     <p class="hint" style="margin-top:0">Resultado: C = Conforme · NC = No conforme · O = Oportunidad de mejora · NA = No aplica. Las preguntas en blanco son para las que surjan en el momento de la auditoría (no son generales a todas las áreas): las que queden vacías no salen en el registro.</p>
     ${filas}${edit ? '<button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="audFilaAdd()">+ Agregar pregunta</button>' : ''}
     <div class="card-label" style="margin-top:14px">4. Resumen de hallazgos y gestión en MAIA</div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end"><div style="min-width:140px"><label>Cantidad de NC</label><div style="font-size:18px;font-weight:700" id="aud-cnt-nc">${c.nc}</div></div><div style="min-width:200px"><label>Cantidad de oportunidades de mejora</label><div style="font-size:18px;font-weight:700" id="aud-cnt-o">${c.o}</div></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end"><div style="min-width:140px"><label>Cantidad de NC</label><div style="font-size:18px;font-weight:700" id="aud-cnt-nc">${c.nc}</div></div><div style="min-width:200px"><label>Cantidad de oportunidades de mejora</label><div style="font-size:18px;font-weight:700" id="aud-cnt-o">${c.o}</div></div><div style="min-width:150px"><label>Hallazgos cargados</label><div style="font-size:18px;font-weight:700" id="aud-cnt-hz">${c.hz} de ${c.nc + c.o}</div></div>
       ${campo('Responsable de cargar las NC en MAIA', `<select ${dis} onchange="audSet('resp_carga_nombre',this.value)"><option value="">Seleccionar…</option>${perf.map(p => { const n = p.nombre || p.email; return `<option value="${esc(n)}" ${a.resp_carga_nombre === n ? 'selected' : ''}>${esc(n)}</option>`; }).join('')}</select>`)}${campo('Fecha de carga en MAIA', inp('fecha_carga', '', 'date'))}</div>
     <div class="card-label" style="margin-top:14px">5. Conclusión general de la auditoría</div>
     <textarea rows="4" style="width:100%;resize:vertical" placeholder="Conclusión general, principales puntos detectados y sugerencias" ${dis} oninput="audSet('conclusion',this.value)">${esc(a.conclusion || '')}</textarea>
@@ -5689,21 +5698,26 @@ async function audGenerarDocx(a) { const cfg = await audCfgCargar(); return docx
 function audNombreArchivo(a) { return cotizSanitizeNombre(`${(_audCfg || AUD_CFG_DEF).codigo} Auditoría ${a.area_auditada} ${String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 10)}`); }
 async function audDescargar() { if (!_audAbierta) return; try { docxDescargar(await audGenerarDocx(_audAbierta), audNombreArchivo(_audAbierta)); } catch (e) { showMsg('aud-form-status', 'error', '✕ ' + e.message); } }
 async function audCarpetaLeer() { try { const raw = await supaConfigGet(AUD_CARPETA_KEY()); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
-// Sube el Word (y su PDF) a ‹carpeta de Calidad›/‹año›/. Sin carpeta vinculada, descarga el Word y devuelve {local:true}.
-async function audArchivar(a) {
-  const blob = await audGenerarDocx(a), nombre = audNombreArchivo(a), carpeta = await audCarpetaLeer();
-  if (!carpeta) { docxDescargar(blob, nombre); return { local: true }; }
-  const token = await getMsToken(), anio = String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 4);
-  const anioId = await spEnsureFolder(token, carpeta.siteId, carpeta.itemId, anio);
-  const subir = async (cuerpo, fname) => {
-    const r = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${anioId}:/${encodeURIComponent(fname)}:/content`, { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: await cuerpo.arrayBuffer() });
+async function audSubirACarpeta(blob, fname, anio) {
+  const carpeta = await audCarpetaLeer();
+  if (!carpeta) throw new Error('No hay carpeta de Calidad vinculada (Cfg Auditorías).');
+  const token = await getMsToken(), anioId = await spEnsureFolder(token, carpeta.siteId, carpeta.itemId, String(anio));
+  const subir = async (cuerpo, nombre) => {
+    const r = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${anioId}:/${encodeURIComponent(nombre)}:/content`, { method: 'PUT', headers: { Authorization: 'Bearer ' + token }, body: await cuerpo.arrayBuffer() });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error('No se pudo subir a SharePoint: ' + (e.error && e.error.message || 'HTTP ' + r.status)); }
     return r.json();
   };
-  const item = await subir(blob, nombre + '.docx');
+  const item = await subir(blob, fname);
   let pdf = false;
-  try { const pr = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${item.id}/content?format=pdf`, { headers: { Authorization: 'Bearer ' + token } }); if (pr.ok) { await subir(await pr.blob(), nombre + '.pdf'); pdf = true; } } catch (e) { console.warn('PDF de la auditoría:', e.message); }
-  return { ruta: `${carpeta.label} › ${anio}`, nombre: nombre + '.docx', web_url: item.webUrl || '', pdf };
+  try { const pr = await fetch(`https://graph.microsoft.com/v1.0/sites/${carpeta.siteId}/drive/items/${item.id}/content?format=pdf`, { headers: { Authorization: 'Bearer ' + token } }); if (pr.ok) { await subir(await pr.blob(), fname.replace(/\.docx$/i, '') + '.pdf'); pdf = true; } } catch (e) { console.warn('PDF:', e.message); }
+  return { item, pdf, ruta: `${carpeta.label} › ${anio}`, web_url: item.webUrl || '' };
+}
+// Sube el Word (y su PDF) a ‹carpeta de Calidad›/‹año›/. Sin carpeta vinculada, descarga el Word y devuelve {local:true}.
+async function audArchivar(a) {
+  const blob = await audGenerarDocx(a), nombre = audNombreArchivo(a);
+  if (!(await audCarpetaLeer())) { docxDescargar(blob, nombre); return { local: true }; }
+  const r = await audSubirACarpeta(blob, nombre + '.docx', String(a.fecha || a.fecha_prevista || new Date().toISOString()).slice(0, 4));
+  return { ruta: r.ruta, nombre: nombre + '.docx', web_url: r.web_url, pdf: r.pdf };
 }
 async function audArchivarAhora() {
   const a = _audAbierta; if (!a || _audOcupado) return; const st = 'aud-form-status';
@@ -5715,6 +5729,173 @@ async function audArchivarAhora() {
     await audPatch(a.id, { registro: a.registro }); await audListar(); audRender(); showMsg('aud-form-status', 'success', `✓ Registro guardado en ${r.ruta}.`);
   } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
   finally { _audOcupado = false; }
+}
+
+// ── Hallazgos desde las NC / oportunidades de mejora de la auditoría ──
+// El botón abre el formulario de Hallazgos ya completado (origen "Auditoría Interna", área, descripción, evidencia): quien lo carga lo revisa y lo guarda por el circuito de
+// siempre (SGI revisa e inserta en el Excel). Al crearse, el hallazgo queda marcado en la fila de la planilla y se completa "Fecha de carga en MAIA".
+let _hallazgoPrefill = null, _audVinculo = null;
+function audHzHtml(a, i, edit) {
+  const f = (a.checklist || [])[i];
+  if (!f || !['NC', 'O'].includes(f.resultado) || !String(f.pregunta || '').trim()) return '';
+  if (f.hallazgo_id) return '<span class="hint" style="margin:0;color:var(--green)">✓ Hallazgo cargado en MAIA</span>';
+  if (!(edit || audEsSGI())) return '';
+  return `<button class="btn btn-secondary btn-sm" onclick="audCrearHallazgo(${i})">➕ Crear hallazgo${f.resultado === 'O' ? ' (oportunidad de mejora)' : ''}</button>`;
+}
+async function audCrearHallazgo(i) {
+  const a = _audAbierta, f = a && a.checklist[i], st = 'aud-form-status'; if (!f) return;
+  try {
+    showMsg(st, 'loading', 'Preparando el hallazgo…');
+    if (!f.rid) f.rid = 'r' + Date.now().toString(36) + i;
+    await audPatch(a.id, { checklist: a.checklist, updated_at: new Date().toISOString() });   // queda guardada la marca de la fila antes de salir
+    const fecha = audFecha(a.fecha) || audFecha(a.fecha_prevista), area = hallazgosAreaOptions().includes(a.area_auditada) ? a.area_auditada : '';
+    _audVinculo = { audId: a.id, rid: f.rid, area: a.area_auditada };
+    _hallazgoPrefill = {
+      descripcion: `Auditoría interna al área ${a.area_auditada}${fecha ? ' (' + fecha + ')' : ''}. ${f.resultado === 'O' ? 'Oportunidad de mejora' : 'No conformidad'} en la verificación: ${f.pregunta}${f.comentario ? '\nDetalle: ' + f.comentario : ''}`,
+      origen_hallazgo: 'Auditoría Interna', tipo_hallazgo: f.resultado === 'O' ? 'OM' : '', estado_hallazgo: 'En Análisis', area_asociada: area,
+      evidencia_comentarios: `Planilla ${(_audCfg || AUD_CFG_DEF).codigo}, auditor/a ${a.auditor_nombre || '—'}${f.evidencia ? '. Evidencia revisada: ' + f.evidencia : ''}`
+    };
+    showMsg(st, 'success', '✓ Listo.');
+    navSelect('hallazgos'); hallazgosToggleNewForm();
+    const w = document.getElementById('hallazgos-new-form-wrap'); if (w) w.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+async function audHallazgoCreado(hid) {
+  const v = _audVinculo; if (!v) return; _audVinculo = null;
+  try {
+    const r = await supaFetch(`/rest/v1/auditorias_internas?id=eq.${v.audId}&select=*`, { headers: audH() }), a = ((await r.json().catch(() => [])) || [])[0]; if (!a) return;
+    const f = (a.checklist || []).find(x => x.rid === v.rid); if (!f) return;
+    f.hallazgo_id = hid;
+    const body = { checklist: a.checklist, updated_at: new Date().toISOString() };
+    if (!a.fecha_carga) body.fecha_carga = new Date().toISOString().slice(0, 10);
+    if (!a.resp_carga_nombre) body.resp_carga_nombre = (currentUser && (currentUser.nombre || currentUser.email)) || null;
+    await audPatch(a.id, body);
+  } catch (e) { console.warn('No se pudo vincular el hallazgo con la auditoría:', e.message); }
+}
+
+// ── Plan anual de auditorías (SGI) ──
+// El plan son auditorías en estado "planificada": fecha prevista + qué área audita a cuál, todavía sin persona. SGI las genera con una rotación sugerida o a mano, las ajusta y,
+// cuando llega el momento, asigna a la persona: pasa a "programada" y le llega al auditor como cualquier otra. Las programadas aparte, con fecha del año, también figuran en el plan.
+let _audPlanAnio = new Date().getFullYear(), _audPlanOpc = false, _audPlanAdd = false, _audAsignarId = '';
+const audAnioDe = a => parseInt(String(a.fecha_prevista || a.fecha || '').slice(0, 4), 10) || null;
+const audPlanItems = () => _audLista.filter(a => audAnioDe(a) === _audPlanAnio).sort((x, y) => String(x.fecha_prevista || x.fecha).localeCompare(String(y.fecha_prevista || y.fecha)));
+const audAreasPlan = () => hallazgosAreaOptions().filter(s => s !== 'Admin');
+const audHoyISO = () => new Date().toISOString().slice(0, 10);
+const audMesesTxt = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+function audFechaPlan(anio, mes, dia) { const d = new Date(Date.UTC(anio, mes - 1, dia)), w = d.getUTCDay(); if (w === 6) d.setUTCDate(d.getUTCDate() + 2); if (w === 0) d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); }
+// Cada área auditada por otra: se desplaza la lista de áreas un lugar distinto cada año, evitando repetir los cruces del año anterior
+function audRotacion(areas, anio, faltan) {
+  const n = areas.length, prev = new Set(_audLista.filter(a => audAnioDe(a) === anio - 1).map(a => a.area_auditora + '>' + a.area_auditada));
+  let mejor = 1, min = Infinity;
+  for (let t = 0; t < Math.max(1, n - 1); t++) {
+    const s = 1 + ((anio + t) % Math.max(1, n - 1)), rep = faltan.filter(ad => prev.has(areas[(areas.indexOf(ad) + s) % n] + '>' + ad)).length;
+    if (rep < min) { min = rep; mejor = s; } if (!rep) break;
+  }
+  return faltan.map(ad => ({ auditada: ad, auditora: areas[(areas.indexOf(ad) + mejor) % n] }));
+}
+function audPlanHtml() {
+  const items = audPlanItems(), areas = audAreasPlan(), hoy = audHoyISO();
+  const anios = [...new Set([new Date().getFullYear() - 1, new Date().getFullYear(), new Date().getFullYear() + 1, _audPlanAnio].concat(_audLista.map(audAnioDe).filter(Boolean)))].sort();
+  const cubiertas = areas.filter(ar => items.some(a => a.area_auditada === ar)), faltan = areas.filter(ar => !cubiertas.includes(ar));
+  const optAreas = (sel) => `<option value="">Seleccionar…</option>${areas.map(s => `<option ${s === sel ? 'selected' : ''}>${esc(s)}</option>`).join('')}`;
+  const personas = a => { const perf = (_audPerf || []).filter(p => p.sector !== a.area_auditada), mias = perf.filter(p => p.sector === a.area_auditora), otras = perf.filter(p => p.sector !== a.area_auditora); const o = p => `<option value="${p.id}">${esc(p.nombre || p.email)}${p.sector ? ' — ' + esc(p.sector) : ''}</option>`; return `<option value="">Seleccionar…</option>${mias.length ? `<optgroup label="${esc(a.area_auditora || 'Área auditora')}">${mias.map(o).join('')}</optgroup>` : ''}<optgroup label="Otras áreas">${otras.map(o).join('')}</optgroup>`; };
+  const fila = a => {
+    const plan = a.estado === 'planificada', [txt, col] = AUD_ESTADOS[a.estado] || [a.estado, '#6b7280'];
+    const venc = ['planificada', 'programada', 'en_curso', 'ajuste'].includes(a.estado) && a.fecha_prevista && a.fecha_prevista < hoy;
+    const td = 'padding:4px 6px;border-top:1px solid var(--border);vertical-align:middle';
+    const celda = plan ? {
+      fecha: `<input type="date" value="${esc(a.fecha_prevista || '')}" style="padding:4px 6px;font-size:12px" onchange="audPlanCampo('${a.id}','fecha_prevista',this.value)" />`,
+      ora: `<select style="padding:4px 6px;font-size:12px;min-width:150px" onchange="audPlanCampo('${a.id}','area_auditora',this.value)">${optAreas(a.area_auditora)}</select>`,
+      ada: `<select style="padding:4px 6px;font-size:12px;min-width:150px" onchange="audPlanCampo('${a.id}','area_auditada',this.value)">${optAreas(a.area_auditada)}</select>`
+    } : { fecha: esc(audFecha(a.fecha_prevista || a.fecha)), ora: esc(a.area_auditora || '—'), ada: esc(a.area_auditada) };
+    const acc = plan ? `<button class="btn btn-secondary btn-sm" onclick="_audAsignarId='${a.id}';audRender()">Asignar auditor y programar</button> <button class="remove-btn" onclick="audPlanQuitar('${a.id}')" title="Sacar del plan">&#x2715;</button>` : `<button class="btn btn-secondary btn-sm" onclick="audAbrirForm('${a.id}')">Abrir</button>`;
+    const asignar = _audAsignarId === a.id ? `<tr><td colspan="6" style="padding:8px 6px;background:var(--surface2)"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span style="font-size:13px">Auditor/a para ${esc(a.area_auditada)}:</span><select id="aud-as-${a.id}" style="width:auto;min-width:220px;padding:6px 8px;font-size:13px">${personas(a)}</select><button class="btn btn-primary btn-sm" onclick="audPlanProgramar('${a.id}')">✓ Programar</button><button class="btn btn-secondary btn-sm" onclick="_audAsignarId='';audRender()">Cancelar</button></div></td></tr>` : '';
+    return `<tr><td style="${td}">${celda.fecha}</td><td style="${td}">${celda.ora}</td><td style="${td}">${celda.ada}</td><td style="${td};font-size:13px">${esc(a.auditor_nombre || '—')}</td><td style="${td}"><span class="badge" style="background:${col};color:#fff">${esc(txt)}</span>${venc ? ' <span class="badge" style="background:#b3261e;color:#fff">Vencida</span>' : ''}</td><td style="${td};white-space:nowrap">${acc}</td></tr>${asignar}`;
+  };
+  const opciones = _audPlanOpc ? `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0"><p class="hint" style="margin-top:0">Se arma una auditoría por cada área que todavía no tiene una en ${_audPlanAnio}: cada área es auditada por otra, con una rotación que cambia cada año y evita repetir los cruces del año anterior. Después ajustás lo que quieras. Las auditorías quedan sin persona hasta que asignes el auditor.</p>
+      <label>Áreas a incluir</label><div style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:8px">${areas.map((s, k) => `<label style="font-weight:400;font-size:13px;display:flex;gap:4px;align-items:center"><input type="checkbox" id="aud-pl-a-${k}" style="width:auto" checked /> ${esc(s)}</label>`).join('')}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end"><div><label>Desde</label><select id="aud-pl-desde" style="width:auto">${audMesesTxt.map((m, k) => `<option value="${k + 1}" ${k === 2 ? 'selected' : ''}>${m}</option>`).join('')}</select></div><div><label>Hasta</label><select id="aud-pl-hasta" style="width:auto">${audMesesTxt.map((m, k) => `<option value="${k + 1}" ${k === 10 ? 'selected' : ''}>${m}</option>`).join('')}</select></div><button class="btn btn-primary" onclick="audPlanGenerar()">✓ Generar</button></div></div>` : '';
+  const agregar = _audPlanAdd ? `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin:10px 0"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end"><div><label>Área auditora</label><select id="aud-pa-ora" style="width:auto">${optAreas('')}</select></div><div><label>Área auditada</label><select id="aud-pa-ada" style="width:auto">${optAreas('')}</select></div><div><label>Fecha prevista</label><input type="date" id="aud-pa-fecha" style="width:auto" /></div><button class="btn btn-primary" onclick="audPlanAgregar()">✓ Agregar</button></div></div>` : '';
+  return `<div class="card"><div class="card-label">Plan anual de auditorías</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><label style="margin:0">Año</label><select style="width:auto" onchange="_audPlanAnio=Number(this.value);_audAsignarId='';audRender()">${anios.map(y => `<option ${y === _audPlanAnio ? 'selected' : ''}>${y}</option>`).join('')}</select>
+      <button class="btn btn-primary btn-sm" onclick="_audPlanOpc=!_audPlanOpc;_audPlanAdd=false;audRender()">${_audPlanOpc ? '– Cancelar' : '✨ Generar plan sugerido'}</button><button class="btn btn-secondary btn-sm" onclick="_audPlanAdd=!_audPlanAdd;_audPlanOpc=false;audRender()">${_audPlanAdd ? '– Cancelar' : '+ Agregar al plan'}</button>
+      ${items.length ? '<button class="btn btn-secondary btn-sm" onclick="audPlanDescargar()">⬇ Descargar Word</button><button class="btn btn-secondary btn-sm" onclick="audPlanGuardarCarpeta()">📁 Guardar en la carpeta de Calidad</button>' : ''}</div>
+    <p class="hint" style="margin:8px 0 0">${items.length ? `Cobertura ${_audPlanAnio}: ${cubiertas.length} de ${areas.length} áreas con auditoría${faltan.length ? '. Faltan: ' + esc(faltan.join(', ')) + '.' : '.'}` : `Todavía no hay auditorías en el plan de ${_audPlanAnio}.`}</p>
+    ${opciones}${agregar}
+    ${items.length ? `<div style="overflow-x:auto;margin-top:8px"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="text-align:left;font-size:12px;color:var(--text2)"><th style="padding:4px 6px">Fecha prevista</th><th style="padding:4px 6px">Área auditora</th><th style="padding:4px 6px">Área auditada</th><th style="padding:4px 6px">Auditor/a</th><th style="padding:4px 6px">Estado</th><th></th></tr>${items.map(fila).join('')}</table></div>` : ''}
+    <div id="aud-plan-status"></div></div>`;
+}
+async function audPlanCampo(id, campo, valor) {
+  const a = _audLista.find(x => x.id === id); if (!a) return;
+  const nuevo = Object.assign({}, a, { [campo]: valor || null });
+  if (nuevo.area_auditora && nuevo.area_auditada && nuevo.area_auditora === nuevo.area_auditada) { showMsg('aud-plan-status', 'error', '✕ En una auditoría cruzada el área auditora y la auditada son distintas.'); audRender(); return; }
+  try { await audPatch(id, { [campo]: valor || null, updated_at: new Date().toISOString() }); await audListar(); audRender(); }
+  catch (e) { showMsg('aud-plan-status', 'error', '✕ ' + e.message); }
+}
+async function audPlanQuitar(id) {
+  if (!confirm('¿Sacar esta auditoría del plan?')) return;
+  try { const r = await supaFetch(`/rest/v1/auditorias_internas?id=eq.${id}`, { method: 'DELETE', headers: audH() }); if (!r.ok) throw new Error('No se pudo sacar del plan.'); await audListar(); audRender(); }
+  catch (e) { showMsg('aud-plan-status', 'error', '✕ ' + e.message); }
+}
+async function audPlanFilas(filas) {
+  const r = await supaFetch('/rest/v1/auditorias_internas', { method: 'POST', headers: audH({ Prefer: 'return=representation' }), body: JSON.stringify(filas.map(f => Object.assign({ empresa: currentEmpresa, estado: 'planificada', checklist: [], programada_por_nombre: (currentUser && (currentUser.nombre || currentUser.email)) || null }, f))) });
+  const rows = await r.json().catch(() => null);
+  if (!r.ok || !rows) throw new Error((rows && rows.message) || 'No se pudo guardar el plan (¿se corrió el SQL docs/auditorias.sql?).');
+  return rows;
+}
+async function audPlanGenerar() {
+  const st = 'aud-plan-status', todas = audAreasPlan(), elegidas = todas.filter((s, k) => (document.getElementById('aud-pl-a-' + k) || {}).checked);
+  const desde = Number((document.getElementById('aud-pl-desde') || {}).value) || 3, hasta = Number((document.getElementById('aud-pl-hasta') || {}).value) || 11;
+  if (elegidas.length < 2) { showMsg(st, 'error', '✕ Elegí al menos dos áreas: cada una la audita otra.'); return; }
+  if (hasta < desde) { showMsg(st, 'error', '✕ El mes final no puede ser anterior al inicial.'); return; }
+  const faltan = elegidas.filter(ar => !audPlanItems().some(a => a.area_auditada === ar));
+  if (!faltan.length) { showMsg(st, 'error', `✕ Todas las áreas elegidas ya tienen una auditoría en ${_audPlanAnio}.`); return; }
+  try {
+    showMsg(st, 'loading', 'Armando el plan…');
+    const par = audRotacion(elegidas, _audPlanAnio, faltan), span = hasta - desde + 1, porMes = {};
+    const filas = par.map((p, k) => { const mes = desde + Math.floor(k * span / par.length); porMes[mes] = (porMes[mes] || 0) + 1; return { area_auditada: p.auditada, area_auditora: p.auditora, fecha_prevista: audFechaPlan(_audPlanAnio, mes, Math.min(28, 8 + 7 * (porMes[mes] - 1))) }; });
+    await audPlanFilas(filas);
+    _audPlanOpc = false; _audMsg = `✓ Plan ${_audPlanAnio}: se agregaron ${filas.length} auditoría(s). Ajustá fechas o áreas y asigná el auditor cuando corresponda.`;
+    await audListar(); audRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+async function audPlanAgregar() {
+  const v = id => (document.getElementById(id) || {}).value || '', st = 'aud-plan-status', ora = v('aud-pa-ora'), ada = v('aud-pa-ada'), fecha = v('aud-pa-fecha');
+  if (!ora || !ada) { showMsg(st, 'error', '✕ Elegí el área auditora y la auditada.'); return; }
+  if (ora === ada) { showMsg(st, 'error', '✕ En una auditoría cruzada el área auditora y la auditada son distintas.'); return; }
+  if (!fecha) { showMsg(st, 'error', '✕ Poné la fecha prevista.'); return; }
+  try { showMsg(st, 'loading', 'Agregando…'); await audPlanFilas([{ area_auditora: ora, area_auditada: ada, fecha_prevista: fecha }]); if (audAnioDe({ fecha_prevista: fecha }) !== _audPlanAnio) _audPlanAnio = audAnioDe({ fecha_prevista: fecha }); _audPlanAdd = false; await audListar(); audRender(); }
+  catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+// Pasa una auditoría planificada a programada: asigna la persona, arma el checklist y le avisa
+async function audPlanProgramar(id) {
+  const a = _audLista.find(x => x.id === id), st = 'aud-plan-status', pid = (document.getElementById('aud-as-' + id) || {}).value, p = (_audPerf || []).find(x => x.id === pid);
+  if (!a) return; if (!p) { showMsg(st, 'error', '✕ Elegí quién audita.'); return; }
+  if (p.sector === a.area_auditada) { showMsg(st, 'error', `✕ ${p.nombre || 'La persona'} es del área ${a.area_auditada}: en una auditoría cruzada audita otra área.`); return; }
+  try {
+    showMsg(st, 'loading', 'Programando…'); await audCfgCargar();
+    const coord = (_audPerf || []).filter(x => x.sector === a.area_auditada && x.coordinador);
+    const body = { auditor_id: p.id, auditor_nombre: p.nombre || p.email, area_auditora: p.sector || a.area_auditora, estado: 'programada', checklist: audChecklistNuevo(), updated_at: new Date().toISOString() };
+    if (!a.responsable_area && coord.length === 1) body.responsable_area = coord[0].nombre || coord[0].email;
+    await audPatch(id, body);
+    logEvento('auditoria', id, 'programada', `${body.auditor_nombre} audita a ${a.area_auditada} (plan ${_audPlanAnio})`);
+    await notifCreate(p.id, 'Te asignaron una auditoría interna', `Auditás el área ${a.area_auditada}${a.fecha_prevista ? ' (prevista para el ' + audFecha(a.fecha_prevista) + ')' : ''}. Completá el formulario en Auditorías.`, 'auditorias');
+    _audAsignarId = ''; _audMsg = `✓ Auditoría programada: ${body.auditor_nombre} audita a ${a.area_auditada}. Se le avisó en MAIA.`;
+    await audListar(); audRender();
+  } catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
+}
+function audPlanBloques() {
+  const items = audPlanItems();
+  const B = [{ t: 'p', text: `Plan anual de auditorías internas de áreas ${_audPlanAnio}. Cada área es auditada por otra, definida por SGI.`, italic: true }];
+  B.push({ t: 'table', estilo: 'datos', head: ['Fecha prevista', 'Área auditora', 'Área auditada', 'Auditor/a', 'Estado'], widths: [1600, 2100, 2100, 2100, 1738], rows: items.map(a => [audFecha(a.fecha_prevista || a.fecha), a.area_auditora || '', a.area_auditada, a.auditor_nombre || '—', (AUD_ESTADOS[a.estado] || [a.estado])[0]]) });
+  return B;
+}
+async function audPlanDocx() { await audCfgCargar(); return docxGenerar(audPlanBloques(), { titulo: 'PLAN ANUAL DE AUDITORÍAS INTERNAS ' + _audPlanAnio, codigo: 'SGI', rev: '', fecha: today() }); }
+async function audPlanDescargar() { try { docxDescargar(await audPlanDocx(), `Plan anual de auditorías internas ${_audPlanAnio}`); } catch (e) { showMsg('aud-plan-status', 'error', '✕ ' + e.message); } }
+async function audPlanGuardarCarpeta() {
+  const st = 'aud-plan-status';
+  try { showMsg(st, 'loading', 'Guardando…'); const r = await audSubirACarpeta(await audPlanDocx(), `Plan anual de auditorías internas ${_audPlanAnio}.docx`, String(_audPlanAnio)); showMsg(st, 'success', `✓ Plan guardado en ${r.ruta}.`); }
+  catch (e) { showMsg(st, 'error', '✕ ' + e.message); }
 }
 
 // ── Cfg Auditorías (SGI) ──
