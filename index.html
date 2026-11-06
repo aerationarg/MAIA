@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -41163,11 +41163,14 @@ function sim3dAutoPos(lista) {
   return out;
 }
 function sim3dEtiqueta(texto, lodo) {
-  const T = THREE, c = document.createElement('canvas'); c.width = 512; c.height = 80; const x = c.getContext('2d');
-  x.font = '600 36px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; const w = Math.min(500, x.measureText(texto).width + 36);
-  x.fillStyle = 'rgba(255,255,255,.92)'; x.strokeStyle = lodo ? '#5a3a10' : '#1b5e20'; x.lineWidth = 3; x.beginPath(); x.roundRect ? x.roundRect(256 - w / 2, 8, w, 64, 12) : x.rect(256 - w / 2, 8, w, 64); x.fill(); x.stroke();
-  x.fillStyle = '#1b2a22'; x.fillText(texto.length > 26 ? texto.slice(0, 25) + '…' : texto, 256, 41);
-  const tex = new T.CanvasTexture(c), sp = new T.Sprite(new T.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); sp.renderOrder = 10; sp.userData.ar = 512 / 80; return sp;
+  const T = THREE, c = document.createElement('canvas'); c.width = 512; c.height = 80; const x = c.getContext('2d'), tex = new T.CanvasTexture(c);
+  const dibujar = t => {
+    x.clearRect(0, 0, 512, 80); x.font = '600 36px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; const w = Math.min(500, x.measureText(t).width + 36);
+    x.fillStyle = 'rgba(255,255,255,.92)'; x.strokeStyle = lodo ? '#5a3a10' : '#1b5e20'; x.lineWidth = 3; x.beginPath(); x.roundRect ? x.roundRect(256 - w / 2, 8, w, 64, 12) : x.rect(256 - w / 2, 8, w, 64); x.fill(); x.stroke();
+    x.fillStyle = '#1b2a22'; x.fillText(t.length > 30 ? t.slice(0, 29) + '…' : t, 256, 41); tex.needsUpdate = true;
+  };
+  dibujar(texto);
+  const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); sp.renderOrder = 10; sp.userData.ar = 512 / 80; sp.userData.dibujar = dibujar; sp.userData.texto = texto; return sp;
 }
 
 // ── Cuerpo 3D de una unidad ──
@@ -41247,10 +41250,9 @@ function sim3dBombaTubo(tb, info) {
   const marca = new T.Mesh(new T.BoxGeometry(0.08, 0.3, 0.05), M(0x222222)); marca.position.set(0, 0, 0.0); disco.add(marca);
   const luz = add(new T.Mesh(new T.SphereGeometry(0.15, 12, 8), M(0x9a9a9a)), -0.5, 1.0, 0);
   if (y0 > 0.2) add(new T.Mesh(new T.CylinderGeometry(0.1, 0.1, y0, 8), M(0x6a7580)), 0, -y0 / 2, 0);
-  const et = on => { const sp = sim3dEtiqueta(`${info.corto}: ${on ? 'en marcha' : 'parada'}`, true); sp.scale.set(0.9 * sp.userData.ar, 0.9, 1); sp.position.set(0, 1.9, 0); g.add(sp); return sp; };
-  const etOn = et(true), etOff = et(false); etOn.visible = false;
+  const et = sim3dEtiqueta(info.corto + ': parada', true); et.scale.set(0.9 * et.userData.ar, 0.9, 1); et.position.set(0, 1.9, 0); g.add(et);
   mallas.forEach(m => { m.userData.uid = info.uid; m.userData.tubo = true; _sim3d.pick.push(m); });
-  g.visible = simUiAbierto('eq3d', true); tb.g.add(g); tb.bomba = { g, luz, disco, on: null, etOn, etOff };
+  g.visible = simUiAbierto('eq3d', true); tb.g.add(g); tb.bomba = { g, luz, disco, on: null, et, corto: info.corto };
 }
 function sim3dArmarTubos(plant, d) {
   const T = THREE, S = _sim3d; S.tubos.forEach(tb => { S.grupo.remove(tb.g); tb.g.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && !Array.isArray(o.material)) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } }); }); S.tubos = []; S.pick = S.pick.filter(o => !o.userData.tubo);
@@ -41473,7 +41475,7 @@ function sim3dTick(plant, d, k, t, sinFase) {
   });
   S.tubos.forEach(tb => {
     const q = Math.abs(at(tb.Q, k) || 0), qm = S.qmax[tb.grupo] || 1, vis = q > Math.max(0.01, 0.004 * qm), r = (tb.grupo === 'S' ? 0.1 : 0.14) + (tb.grupo === 'S' ? 0.2 : 0.3) * Math.sqrt(q / qm);
-    if (tb.bomba) { const bb = tb.bomba; if (bb.on !== vis) { bb.on = vis; bb.luz.material.color.set(vis ? 0x2f8a57 : 0x9a9a9a); bb.luz.material.emissive.set(vis ? 0x14502e : 0x000000); bb.etOn.visible = vis; bb.etOff.visible = !vis; } if (vis) bb.disco.rotation.x = S.fase * 9; }
+    if (tb.bomba) { const bb = tb.bomba; if (bb.on !== vis) { bb.on = vis; bb.luz.material.color.set(vis ? 0x2f8a57 : 0x9a9a9a); bb.luz.material.emissive.set(vis ? 0x14502e : 0x000000); } const txt = vis ? `${bb.corto}: ${+q.toPrecision(3)} m3/h` : `${bb.corto}: parada`; if (bb.et.userData.texto !== txt) { bb.et.userData.texto = txt; bb.et.userData.dibujar(txt); } if (vis) bb.disco.rotation.x = S.fase * 9; }
     tb.mat.color.set(tb.colFn(k)); tb.segs.forEach(m => m.scale.set(r, 1, r)); tb.juntas.forEach(j => j.scale.setScalar(r));
     const v = 1.5 + 5 * q / qm; tb.marcas.forEach(c => { c.visible = vis; if (!vis) return; const e = sim3dEn(tb, c.userData.s0 + S.fase * v); c.position.copy(e.p); c.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), e.d); c.scale.set(r * 1.7, r * 1.5, r * 1.7); });
   });
