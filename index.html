@@ -121,6 +121,13 @@
 
     .card { background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border); padding: 16px; margin-bottom: 12px; }
     .card-label { font-size: 11px; color: var(--text2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    /* Admin: secciones y filas plegables (details/summary) */
+    .adm-sec > summary, .adm-item > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .adm-sec > summary::-webkit-details-marker, .adm-item > summary::-webkit-details-marker { display: none; }
+    .adm-sec > summary::before, .adm-item > summary::before { content: '▸'; font-size: 12px; color: var(--text2); width: 12px; transition: transform .15s; }
+    .adm-sec[open] > summary::before, .adm-item[open] > summary::before { transform: rotate(90deg); }
+    .adm-sec > summary .card-label { margin: 0; }
+    .adm-sec[open] > summary { margin-bottom: 10px; }
 
     input, textarea, select { width: 100%; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); font-family: inherit; font-size: 15px; outline: none; transition: border-color 0.15s; -webkit-appearance: none; }
     input:focus, textarea:focus { border-color: var(--text3); }
@@ -400,7 +407,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.7</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +464,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.7</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45590,6 +45597,11 @@ const SECTOR_TABS = {
   'Técnicos':          ['rend','viajes','hallazgos','auditorias','microorganismos','mantenimiento'],
 };
 
+// Los sectores se muestran siempre en orden alfabético (los que se crean o renombran desde Admin entran en su lugar, no al final)
+function sectoresCmp(a, b) { return String(a).localeCompare(String(b), 'es', { sensitivity: 'base' }); }
+function ordenarClaves(obj) { const ent = Object.entries(obj).sort((x, y) => sectoresCmp(x[0], y[0])); Object.keys(obj).forEach(k => delete obj[k]); ent.forEach(([k, v]) => { obj[k] = v; }); return obj; }
+ordenarClaves(SECTOR_TABS);
+
 // Excepciones por usuario: sobre los accesos de su sector se suman o se sacan solapas. El usuario se reconoce por el nombre de su perfil
 // (sin tildes ni mayúsculas; tienen que estar todas las palabras). Karina Colace es de Servicios, tiene todo Comercial y no ve Mantenimiento.
 const USUARIO_TABS_EXTRA = [
@@ -45628,32 +45640,44 @@ function accesosAplicar(cfg) {
     Object.keys(SECTOR_TABS).forEach(sec => { if ((!secs || secs.includes(sec)) && !SECTOR_TABS[sec].includes(tab)) SECTOR_TABS[sec].push(tab); });
   });
   if (SECTOR_TABS.Admin && !SECTOR_TABS.Admin.includes('admin')) SECTOR_TABS.Admin.push('admin');   // Admin nunca se queda sin el panel de Admin
+  ordenarClaves(SECTOR_TABS);
 }
 async function accesosCargar() { try { accesosAplicar(await supaConfigGetSeguro(ACCESOS_KEY)); } catch (e) { /* sin config propia o sin red: valen los de origen */ } }
 const accesosTodas = () => NAV_SECTIONS.map(x => Object.assign({ cfg: false }, x)).concat(NAV_CONFIG_SECTIONS.map(x => Object.assign({ cfg: true }, x)));
+// Secciones y filas plegables del panel Admin: cada una se identifica con una clave y se recuerda abierta o cerrada mientras la pantalla siga abierta (arrancan cerradas)
+const _admAbierto = new Set();
+const admAbierto = k => _admAbierto.has(k) ? 'open' : '';
+function admToggle(el) { const k = el && el.dataset && el.dataset.k; if (!k) return; if (el.open) _admAbierto.add(k); else _admAbierto.delete(k); }
+function admTodos(prefijo, abrir) { document.querySelectorAll('details.adm-item').forEach(d => { if ((d.dataset.k || '').startsWith(prefijo)) { d.open = abrir; } }); }
 function accesosRender() {
   const el = document.getElementById('admin-accesos-card'); if (!el) return;
   accesosInit();
   const sectores = Object.keys(_accEdit.sectores), tabs = accesosTodas().concat([{ id: 'admin', label: 'Admin (panel de administración)', area: 'Admin', cfg: true }]);
   const fila = t => `<tr><td style="padding:3px 6px;white-space:nowrap;font-size:13px">${esc(t.label)}<span class="hint" style="display:inline;margin-left:4px">${esc(t.area || '')}</span></td>${sectores.map(sec => `<td style="text-align:center;padding:3px 4px"><input type="checkbox" style="width:auto" ${(_accEdit.sectores[sec] || []).includes(t.id) ? 'checked' : ''} ${t.id === 'admin' && sec !== 'Admin' ? 'disabled' : ''} ${t.id === 'admin' && sec === 'Admin' ? 'disabled' : ''} onchange="accesosToggle('${esc(sec)}','${t.id}',this.checked)" /></td>`).join('')}<td style="padding:3px 6px">${t.id === 'admin' ? '' : `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',true)">todos</button> <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',false)">ninguno</button>`}</td></tr>`;
-  const exc = _accEdit.usuarios.map((x, i) => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select style="width:auto;padding:6px 8px;font-size:13px" onchange="accesosExcPersona(${i},this.value)"><option value="">— Elegir persona —</option>${(_oooPerf || []).map(pf => `<option value="${esc(pf.nombre)}" ${procesosNormTxt(pf.nombre) === x.palabras.join(' ') || x.palabras.every(w => procesosNormTxt(pf.nombre).includes(w)) && x.palabras.length ? 'selected' : ''}>${esc(pf.nombre)}</option>`).join('')}</select><span class="hint" style="margin:0">${x.palabras.length ? 'coincide con el nombre: ' + esc(x.palabras.join(' ')) : 'sin persona'}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="accesosExcQuitar(${i})">✕</button></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px"><label style="font-size:12px">Suma estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'agregar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.agregar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label><label style="font-size:12px">Le saca estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'quitar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.quitar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label></div></div>`).join('');
-  el.innerHTML = `<div class="card"><div class="card-label">Accesos por sector</div>
+  const excNombre = x => { const pf = x.palabras.length ? (_oooPerf || []).find(q => x.palabras.every(w => procesosNormTxt(q.nombre).includes(w))) : null; return pf ? pf.nombre : (x.palabras.length ? x.palabras.join(' ') : 'Sin persona'); };
+  const exc = _accEdit.usuarios.map((x, i) => `<details class="adm-item" data-k="e:${i}" ${admAbierto('e:' + i)} ontoggle="admToggle(this)" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px"><summary><b style="font-size:13px">${esc(excNombre(x))}</b><span class="hint" style="margin:0">suma ${(x.agregar || []).length} · saca ${(x.quitar || []).length}</span></summary><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px"><select style="width:auto;padding:6px 8px;font-size:13px" onchange="accesosExcPersona(${i},this.value)"><option value="">— Elegir persona —</option>${(_oooPerf || []).map(pf => `<option value="${esc(pf.nombre)}" ${procesosNormTxt(pf.nombre) === x.palabras.join(' ') || x.palabras.every(w => procesosNormTxt(pf.nombre).includes(w)) && x.palabras.length ? 'selected' : ''}>${esc(pf.nombre)}</option>`).join('')}</select><span class="hint" style="margin:0">${x.palabras.length ? 'coincide con el nombre: ' + esc(x.palabras.join(' ')) : 'sin persona'}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="accesosExcQuitar(${i})">✕</button></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px"><label style="font-size:12px">Suma estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'agregar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.agregar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label><label style="font-size:12px">Le saca estas solapas<select multiple size="6" style="width:100%;font-size:12px" onchange="accesosExcSet(${i},'quitar',this)">${tabs.filter(t => t.id !== 'admin').map(t => `<option value="${t.id}" ${(x.quitar || []).includes(t.id) ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label></div></details>`).join('');
+  el.innerHTML = `<div class="card"><details class="adm-sec" data-k="sec-accesos" ${admAbierto('sec-accesos')} ontoggle="admToggle(this)"><summary><span class="card-label">Accesos por sector</span><span class="hint" style="margin:0">${sectores.length} sectores</span></summary>
     <p style="font-size:13px;color:var(--text2);margin-bottom:8px">Qué solapas ve cada sector. Los cambios se guardan para todos y se aplican la próxima vez que cada persona entra (o recarga). El sector Admin siempre conserva el panel de Admin. Para habilitar una solapa nueva a todos (por ejemplo Fuera de oficina), tocá "todos" en su fila.</p>
-    <div style="overflow:auto;max-height:520px;border:1px solid var(--border);border-radius:8px"><table style="border-collapse:collapse;width:100%"><thead style="position:sticky;top:0;background:var(--surface);z-index:1"><tr><th style="text-align:left;padding:4px 6px;font-size:12px">Solapa</th>${sectores.map(sec => `<th style="padding:4px 4px;font-size:11px;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap">${esc(sec)}</th>`).join('')}<th></th></tr></thead><tbody>${tabs.map(fila).join('')}</tbody></table></div>
-    <div class="card-label" style="margin:14px 0 6px">Excepciones por persona</div>
-    <p style="font-size:12px;color:var(--text2);margin-bottom:6px">Sobre lo de su sector, a una persona se le pueden sumar o sacar solapas (por ejemplo, una persona de Servicios que también ve Comercial).</p>${exc}<button class="btn btn-secondary btn-sm" onclick="accesosExcAdd()">＋ Agregar excepción</button>
+    <div style="overflow:auto;max-height:520px;border:1px solid var(--border);border-radius:8px"><table style="border-collapse:collapse;width:100%"><thead style="position:sticky;top:0;background:var(--surface);z-index:1"><tr><th style="text-align:left;padding:4px 6px;font-size:12px">Solapa</th>${sectores.map(sec => `<th style="padding:4px 4px;font-size:11px;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap">${esc(sec)}</th>`).join('')}<th></th></tr></thead><tbody>${tabs.map(fila).join('')}</tbody></table></div></details>
+    <details class="adm-sec" data-k="sec-exc" ${admAbierto('sec-exc')} ontoggle="admToggle(this)" style="margin-top:14px"><summary><span class="card-label">Excepciones por persona</span><span class="hint" style="margin:0">${_accEdit.usuarios.length}</span></summary>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:6px">Sobre lo de su sector, a una persona se le pueden sumar o sacar solapas (por ejemplo, una persona de Servicios que también ve Comercial).</p>
+    ${_accEdit.usuarios.length > 1 ? `<div style="display:flex;gap:8px;margin-bottom:8px"><button class="btn btn-secondary btn-sm" onclick="admTodos('e:',true)">Desplegar todas</button><button class="btn btn-secondary btn-sm" onclick="admTodos('e:',false)">Contraer todas</button></div>` : ''}${exc}<button class="btn btn-secondary btn-sm" onclick="accesosExcAdd()">＋ Agregar excepción</button></details>
     <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn btn-primary" onclick="accesosGuardar()">Guardar accesos</button><button class="btn btn-secondary" onclick="accesosRestaurar()">Volver a los valores de origen</button></div><div id="admin-accesos-status" style="margin-top:8px"></div></div>`;
 }
 function accesosToggle(sec, tab, on) { const a = (_accEdit.sectores[sec] = _accEdit.sectores[sec] || []); const i = a.indexOf(tab); if (on && i < 0) a.push(tab); if (!on && i >= 0) a.splice(i, 1); }
 function accesosFila(tab, on) { Object.keys(_accEdit.sectores).forEach(sec => accesosToggle(sec, tab, on)); accesosRender(); }
-function accesosExcAdd() { _accEdit.usuarios.push({ palabras: [], agregar: [], quitar: [] }); accesosRender(); }
+function accesosExcAdd() { _accEdit.usuarios.push({ palabras: [], agregar: [], quitar: [] }); _admAbierto.add('sec-exc'); _admAbierto.add('e:' + (_accEdit.usuarios.length - 1)); accesosRender(); }
 function accesosExcQuitar(i) { _accEdit.usuarios.splice(i, 1); accesosRender(); }
 function accesosExcPersona(i, nombre) { _accEdit.usuarios[i].palabras = nombre ? procesosNormTxt(nombre).split(/[^a-z0-9]+/).filter(Boolean) : []; accesosRender(); }
-function accesosExcSet(i, campo, sel) { _accEdit.usuarios[i][campo] = Array.from(sel.selectedOptions).map(o => o.value); }
+function accesosExcSet(i, campo, sel) {
+  _accEdit.usuarios[i][campo] = Array.from(sel.selectedOptions).map(o => o.value);
+  const h = sel.closest('details') && sel.closest('details').querySelector('summary .hint'); if (h) h.textContent = `suma ${(_accEdit.usuarios[i].agregar || []).length} · saca ${(_accEdit.usuarios[i].quitar || []).length}`;
+}
 function accesosInit() {
   if (!_accEdit) _accEdit = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)), eliminados: _accEliminados.slice() };
   if (!Array.isArray(_accEdit.eliminados)) _accEdit.eliminados = [];
+  ordenarClaves(_accEdit.sectores);
   return _accEdit;
 }
 // Después de guardar, se lee igual que lo lee MAIA al iniciar sesión. Si lo que vuelve no tiene los cambios, se avisa con detalle (en vez de decir "guardado" y que al recargar se pierda).
@@ -45670,7 +45694,7 @@ async function accesosVerificar(cfg) {
 }
 // Guarda en app_config y aplica (accesos, excepciones y sectores). Tira error si no se pudo.
 async function accesosPersistir() {
-  accesosInit();
+  accesosInit(); ordenarClaves(_accEdit.sectores);
   const cfg = { sectores: _accEdit.sectores, usuarios: _accEdit.usuarios.filter(x => x.palabras.length), eliminados: _accEdit.eliminados };
   if (!(cfg.sectores.Admin || []).includes('admin')) cfg.sectores.Admin = (cfg.sectores.Admin || []).concat(['admin']);
   await supaConfigSet(ACCESOS_KEY, cfg); await accesosVerificar(cfg); accesosAplicar(cfg);
@@ -45714,12 +45738,12 @@ async function sectoresRender() {
   accesosInit();
   try { _secCuenta = await sectoresContar(); _secContado = true; } catch (e) { _secCuenta = {}; _secContado = false; }
   _secLista = Object.keys(_accEdit.sectores);
-  const huerf = _secContado ? Object.keys(_secCuenta).filter(x => x && x !== 'null' && !_accEdit.sectores[x]) : [];
+  const huerf = _secContado ? Object.keys(_secCuenta).filter(x => x && x !== 'null' && !_accEdit.sectores[x]).sort(sectoresCmp) : [];
   const filas = _secLista.map((sec, i) => {
     const n = _secCuenta[sec] || 0, prot = SECTORES_PROTEGIDOS.includes(sec);
     return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border);flex-wrap:wrap"><b style="font-size:13px;flex:1;min-width:150px">${esc(sec)}</b><span class="hint" style="margin:0">${_secContado ? n + (n === 1 ? ' persona' : ' personas') : ''}${prot ? (_secContado ? ' · ' : '') + 'del sistema' : ''}</span>${prot ? '' : `<button class="btn btn-secondary btn-sm" onclick="sectorRenombrar(${i})">Renombrar</button><button class="btn btn-secondary btn-sm" onclick="sectorEliminar(${i})">Eliminar</button>`}</div>`;
   }).join('');
-  el.innerHTML = `<div class="card"><div class="card-label">Sectores</div>
+  el.innerHTML = `<div class="card"><details class="adm-sec" data-k="sec-sectores" ${admAbierto('sec-sectores')} ontoggle="admToggle(this)"><summary><span class="card-label">Sectores</span><span class="hint" style="margin:0">${_secLista.length}</span></summary>
     <p style="font-size:13px;color:var(--text2);margin-bottom:8px">Los sectores que existen en MAIA. Podés crear uno, cambiarle el nombre o eliminarlo (solo si no tiene personas). Admin, SGI y RRHH no se tocan porque el sistema se apoya en ellos. Cada cambio se guarda en el momento, junto con lo que tengas pendiente en "Accesos por sector".</p>
     <div>${filas}</div>
     ${huerf.length ? `<p style="font-size:12px;color:#b8860b;margin-top:8px">⚠ Hay personas con un sector que no está en la lista: ${huerf.map(x => esc(x) + ' (' + _secCuenta[x] + ')').join(', ')}. Asignales uno desde "Gestión de usuarios", o creá un sector con ese mismo nombre.</p>` : ''}
@@ -45728,7 +45752,7 @@ async function sectoresRender() {
       <label style="font-size:12px">Partir de los accesos de<select id="sec-nuevo-base" style="width:auto"><option value="">Básicos (Rendiciones, Viajes, Hallazgos, Auditorías)</option>${_secLista.filter(x => x !== 'Admin').map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select></label>
       <button class="btn btn-primary" onclick="sectorCrear()">Crear sector</button>
     </div>
-    <div id="admin-sectores-status" style="margin-top:8px"></div></div>`;
+    <div id="admin-sectores-status" style="margin-top:8px"></div></details></div>`;
 }
 // Después de un cambio: se redibuja todo lo que muestra sectores (lista, tabla de accesos, usuarios y el selector de "Crear usuario")
 function sectoresRefrescar() {
@@ -47301,13 +47325,14 @@ async function adminLoadUsers() {
     el.innerHTML = users.map(u=>{
       const emp = (u.empresas||'AA,AS').split(',').map(s=>s.trim()).filter(Boolean);
       return `
-      <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+      <details class="adm-item" data-k="u:${u.id}" ${admAbierto('u:' + u.id)} ontoggle="admToggle(this)" style="border-bottom:1px solid var(--border)"><summary style="padding:9px 0"><b style="font-size:13px">${esc(u.nombre || 'Sin nombre')}</b><span class="hint" style="margin:0">${esc(u.email || '')}</span><span class="badge adm-sector-txt" style="margin-left:auto;background:var(--surface2);color:var(--text)">${esc(u.sector || '—')}</span>${u.coordinador ? '<span class="hint" style="margin:0">Coordinador</span>' : ''}</summary>
+      <div style="padding:2px 0 12px">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
           <div style="flex:1;min-width:160px">
             <input value="${esc(u.nombre||'')}" placeholder="Sin nombre" onblur="adminUpdateNombre('${u.id}',this.value)" onkeydown="if(event.key==='Enter')this.blur()" style="font-size:13px;font-weight:600;padding:4px 6px;margin-bottom:2px;background:transparent;border:1px solid transparent" onfocus="this.style.background='var(--surface2)';this.style.borderColor='var(--border)'" />
             <div style="font-size:12px;color:var(--text2);padding:0 6px">${esc(u.email||'')}</div>
           </div>
-          <select onchange="adminUpdateSector('${u.id}',this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);font-family:inherit;font-size:12px;flex-shrink:0">
+          <select onchange="adminUpdateSector('${u.id}',this.value);var b=this.closest('details').querySelector('.adm-sector-txt');if(b)b.textContent=this.value" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);font-family:inherit;font-size:12px;flex-shrink:0">
             ${Object.keys(SECTOR_TABS).map(s=>`<option value="${s}" ${s===u.sector?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
@@ -47330,8 +47355,9 @@ async function adminLoadUsers() {
           <span style="font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase">🎂 Cumpleaños:</span>
           <input type="date" value="${u.fecha_nacimiento||''}" onchange="adminUpdateFechaNacimiento('${u.id}',this.value)" style="padding:5px 8px;font-size:12.5px;width:auto" />
         </div>
-      </div>`;
+      </div></details>`;
     }).join('');
+    const cnt = document.getElementById('admin-users-count'); if (cnt) cnt.textContent = users.length + (users.length === 1 ? ' persona' : ' personas');
   } catch(e) { el.innerHTML=`<p style="font-size:13px;color:#dc2626">Error al cargar usuarios: ${esc(e.message)}</p>`; }
 }
 
@@ -47453,7 +47479,8 @@ function renderAdmin() {
   }
   el.innerHTML = `
     <div class="card">
-      <div class="card-label">Gestión de usuarios</div>
+      <details class="adm-sec" data-k="sec-usuarios" ${admAbierto('sec-usuarios')} ontoggle="admToggle(this)"><summary><span class="card-label">Gestión de usuarios</span><span class="hint" id="admin-users-count" style="margin:0"></span></summary>
+      <div style="display:flex;gap:8px;margin-bottom:6px"><button class="btn btn-secondary btn-sm" onclick="admTodos('u:',true)">Desplegar todos</button><button class="btn btn-secondary btn-sm" onclick="admTodos('u:',false)">Contraer todos</button></div>
       <div id="admin-users-list"></div>
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
         <div class="card-label" style="margin-bottom:8px">Crear usuario</div>
@@ -47482,6 +47509,7 @@ function renderAdmin() {
         <button class="btn btn-primary" onclick="adminCreateUser()">Crear usuario</button>
         <div id="admin-create-status" style="margin-top:8px"></div>
       </div>
+      </details>
     </div>
     <div class="card">
       <div class="card-label">Integración SharePoint</div>
