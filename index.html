@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -41232,11 +41232,31 @@ function sim3dEn(tb, s) {
   const T = THREE; s = ((s % tb.total) + tb.total) % tb.total; let i = 0; while (i < tb.cum.length - 2 && tb.cum[i + 1] < s) i++;
   const a = tb.P[i], b = tb.P[i + 1], f = (s - tb.cum[i]) / Math.max(1e-6, tb.cum[i + 1] - tb.cum[i]); return { p: a.clone().lerp(b, f), d: b.clone().sub(a).normalize() };
 }
+// ═══ Vista 3D: bombas de recirculación y de purga ═══
+// Se ubican sobre la tubería de lodo (recirculación, recirculación interna, purga hacia la línea de lodos o hacia afuera): bomba sobre su base con motor, luz de estado
+// (verde = encendida según el caudal simulado), acople que gira y un cartel que dice si está en marcha o parada. Tocarla selecciona la unidad de la que sale el lodo.
+function sim3dBombaTubo(tb, info) {
+  const T = THREE, M = (c, o) => new T.MeshStandardMaterial(Object.assign({ color: c, roughness: 0.55, metalness: 0.3 }, o || {}));
+  const s = Math.min(3.8, tb.total * 0.3), e = sim3dEn(tb, s), pipeY = tb.P[0].y, y0 = Math.max(0, pipeY - 0.5), g = new T.Group(), mallas = [];
+  g.position.set(e.p.x, y0, e.p.z); g.rotation.y = Math.atan2(-e.d.z, e.d.x);
+  const add = (m, x, y, z) => { m.position.set(x, y, z); g.add(m); mallas.push(m); return m; };
+  add(new T.Mesh(new T.BoxGeometry(2.0, 0.16, 0.9), M(0x7b868d)), 0, 0.08, 0);
+  add(new T.Mesh(new T.CylinderGeometry(0.3, 0.3, 1.0, 16), M(0x1f6fb0)), -0.5, 0.58, 0).rotation.z = Math.PI / 2;
+  add(new T.Mesh(new T.CylinderGeometry(0.36, 0.36, 0.4, 18), M(0x3a4650)), 0.4, 0.55, 0).rotation.x = Math.PI / 2;
+  const disco = add(new T.Mesh(new T.CylinderGeometry(0.2, 0.2, 0.06, 14), M(0xd9a200)), 0.0, 0.58, 0); disco.rotation.z = Math.PI / 2;
+  const marca = new T.Mesh(new T.BoxGeometry(0.08, 0.3, 0.05), M(0x222222)); marca.position.set(0, 0, 0.0); disco.add(marca);
+  const luz = add(new T.Mesh(new T.SphereGeometry(0.15, 12, 8), M(0x9a9a9a)), -0.5, 1.0, 0);
+  if (y0 > 0.2) add(new T.Mesh(new T.CylinderGeometry(0.1, 0.1, y0, 8), M(0x6a7580)), 0, -y0 / 2, 0);
+  const et = on => { const sp = sim3dEtiqueta(`${info.corto}: ${on ? 'en marcha' : 'parada'}`, true); sp.scale.set(0.9 * sp.userData.ar, 0.9, 1); sp.position.set(0, 1.9, 0); g.add(sp); return sp; };
+  const etOn = et(true), etOff = et(false); etOn.visible = false;
+  mallas.forEach(m => { m.userData.uid = info.uid; m.userData.tubo = true; _sim3d.pick.push(m); });
+  g.visible = simUiAbierto('eq3d', true); tb.g.add(g); tb.bomba = { g, luz, disco, on: null, etOn, etOff };
+}
 function sim3dArmarTubos(plant, d) {
-  const T = THREE, S = _sim3d; S.tubos.forEach(tb => { S.grupo.remove(tb.g); tb.g.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && !Array.isArray(o.material)) o.material.dispose(); }); }); S.tubos = [];
+  const T = THREE, S = _sim3d; S.tubos.forEach(tb => { S.grupo.remove(tb.g); tb.g.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && !Array.isArray(o.material)) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } }); }); S.tubos = []; S.pick = S.pick.filter(o => !o.userData.tubo);
   const at = (a, k) => a && a.length ? a[Math.min(k, a.length - 1)] : 0, nodos = plant.nodos.filter(n => n.tipo !== 'entrada'), nL = nodos.filter(n => !(n.extra && n.extra.lodo)), nS = nodos.filter(n => n.extra && n.extra.lodo);
   const VAR = d.vistaVar || 'dbo', maxV = Math.max(1, ...nL.map(n => Math.max(...(n.sal[VAR] || [0])))), U = id => S.uni[id] ? Object.assign({ hu: S.uni[id].hu }, S.pos[id]) : null, pt = (x, z) => ({ x, z });
-  const add = (A, B, y, tipo, Q, colFn, horiz, grupo) => { if (!A || !B) return; const pts = sim3dRuta(A, B, horiz, Object.keys(S.uni).map(id => U(id)).filter(X => X && X !== A && X !== B && !(A.hu && X.x === A.x && X.z === A.z && X.hu === A.hu) && !(B.hu && X.x === B.x && X.z === B.z && X.hu === B.hu))); if (pts.length < 2) return; const tb = sim3dTubo(pts, y, 0x0056a1); tb.Q = Q; tb.colFn = colFn; tb.grupo = grupo; tb.tipo = tipo; S.grupo.add(tb.g); S.tubos.push(tb); };
+  const add = (A, B, y, tipo, Q, colFn, horiz, grupo, bomba) => { if (!A || !B) return; const pts = sim3dRuta(A, B, horiz, Object.keys(S.uni).map(id => U(id)).filter(X => X && X !== A && X !== B && !(A.hu && X.x === A.x && X.z === A.z && X.hu === A.hu) && !(B.hu && X.x === B.x && X.z === B.z && X.hu === B.hu))); if (pts.length < 2) return; const tb = sim3dTubo(pts, y, 0x0056a1); tb.Q = Q; tb.colFn = colFn; tb.grupo = grupo; tb.tipo = tipo; S.grupo.add(tb.g); S.tubos.push(tb); if (bomba) { sim3dBombaTubo(tb, bomba); tb.segs.forEach(m => { m.userData.uid = bomba.uid; m.userData.tubo = true; S.pick.push(m); }); } };
   const cL = nd => k => { const a = nd.sal[VAR] || nd.sal.Q; return simColorConc(a[Math.min(k, a.length - 1)], maxV); }, cS = nd => k => simColorConc(nd.sal.sst[Math.min(k, nd.sal.sst.length - 1)], 40000), fijo = c => () => c;
   if (nL.length) {
     const p0 = S.pos[nL[0].id], u0 = U(nL[0].id), xin = p0.x - (u0.hu.L / 2 + 9), zin = p0.z; const e = plant.nodos[0];
@@ -41244,14 +41264,14 @@ function sim3dArmarTubos(plant, d) {
     for (let i = 0; i < nL.length - 1; i++) add(U(nL[i].id), U(nL[i + 1].id), 1.0, 'liq', nL[i].sal.Q, cL(nL[i]), true, 'L');
     const ul = nL[nL.length - 1], pl = S.pos[ul.id], hl = S.uni[ul.id].hu; add(U(ul.id), pt(pl.x + hl.L / 2 + 9, pl.z), 1.0, 'out', ul.sal.Q, cL(ul), true, 'L');
   }
-  if (plant.recircInt && S.uni[plant.recircInt.desde] && S.uni[plant.recircInt.hasta]) add(U(plant.recircInt.desde), U(plant.recircInt.hasta), 2.0, 'recint', plant.recircInt.Q, fijo('#1a8f4d'), false, 'L');
-  if (plant.recirc && S.uni[plant.recirc.desde] && S.uni[plant.recirc.hasta]) add(U(plant.recirc.desde), U(plant.recirc.hasta), 0.5, 'rec', plant.recirc.Q, fijo('#8a5a1a'), false, 'L');
+  if (plant.recircInt && S.uni[plant.recircInt.desde] && S.uni[plant.recircInt.hasta]) add(U(plant.recircInt.desde), U(plant.recircInt.hasta), 2.0, 'recint', plant.recircInt.Q, fijo('#1a8f4d'), false, 'L', { corto: 'Recirc. interna', uid: plant.recircInt.desde });
+  if (plant.recirc && S.uni[plant.recirc.desde] && S.uni[plant.recirc.hasta]) add(U(plant.recirc.desde), U(plant.recirc.hasta), 0.5, 'rec', plant.recirc.Q, fijo('#8a5a1a'), false, 'L', { corto: 'Recirculación', uid: plant.recirc.desde });
   if (nS.length) {
     const ds = plant.lodoFeed && S.uni[plant.lodoFeed.desde] ? U(plant.lodoFeed.desde) : null, u0 = U(nS[0].id), p0 = S.pos[nS[0].id];
-    add(ds || pt(p0.x - (u0.hu.L / 2 + 8), p0.z), u0, 0.4, 'lodof', plant.lodoFeed ? plant.lodoFeed.Q : nS[0].ent.Q, fijo('#5a3a10'), false, 'S');
+    add(ds || pt(p0.x - (u0.hu.L / 2 + 8), p0.z), u0, 0.4, 'lodof', plant.lodoFeed ? plant.lodoFeed.Q : nS[0].ent.Q, fijo('#5a3a10'), false, 'S', { corto: 'Purga', uid: plant.purga && plant.purga.unidad ? plant.purga.unidad : (plant.lodoFeed ? plant.lodoFeed.desde : null) });
     for (let i = 0; i < nS.length - 1; i++) add(U(nS[i].id), U(nS[i + 1].id), 0.4, 'lodo', nS[i].sal.Q, cS(nS[i]), true, 'S');
     const ul = nS[nS.length - 1], pl = S.pos[ul.id], hl = S.uni[ul.id].hu; add(U(ul.id), pt(pl.x + hl.L / 2 + 8, pl.z), 0.4, 'lodoout', ul.sal.Q, cS(ul), true, 'S');
-  } else if (plant.purga && plant.purga.Q && S.uni[plant.purga.unidad]) { const ps = S.pos[plant.purga.unidad], hp = S.uni[plant.purga.unidad].hu; add(U(plant.purga.unidad), pt(ps.x, ps.z + hp.W / 2 + 9), 0.4, 'purga', plant.purga.Q, fijo('#5a3a10'), false, 'S'); }
+  } else if (plant.purga && plant.purga.Q && S.uni[plant.purga.unidad]) { const ps = S.pos[plant.purga.unidad], hp = S.uni[plant.purga.unidad].hu; add(U(plant.purga.unidad), pt(ps.x, ps.z + hp.W / 2 + 9), 0.4, 'purga', plant.purga.Q, fijo('#5a3a10'), false, 'S', { corto: 'Purga', uid: plant.purga.unidad }); }
   const mx = g => Math.max(1e-6, ...S.tubos.filter(t => t.grupo === g).map(t => Math.max(...(t.Q || [0]).map(Math.abs)))); S.qmax = { L: mx('L'), S: mx('S') };
 }
 
@@ -41402,7 +41422,7 @@ function sim3dBarraHtml(d) {
   <div class="hint" style="margin:4px 0 6px">${esc(S.msg || SIM3D_AYUDA[S.modo] || '')}${S.auto ? ' <b>Las unidades están en una disposición automática: arrastralas para ubicarlas como en el sitio.</b>' : ''} ${ocupa}</div>`;
 }
 function sim3dBarraRender() { const e = document.getElementById('sim3d-bar'); if (e && _simDoc) e.innerHTML = sim3dBarraHtml(_simDoc.datos); }
-function sim3dEquiposVer(v) { simUiToggle('eq3d', !!v, true); Object.values(_sim3d.uni).forEach(b => { b.eq.visible = !!v; }); sim3dTick(_sim3d.plant, _simDoc.datos, simIdx(), _simPlay.t, true); }
+function sim3dEquiposVer(v) { simUiToggle('eq3d', !!v, true); Object.values(_sim3d.uni).forEach(b => { b.eq.visible = !!v; }); _sim3d.tubos.forEach(tb => { if (tb.bomba) tb.bomba.g.visible = !!v; }); sim3dTick(_sim3d.plant, _simDoc.datos, simIdx(), _simPlay.t, true); }
 function sim3dModo(m) { const S = _sim3d; S.modo = m; S.msg = ''; if (m === 'calibrar') S.calib = { pts: [] }; sim3dBarraRender(); }
 function sim3dSetGrilla(v) { const im = sim3dImp(_simDoc.datos); im.grid = Number(v) || 1; simGuardar(); sim3dGrilla(); sim3dRender(); }
 function sim3dGirar() {
@@ -41453,6 +41473,7 @@ function sim3dTick(plant, d, k, t, sinFase) {
   });
   S.tubos.forEach(tb => {
     const q = Math.abs(at(tb.Q, k) || 0), qm = S.qmax[tb.grupo] || 1, vis = q > Math.max(0.01, 0.004 * qm), r = (tb.grupo === 'S' ? 0.1 : 0.14) + (tb.grupo === 'S' ? 0.2 : 0.3) * Math.sqrt(q / qm);
+    if (tb.bomba) { const bb = tb.bomba; if (bb.on !== vis) { bb.on = vis; bb.luz.material.color.set(vis ? 0x2f8a57 : 0x9a9a9a); bb.luz.material.emissive.set(vis ? 0x14502e : 0x000000); bb.etOn.visible = vis; bb.etOff.visible = !vis; } if (vis) bb.disco.rotation.x = S.fase * 9; }
     tb.mat.color.set(tb.colFn(k)); tb.segs.forEach(m => m.scale.set(r, 1, r)); tb.juntas.forEach(j => j.scale.setScalar(r));
     const v = 1.5 + 5 * q / qm; tb.marcas.forEach(c => { c.visible = vis; if (!vis) return; const e = sim3dEn(tb, c.userData.s0 + S.fase * v); c.position.copy(e.p); c.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), e.d); c.scale.set(r * 1.7, r * 1.5, r * 1.7); });
   });
