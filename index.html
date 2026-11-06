@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -39928,8 +39928,9 @@ function simPlantaVista(plant, d) {
 const SIM_GEO_FREE = 0.4;
 function simGeoDeProyecto(p, v) {
   const m = v.m, ed = ((p.equipos_data || {}).etapas || {})[v.nombre] || {}, eqs = [];
-  (ed.equipos || []).forEach(q => { const inf = procesosFlowsheetInfoDe(q.tipo, q.especificacion); if (inf && PROCESOS_FLOWSHEET_ICONOS_SUMERGIBLES[inf.icono]) eqs.push({ icono: inf.icono, n: Math.min(3, Number(q.cantidad) || 1) }); });
-  return { forma: m.forma, largo: m.largo, ancho: m.ancho, diametro: m.diametro, alto: m.alto, nivelAgua: m.nivelAgua, enterrado: m.enterrado, angulo: m.angulo, fig: v.fig, equipos: eqs };
+  const sops = [];
+  (ed.equipos || []).forEach(q => { const inf = procesosFlowsheetInfoDe(q.tipo, q.especificacion); if (!inf) return; const b = { icono: inf.icono, n: Math.min(3, Number(q.cantidad) || 1), nReal: Number(q.cantidad) || 1, esp: String(q.especificacion || ''), modelo: String(q.modelo || '') }; if (PROCESOS_FLOWSHEET_ICONOS_SUMERGIBLES[inf.icono]) eqs.push(b); else if (inf.icono === 'blower') sops.push(b); });
+  return { forma: m.forma, largo: m.largo, ancho: m.ancho, diametro: m.diametro, alto: m.alto, nivelAgua: m.nivelAgua, enterrado: m.enterrado, angulo: m.angulo, fig: v.fig, equipos: eqs, sopladores: sops };
 }
 // Medidas de dibujo de una unidad (m): w = ancho en el corte, alto total, ent = parte enterrada, col = altura de agua de diseño
 function simGeoUnidad(u) {
@@ -40901,6 +40902,7 @@ function simSelInnerHtml(plant, d) {
     <details style="margin-top:10px" ${simUiAbierto('calc', true) ? 'open' : ''} ontoggle="simUiToggle('calc',this.open,true)"><summary style="cursor:pointer" class="sim-ro-t"><span style="color:var(--text2)">Cálculo en vivo</span></summary><div id="sim-sel-calc" style="margin-top:4px"></div><div class="hint" style="margin:4px 0 0;font-size:11px">Son las mismas cuentas de la verificación, con los valores de la hora del reproductor y los parámetros de abajo.</div></details>
     <div class="sim-ro-t" style="color:var(--text2);margin:12px 0 2px">Parámetros principales</div>
     <div id="sim-sel-par" data-uid="${id}">${simSelParamsHtml(u)}</div>
+    ${sim3dEqPanelHtml(u)}
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-secondary btn-sm" onclick="simDetalle('${id}')" title="Ventana con gráficos, bombas, indicadores y explicación">Ver detalle completo</button><button class="btn btn-secondary btn-sm" onclick="simDetalleEditar('${id}')" title="Todos los datos de la unidad en la sección Datos por unidad">✎ Todos los datos</button><button class="btn btn-secondary btn-sm" id="sim-sel-rest" onclick="simPanelRestablecer()" style="${_simOrig[id] ? '' : 'display:none'}" title="Deja la unidad como estaba antes de mover estos parámetros">↺ Volver a los valores de antes</button></div>
   </div>`;
 }
@@ -41049,6 +41051,34 @@ function simSelLive() {
 // Aparecen según lo que el proyecto tiene cargado (difusores, aireadores, mezcladores, bombas, canasto) y, para cada tipo de unidad, su equipo característico
 // (puente raspador del sedimentador, tamiz inclinado, pantallas del contacto, etc.). Las burbujas siguen el aire que da la simulación; el resto gira o se mueve con el reloj.
 const sim3dClamp = (x, a, b) => Math.min(b, Math.max(a, x));
+// Equipos que MAIA conoce de una unidad: los del proyecto (u.geo.equipos y u.geo.sopladores, con su especificación) y lo que se cargó a mano (u.eq3d[icono]).
+// De la especificación y el modelo se leen, si figuran, potencia, caudal y medidas; lo cargado a mano manda sobre lo leído.
+const SIM3D_EQ = {
+  difusor: { n: 'Difusores', def: null }, aireador_sumerg: { n: 'Aireador sumergible', def: { kw: 7.5, L: 0.5, W: 0.5, H: 0.9 } }, mezclador_sumerg: { n: 'Mezclador sumergible', def: { kw: 2, L: 1, W: 0.9, H: 0.9 } },
+  bomba_sumerg: { n: 'Bomba sumergible', def: { kw: 5, L: 0.6, W: 0.6, H: 0.7 } }, canasto: { n: 'Canasto de retención', def: { L: 1.2, W: 1.0, H: 1.4 } }, blower: { n: 'Sopladores', def: { kw: 22, L: 1.6, W: 1.0, H: 1.2 } }
+};
+function simEqParse(esp, modelo) {
+  const t = String(`${esp || ''} ${modelo || ''}`).toLowerCase().replace(/(\d),(\d)/g, '$1.$2').replace(/³/g, '3'), o = {}, num = x => parseFloat(x);
+  let m = t.match(/(\d+(?:\.\d+)?)\s*(kw|hp|cv)\b/); if (m) { const v = num(m[1]); o.kw = +(m[2] === 'kw' ? v : m[2] === 'hp' ? v * 0.746 : v * 0.7355).toFixed(2); }
+  m = t.match(/(\d+(?:\.\d+)?)\s*(nm3\/h|m3\/h|m3\/min|l\/s)/); if (m) { const v = num(m[1]); o.caudal = +(m[2] === 'm3/min' ? v * 60 : m[2] === 'l/s' ? v * 3.6 : v).toFixed(1); }
+  const f = u => u === 'mm' ? 0.001 : u === 'cm' ? 0.01 : 1;
+  m = t.match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*[x×]\s*(\d+(?:\.\d+)?))?\s*(mm|cm|m)\b/); if (m) { const k = f(m[4]); o.L = +(num(m[1]) * k).toFixed(3); o.W = +(num(m[2]) * k).toFixed(3); if (m[3]) o.H = +(num(m[3]) * k).toFixed(3); }
+  else { m = t.match(/(?:di[aá]metro|diam\.?|ø)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m)\b/); if (m) { const d = +(num(m[1]) * f(m[2])).toFixed(3); o.L = d; o.W = d; } }
+  Object.keys(o).forEach(k => { if (!(o[k] > 0)) delete o[k]; });
+  if (o.L > 12 || o.W > 12 || o.H > 12) { delete o.L; delete o.W; delete o.H; }   // medidas fuera de lo razonable para un equipo: se ignoran
+  return o;
+}
+function sim3dEqLista(u) {
+  const g = (u && u.geo) || {}, ov = (u && u.eq3d) || {}, base = {};
+  (g.equipos || []).concat(g.sopladores || []).forEach(q => { const b = base[q.icono] = base[q.icono] || { n: 0, med: {}, leido: false }; b.n += (q.nReal != null ? q.nReal : q.n) || 1; const p = simEqParse(q.esp, q.modelo); Object.keys(p).forEach(k => { if (b.med[k] == null) { b.med[k] = p[k]; b.leido = true; } }); });
+  const out = [];
+  new Set(Object.keys(base).concat(Object.keys(ov))).forEach(ic => {
+    const b = base[ic] || { n: 0, med: {}, leido: false }, o = ov[ic] || {}, n = o.n != null && o.n !== '' ? Number(o.n) : (b.n || 1); if (!(n > 0) || !SIM3D_EQ[ic]) return;
+    const med = Object.assign({}, b.med), man = []; ['kw', 'L', 'W', 'H'].forEach(k => { if (o[k] != null && o[k] !== '' && isFinite(Number(o[k]))) { med[k] = Number(o[k]); man.push(k); } });
+    out.push({ icono: ic, n, med, man, src: man.length || (ov[ic] && !base[ic]) ? 'manual' : b.leido ? 'leído del texto del equipo' : base[ic] ? 'del proyecto' : 'manual', delProyecto: !!base[ic] });
+  });
+  return out;
+}
 function sim3dBurbujas(b, centros, nMax, tam) {
   const T = THREE, n = Math.max(8, nMax), pos = new Float32Array(n * 3), cx = [], cz = [], off = [], vel = [];
   for (let i = 0; i < n; i++) { const c = centros[i % centros.length]; cx.push(c[0] + (Math.random() - 0.5) * 0.6); cz.push(c[1] + (Math.random() - 0.5) * 0.6); off.push(Math.random()); vel.push(0.6 + Math.random() * 0.8); }
@@ -41063,27 +41093,31 @@ function sim3dBurbujas(b, centros, nMax, tam) {
 function sim3dEquipos(b, nd, hu, u) {
   const T = THREE, t = nd.tipo, ex = nd.extra || {}, yb = b.yb, top = b.top, col = Math.max(0.5, Math.min(hu.col, hu.alto)), L = hu.L, W = hu.W, r = L / 2;
   const eq = new T.Group(); b.eq = eq; b.g.add(eq); b.anim = []; b.aire = null;
-  const lst = (u && u.geo && u.geo.equipos) || [], cuenta = ic => lst.filter(q => q.icono === ic).reduce((a, q) => a + (q.n || 1), 0);
+  const lista = sim3dEqLista(u), cuenta = ic => (lista.find(q => q.icono === ic) || { n: 0 }).n, medDe = ic => (lista.find(q => q.icono === ic) || { med: {} }).med;
+  const fac = ic => { const m = medDe(ic), d = (SIM3D_EQ[ic] || {}).def; if (!d) return 1; if (m.L || m.W || m.H) return sim3dClamp(Math.max(m.L || 0, m.W || 0, m.H || 0) / Math.max(d.L, d.W, d.H), 0.4, 5); if (m.kw && d.kw) return sim3dClamp(Math.cbrt(m.kw / d.kw), 0.5, 3); return 1; };
   const M = (c, o) => new T.MeshStandardMaterial(Object.assign({ color: c, roughness: 0.55, metalness: 0.25 }, o || {}));
   const put = (mesh, x, y, z) => { mesh.position.set(x, y, z); eq.add(mesh); return mesh; };
   const puntos = (n, esc) => { const o = [], a = (hu.circ ? r : L / 2) * (esc || 0.7), c = (hu.circ ? r : W / 2) * (esc || 0.7); for (let i = 0; i < n; i++) { const f = Math.sqrt((i + 0.5) / n), th = i * 2.399; o.push([Math.cos(th) * f * a, Math.sin(th) * f * c]); } return o; };
   const enAgua = ['lodos_activados', 'anoxico', 'mbbr', 'sbr', 'iceas', 'mbr', 'ecualizador', 'digestor', 'fisicoquimico'].includes(t);
-  const mezclador = (x, z) => {
+  const mezclador = (x, z, f) => {
+    f = f || 1;
     const alt = yb + Math.min(1.2, col * 0.3), prof = Math.max(0.2, top - alt);
     put(new T.Mesh(new T.CylinderGeometry(0.05, 0.05, prof, 8), M(0x777777)), x, alt + prof / 2, z);
-    const mot = new T.Mesh(new T.CylinderGeometry(0.2, 0.2, 0.6, 14), M(0x2e5c8a)); mot.rotation.z = Math.PI / 2; put(mot, x, alt, z);
-    const hel = new T.Group(); hel.position.set(x + 0.42, alt, z); for (let i = 0; i < 3; i++) { const a = new T.Mesh(new T.BoxGeometry(0.04, 0.85, 0.16), M(0xb0b7bd)); a.rotation.x = i * 2.094; hel.add(a); } eq.add(hel);
+    const mot = new T.Mesh(new T.CylinderGeometry(0.2 * f, 0.2 * f, 0.6 * f, 14), M(0x2e5c8a)); mot.rotation.z = Math.PI / 2; put(mot, x, alt, z);
+    const hel = new T.Group(); hel.position.set(x + 0.42 * f, alt, z); for (let i = 0; i < 3; i++) { const a = new T.Mesh(new T.BoxGeometry(0.04, 0.85 * f, 0.16 * f), M(0xb0b7bd)); a.rotation.x = i * 2.094; hel.add(a); } eq.add(hel);
     b.anim.push((k, fase) => { hel.rotation.x = fase * 7; });
   };
-  const bomba = (x, z) => { put(new T.Mesh(new T.CylinderGeometry(0.24, 0.3, 0.7, 14), M(0x1f6fb0)), x, yb + 0.4, z); put(new T.Mesh(new T.CylinderGeometry(0.05, 0.05, Math.max(0.2, top - yb - 0.7), 8), M(0x777777)), x + 0.15, (yb + 0.7 + top) / 2, z); };
+  const bomba = (x, z, f) => { f = f || 1; put(new T.Mesh(new T.CylinderGeometry(0.24 * f, 0.3 * f, 0.7 * f, 14), M(0x1f6fb0)), x, yb + 0.4 * f, z); put(new T.Mesh(new T.CylinderGeometry(0.05, 0.05, Math.max(0.2, top - yb - 0.7 * f), 8), M(0x777777)), x + 0.15 * f, (yb + 0.7 * f + top) / 2, z); };
   const difusores = () => {
     const area = hu.circ ? Math.PI * r * r : L * W, n = Math.round(sim3dClamp(area / 2.2, 6, 150)), ps = puntos(n, 0.86), im = new T.InstancedMesh(new T.CylinderGeometry(0.17, 0.17, 0.05, 10), M(0x3a3a3a), n), m4 = new T.Matrix4();
     ps.forEach((p, i) => { m4.setPosition(p[0], yb + 0.05, p[1]); im.setMatrixAt(i, m4); }); eq.add(im); sim3dBurbujas(b, ps, Math.min(220, n * 2 + 20), 0.3);
   };
-  const aireador = (x, z) => { const c = new T.Mesh(new T.CylinderGeometry(0.2, 0.26, 0.9, 14), M(0x2e7d32)); c.rotation.z = 0.5; put(c, x, yb + 0.7, z); return [x, z]; };
+  const aireador = (x, z, f) => { f = f || 1; const c = new T.Mesh(new T.CylinderGeometry(0.2 * f, 0.26 * f, 0.9 * f, 14), M(0x2e7d32)); c.rotation.z = 0.5; put(c, x, yb + 0.7 * f, z); return [x, z]; };
   const sopladores = () => {
-    const x = (hu.circ ? r : L / 2) + 3.4, casa = put(new T.Mesh(new T.BoxGeometry(3, 2.2, 2.4), M(0x6f8fa8)), x, 1.1 - 0.0, 0), luz = put(new T.Mesh(new T.SphereGeometry(0.22, 12, 8), M(0x9a9a9a, { emissive: 0x000000 })), x, 2.5, 0);
-    put(new T.Mesh(new T.CylinderGeometry(0.16, 0.16, 3.4, 10), M(0xb7c4cf)), x - 2.9, 1.2, 0).rotation.z = Math.PI / 2;
+    const n = Math.max(1, Math.min(6, cuenta('blower') || 1)), m = medDe('blower'), kf = fac('blower'), hasD = m.L || m.W || m.H, borde = hu.circ ? r : L / 2;
+    const Lh = hasD ? n * ((m.L || 1.6) + 0.5) + 0.8 : (1.4 + 1.1 * n) * kf, Wh = hasD ? (m.W || 1.0) + 1.0 : 2.4 * kf, Hh = hasD ? (m.H || 1.2) + 0.6 : 2.2 * kf;
+    const x = borde + 1.5 + Wh / 2 + 1.6, casa = put(new T.Mesh(new T.BoxGeometry(Wh, Hh, Lh), M(0x6f8fa8)), x, Hh / 2, 0), luz = put(new T.Mesh(new T.SphereGeometry(0.22, 12, 8), M(0x9a9a9a, { emissive: 0x000000 })), x, Hh + 0.3, 0);
+    put(new T.Mesh(new T.CylinderGeometry(0.16, 0.16, x - borde, 10), M(0xb7c4cf)), (x + borde) / 2, Math.min(1.2, Hh * 0.6), 0).rotation.z = Math.PI / 2;
     b.anim.push((k, fase, u) => { const on = (u.aire || 0) > 0.02; luz.material.color.set(on ? 0x2f8a57 : 0x9a9a9a); luz.material.emissive.set(on ? 0x14502e : 0x000000); });
     casa.userData.tag = 'sopladores';
   };
@@ -41091,11 +41125,11 @@ function sim3dEquipos(b, nd, hu, u) {
   const nMez = cuenta('mezclador_sumerg'), nAir = cuenta('aireador_sumerg'), nBom = cuenta('bomba_sumerg'), nDif = cuenta('difusor'), nCan = cuenta('canasto');
   const aireada = ['lodos_activados', 'sbr', 'iceas', 'mbbr', 'mbr'].includes(t);
   if (aireada && (nDif || (!nAir && !nMez))) { difusores(); sopladores(); }
-  if (nAir) { const ps = puntos(Math.min(4, nAir), 0.6), cs = ps.map(p => aireador(p[0], p[1])); sim3dBurbujas(b, cs, 60 * cs.length, 0.3); }
+  if (nAir) { const fa = fac('aireador_sumerg'), ps = puntos(Math.min(4, nAir), 0.6), cs = ps.map(p => aireador(p[0], p[1], fa)); sim3dBurbujas(b, cs, 60 * cs.length, 0.3); }
   const mezN = nMez || (['anoxico', 'fisicoquimico'].includes(t) ? Math.max(1, Math.min(3, Math.round(L / 7))) : (t === 'ecualizador' && !nAir && !nDif ? Math.max(1, Math.min(3, Math.round(L / 10))) : 0));
-  if (enAgua && mezN) puntos(Math.min(4, mezN), 0.6).forEach(p => mezclador(p[0], p[1]));
-  if (nBom && t !== 'pozo') puntos(Math.min(3, nBom), 0.5).forEach(p => bomba(p[0], p[1]));
-  if (nCan) { const c = put(new T.LineSegments(new T.EdgesGeometry(new T.BoxGeometry(1.2, 1.4, Math.min(W * 0.7, 2.4))), new T.LineBasicMaterial({ color: 0x444444 })), -L / 2 + 1, yb + 1.0, 0); c.userData.tag = 'canasto'; }
+  if (enAgua && mezN) { const fm = fac('mezclador_sumerg'); puntos(Math.min(4, mezN), 0.6).forEach(p => mezclador(p[0], p[1], fm)); }
+  if (nBom && t !== 'pozo') { const fb = fac('bomba_sumerg'); puntos(Math.min(3, nBom), 0.5).forEach(p => bomba(p[0], p[1], fb)); }
+  if (nCan) { const mc = medDe('canasto'), cL = mc.L || 1.2, cH = mc.H || 1.4, cW = mc.W || Math.min(W * 0.7, 2.4); const c = put(new T.LineSegments(new T.EdgesGeometry(new T.BoxGeometry(cL, cH, cW)), new T.LineBasicMaterial({ color: 0x444444 })), -L / 2 + cL / 2 + 0.3, yb + cH / 2 + 0.3, 0); c.userData.tag = 'canasto'; }
   // MBBR: soportes plásticos que se mueven con el aire
   if (t === 'mbbr') {
     const n = 220, pos = new Float32Array(n * 3), base = [], ph = []; for (let i = 0; i < n; i++) { const a = hu.circ ? Math.random() * 6.283 : 0, f = Math.sqrt(Math.random()); base.push(hu.circ ? [Math.cos(a) * f * (r - 0.4), Math.sin(a) * f * (r - 0.4)] : [(Math.random() - 0.5) * (L - 0.8), (Math.random() - 0.5) * (W - 0.8)]); ph.push(Math.random() * 6.28); }
@@ -41128,9 +41162,32 @@ function sim3dEquipos(b, nd, hu, u) {
     const torta = put(new T.Mesh(new T.ConeGeometry(Math.max(0.5, Math.min(L, W) * 0.3), 1, 14), M(0x6b4a2b)), L * 0.32, yb + 0.5, 0); b.anim.push((k) => { const en = ex.sim && ex.sim.enc ? (ex.sim.enc[Math.min(k, ex.sim.enc.length - 1)] || 0) : 0; torta.scale.y = 0.4 + 0.9 * (en > 0.5 ? 1 : 0.3); torta.position.y = yb + 0.5 * torta.scale.y; });
   }
   // pozo: bombas sumergidas
-  if (t === 'pozo') { const nT = Math.max(1, ex.nd || 1); puntos(nT, 0.45).forEach(p => bomba(p[0], p[1])); }
+  if (t === 'pozo') { const nT = Math.max(1, ex.nd || 1), fb = fac('bomba_sumerg'); puntos(nT, 0.45).forEach(p => bomba(p[0], p[1], fb)); }
   eq.traverse(o => { if (o.isMesh || o.isLineSegments) o.userData.uid = nd.id; });
 }
+// ═══ Vista 3D: lista de equipos de la unidad seleccionada, con sus medidas editables ═══
+// Muestra lo que MAIA sabe de cada equipo (cantidad, potencia y medidas leídas del proyecto o escritas a mano). En gris va el valor que se usa cuando no hay nada escrito.
+function sim3dEqPanelHtml(u) {
+  if (!u || !_simDoc || _simDoc.datos.vistaPlanta !== '3d') return '';
+  const lista = sim3dEqLista(u), usados = new Set(lista.map(q => q.icono)), ov = u.eq3d || {}, sinUsar = Object.keys(SIM3D_EQ).filter(k => !usados.has(k));
+  const campo = (q, k, tit, st) => { const d = SIM3D_EQ[q.icono].def || {}, o = ov[q.icono] || {}, ph = q.med[k] != null ? q.med[k] : (d[k] != null ? d[k] : ''); return `<label style="font-size:10.5px;display:block;margin:0;color:var(--text2)">${tit}<input type="number" step="any" min="0" value="${o[k] != null && o[k] !== '' ? esc(String(o[k])) : ''}" placeholder="${esc(String(ph))}" style="width:100%;padding:3px 5px;font-size:12px" onchange="sim3dEqSet('${u.id}','${q.icono}','${k}',this.value)" /></label>`; };
+  const fila = q => { const d = SIM3D_EQ[q.icono], o = ov[q.icono] || {};
+    return `<div style="border-top:1px solid var(--border);padding:6px 0"><div style="display:flex;gap:6px;align-items:baseline;flex-wrap:wrap"><b style="font-size:12.5px;flex:1;min-width:0">${esc(d.n)}</b><span class="badge" style="background:var(--surface2,#eee);color:var(--text2);font-size:10px">${esc(q.src)}</span>${ov[q.icono] ? `<button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:11px" onclick="sim3dEqRestablecer('${u.id}','${q.icono}')" title="Vuelve a lo que dice el proyecto">↺</button>` : ''}<button class="btn btn-secondary btn-sm" style="padding:1px 6px;font-size:11px" onclick="sim3dEqQuitar('${u.id}','${q.icono}')" title="Sacar este equipo del 3D">✕</button></div>
+      <div style="display:grid;grid-template-columns:repeat(${d.def ? 5 : 1},minmax(0,1fr));gap:5px;margin-top:4px">${campo(Object.assign({}, q, { med: Object.assign({ n: q.n }, q.med) }), 'n', 'Cant.')}${d.def ? campo(q, 'kw', 'kW') + campo(q, 'L', 'Largo m') + campo(q, 'W', 'Ancho m') + campo(q, 'H', 'Alto m') : ''}</div>${q.icono === 'blower' ? '<div class="hint" style="margin:3px 0 0;font-size:10.5px">Las medidas son las de un soplador; la sala se arma con la cantidad.</div>' : ''}</div>`; };
+  return `<details style="margin-top:10px" ${simUiAbierto('eqm', false) ? 'open' : ''} ontoggle="simUiToggle('eqm',this.open,false)"><summary style="cursor:pointer" class="sim-ro-t"><span style="color:var(--text2)">Equipos de la unidad (3D)</span></summary>
+    <div style="margin-top:4px">${lista.length ? lista.map(fila).join('') : '<p class="hint" style="margin:4px 0">Esta unidad no tiene equipos cargados: se dibuja solo su equipo característico.</p>'}
+    ${sinUsar.length ? `<div style="border-top:1px solid var(--border);padding-top:6px"><select style="width:100%;font-size:12px" onchange="sim3dEqAgregar('${u.id}',this.value);this.value=''"><option value="">＋ Agregar un equipo…</option>${sinUsar.map(k => `<option value="${k}">${esc(SIM3D_EQ[k].n)}</option>`).join('')}</select></div>` : ''}
+    <div class="hint" style="margin:6px 0 0;font-size:10.5px">Potencia y medidas se leen del texto del equipo si figuran (por ejemplo "5,5 kW" o "800 x 400 x 600 mm"); lo que escribas acá manda. Si cambiaste cosas en el proyecto, usá "Actualizar medidas".</div></div></details>`;
+}
+function sim3dEqRehacer(panel) {
+  simGuardar(); const S = _sim3d; if (S.plant && _simDoc && sim3dActiva()) { sim3dConstruir(S.plant, _simDoc.datos); simVistasActualizar(); }
+  if (panel) simSelRender();
+}
+function sim3dEqOv(id, ic) { const u = simU(id); if (!u) return null; u.eq3d = u.eq3d || {}; return { u, o: u.eq3d[ic] = u.eq3d[ic] || {} }; }
+function sim3dEqSet(id, ic, k, v) { const r = sim3dEqOv(id, ic); if (!r) return; if (v === '' || v == null) delete r.o[k]; else { const n = Number(v); if (!isFinite(n) || n < 0) return; r.o[k] = n; } if (!Object.keys(r.o).length) delete r.u.eq3d[ic]; sim3dEqRehacer(k === 'n' && Number(v) === 0); }
+function sim3dEqQuitar(id, ic) { const r = sim3dEqOv(id, ic); if (!r) return; r.o.n = 0; sim3dEqRehacer(true); }
+function sim3dEqRestablecer(id, ic) { const u = simU(id); if (!u || !u.eq3d) return; delete u.eq3d[ic]; sim3dEqRehacer(true); }
+function sim3dEqAgregar(id, ic) { if (!ic) return; const r = sim3dEqOv(id, ic); if (!r) return; r.o.n = 1; sim3dEqRehacer(true); }
 // ═══ Vista 3D de la planta ═══
 // Las unidades son cuerpos 3D con las medidas reales (las mismas de la vista en corte) y se ubican sobre una grilla de terreno en metros: se arrastran para
 // representar la implantación real del sitio, se pueden girar y, si hay un plano del sitio, se carga como imagen de fondo y se calibra a escala.
