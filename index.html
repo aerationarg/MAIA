@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.6</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.6</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -41047,6 +41047,37 @@ function simSelLive() {
   const fr = document.getElementById('sim-sel-frase'); if (fr) { fr.innerHTML = r.frase; fr.style.display = r.frase ? '' : 'none'; }
   const c = document.getElementById('sim-sel-calc'); if (c) c.innerHTML = simCalcHtml(r.filas);
 }
+// ═══ Vista 3D: estado de cada unidad ═══
+// Aro bajo la unidad con el resultado de su verificación (verde cumple, amarillo justo, rojo no cumple, gris faltan datos) y, mientras ocurre, alarma sobre la unidad
+// (rebalse, sin oxígeno, limpieza química de membranas): baliza roja que pulsa y cartel. Los mismos avisos que la vista en corte, pero a la vista en el terreno.
+function sim3dEstadoUnidad(nd) {
+  const u = simU(nd.id); if (!u || (nd.extra && nd.extra.incompleta)) return 'info';
+  let res; try { res = simCorrer(u); } catch (e) { return 'info'; }
+  if (!res || res.error || (res.faltan && res.faltan.length)) return 'info';
+  const ind = res.ind || []; return ind.some(i => i.estado === 'mal') ? 'mal' : ind.some(i => i.estado === 'justo') ? 'justo' : ind.length ? 'ok' : 'info';
+}
+function sim3dMarco(hu, color) {
+  const T = THREE; let geo;
+  if (hu.circ) geo = new T.RingGeometry(hu.L / 2 + 0.3, hu.L / 2 + 0.85, 56);
+  else { const a = hu.L / 2 + 0.85, b = hu.W / 2 + 0.85, c = hu.L / 2 + 0.3, d = hu.W / 2 + 0.3, sh = new T.Shape(); sh.moveTo(-a, -b); sh.lineTo(a, -b); sh.lineTo(a, b); sh.lineTo(-a, b); sh.closePath(); const h = new T.Path(); h.moveTo(-c, -d); h.lineTo(-c, d); h.lineTo(c, d); h.lineTo(c, -d); h.closePath(); sh.holes.push(h); geo = new T.ShapeGeometry(sh); }
+  geo.rotateX(-Math.PI / 2); const m = new T.Mesh(geo, new T.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, side: T.DoubleSide, depthWrite: false })); m.position.y = 0.07; m.renderOrder = 2; return m;
+}
+function sim3dEstadoArmar(b, nd, labH, p) {
+  const T = THREE, S = _sim3d, est = sim3dEstadoUnidad(nd);
+  b.est = est; b.marco = sim3dMarco(b.hu, SIM_ESTADO[est][1]); b.marco.visible = simUiAbierto('est3d', true); b.g.add(b.marco);
+  b.bal = new T.Mesh(new T.SphereGeometry(0.4, 16, 12), new T.MeshStandardMaterial({ color: 0xd9381e, emissive: 0xb3261e, emissiveIntensity: 0.9 })); b.bal.position.set(0, b.top + 0.7, 0); b.bal.visible = false; b.g.add(b.bal);
+  b.alr = sim3dEtiqueta('⚠', false, true); b.alr.scale.set(labH * 0.9 * b.alr.userData.ar, labH * 0.9, 1); b.alr.position.set(p.x, b.top + 1.4 + labH * 1.5, p.z); b.alr.visible = false; S.grupo.add(b.alr); b.alm = '';
+}
+function sim3dAlarmaTexto(nd, k) {
+  const ex = nd.extra || {}, at = (a, kk) => a && a.length ? a[Math.min(kk, a.length - 1)] : null;
+  try {
+    if (nd.tipo === 'lodos_activados' && ex.do && at(ex.do, k) < 0.3) return 'SIN OXÍGENO';
+    if (nd.tipo === 'mbbr' && ex.sim && ex.sim.DO && at(ex.sim.DO, k) < 0.3) return 'SIN OXÍGENO';
+    if (nd.tipo === 'mbr' && ex.sim && ex.sim.TMP && at(ex.sim.TMP, k) > 40) return 'LIMPIEZA QUÍMICA';
+  } catch (e) { /* serie incompleta */ }
+  return '';
+}
+function sim3dEstadoVer(v) { simUiToggle('est3d', !!v, true); Object.values(_sim3d.uni).forEach(b => { if (b.marco) b.marco.visible = !!v; }); sim3dBarraRender(); sim3dRender(); }
 // ═══ Vista 3D: equipos de cada unidad ═══
 // Aparecen según lo que el proyecto tiene cargado (difusores, aireadores, mezcladores, bombas, canasto) y, para cada tipo de unidad, su equipo característico
 // (puente raspador del sedimentador, tamiz inclinado, pantallas del contacto, etc.). Las burbujas siguen el aire que da la simulación; el resto gira o se mueve con el reloj.
@@ -41219,12 +41250,12 @@ function sim3dAutoPos(lista) {
   filas.forEach((f, r) => { const prof = Math.max(...f.items.map(i => i.x.hu.W)); f.items.forEach(i => { const xc = r % 2 ? f.w - i.x0 - i.x.hu.L / 2 : i.x0 + i.x.hu.L / 2; out[i.x.id] = { x: +xc.toFixed(2), z: +(z + prof / 2).toFixed(2), rot: 0 }; }); z += prof + GAP * 1.6; });
   return out;
 }
-function sim3dEtiqueta(texto, lodo) {
+function sim3dEtiqueta(texto, lodo, rojo) {
   const T = THREE, c = document.createElement('canvas'); c.width = 512; c.height = 80; const x = c.getContext('2d'), tex = new T.CanvasTexture(c);
   const dibujar = t => {
     x.clearRect(0, 0, 512, 80); x.font = '600 36px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; const w = Math.min(500, x.measureText(t).width + 36);
-    x.fillStyle = 'rgba(255,255,255,.92)'; x.strokeStyle = lodo ? '#5a3a10' : '#1b5e20'; x.lineWidth = 3; x.beginPath(); x.roundRect ? x.roundRect(256 - w / 2, 8, w, 64, 12) : x.rect(256 - w / 2, 8, w, 64); x.fill(); x.stroke();
-    x.fillStyle = '#1b2a22'; x.fillText(t.length > 30 ? t.slice(0, 29) + '…' : t, 256, 41); tex.needsUpdate = true;
+    x.fillStyle = 'rgba(255,255,255,.92)'; x.strokeStyle = rojo ? '#c0392b' : lodo ? '#5a3a10' : '#1b5e20'; x.lineWidth = 3; x.beginPath(); x.roundRect ? x.roundRect(256 - w / 2, 8, w, 64, 12) : x.rect(256 - w / 2, 8, w, 64); x.fill(); x.stroke();
+    x.fillStyle = rojo ? '#8c1d18' : '#1b2a22'; x.fillText(t.length > 30 ? t.slice(0, 29) + '…' : t, 256, 41); tex.needsUpdate = true;
   };
   dibujar(texto);
   const sp = new T.Sprite(new T.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); sp.renderOrder = 10; sp.userData.ar = 512 / 80; sp.userData.dibujar = dibujar; sp.userData.texto = texto; return sp;
@@ -41379,7 +41410,7 @@ function sim3dConstruir(plant, d) {
   nodos.forEach(nd => {
     const b = sim3dCuerpo(nd, huellas[nd.id]), p = S.pos[nd.id]; b.g.position.set(p.x, 0, p.z); b.g.rotation.y = p.rot || 0; b.nd = nd;
     const et = sim3dEtiqueta(nd.nombre || nd.tipo, b.lodo); et.scale.set(labH * et.userData.ar, labH, 1); et.position.set(p.x, b.top + 1.4 + labH / 2, p.z); b.et = et;
-    S.grupo.add(b.g); S.grupo.add(et); S.uni[nd.id] = b; S.pick.push(b.pared, ...(b.agua.isGroup ? b.agua.children : [b.agua]), ...b.bombas); b.eq.traverse(o => { if (o.isMesh) S.pick.push(o); }); b.eq.visible = simUiAbierto('eq3d', true);
+    S.grupo.add(b.g); S.grupo.add(et); S.uni[nd.id] = b; S.pick.push(b.pared, ...(b.agua.isGroup ? b.agua.children : [b.agua]), ...b.bombas); b.eq.traverse(o => { if (o.isMesh) S.pick.push(o); }); b.eq.visible = simUiAbierto('eq3d', true); sim3dEstadoArmar(b, nd, labH, p);
   });
   // marcador de la unidad seleccionada (disco o rectángulo bajo la unidad)
   S.selC = new T.Mesh(new T.CircleGeometry(1, 48).rotateX(-Math.PI / 2), new T.MeshBasicMaterial({ color: 0xe2a900, transparent: true, opacity: 0.45, depthWrite: false })); S.selR = new T.Mesh(new T.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), S.selC.material);
@@ -41453,7 +41484,7 @@ function sim3dMove(ev) {
   if (a.tipo === 'u') { const x = sim3dSnap(p.x - a.ox), z = sim3dSnap(p.z - a.oz), q = S.pos[a.uid]; if (x === q.x && z === q.z) return; q.x = x; q.z = z; sim3dPonerUnidad(a.uid); sim3dArmarTubos(S.plant, _simDoc.datos); sim3dSeleccion(); sim3dTick(S.plant, _simDoc.datos, simIdx(), _simPlay.t, true); }
   else { const pl = sim3dImp(_simDoc.datos).plano; pl.x = +(p.x - a.ox).toFixed(2); pl.z = +(p.z - a.oz).toFixed(2); if (S.planoMesh) S.planoMesh.position.set(pl.x, 0, pl.z); sim3dRender(); }
 }
-function sim3dPonerUnidad(id) { const S = _sim3d, b = S.uni[id], p = S.pos[id]; b.g.position.set(p.x, 0, p.z); b.g.rotation.y = p.rot || 0; b.et.position.set(p.x, b.top + 1.4 + b.et.scale.y / 2, p.z); }
+function sim3dPonerUnidad(id) { const S = _sim3d, b = S.uni[id], p = S.pos[id]; b.g.position.set(p.x, 0, p.z); b.g.rotation.y = p.rot || 0; b.et.position.set(p.x, b.top + 1.4 + b.et.scale.y / 2, p.z); if (b.alr) b.alr.position.set(p.x, b.top + 1.4 + b.et.scale.y * 2, p.z); }
 function sim3dCongelar() { const d = _simDoc.datos, im = sim3dImp(d); Object.keys(_sim3d.pos).forEach(id => { const p = _sim3d.pos[id]; im.pos[id] = { x: p.x, z: p.z, rot: p.rot || 0 }; }); _sim3d.auto = false; }
 function sim3dUp(ev) {
   const S = _sim3d, dn = S.down, a = S.arr; S.down = null; S.arr = null; S.ctl.enabled = true; if (!dn) return;
@@ -41479,7 +41510,7 @@ function sim3dBarraHtml(d) {
   return `<div class="sim-3d-bar">
     <span class="sim-3d-g">${bt('orbit', '🖱 Mirar', 'Girar y acercar la vista')}${bt('mover', '✥ Mover unidades', 'Arrastrar las unidades sobre la grilla para ubicarlas como en el sitio')}</span>
     <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dVista('persp')">Perspectiva</button><button class="btn btn-secondary btn-sm" onclick="sim3dVista('planta')">Planta</button><button class="btn btn-secondary btn-sm" onclick="sim3dVista('frente')">Frente</button></span>
-    <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dGirar()" title="Gira 90° la unidad seleccionada">↻ Girar unidad</button><label style="font-size:12px;margin:0">Grilla</label><select style="width:auto" onchange="sim3dSetGrilla(this.value)">${[0.5, 1, 2, 5].map(v => `<option value="${v}" ${im.grid === v ? 'selected' : ''}>${v} m</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="sim3dReordenar()" title="Vuelve a la disposición automática inicial">Reordenar solas</button><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Difusores, mezcladores, puentes raspadores, sopladores, etc."><input type="checkbox" ${simUiAbierto('eq3d', true) ? 'checked' : ''} onchange="sim3dEquiposVer(this.checked)" style="width:auto" /> Equipos</label></span>
+    <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dGirar()" title="Gira 90° la unidad seleccionada">↻ Girar unidad</button><label style="font-size:12px;margin:0">Grilla</label><select style="width:auto" onchange="sim3dSetGrilla(this.value)">${[0.5, 1, 2, 5].map(v => `<option value="${v}" ${im.grid === v ? 'selected' : ''}>${v} m</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="sim3dReordenar()" title="Vuelve a la disposición automática inicial">Reordenar solas</button><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Difusores, mezcladores, puentes raspadores, sopladores, etc."><input type="checkbox" ${simUiAbierto('eq3d', true) ? 'checked' : ''} onchange="sim3dEquiposVer(this.checked)" style="width:auto" /> Equipos</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Aro bajo cada unidad con el resultado de su verificación"><input type="checkbox" ${simUiAbierto('est3d', true) ? 'checked' : ''} onchange="sim3dEstadoVer(this.checked)" style="width:auto" /> Estado</label>${simUiAbierto('est3d', true) ? '<span style="font-size:11px;color:var(--text2);display:inline-flex;gap:8px"><span><b style="color:#1a8f4d">●</b> cumple</span><span><b style="color:#c98a00">●</b> justo</span><span><b style="color:#c0392b">●</b> no cumple</span><span><b style="color:#5b6b7b">●</b> faltan datos</span></span>' : ''}</span>
     <span class="sim-3d-g"><input type="file" id="sim3d-plano-file" accept="image/*" style="display:none" onchange="sim3dPlanoCargar(this)" /><button class="btn btn-secondary btn-sm" onclick="document.getElementById('sim3d-plano-file').click()" title="Una imagen del plano de implantación del sitio, que queda de fondo bajo las unidades">🗺 ${pl ? 'Cambiar plano' : 'Plano de fondo…'}</button>${pl ? `${bt('plano', 'Mover plano', 'Arrastrar el plano de fondo')}${bt('calibrar', 'Calibrar escala', 'Marcar dos puntos del plano y decir cuántos metros hay entre ellos')}<label style="font-size:12px;margin:0">Ancho</label><input type="number" min="2" step="any" value="${pl.ancho}" style="width:74px" onchange="sim3dPlanoSet('ancho',this.value)" title="Ancho real del plano en metros" /><span style="font-size:12px">m</span><label style="font-size:12px;margin:0">Opacidad</label><input type="range" min="0.1" max="1" step="0.05" value="${pl.op == null ? 0.6 : pl.op}" style="width:80px" oninput="sim3dPlanoSet('op',this.value)" /><button class="btn btn-secondary btn-sm" onclick="sim3dPlanoQuitar()">Quitar plano</button>` : ''}</span>
   </div>
   <div class="hint" style="margin:4px 0 6px">${esc(S.msg || SIM3D_AYUDA[S.modo] || '')}${S.auto ? ' <b>Las unidades están en una disposición automática: arrastralas para ubicarlas como en el sitio.</b>' : ''} ${ocupa}</div>`;
@@ -41530,6 +41561,7 @@ function sim3dTick(plant, d, k, t, sinFase) {
     } catch (e) { /* serie incompleta: se deja el nivel de diseño */ }
     if (!color) color = ex.lodo ? simColorConc(at(nd.sal.sst, k) || 0, 40000) : simColorConc(at(nd.sal[VAR], k) || 0, maxV);
     let aire = 0.7; try { if (nd.tipo === 'lodos_activados' && ex.aire) aire = sim3dClamp(at(ex.aire, k) * 1.6, 0, 1); else if ((nd.tipo === 'sbr' || nd.tipo === 'iceas') && ex.sbr) aire = sim3dClamp(at(ex.sbr.tanque.aire, k), 0, 1); else if (nd.tipo === 'mbbr' && ex.sim && ex.sim.aire) aire = sim3dClamp(at(ex.sim.aire, k) * 1.2, 0, 1); } catch (e) { /* queda el aire de referencia */ }
+    { const alm = rebalsa ? 'REBALSA' : sim3dAlarmaTexto(nd, k); if (alm !== b.alm) { b.alm = alm; b.alr.visible = !!alm; b.bal.visible = !!alm; if (alm) b.alr.userData.dibujar('⚠ ' + alm); } if (alm) b.bal.scale.setScalar(1 + 0.3 * Math.sin(performance.now() / 170)); }
     b.hAct = h; b.aire = aire; if (b.eq.visible) b.anim.forEach(f => f(k, S.fase, b));
     b.matA.color.set(rebalsa ? '#e57373' : color);
     if (b.escala) { const hh = Math.max(0.02, h); b.agua.scale.y = hh; b.agua.position.y = b.yb + hh / 2; }
