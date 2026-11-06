@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.5</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.4</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.5</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45654,12 +45654,24 @@ function accesosInit() {
   if (!Array.isArray(_accEdit.eliminados)) _accEdit.eliminados = [];
   return _accEdit;
 }
+// Después de guardar, se lee igual que lo lee MAIA al iniciar sesión. Si lo que vuelve no tiene los cambios, se avisa con detalle (en vez de decir "guardado" y que al recargar se pierda).
+const accesosFirma = v => { try { if (typeof v === 'string') v = JSON.parse(v); } catch (e) { return null; } return v && v.sectores ? JSON.stringify([Object.keys(v.sectores).sort(), (v.eliminados || []).slice().sort(), Object.keys(v.sectores).sort().map(k => (v.sectores[k] || []).slice().sort())]) : null; };
+async function accesosVerificar(cfg) {
+  const esperado = accesosFirma(cfg), leida = await supaConfigGetSeguro(ACCESOS_KEY);
+  if (accesosFirma(leida) === esperado) return;
+  let detalle = '';
+  try {
+    const s = JSON.parse(localStorage.getItem('daia_session') || 'null'), r = await supaFetch(`/rest/v1/app_config?select=value&key=eq.${ACCESOS_KEY}`, { headers: { Authorization: 'Bearer ' + (s && s.token) } }), filas = await r.json();
+    if (r.ok && Array.isArray(filas)) detalle = filas.length ? ` Hay ${filas.length} fila${filas.length === 1 ? '' : 's'} con la clave ${ACCESOS_KEY} y ${filas.filter(f => accesosFirma(f.value) !== esperado).length} sin los cambios.` : ` No existe ninguna fila con la clave ${ACCESOS_KEY}.`;
+  } catch (e) { /* sin detalle */ }
+  throw new Error('La base dijo que guardó, pero al leerla de nuevo no están los cambios.' + detalle + ' Suele ser por filas repetidas de esa clave o porque la tabla app_config no deja actualizarla: probá "Revisar ahora" en Admin (Revisión de configuraciones guardadas) y avisame lo que muestra.');
+}
 // Guarda en app_config y aplica (accesos, excepciones y sectores). Tira error si no se pudo.
 async function accesosPersistir() {
   accesosInit();
   const cfg = { sectores: _accEdit.sectores, usuarios: _accEdit.usuarios.filter(x => x.palabras.length), eliminados: _accEdit.eliminados };
   if (!(cfg.sectores.Admin || []).includes('admin')) cfg.sectores.Admin = (cfg.sectores.Admin || []).concat(['admin']);
-  await supaConfigSet(ACCESOS_KEY, cfg); accesosAplicar(cfg);
+  await supaConfigSet(ACCESOS_KEY, cfg); await accesosVerificar(cfg); accesosAplicar(cfg);
   if (typeof applyTabAccess === 'function') applyTabAccess();
 }
 async function accesosGuardar() {
