@@ -400,7 +400,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.3</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -457,7 +457,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.3</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -45640,11 +45640,17 @@ function tabsPermitidas() {
 // Los valores del código son los de origen; lo que se edita en Admin se guarda en app_config (clave accesos_sectores) y manda al iniciar sesión.
 const ACCESOS_KEY = 'accesos_sectores';
 const ACCESOS_ORIGINAL = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)) };
-let _accEdit = null;
+let _accEdit = null, _accEliminados = [];
+// Sectores del sistema: el código se apoya en ellos (panel Admin, aprobaciones de Hallazgos y de Fuera de oficina). No se renombran ni se eliminan.
+const SECTORES_PROTEGIDOS = ['Admin', 'SGI', 'RRHH'];
+const SECTORES_BASE = ['rend', 'viajes', 'hallazgos', 'auditorias'];   // lo que ve un sector nuevo si no se parte de los accesos de otro
 function accesosAplicar(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
   if (cfg.sectores && typeof cfg.sectores === 'object') Object.entries(cfg.sectores).forEach(([sec, tabs]) => { if (Array.isArray(tabs)) SECTOR_TABS[sec] = tabs.slice(); });
   if (Array.isArray(cfg.usuarios)) { USUARIO_TABS_EXTRA.length = 0; cfg.usuarios.forEach(x => USUARIO_TABS_EXTRA.push(x)); }
+  // Sectores del código que se eliminaron o renombraron desde Admin: no vuelven a aparecer
+  _accEliminados = Array.isArray(cfg.eliminados) ? cfg.eliminados.slice() : [];
+  _accEliminados.forEach(sec => { if (!SECTORES_PROTEGIDOS.includes(sec) && !(cfg.sectores && Object.prototype.hasOwnProperty.call(cfg.sectores, sec))) delete SECTOR_TABS[sec]; });
   // Solapas nuevas que la configuración guardada todavía no conoce (no figuran en ningún sector): entran con su acceso de origen, sin tener que tocarlas en Admin
   if (cfg.sectores && typeof cfg.sectores === 'object') Object.entries({ 'auditorias': null, 'cfg-auditorias': ['SGI', 'Admin'] }).forEach(([tab, secs]) => {
     if (Object.values(cfg.sectores).some(l => Array.isArray(l) && l.includes(tab))) return;
@@ -45656,7 +45662,7 @@ async function accesosCargar() { try { accesosAplicar(await supaConfigGetSeguro(
 const accesosTodas = () => NAV_SECTIONS.map(x => Object.assign({ cfg: false }, x)).concat(NAV_CONFIG_SECTIONS.map(x => Object.assign({ cfg: true }, x)));
 function accesosRender() {
   const el = document.getElementById('admin-accesos-card'); if (!el) return;
-  if (!_accEdit) _accEdit = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)) };
+  accesosInit();
   const sectores = Object.keys(_accEdit.sectores), tabs = accesosTodas().concat([{ id: 'admin', label: 'Admin (panel de administración)', area: 'Admin', cfg: true }]);
   const fila = t => `<tr><td style="padding:3px 6px;white-space:nowrap;font-size:13px">${esc(t.label)}<span class="hint" style="display:inline;margin-left:4px">${esc(t.area || '')}</span></td>${sectores.map(sec => `<td style="text-align:center;padding:3px 4px"><input type="checkbox" style="width:auto" ${(_accEdit.sectores[sec] || []).includes(t.id) ? 'checked' : ''} ${t.id === 'admin' && sec !== 'Admin' ? 'disabled' : ''} ${t.id === 'admin' && sec === 'Admin' ? 'disabled' : ''} onchange="accesosToggle('${esc(sec)}','${t.id}',this.checked)" /></td>`).join('')}<td style="padding:3px 6px">${t.id === 'admin' ? '' : `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',true)">todos</button> <button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:11px" onclick="accesosFila('${t.id}',false)">ninguno</button>`}</td></tr>`;
   const exc = _accEdit.usuarios.map((x, i) => `<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select style="width:auto;padding:6px 8px;font-size:13px" onchange="accesosExcPersona(${i},this.value)"><option value="">— Elegir persona —</option>${(_oooPerf || []).map(pf => `<option value="${esc(pf.nombre)}" ${procesosNormTxt(pf.nombre) === x.palabras.join(' ') || x.palabras.every(w => procesosNormTxt(pf.nombre).includes(w)) && x.palabras.length ? 'selected' : ''}>${esc(pf.nombre)}</option>`).join('')}</select><span class="hint" style="margin:0">${x.palabras.length ? 'coincide con el nombre: ' + esc(x.palabras.join(' ')) : 'sin persona'}</span><button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="accesosExcQuitar(${i})">✕</button></div>
@@ -45674,20 +45680,140 @@ function accesosExcAdd() { _accEdit.usuarios.push({ palabras: [], agregar: [], q
 function accesosExcQuitar(i) { _accEdit.usuarios.splice(i, 1); accesosRender(); }
 function accesosExcPersona(i, nombre) { _accEdit.usuarios[i].palabras = nombre ? procesosNormTxt(nombre).split(/[^a-z0-9]+/).filter(Boolean) : []; accesosRender(); }
 function accesosExcSet(i, campo, sel) { _accEdit.usuarios[i][campo] = Array.from(sel.selectedOptions).map(o => o.value); }
+function accesosInit() {
+  if (!_accEdit) _accEdit = { sectores: JSON.parse(JSON.stringify(SECTOR_TABS)), usuarios: JSON.parse(JSON.stringify(USUARIO_TABS_EXTRA)), eliminados: _accEliminados.slice() };
+  if (!Array.isArray(_accEdit.eliminados)) _accEdit.eliminados = [];
+  return _accEdit;
+}
+// Guarda en app_config y aplica (accesos, excepciones y sectores). Tira error si no se pudo.
+async function accesosPersistir() {
+  accesosInit();
+  const cfg = { sectores: _accEdit.sectores, usuarios: _accEdit.usuarios.filter(x => x.palabras.length), eliminados: _accEdit.eliminados };
+  if (!(cfg.sectores.Admin || []).includes('admin')) cfg.sectores.Admin = (cfg.sectores.Admin || []).concat(['admin']);
+  await supaConfigSet(ACCESOS_KEY, cfg); accesosAplicar(cfg);
+  if (typeof applyTabAccess === 'function') applyTabAccess();
+}
 async function accesosGuardar() {
   const st = document.getElementById('admin-accesos-status');
   try {
     showMsg('admin-accesos-status', 'loading', 'Guardando…');
-    const cfg = { sectores: _accEdit.sectores, usuarios: _accEdit.usuarios.filter(x => x.palabras.length) };
-    if (!(cfg.sectores.Admin || []).includes('admin')) cfg.sectores.Admin = (cfg.sectores.Admin || []).concat(['admin']);
-    await supaConfigSet(ACCESOS_KEY, cfg); accesosAplicar(cfg);
-    if (typeof applyTabAccess === 'function') applyTabAccess();
+    await accesosPersistir();
     showMsg('admin-accesos-status', 'success', '✓ Accesos guardados. Cada persona los ve al volver a entrar o recargar.');
   } catch (e) { showMsg('admin-accesos-status', 'error', '✕ ' + e.message); }
 }
 async function accesosRestaurar() {
   if (!confirm('¿Volver a los accesos de origen (los que vienen en el código)? Se pierden los cambios hechos desde acá.')) return;
-  _accEdit = JSON.parse(JSON.stringify(ACCESOS_ORIGINAL)); accesosRender(); await accesosGuardar();
+  const propios = {}; Object.entries(accesosInit().sectores).forEach(([sec, tabs]) => { if (!(sec in ACCESOS_ORIGINAL.sectores)) propios[sec] = tabs; });   // sectores creados desde Admin: se conservan
+  _accEdit = JSON.parse(JSON.stringify(ACCESOS_ORIGINAL)); Object.assign(_accEdit.sectores, propios); _accEdit.eliminados = [];
+  accesosRender(); await accesosGuardar(); sectoresRender();
+}
+// ── Sectores: crear, renombrar y eliminar desde Admin ──
+// La lista de sectores es la de las claves de SECTOR_TABS. Lo que se crea o cambia acá se guarda con los accesos (app_config › accesos_sectores).
+// Los sectores que vienen del código y se eliminan o renombran quedan anotados en "eliminados" para que no reaparezcan.
+let _secLista = [], _secCuenta = {}, _secContado = false;
+async function sectoresContar() {
+  const s = JSON.parse(localStorage.getItem('daia_session') || 'null');
+  const r = await supaFetch('/rest/v1/profiles?select=sector&limit=5000', { headers: { Authorization: 'Bearer ' + (s && s.token) } }), j = await r.json().catch(() => null);
+  if (!r.ok || !Array.isArray(j)) throw new Error((j && j.message) || ('No se pudo consultar a las personas (HTTP ' + r.status + ')'));
+  const c = {}; j.forEach(p => { c[p.sector] = (c[p.sector] || 0) + 1; }); return c;
+}
+function sectorNombreValido(nombre, excepto) {
+  const n = String(nombre || '').trim().replace(/\s+/g, ' ');
+  if (!n) throw new Error('Escribí el nombre del sector.');
+  if (n.length > 40) throw new Error('El nombre es muy largo (máximo 40 caracteres).');
+  if (/['"`\\<>&]/.test(n)) throw new Error('El nombre no puede llevar comillas, barras invertidas ni los signos < > &.');
+  const norm = procesosNormTxt(n);
+  if (Object.keys(accesosInit().sectores).some(x => x !== excepto && procesosNormTxt(x) === norm)) throw new Error('Ya existe un sector con ese nombre.');
+  return n;
+}
+async function sectoresRender() {
+  const el = document.getElementById('admin-sectores-card'); if (!el) return;
+  accesosInit();
+  try { _secCuenta = await sectoresContar(); _secContado = true; } catch (e) { _secCuenta = {}; _secContado = false; }
+  _secLista = Object.keys(_accEdit.sectores);
+  const huerf = _secContado ? Object.keys(_secCuenta).filter(x => x && x !== 'null' && !_accEdit.sectores[x]) : [];
+  const filas = _secLista.map((sec, i) => {
+    const n = _secCuenta[sec] || 0, prot = SECTORES_PROTEGIDOS.includes(sec);
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border);flex-wrap:wrap"><b style="font-size:13px;flex:1;min-width:150px">${esc(sec)}</b><span class="hint" style="margin:0">${_secContado ? n + (n === 1 ? ' persona' : ' personas') : ''}${prot ? (_secContado ? ' · ' : '') + 'del sistema' : ''}</span>${prot ? '' : `<button class="btn btn-secondary btn-sm" onclick="sectorRenombrar(${i})">Renombrar</button><button class="btn btn-secondary btn-sm" onclick="sectorEliminar(${i})">Eliminar</button>`}</div>`;
+  }).join('');
+  el.innerHTML = `<div class="card"><div class="card-label">Sectores</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:8px">Los sectores que existen en MAIA. Podés crear uno, cambiarle el nombre o eliminarlo (solo si no tiene personas). Admin, SGI y RRHH no se tocan porque el sistema se apoya en ellos. Cada cambio se guarda en el momento, junto con lo que tengas pendiente en "Accesos por sector".</p>
+    <div>${filas}</div>
+    ${huerf.length ? `<p style="font-size:12px;color:#b8860b;margin-top:8px">⚠ Hay personas con un sector que no está en la lista: ${huerf.map(x => esc(x) + ' (' + _secCuenta[x] + ')').join(', ')}. Asignales uno desde "Gestión de usuarios", o creá un sector con ese mismo nombre.</p>` : ''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+      <label style="font-size:12px;flex:1;min-width:180px">Nuevo sector<input type="text" id="sec-nuevo" maxlength="40" placeholder="Ej.: Seguridad e Higiene" onkeydown="if(event.key==='Enter')sectorCrear()" /></label>
+      <label style="font-size:12px">Partir de los accesos de<select id="sec-nuevo-base" style="width:auto"><option value="">Básicos (Rendiciones, Viajes, Hallazgos, Auditorías)</option>${_secLista.filter(x => x !== 'Admin').map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select></label>
+      <button class="btn btn-primary" onclick="sectorCrear()">Crear sector</button>
+    </div>
+    <div id="admin-sectores-status" style="margin-top:8px"></div></div>`;
+}
+// Después de un cambio: se redibuja todo lo que muestra sectores (lista, tabla de accesos, usuarios y el selector de "Crear usuario")
+function sectoresRefrescar() {
+  const sel = document.getElementById('admin-new-sector');
+  if (sel) { const v = sel.value; sel.innerHTML = '<option value="">— Elegir sector —</option>' + Object.keys(SECTOR_TABS).map(x => `<option>${esc(x)}</option>`).join(''); if (v && SECTOR_TABS[v]) sel.value = v; }
+  accesosRender(); adminLoadUsers(); return sectoresRender();
+}
+async function sectorCrear() {
+  const st = 'admin-sectores-status', antes = JSON.stringify(accesosInit());
+  try {
+    const nombre = sectorNombreValido(document.getElementById('sec-nuevo').value), base = document.getElementById('sec-nuevo-base').value;
+    const tabs = (base && _accEdit.sectores[base] ? _accEdit.sectores[base] : SECTORES_BASE).filter(t => t !== 'admin');
+    showMsg(st, 'loading', 'Guardando…');
+    _accEdit.sectores[nombre] = tabs.slice(); _accEdit.eliminados = _accEdit.eliminados.filter(x => x !== nombre);
+    await accesosPersistir();
+    await sectoresRefrescar();
+    showMsg(st, 'success', `✓ Sector "${nombre}" creado. Ya se lo podés asignar a las personas; ajustá sus solapas en "Accesos por sector".`);
+  } catch (e) { _accEdit = JSON.parse(antes); showMsg(st, 'error', '✕ ' + e.message); }
+}
+async function sectorRenombrar(i) {
+  const viejo = _secLista[i], st = 'admin-sectores-status'; if (!viejo || SECTORES_PROTEGIDOS.includes(viejo)) return;
+  const entrada = prompt(`Nuevo nombre para el sector "${viejo}":`, viejo); if (entrada === null) return;
+  const antes = JSON.stringify(accesosInit());
+  try {
+    const nuevo = sectorNombreValido(entrada, viejo); if (nuevo === viejo) return;
+    const n = (await sectoresContar())[viejo] || 0;
+    if (!confirm(`¿Cambiar "${viejo}" por "${nuevo}"?\n\n${n} persona${n === 1 ? '' : 's'} pasa${n === 1 ? '' : 'n'} al nombre nuevo y los accesos se mantienen. Los hallazgos y auditorías ya cargados conservan el nombre viejo del área. Quien tenga la sesión abierta ve el cambio al recargar.`)) return;
+    showMsg(st, 'loading', 'Guardando…');
+    // primero las personas (si falla, no cambió nada); después la lista de sectores
+    if (n) {
+      const s = JSON.parse(localStorage.getItem('daia_session') || 'null');
+      const r = await supaFetch('/rest/v1/profiles?sector=eq.' + encodeURIComponent(viejo), { method: 'PATCH', headers: { Authorization: 'Bearer ' + s.token, Prefer: 'return=representation' }, body: JSON.stringify({ sector: nuevo }) });
+      const filas = await r.json().catch(() => null);
+      if (!r.ok || !Array.isArray(filas) || filas.length < n) throw new Error('No se pudo pasar a las personas al sector nuevo: ' + ((filas && filas.message) || 'la base no aceptó el valor. Si tiene una restricción en profiles.sector, corré docs/sectores.sql en Supabase.'));
+    }
+    const orden = {}; Object.keys(_accEdit.sectores).forEach(k => { orden[k === viejo ? nuevo : k] = _accEdit.sectores[k]; }); _accEdit.sectores = orden;
+    if (!_accEdit.eliminados.includes(viejo)) _accEdit.eliminados.push(viejo);
+    _accEdit.eliminados = _accEdit.eliminados.filter(x => x !== nuevo);
+    await accesosPersistir();
+    await sectoresRefrescar();
+    showMsg(st, 'success', `✓ "${viejo}" ahora se llama "${nuevo}".`);
+  } catch (e) { _accEdit = JSON.parse(antes); showMsg(st, 'error', '✕ ' + e.message); }
+}
+async function sectorEliminar(i) {
+  const sec = _secLista[i], st = 'admin-sectores-status'; if (!sec || SECTORES_PROTEGIDOS.includes(sec)) return;
+  const antes = JSON.stringify(accesosInit());
+  try {
+    const n = (await sectoresContar())[sec] || 0;
+    if (n) { showMsg(st, 'error', `✕ "${sec}" tiene ${n} persona${n === 1 ? '' : 's'}. Pasalas a otro sector desde "Gestión de usuarios" y después eliminalo.`); return; }
+    if (!confirm(`¿Eliminar el sector "${sec}"?\n\nDejan de existir sus accesos. No se pierde ningún dato ya cargado.`)) return;
+    showMsg(st, 'loading', 'Guardando…');
+    delete _accEdit.sectores[sec]; if (!_accEdit.eliminados.includes(sec)) _accEdit.eliminados.push(sec);
+    await accesosPersistir();
+    await sectoresRefrescar();
+    showMsg(st, 'success', `✓ Sector "${sec}" eliminado.`);
+  } catch (e) { _accEdit = JSON.parse(antes); showMsg(st, 'error', '✕ ' + e.message); }
+}
+// Si el sector guardado en la sesión ya no existe (se renombró), se toma el actual del perfil
+async function sectorResincronizar() {
+  if (!currentUser || SECTOR_TABS[currentSector]) return;
+  try {
+    const s = JSON.parse(localStorage.getItem('daia_session') || 'null'); if (!s || !s.token) return;
+    const r = await supaFetch('/rest/v1/profiles?select=sector&id=eq.' + currentUser.id, { headers: { Authorization: 'Bearer ' + s.token } }), j = await r.json().catch(() => null);
+    const sec = r.ok && Array.isArray(j) && j[0] && j[0].sector; if (!sec || !SECTOR_TABS[sec]) return;
+    currentSector = sec; currentUser.sector = sec; s.sector = sec; if (s.user) s.user.sector = sec;
+    localStorage.setItem('daia_session', JSON.stringify(s));
+    const el = document.getElementById('user-sector-display'); if (el) el.textContent = sec + (currentUser.coordinador ? ' · Coordinador' : '');
+  } catch (e) { /* queda como estaba */ }
 }
 // Revisión de la tabla de configuraciones: filas repetidas por clave (una causa de que "no se guarde" una configuración)
 let _adminCfgDup = {};
@@ -45894,6 +46020,7 @@ async function continueLoginAfterEmpresa() {
   applyEmpresaSelector();
   refreshAllForEmpresa();
   await accesosCargar();   // accesos por sector guardados desde Admin (si no hay, valen los de origen)
+  await sectorResincronizar();   // por si el sector de la sesión se renombró desde Admin
   applyTabAccess();
   initApp();
   notifStartPolling();
@@ -47249,7 +47376,7 @@ async function adminUpdateSector(userId, sector) {
   });
   const data = await res.json().catch(()=>null);
   if (!res.ok || !data || !data.length) {
-    alert('No se pudo guardar el sector "'+sector+'": ' + (data?.message || 'la fila no se actualizó. Puede ser una restricción (check constraint) en la columna sector de la tabla profiles que todavía no incluye este valor — revisalo en Supabase.'));
+    alert('No se pudo guardar el sector "'+sector+'": ' + (data?.message || 'la fila no se actualizó. Puede ser una restricción (check constraint) en la columna sector de la tabla profiles que todavía no incluye este valor — corré docs/sectores.sql en Supabase.'));
     adminLoadUsers();
   }
 }
@@ -47383,6 +47510,7 @@ function renderAdmin() {
       <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Cada vez que el chat flotante resuelve con éxito un sitio, Lista o página de SharePoint por nombre, lo guarda acá para no tener que volver a buscarlo — compartido entre todos los usuarios. Si asoció algo mal (por ejemplo, guardó una lista que no era la correcta para un tema), borralo acá.</p>
       <div id="admin-maia-conocimiento-list"></div>
     </div>
+    <div id="admin-sectores-card"></div>
     <div id="admin-accesos-card"></div>
     <div class="card">
       <div class="card-label">Revisión de configuraciones guardadas</div>
@@ -47392,6 +47520,7 @@ function renderAdmin() {
   adminLoadUsers();
   renderAdminMaiaConocimiento();
   oooPerfiles().then(() => accesosRender()).catch(() => accesosRender());
+  sectoresRender();
 }
 
 async function renderAdminMaiaConocimiento() {
