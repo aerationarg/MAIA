@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.9</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.8</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.9</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -41108,6 +41108,40 @@ function sim3dMedirPunto(p) {
   } else { S.msg = 'Tocá el segundo punto.'; sim3dBarraRender(); }
   sim3dRender();
 }
+// ═══ Vista 3D: SBR e ICEAS (fases del ciclo) y paredes ═══
+// Capa de lodo decantado, brazo decantador (en la descarga), cartel con la fase del ciclo y, en el ICEAS, tabique de preselección y pluma de lodo que avanza por el tanque.
+// Las paredes se pueden ver transparentes, sólidas u ocultas (para mirar adentro o ver solo los equipos).
+function sim3dSbr3d(b, nd, hu) {
+  const T = THREE, ex = nd.extra || {}, sb = ex.sbr; if (!sb || !sb.tanque) return;
+  const yb = b.yb, col = Math.max(0.3, hu.col), L = hu.L, W = hu.W, circ = hu.circ, q = sb.tanque, pf = sb.iceas && !circ ? (sb.preFrac || 0) : 0, at = (a, k) => a && a.length ? a[Math.min(k, a.length - 1)] : 0;
+  const cuerpo = (mat) => new T.Mesh(circ ? new T.CylinderGeometry(L / 2 - 0.08, L / 2 - 0.08, 1, 40) : new T.BoxGeometry(L - 0.14, 1, W - 0.14), mat);
+  const lodo = cuerpo(new T.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 0.9 })); b.g.add(lodo); b.dyn = b.dyn || [];
+  const dec = new T.Mesh(new T.BoxGeometry(L * 0.6, 0.1, 0.3), new T.MeshStandardMaterial({ color: 0x1a8f4d })); dec.visible = false; b.g.add(dec);
+  let pre = null, tab = null, pluma = null;
+  if (pf > 0) {
+    tab = new T.Mesh(new T.BoxGeometry(0.15, col, W - 0.1), new T.MeshStandardMaterial({ color: 0x7a838a, transparent: true, opacity: 0.9 })); tab.position.set(-L / 2 + pf * L, yb + col / 2, 0); b.g.add(tab);
+    pre = new T.Mesh(new T.BoxGeometry(pf * L - 0.2, 1, W - 0.14), new T.MeshStandardMaterial({ color: 0xc9b88f, transparent: true, opacity: 0.55, depthWrite: false })); pre.position.x = -L / 2 + pf * L / 2; b.g.add(pre);
+    pluma = new T.Mesh(new T.BoxGeometry(1, 1, 1), new T.MeshStandardMaterial({ color: 0x5a2d1a, transparent: true, opacity: 0.6 })); pluma.visible = false; b.g.add(pluma);
+  }
+  const fs = sim3dEtiqueta('Fase', false); fs.scale.set((S3 => S3 * 0.8)(_sim3d.labH || 1.5) * fs.userData.ar, (_sim3d.labH || 1.5) * 0.8, 1); fs.position.set(0, b.top + 1.4 + (_sim3d.labH || 1.5) * 2.6, 0); b.g.add(fs); b.faseSp = fs;
+  b.dyn.push(k => {
+    const hwF = sim3dClamp(at(q.hw, k) / sb.Hmax, 0, 1), hsF = Math.max(0, Math.min(at(q.hw, k), at(q.hint, k))) / sb.Hmax, f = at(q.fase, k), h = col * hwF, hl = col * hsF;
+    lodo.scale.y = Math.max(0.02, hl); lodo.position.y = yb + lodo.scale.y / 2; dec.visible = f === 3; dec.position.y = yb + h;
+    if (pre) {
+      pre.scale.y = Math.max(0.02, h); pre.position.y = yb + pre.scale.y / 2; pre.material.color.set(simColorConc(Math.max(at(q.preMLSS, k), 0.4 * at(q.MLSS, k)), 7000));
+      const wm = L * (1 - pf) - 0.2, pw = f >= 2 ? wm * Math.min(1, at(q.plume, k)) : 0, ph = Math.max(0.3, hl); pluma.visible = pw > 0.05; pluma.scale.set(Math.max(0.01, pw), ph, W - 0.2); pluma.position.set(-L / 2 + pf * L + 0.1 + pw / 2, yb + ph / 2, 0);
+    }
+    const txt = simFaseNom(sb, f) + (sb.iceas ? ' · ingreso continuo' : ''); if (fs.userData.texto !== txt) { fs.userData.texto = txt; fs.userData.dibujar(txt); }
+  });
+}
+function sim3dParedesAplicar(b) {
+  const m = (_simDoc && _simDoc.datos.ui && _simDoc.datos.ui.paredes3d) || 'transp';
+  b.matW.opacity = m === 'solida' ? 0.93 : 0.34; b.matW.depthWrite = m === 'solida'; b.matW.visible = m !== 'oculta'; b.matW.needsUpdate = true;
+  if (b.bordes) b.bordes.visible = m !== 'oculta';
+}
+function sim3dParedes(v) {
+  const d = _simDoc.datos; d.ui = d.ui || {}; d.ui.paredes3d = v; simGuardar(); Object.values(_sim3d.uni).forEach(sim3dParedesAplicar); sim3dBarraRender(); sim3dRender();
+}
 // ═══ Vista 3D: equipos de cada unidad ═══
 // Aparecen según lo que el proyecto tiene cargado (difusores, aireadores, mezcladores, bombas, canasto) y, para cada tipo de unidad, su equipo característico
 // (puente raspador del sedimentador, tamiz inclinado, pantallas del contacto, etc.). Las burbujas siguen el aire que da la simulación; el resto gira o se mueve con el reloj.
@@ -41316,9 +41350,9 @@ function sim3dCuerpo(nd, hu) {
   pared.userData.uid = nd.id; g.add(pared);
   const bordes = new T.LineSegments(new T.EdgesGeometry(pared.geometry, 20), matL); bordes.position.copy(pared.position); g.add(bordes);
   g.add(agua); (agua.isGroup ? agua.children : [agua]).forEach(m => { m.userData.uid = nd.id; });
-  const b = { g, pared, agua, matA, matW, hu, top, yb, escala, cono, bombas: [], lodo };
+  const b = { g, pared, agua, matA, matW, hu, top, yb, escala, cono, bombas: [], lodo, bordes };
   if (nd.tipo === 'pozo') { const nT = Math.max(1, (nd.extra && nd.extra.nd) || 1); for (let j = 0; j < nT; j++) { const m = new T.Mesh(new T.BoxGeometry(0.5, 0.6, 0.5), new T.MeshStandardMaterial({ color: 0x9a9a9a })); m.position.set(-hu.L / 2 + hu.L * (j + 1) / (nT + 1), top + 0.32, 0); m.userData.uid = nd.id; g.add(m); b.bombas.push(m); } }
-  sim3dEquipos(b, nd, hu, simU(nd.id));
+  sim3dEquipos(b, nd, hu, simU(nd.id)); sim3dSbr3d(b, nd, hu); sim3dParedesAplicar(b);
   return b;
 }
 
@@ -41568,7 +41602,7 @@ function sim3dBarraHtml(d) {
   return `<div class="sim-3d-bar">
     <span class="sim-3d-g">${bt('orbit', '🖱 Mirar', 'Girar y acercar la vista')}${bt('mover', '✥ Mover unidades', 'Arrastrar las unidades sobre la grilla para ubicarlas como en el sitio')}${bt('medir', '📏 Medir', 'Medir la distancia entre dos puntos del terreno')}${S.medObjs && S.medObjs.length ? '<button class="btn btn-secondary btn-sm" onclick="sim3dMedirBorrar();sim3dBarraRender();sim3dRender()" title="Borra las medidas hechas">Borrar medidas</button>' : ''}</span>
     <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dVista('persp')">Perspectiva</button><button class="btn btn-secondary btn-sm" onclick="sim3dVista('planta')">Planta</button><button class="btn btn-secondary btn-sm" onclick="sim3dVista('frente')">Frente</button></span>${sim3dVistasHtml(d)}
-    <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dGirar()" title="Gira 90° la unidad seleccionada">↻ Girar unidad</button><label style="font-size:12px;margin:0">Grilla</label><select style="width:auto" onchange="sim3dSetGrilla(this.value)">${[0.5, 1, 2, 5].map(v => `<option value="${v}" ${im.grid === v ? 'selected' : ''}>${v} m</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="sim3dReordenar()" title="Vuelve a la disposición automática inicial">Reordenar solas</button><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Difusores, mezcladores, puentes raspadores, sopladores, etc."><input type="checkbox" ${simUiAbierto('eq3d', true) ? 'checked' : ''} onchange="sim3dEquiposVer(this.checked)" style="width:auto" /> Equipos</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Aro bajo cada unidad con el resultado de su verificación"><input type="checkbox" ${simUiAbierto('est3d', true) ? 'checked' : ''} onchange="sim3dEstadoVer(this.checked)" style="width:auto" /> Estado</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Largo de cada tubería y medidas de la unidad seleccionada"><input type="checkbox" ${simUiAbierto('dist3d', false) ? 'checked' : ''} onchange="sim3dCotasVer(this.checked)" style="width:auto" /> Cotas</label>${simUiAbierto('est3d', true) ? '<span style="font-size:11px;color:var(--text2);display:inline-flex;gap:8px"><span><b style="color:#1a8f4d">●</b> cumple</span><span><b style="color:#c98a00">●</b> justo</span><span><b style="color:#c0392b">●</b> no cumple</span><span><b style="color:#5b6b7b">●</b> faltan datos</span></span>' : ''}</span>
+    <span class="sim-3d-g"><button class="btn btn-secondary btn-sm" onclick="sim3dGirar()" title="Gira 90° la unidad seleccionada">↻ Girar unidad</button><label style="font-size:12px;margin:0">Grilla</label><select style="width:auto" onchange="sim3dSetGrilla(this.value)">${[0.5, 1, 2, 5].map(v => `<option value="${v}" ${im.grid === v ? 'selected' : ''}>${v} m</option>`).join('')}</select><button class="btn btn-secondary btn-sm" onclick="sim3dReordenar()" title="Vuelve a la disposición automática inicial">Reordenar solas</button><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Difusores, mezcladores, puentes raspadores, sopladores, etc."><input type="checkbox" ${simUiAbierto('eq3d', true) ? 'checked' : ''} onchange="sim3dEquiposVer(this.checked)" style="width:auto" /> Equipos</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Aro bajo cada unidad con el resultado de su verificación"><input type="checkbox" ${simUiAbierto('est3d', true) ? 'checked' : ''} onchange="sim3dEstadoVer(this.checked)" style="width:auto" /> Estado</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Largo de cada tubería y medidas de la unidad seleccionada"><input type="checkbox" ${simUiAbierto('dist3d', false) ? 'checked' : ''} onchange="sim3dCotasVer(this.checked)" style="width:auto" /> Cotas</label><label style="font-size:12px;margin:0;display:inline-flex;gap:4px;align-items:center" title="Ver las paredes de los tanques transparentes, sólidas u ocultas">Paredes <select style="width:auto" onchange="sim3dParedes(this.value)">${[['transp', 'Transparentes'], ['solida', 'Sólidas'], ['oculta', 'Ocultas']].map(([v, t]) => `<option value="${v}" ${(((d.ui || {}).paredes3d) || 'transp') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>${simUiAbierto('est3d', true) ? '<span style="font-size:11px;color:var(--text2);display:inline-flex;gap:8px"><span><b style="color:#1a8f4d">●</b> cumple</span><span><b style="color:#c98a00">●</b> justo</span><span><b style="color:#c0392b">●</b> no cumple</span><span><b style="color:#5b6b7b">●</b> faltan datos</span></span>' : ''}</span>
     <span class="sim-3d-g"><input type="file" id="sim3d-plano-file" accept="image/*" style="display:none" onchange="sim3dPlanoCargar(this)" /><button class="btn btn-secondary btn-sm" onclick="document.getElementById('sim3d-plano-file').click()" title="Una imagen del plano de implantación del sitio, que queda de fondo bajo las unidades">🗺 ${pl ? 'Cambiar plano' : 'Plano de fondo…'}</button>${pl ? `${bt('plano', 'Mover plano', 'Arrastrar el plano de fondo')}${bt('calibrar', 'Calibrar escala', 'Marcar dos puntos del plano y decir cuántos metros hay entre ellos')}<label style="font-size:12px;margin:0">Ancho</label><input type="number" min="2" step="any" value="${pl.ancho}" style="width:74px" onchange="sim3dPlanoSet('ancho',this.value)" title="Ancho real del plano en metros" /><span style="font-size:12px">m</span><label style="font-size:12px;margin:0">Opacidad</label><input type="range" min="0.1" max="1" step="0.05" value="${pl.op == null ? 0.6 : pl.op}" style="width:80px" oninput="sim3dPlanoSet('op',this.value)" /><button class="btn btn-secondary btn-sm" onclick="sim3dPlanoQuitar()">Quitar plano</button>` : ''}</span>
   </div>
   <div class="hint" style="margin:4px 0 6px">${esc(S.msg || SIM3D_AYUDA[S.modo] || '')}${S.auto ? ' <b>Las unidades están en una disposición automática: arrastralas para ubicarlas como en el sitio.</b>' : ''} ${ocupa}</div>`;
@@ -41610,7 +41644,7 @@ function sim3dTick(plant, d, k, t, sinFase) {
     try {
       if (nd.tipo === 'pozo' && ex.nivel) { h = Math.min(hu.alto, at(ex.nivel, k)); rebalsa = (ex.rebalseSerie && at(ex.rebalseSerie, k) > 0) || at(ex.nivel, k) >= ex.hmax - 1e-6; const on = at(ex.bombas, k) || 0; b.bombas.forEach((m, j) => m.material.color.set(on >= j + 0.5 ? 0x2f8a57 : 0x9a9a9a)); }
       else if (nd.tipo === 'ecualizador' && ex.vol) { h = hu.col * Math.min(1, at(ex.vol, k) / ex.V); rebalsa = at(ex.spill, k) > 0; }
-      else if ((nd.tipo === 'sbr' || nd.tipo === 'iceas') && ex.sbr) { const q = ex.sbr.tanque; h = hu.col * Math.max(0, Math.min(1, at(q.hw, k) / ex.sbr.Hmax)); try { color = simSbrColores(q, k).agua; } catch (e) { /* sin color propio */ } }
+      else if ((nd.tipo === 'sbr' || nd.tipo === 'iceas') && ex.sbr) { const q = ex.sbr.tanque; h = hu.col * Math.max(0, Math.min(1, at(q.hw, k) / ex.sbr.Hmax)); try { const cs = simSbrColores(q, k); color = at(q.fase, k) >= 2 ? SIM_ZONA_COL.dec : cs.agua; } catch (e) { /* sin color propio */ } }
       else if (nd.tipo === 'lodos_activados' && ex.mlss) color = simColorConc(at(ex.mlss, k), 7000);
       else if (nd.tipo === 'anoxico' && ex.mlss) color = simColorConc(at(ex.mlss, k), 7000);
       else if (nd.tipo === 'mbr' && ex.mlss) color = simColorConc(at(ex.mlss, k), 12000);
@@ -41620,7 +41654,7 @@ function sim3dTick(plant, d, k, t, sinFase) {
     if (!color) color = ex.lodo ? simColorConc(at(nd.sal.sst, k) || 0, 40000) : simColorConc(at(nd.sal[VAR], k) || 0, maxV);
     let aire = 0.7; try { if (nd.tipo === 'lodos_activados' && ex.aire) aire = sim3dClamp(at(ex.aire, k) * 1.6, 0, 1); else if ((nd.tipo === 'sbr' || nd.tipo === 'iceas') && ex.sbr) aire = sim3dClamp(at(ex.sbr.tanque.aire, k), 0, 1); else if (nd.tipo === 'mbbr' && ex.sim && ex.sim.aire) aire = sim3dClamp(at(ex.sim.aire, k) * 1.2, 0, 1); } catch (e) { /* queda el aire de referencia */ }
     { const alm = rebalsa ? 'REBALSA' : sim3dAlarmaTexto(nd, k); if (alm !== b.alm) { b.alm = alm; b.alr.visible = !!alm; b.bal.visible = !!alm; if (alm) b.alr.userData.dibujar('⚠ ' + alm); } if (alm) b.bal.scale.setScalar(1 + 0.3 * Math.sin(performance.now() / 170)); }
-    b.hAct = h; b.aire = aire; if (b.eq.visible) b.anim.forEach(f => f(k, S.fase, b));
+    b.hAct = h; b.aire = aire; (b.dyn || []).forEach(f => f(k, S.fase, b)); if (b.eq.visible) b.anim.forEach(f => f(k, S.fase, b));
     b.matA.color.set(rebalsa ? '#e57373' : color);
     if (b.escala) { const hh = Math.max(0.02, h); b.agua.scale.y = hh; b.agua.position.y = b.yb + hh / 2; }
   });
