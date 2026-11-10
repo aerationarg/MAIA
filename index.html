@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.2</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.2</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -4063,12 +4063,39 @@ function rendTarjCargarPersonas(bancoNombre) {
     st.cargandoPers[bancoNombre] = false; renderRendResults();
   })();
 }
-function rendTarjElegirBanco(v) { rendManualValues['__tarjeta_detalle__'] = v; rendManualValues['__tarjeta_persona__'] = ''; renderRendResults(); }
+function rendTarjElegirBanco(v) { rendManualValues['__tarjeta_detalle__'] = v; rendManualValues['__tarjeta_persona__'] = ''; rendTarjEstado().creando = false; renderRendResults(); }
+// Sugerencia para la carpeta nueva: lo que ya se había elegido otra vez o, si no, las iniciales del nombre (Federico Cherny → FC)
+function rendTarjSugerirNombre() {
+  const st = rendTarjEstado(); if (st.persona) return st.persona;
+  const n = (typeof currentUser !== 'undefined' && currentUser && (currentUser.nombre || String(currentUser.email || '').split('@')[0])) || '';
+  return n.trim().split(/[\s._-]+/).filter(Boolean).map(w => w[0]).join('').toUpperCase();
+}
 function rendTarjElegirPersona(v) {
-  rendManualValues['__tarjeta_persona__'] = v; const st = rendTarjEstado(); st.persona = v;   // se recuerda para la próxima vez
+  const st = rendTarjEstado();
+  if (v === '__nueva__') { st.creando = true; st.nombreNueva = rendTarjSugerirNombre(); rendManualValues['__tarjeta_persona__'] = ''; renderRendResults(); return; }
+  st.creando = false;
+  rendManualValues['__tarjeta_persona__'] = v; st.persona = v;   // se recuerda para la próxima vez
   try { localStorage.setItem(rendTarjKeyPersona(), v); } catch (e) { /* sin acceso */ }
   supaConfigSet(rendTarjKeyPersona(), v).catch(() => {});
 }
+async function rendTarjCrearPersona() {
+  const st = rendTarjEstado(), banco = rendManualValues['__tarjeta_detalle__'], inp = document.getElementById('rend-tarj-nueva');
+  const nombre = String((inp ? inp.value : st.nombreNueva) || '').trim().replace(/\s+/g, ' ');
+  if (!nombre) { alert('Escribí el nombre de tu carpeta (por ejemplo tus iniciales).'); return; }
+  if (/[\\\/:*?"<>|]/.test(nombre) || nombre.length > 60) { alert('El nombre no puede tener \\ / : * ? " < > | ni ser tan largo.'); return; }
+  const lista = st.personas[banco] || [], ya = lista.find(x => rendNorm(x) === rendNorm(nombre));
+  const btn = document.getElementById('rend-tarj-crear-btn'); if (btn) { btn.disabled = true; btn.textContent = 'Creando...'; }
+  try {
+    let final = ya;
+    if (!final) {
+      const b = (st.bancos || []).find(x => x.name === banco); if (!b) throw new Error('No encuentro la carpeta del banco.');
+      await spEnsureFolder(await getMsToken(), st.base.siteId, b.id, nombre); final = nombre; lista.push(nombre); lista.sort((x, y) => x.localeCompare(y, 'es', { numeric: true })); st.personas[banco] = lista;
+    }
+    st.creando = false; rendTarjElegirPersona(final);   // la deja elegida y la recuerda
+    renderRendResults();
+  } catch (e) { alert('No se pudo crear la carpeta: ' + e.message); if (btn) { btn.disabled = false; btn.textContent = 'Crear carpeta'; } }
+}
+function rendTarjCancelarCrear() { const st = rendTarjEstado(); st.creando = false; renderRendResults(); }
 function rendTarjReintentar() { rendTarjLimpiarCache(); renderRendResults(); }
 // Bloque que va debajo de "Método de pago = Tarjeta"
 function rendTarjetaDetalleHtml() {
@@ -4086,8 +4113,9 @@ function rendTarjetaDetalleHtml() {
     if (st.personas[det] === undefined) { rendTarjCargarPersonas(det); html += '<div class="hint" style="margin-top:6px">Cargando carpetas...</div>'; }
     else {
       const lista = st.personas[det]; let cur = rendManualValues['__tarjeta_persona__'] || '';
-      if (!cur && st.persona && lista.includes(st.persona)) { cur = st.persona; rendManualValues['__tarjeta_persona__'] = cur; }
-      html += `<label style="margin-top:8px">Mi carpeta (iniciales) ${req}</label><select style="font-size:14px" onchange="rendTarjElegirPersona(this.value)"><option value="" ${!cur ? 'selected' : ''}>Seleccionar...</option>${lista.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      if (!cur && !st.creando && st.persona && lista.includes(st.persona)) { cur = st.persona; rendManualValues['__tarjeta_persona__'] = cur; }
+      html += `<label style="margin-top:8px">Mi carpeta (iniciales) ${req}</label><select style="font-size:14px" onchange="rendTarjElegirPersona(this.value)"><option value="" ${!cur && !st.creando ? 'selected' : ''}>Seleccionar...</option>${lista.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}<option value="__nueva__" ${st.creando ? 'selected' : ''}>➕ Mi carpeta no está en la lista (crearla)</option></select>`;
+      if (st.creando) html += `<div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--radius-sm)"><div class="hint" style="margin:0 0 6px">Se crea dentro de "${esc(det)}". Te sugiero tus iniciales; podés cambiarlas.</div><input type="text" id="rend-tarj-nueva" style="font-size:14px;max-width:240px" value="${esc(st.nombreNueva || '')}" oninput="rendTarjEstado().nombreNueva = this.value" /> <button class="btn btn-primary btn-sm" id="rend-tarj-crear-btn" style="width:auto" onclick="rendTarjCrearPersona()">Crear carpeta</button> <button class="btn btn-secondary btn-sm" style="width:auto" onclick="rendTarjCancelarCrear()">Cancelar</button></div>`;
       html += st.errPers[det] ? `<div class="hint" style="color:#e05">${esc(st.errPers[det])}</div>` : '<div class="hint">La elegís una sola vez: MAIA se acuerda. Los comprobantes con IVA van a "Fcs A" y los que no tienen IVA a "sin IVA", del mes actual.</div>';
     }
   }
