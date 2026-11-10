@@ -448,7 +448,7 @@
     <div class="login-card">
       <div class="login-logo">
         <img src="icons/logo-aeration.png" alt="Aeration Argentina" />
-        <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+        <h1>MAIA <span id="maia-build-label">v.1</span></h1>
         <p>Manejo de Aeration con IA</p>
       </div>
       <div id="login-error" class="login-error" style="display:none"></div>
@@ -505,7 +505,7 @@
       <img src="icons/logo-aeration.png" alt="Aeration" class="sidebar-logo" id="sidebar-logo-img" />
       <div class="sidebar-header-row">
         <div class="sidebar-header-text">
-          <h1>MAIA <span id="maia-build-label">v.0</span></h1>
+          <h1>MAIA <span id="maia-build-label">v.1</span></h1>
           <p>Manejo de Aeration con IA</p>
         </div>
         <button class="sidebar-toggle desktop-only" onclick="toggleSidebar()" title="Colapsar/expandir"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1350,6 +1350,15 @@
         <div class="sp-selected" style="margin-bottom:8px">
           <span id="cfg-rend-base-label">Cargando...</span>
           <button class="sp-browse-btn" onclick="fbOpen('folder','rend-base-folder')">Seleccionar</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label">Carpeta base — Tarjeta (facturas de proveedores)</div>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:10px">Opcional. Si se elige, las rendiciones con método de pago Tarjeta (Galicia, Río, etc.) van a: esta carpeta › carpeta del banco › carpeta de la persona (iniciales) › mes › "Fcs A" (comprobantes con IVA) o "sin IVA". Cada una con su propio Excel. AMEX y Nación siguen como antes. Si no se elige, todo funciona como siempre.</p>
+        <div class="sp-selected" style="margin-bottom:8px">
+          <span id="cfg-rend-tarjeta-base-label">Cargando...</span>
+          <button class="sp-browse-btn" onclick="fbOpen('folder','rend-tarjeta-base')">Seleccionar</button>
+          <button class="sp-browse-btn" onclick="cfgRendTarjetaQuitar()">Quitar</button>
         </div>
       </div>
       <div class="card">
@@ -2806,6 +2815,7 @@ async function cfgRendLoadAll() {
   }
   cfgRendRenderFx();
   cfgRendRenderFxFields();
+  cfgRendTarjetaCargarLabel();
 }
 function cfgRendRenderFx() {
   const el = document.getElementById('cfg-rend-fx-list');
@@ -3566,14 +3576,7 @@ function renderRendResults() {
           const onChangeJs = isMetodoPago
             ? `rendManualValues['${fieldNameEsc}'] = this.value; renderRendResults()`
             : `rendManualValues['${fieldNameEsc}'] = this.value`;
-          const tarjetaDetalle = (isMetodoPago && curVal.trim().toLowerCase()==='tarjeta') ? `
-            <div style="margin-top:8px;margin-left:14px;padding-left:10px;border-left:2px solid var(--border)">
-              <label>Tarjeta <span style="color:#e05" title="Obligatorio">*</span></label>
-              <select id="rend-tarjeta-detalle" style="font-size:14px" onchange="rendManualValues['__tarjeta_detalle__'] = this.value">
-                <option value="" ${!rendManualValues['__tarjeta_detalle__']?'selected':''}>Seleccionar...</option>
-                ${RENDIC_TARJETA_OPTIONS.map(o=>`<option value="${esc(o)}" ${rendManualValues['__tarjeta_detalle__']===o?'selected':''}>${esc(o)}</option>`).join('')}
-              </select>
-            </div>` : '';
+          const tarjetaDetalle = (isMetodoPago && curVal.trim().toLowerCase()==='tarjeta') ? rendTarjetaDetalleHtml() : '';
           return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<select id="rend-manual-${i}" style="font-size:14px" onchange="${onChangeJs}"><option value="" ${!curVal?'selected':''}>${esc(f.desc||'Seleccionar...')}</option>${opts.map(o=>`<option value="${esc(o)}" ${curVal===o?'selected':''}>${esc(o)}</option>`).join('')}</select>${tarjetaDetalle}</div>`;
         }
         return `<div style="margin-bottom:12px"><label>${esc(f.name)}${reqMark}</label>${modeSelector}<input type="text" id="rend-manual-${i}" placeholder="${esc(f.desc||f.name)}" style="font-size:14px" value="${esc(curVal)}" oninput="rendManualValues['${fieldNameEsc}'] = this.value" /></div>`;
@@ -3930,6 +3933,13 @@ function rendValidateRequiredFields() {
     if (isMetodoPago && String(rendManualValues[f.name]||'').trim().toLowerCase() === 'tarjeta' && !String(rendManualValues['__tarjeta_detalle__']||'').trim()) {
       return 'Falta elegir la Tarjeta.';
     }
+    if (isMetodoPago && String(rendManualValues[f.name]||'').trim().toLowerCase() === 'tarjeta') {
+      const stv = rendTarjEstado(), det = rendManualValues['__tarjeta_detalle__'];
+      if (stv.base && !RENDIC_TARJETA_LEGACY.includes(det)) {
+        if (!(stv.bancos || []).some(b => b.name === det)) return 'Falta elegir la Tarjeta.';
+        if (!String(rendManualValues['__tarjeta_persona__']||'').trim()) return 'Falta elegir tu carpeta (iniciales) de la Tarjeta.';
+      }
+    }
   }
   return null;
 }
@@ -3992,6 +4002,156 @@ function rendApplyCurrencyConversion(extracted, activeFields, fxRates, fxFieldNa
   }
 }
 
+// ── Rendiciones con Tarjeta: carpeta de facturas de proveedores (Cfg Rendiciones › Carpeta base — Tarjeta) ──
+// Ruta: base de tarjeta › carpeta del banco (la que ya existe) › carpeta de la persona (iniciales, la que ya existe) › mes (M-AAAA) › "Fcs A…" (comprobantes con IVA) o "sin IVA…" (sin IVA)
+// En cada una de las dos carpetas se crea una rendición (carpeta Rendicion_AAAA_MM_DD con su Excel y los comprobantes que le tocan).
+// AMEX y Nación siguen con el esquema anterior (Empresa › Persona › Tarjeta › …). Si la empresa no tiene configurada la carpeta base de tarjeta, todo sigue como antes.
+const RENDIC_TARJETA_LEGACY = ['AMEX', 'VISAS Banco Nacion'];
+const REND_CARPETA_FCSA = 'Fcs A - imputacion- solo guardar fc', REND_CARPETA_SINIVA = 'sin IVA - completar planilla y guardar comprobantes';
+let _rendTarj = null;
+function rendTarjEstado() {
+  if (!_rendTarj || _rendTarj.emp !== currentEmpresa) _rendTarj = { emp: currentEmpresa, base: undefined, cargando: false, bancos: null, errBancos: '', personas: {}, cargandoPers: {}, errPers: {}, persona: undefined };
+  return _rendTarj;
+}
+const rendTarjKeyBase = () => 'rend_tarjeta_' + currentEmpresa + '_base';   // (no termina en _SAS: no se hereda de AA)
+function rendTarjKeyPersona() { const uid = (typeof currentUser !== 'undefined' && currentUser && (currentUser.id || currentUser.email)) || 'u'; return 'rend_tarjeta_' + currentEmpresa + '_persona_' + uid; }
+function rendTarjLimpiarCache() { _rendTarj = null; }
+// Lee la carpeta base de tarjeta. A diferencia de otras lecturas, si no se puede leer TIRA error (así nunca se cae sin aviso al esquema viejo).
+async function rendTarjLeerBase() {
+  let raw;
+  try { raw = await supaConfigGetSeguro(rendTarjKeyBase()); } catch (e) { throw new Error('No pude leer la configuración de la carpeta de tarjetas (' + e.message + '). Probá de nuevo en un momento.'); }
+  const st = rendTarjEstado(); let b = null; try { b = raw ? JSON.parse(raw) : null; } catch (e) { b = null; }
+  st.base = (b && b.siteId && (b.id || b.path != null)) ? b : null; return st.base;
+}
+async function spListarCarpetas(token, siteId, parentId) {
+  const out = []; let url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${parentId}/children?$select=id,name,folder&$top=200`;
+  while (url) {
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error(`No se pudo leer una carpeta de SharePoint (HTTP ${r.status}). Revisá que tu cuenta tenga acceso.`);
+    const d = await r.json(); (d.value || []).forEach(x => { if (x.folder) out.push({ id: x.id, name: x.name }); }); url = d['@odata.nextLink'] || null;
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name, 'es', { numeric: true }));
+}
+async function rendTarjBaseId(token, base) { return base.id || await spGetFolderIdByPath(token, base.siteId, base.path || ''); }
+async function rendTarjCargarBancos(st) {
+  try {
+    const token = await getMsToken(), baseId = await rendTarjBaseId(token, st.base);
+    st.bancos = (await spListarCarpetas(token, st.base.siteId, baseId)).filter(h => /^rendicion/i.test(h.name) && !/efectivo/i.test(h.name)); st.errBancos = '';
+  } catch (e) { st.bancos = []; st.errBancos = e.message; }
+}
+// Carga (una vez) la config de la carpeta base y la carpeta de iniciales recordada; después vuelve a dibujar la pantalla
+function rendTarjCargar() {
+  const st = rendTarjEstado(); if (st.cargando) return; st.cargando = true;
+  (async () => {
+    try {
+      await rendTarjLeerBase();
+      let p = null; try { p = localStorage.getItem(rendTarjKeyPersona()); } catch (e) { /* sin acceso */ }
+      if (!p) { try { p = await supaConfigGet(rendTarjKeyPersona()); } catch (e) { /* se pide de nuevo */ } }
+      st.persona = p || '';
+      if (st.base) await rendTarjCargarBancos(st);
+    } catch (e) { st.base = null; st.errBancos = e.message; }
+    st.cargando = false; renderRendResults();
+  })();
+}
+function rendTarjCargarPersonas(bancoNombre) {
+  const st = rendTarjEstado(); if (st.cargandoPers[bancoNombre]) return; st.cargandoPers[bancoNombre] = true;
+  (async () => {
+    try {
+      const b = (st.bancos || []).find(x => x.name === bancoNombre); if (!b) throw new Error('No encuentro esa carpeta de banco.');
+      st.personas[bancoNombre] = (await spListarCarpetas(await getMsToken(), st.base.siteId, b.id)).map(x => x.name); delete st.errPers[bancoNombre];
+    } catch (e) { st.personas[bancoNombre] = []; st.errPers[bancoNombre] = e.message; }
+    st.cargandoPers[bancoNombre] = false; renderRendResults();
+  })();
+}
+function rendTarjElegirBanco(v) { rendManualValues['__tarjeta_detalle__'] = v; rendManualValues['__tarjeta_persona__'] = ''; renderRendResults(); }
+function rendTarjElegirPersona(v) {
+  rendManualValues['__tarjeta_persona__'] = v; const st = rendTarjEstado(); st.persona = v;   // se recuerda para la próxima vez
+  try { localStorage.setItem(rendTarjKeyPersona(), v); } catch (e) { /* sin acceso */ }
+  supaConfigSet(rendTarjKeyPersona(), v).catch(() => {});
+}
+function rendTarjReintentar() { rendTarjLimpiarCache(); renderRendResults(); }
+// Bloque que va debajo de "Método de pago = Tarjeta"
+function rendTarjetaDetalleHtml() {
+  const st = rendTarjEstado(), det = rendManualValues['__tarjeta_detalle__'] || '';
+  const caja = inner => `<div style="margin-top:8px;margin-left:14px;padding-left:10px;border-left:2px solid var(--border)">${inner}</div>`;
+  if (st.base === undefined) { rendTarjCargar(); return caja('<div class="hint">Cargando tarjetas...</div>'); }
+  const req = '<span style="color:#e05" title="Obligatorio">*</span>';
+  if (!st.base) {   // sin carpeta de tarjeta configurada: esquema de siempre
+    return caja(`<label>Tarjeta ${req}</label><select id="rend-tarjeta-detalle" style="font-size:14px" onchange="rendManualValues['__tarjeta_detalle__'] = this.value"><option value="" ${!det ? 'selected' : ''}>Seleccionar...</option>${RENDIC_TARJETA_OPTIONS.map(o => `<option value="${esc(o)}" ${det === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`);
+  }
+  const nombres = RENDIC_TARJETA_LEGACY.concat((st.bancos || []).map(b => b.name));
+  let html = `<label>Tarjeta ${req}</label><select id="rend-tarjeta-detalle" style="font-size:14px" onchange="rendTarjElegirBanco(this.value)"><option value="" ${!det ? 'selected' : ''}>Seleccionar...</option>${nombres.map(o => `<option value="${esc(o)}" ${det === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  if (st.errBancos) html += `<div class="hint" style="color:#e05">No pude leer las carpetas de los bancos: ${esc(st.errBancos)} <button class="btn btn-secondary btn-sm" style="width:auto" onclick="rendTarjReintentar()">Reintentar</button></div>`;
+  if (det && !RENDIC_TARJETA_LEGACY.includes(det)) {
+    if (st.personas[det] === undefined) { rendTarjCargarPersonas(det); html += '<div class="hint" style="margin-top:6px">Cargando carpetas...</div>'; }
+    else {
+      const lista = st.personas[det]; let cur = rendManualValues['__tarjeta_persona__'] || '';
+      if (!cur && st.persona && lista.includes(st.persona)) { cur = st.persona; rendManualValues['__tarjeta_persona__'] = cur; }
+      html += `<label style="margin-top:8px">Mi carpeta (iniciales) ${req}</label><select style="font-size:14px" onchange="rendTarjElegirPersona(this.value)"><option value="" ${!cur ? 'selected' : ''}>Seleccionar...</option>${lista.map(o => `<option value="${esc(o)}" ${cur === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      html += st.errPers[det] ? `<div class="hint" style="color:#e05">${esc(st.errPers[det])}</div>` : '<div class="hint">La elegís una sola vez: MAIA se acuerda. Los comprobantes con IVA van a "Fcs A" y los que no tienen IVA a "sin IVA", del mes actual.</div>';
+    }
+  }
+  return caja(html);
+}
+// Comprobante con IVA = el monto de IVA leído es mayor a cero
+function rendTieneIva(r) { const iva = rendValorPorRol(r, 'iva'), n = iva ? rendParseMonto(iva.valor) : null; return n != null && n > 0; }
+// ¿Esta rendición usa el esquema nuevo? (Tarjeta + una carpeta de banco real + carpeta base de tarjeta configurada)
+async function rendTarjetaNuevoActivo() {
+  if (String(spMetodoPagoValue() || '').trim().toLowerCase() !== 'tarjeta') return false;
+  const det = rendManualValues['__tarjeta_detalle__'] || '';
+  if (!det || RENDIC_TARJETA_LEGACY.includes(det)) return false;
+  return !!(await rendTarjLeerBase());
+}
+function rendNorm(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+// Carpeta del mes: usa la que ya existe (10-2026, 3-2026 o 03-2026) y si no hay, la crea como M-AAAA
+async function spCarpetaMes(token, siteId, parentId) {
+  const d = new Date(), m = d.getMonth() + 1, y = d.getFullYear();
+  const hijos = await spListarCarpetas(token, siteId, parentId);
+  const ex = hijos.find(h => { const q = /^\s*0*(\d{1,2})\s*-\s*(\d{4})\s*$/.exec(h.name); return q && +q[1] === m && +q[2] === y; });
+  return ex ? ex.id : await spEnsureFolder(token, siteId, parentId, `${m}-${y}`);
+}
+// Busca una subcarpeta por patrón ("Fcs A…", "sin IVA…"); si no existe la crea con el nombre habitual
+async function spCarpetaPorPatron(token, siteId, parentId, patron, nombreNuevo) {
+  const hijos = await spListarCarpetas(token, siteId, parentId), ex = hijos.find(h => patron.test(h.name));
+  return ex ? ex.id : await spEnsureFolder(token, siteId, parentId, nombreNuevo);
+}
+// Devuelve el id de la carpeta de cada grupo que haga falta (ya con el mes adentro)
+async function rendResolverCarpetasTarjeta(token, necesitaConIva, necesitaSinIva) {
+  const st = rendTarjEstado(), base = st.base || await rendTarjLeerBase(); if (!base) throw new Error('La carpeta base de tarjetas no está configurada.');
+  const siteId = base.siteId, baseId = await rendTarjBaseId(token, base);
+  const banco = rendManualValues['__tarjeta_detalle__'], persona = rendManualValues['__tarjeta_persona__'];
+  if (!String(persona || '').trim()) throw new Error('Falta elegir tu carpeta (iniciales) de la tarjeta.');
+  const bancoItem = (await spListarCarpetas(token, siteId, baseId)).find(h => rendNorm(h.name) === rendNorm(banco));
+  if (!bancoItem) throw new Error(`No encuentro la carpeta "${banco}" dentro de la carpeta base de tarjetas.`);
+  const persItem = (await spListarCarpetas(token, siteId, bancoItem.id)).find(h => rendNorm(h.name) === rendNorm(persona));
+  if (!persItem) throw new Error(`No encuentro la carpeta "${persona}" dentro de "${banco}". Elegí tu carpeta de nuevo.`);
+  const mesId = await spCarpetaMes(token, siteId, persItem.id), out = { siteId };
+  if (necesitaConIva) out.conIva = await spCarpetaPorPatron(token, siteId, mesId, /^fcs\s*a\b/i, REND_CARPETA_FCSA);
+  if (necesitaSinIva) out.sinIva = await spCarpetaPorPatron(token, siteId, mesId, /^sin\s*iva/i, REND_CARPETA_SINIVA);
+  return out;
+}
+// Destinos de este envío: uno solo (esquema de siempre) o dos (Fcs A / sin IVA) con los comprobantes que le tocan a cada uno
+async function rendDestinosLote(token) {
+  if (await rendTarjetaNuevoActivo()) {
+    const conIva = results.filter(rendTieneIva), sinIva = results.filter(r => !rendTieneIva(r));
+    const c = await rendResolverCarpetasTarjeta(token, conIva.length > 0, sinIva.length > 0), out = [];
+    if (conIva.length) out.push({ siteId: c.siteId, mesId: c.conIva, items: conIva, etiqueta: 'Fcs A (con IVA)' });
+    if (sinIva.length) out.push({ siteId: c.siteId, mesId: c.sinIva, items: sinIva, etiqueta: 'sin IVA' });
+    return out;
+  }
+  const { siteId, folderId } = await rendResolveDestFolder(token);
+  return [{ siteId, mesId: folderId, items: results.slice(), etiqueta: '' }];
+}
+function rendArchivosDeLote(doneFiles, items) { const n = new Set(items.map(r => r['__archivo__'])); return doneFiles.filter(it => n.has(it.file.name)); }
+async function cfgRendTarjetaCargarLabel() {
+  const el = document.getElementById('cfg-rend-tarjeta-base-label'); if (!el) return;
+  try { const raw = await supaConfigGetSeguro(rendTarjKeyBase()); const b = raw ? JSON.parse(raw) : null; el.textContent = b ? (b.label || 'Configurada') : 'Sin seleccionar (se usa el esquema de siempre)'; } catch (e) { el.textContent = 'Error al cargar'; }
+}
+async function cfgRendTarjetaQuitar() {
+  if (!confirm('¿Quitar la carpeta base de tarjetas? Las rendiciones con Tarjeta vuelven al esquema de siempre.')) return;
+  try { await supaConfigSet(rendTarjKeyBase(), ''); rendTarjLimpiarCache(); cfgRendTarjetaCargarLabel(); } catch (e) { alert('No se pudo quitar: ' + e.message); }
+}
+
 // ── Rendiciones: guardar en SharePoint — carpeta y plantilla fijas (Cfg Rendiciones) ──
 // Carpeta final = base (Cfg) / Empresa / Persona / Método de pago / Año-Mes
 async function rendResolveDestFolder(token) {
@@ -4018,7 +4178,8 @@ async function rendResolveDestFolder(token) {
 // Escribe results[] en el Excel indicado, respetando la fila "Total" (inserta arriba y extiende el SUM)
 const rendColLetra = i => { let s = '', n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
 // Escribe las filas en el Excel. Devuelve qué filas se escribieron (con su número de fila y archivo de origen) y cuáles fallaron.
-async function rendWriteRows(token, siteId, excelItemId, sheetName) {
+async function rendWriteRows(token, siteId, excelItemId, sheetName, lote) {
+  const items = lote || results;
   const excelBase = `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItemId}/workbook/worksheets('${encodeURIComponent(sheetName)}')/`;
   const usedResp = await fetch(excelBase + `usedRange?$select=values`, {headers:{Authorization:'Bearer '+token}});
   if (!usedResp.ok) throw new Error('No se pudo leer el Excel.');
@@ -4055,8 +4216,8 @@ async function rendWriteRows(token, siteId, excelItemId, sheetName) {
   let nextBlankRow = (totalRowNum && firstEmptyRow < totalRowNum) ? firstEmptyRow : null;
   const filas = [], fallidas = [];
 
-  for (let ri=0; ri<results.length; ri++) {
-    const r = results[ri];
+  for (let ri=0; ri<items.length; ri++) {
+    const r = items[ri];
     let newRow;
     if (useMapping) {
       newRow = buildRowFromMapping(savedMapping, hdrs, usaCodigo ? Object.assign({}, r, { '__codigo__': rendCodigoPara(r) }) : r, rendManualValues, manualFields, fields);
@@ -4209,21 +4370,22 @@ function rendHistorialBorrar(id) {
 }
 
 // Escribe las filas, sube los comprobantes (con la fila en el nombre y enlace en el Excel), registra el historial y deja la pantalla limpia.
-async function rendFinalizarLote(token, siteId, folderId, excelId, sheetName, doneFiles, excelNombre, statusId, modo) {
-  const w = await rendWriteRows(token, siteId, excelId, sheetName);
+async function rendFinalizarLote(token, siteId, folderId, excelId, sheetName, doneFiles, excelNombre, statusId, modo, itemsLote, ultimo) {
+  const items = itemsLote || results.slice(); if (ultimo === undefined) ultimo = true;
+  const w = await rendWriteRows(token, siteId, excelId, sheetName, items);
   showMsg(statusId, 'loading', 'Subiendo comprobantes...');
   const filaPorArchivo = {};
   w.filas.forEach(f => { if (f.archivo && !(f.archivo in filaPorArchivo)) filaPorArchivo[f.archivo] = f.rowNum; });
   const subidos = await rendSubirComprobantesConFila(token, siteId, folderId, doneFiles, filaPorArchivo);
   await rendEnlazarArchivos(token, w, subidos);
-  const escritos = new Set(w.filas.map(f => f.ri));
-  const lote = results.filter((_, i) => escritos.has(i));
+  const escritos = new Set(w.filas.map(f => items[f.ri]));
+  const lote = items.filter(r => escritos.has(r));
   await rendRegistrarHistorialCompartido(lote);
   if (lote.length) rendHistorialAgregar(lote, excelNombre, modo);
   // lo enviado sale de la pantalla; lo que falló se queda para reintentarlo
-  results = results.filter((_, i) => !escritos.has(i));
+  results = results.filter(r => !escritos.has(r));
   files = files.filter(f => f.status !== 'done' || results.some(r => r['__archivo__'] === f.file.name));
-  if (!w.fallidas.length) { rendManualValues = {}; rendPersonaOverrideEnabled = false; rendPersonaOverrideValue = ''; }
+  if (ultimo && !w.fallidas.length) { rendManualValues = {}; rendPersonaOverrideEnabled = false; rendPersonaOverrideValue = ''; }
   saveResults(); renderFileList(); renderRendResults();
   const sinSubir = Object.entries(subidos).filter(([, v]) => v.error).map(([k]) => k).concat(Object.keys(filaPorArchivo).filter(n => !(n in subidos)).map(n => n + ' (no tenía archivo cargado)'));
   Object.entries(subidos).forEach(([n, v]) => { if (!v.error && !results.some(r => r['__archivo__'] === n)) rendArchivoBorrar(n); });
@@ -4281,50 +4443,41 @@ async function rendInsertarUltima() {
     const sesionMaia = JSON.parse(localStorage.getItem('daia_session')||'null');
     if (!sesionMaia?.token) throw new Error('Tu sesión de MAIA venció o no es válida — recargá la página e iniciá sesión de nuevo antes de reintentar.');
     const token = await getMsToken();
-    const { siteId, folderId: mesId } = await rendResolveDestFolder(token);
-    showMsg(statusId,'loading','Buscando la última rendición...');
-    const ultima = await rendBuscarUltima(token, siteId, mesId);
-    if (!ultima) throw new Error('No hay ninguna rendición generada todavía en esa carpeta. Usá "Generar nueva rendición" primero.');
-    const excelItem = ultima.excel, folderId = ultima.carpetaId;
-
-    showMsg(statusId,'loading','Leyendo el Excel...');
-    const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${excelItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
-    const sheetsData = await sheetsResp.json();
-    const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
-
-    showMsg(statusId,'loading','Insertando filas...');
-    const fin = await rendFinalizarLote(token, siteId, folderId, excelItem.id, sheetName, doneFiles, excelItem.name, statusId, 'insertar');
-    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ ${fin.cantidad} comprobante(s) guardados en "${excelItem.name}" y movidos al historial.` : fin.mensaje);
+    const dest = await rendDestinosLote(token);
+    // primero se verifica que cada destino tenga una rendición donde insertar (así no queda a medias)
+    const listos = [];
+    for (const d of dest) {
+      showMsg(statusId,'loading','Buscando la última rendición' + (d.etiqueta ? ' (' + d.etiqueta + ')' : '') + '...');
+      const ultima = await rendBuscarUltima(token, d.siteId, d.mesId);
+      if (!ultima) throw new Error('No hay ninguna rendición generada todavía en ' + (d.etiqueta ? 'la carpeta "' + d.etiqueta + '"' : 'esa carpeta') + '. Usá "Generar nueva rendición" primero.');
+      listos.push({ d, ultima });
+    }
+    const textos = []; let todoOk = true;
+    for (let di = 0; di < listos.length; di++) {
+      const { d, ultima } = listos[di], excelItem = ultima.excel, folderId = ultima.carpetaId, pre = d.etiqueta ? '[' + d.etiqueta + '] ' : '';
+      try {
+        showMsg(statusId,'loading', pre + 'Leyendo el Excel...');
+        const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${d.siteId}/drive/items/${excelItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
+        const sheetsData = await sheetsResp.json();
+        const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
+        showMsg(statusId,'loading', pre + 'Insertando filas...');
+        const filesG = dest.length > 1 ? rendArchivosDeLote(doneFiles, d.items) : doneFiles;
+        const fin = await rendFinalizarLote(token, d.siteId, folderId, excelItem.id, sheetName, filesG, excelItem.name, statusId, 'insertar', d.items, di === listos.length - 1);
+        if (!fin.ok) todoOk = false;
+        textos.push(fin.ok ? `${pre}✓ ${fin.cantidad} comprobante(s) guardados en "${excelItem.name}"` : pre + fin.mensaje);
+      } catch (e) { todoOk = false; textos.push(`${pre}✕ Error: ${e.message}`); }
+    }
+    showMsg(statusId, todoOk ? 'success' : 'error', textos.join(' · ') + (todoOk ? ' y movidos al historial.' : ''));
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
   }
 }
 
-async function rendGenerarNueva() {
-  if (!results.length) { alert('No hay comprobantes para guardar: analizá archivos con IA o cargá uno a mano.'); return; }
-  const missingMsg = rendValidateRequiredFields();
-  if (missingMsg) { alert(missingMsg); return; }
-  if (!rendConfirmarAdvertencias()) return;
-  const doneFiles = await rendArchivosParaSubir();
-  if (!rendConfirmarSinArchivo(doneFiles)) return;
-  const statusId = 'rend-save-status';
-  showMsg(statusId,'loading','Conectando...');
-  try {
-    // supaConfigGet devuelve null tanto si la config no existe como si hubo
-    // cualquier problema para leerla (sesión de MAIA vencida, red, etc.) — se
-    // chequea la sesión primero para no confundir un problema de sesión con
-    // "no está configurado".
-    const sesionMaia = JSON.parse(localStorage.getItem('daia_session')||'null');
-    if (!sesionMaia?.token) throw new Error('Tu sesión de MAIA venció o no es válida — recargá la página e iniciá sesión de nuevo antes de reintentar.');
-    const token = await getMsToken();
-    const tmplRaw = await rendCfgGet('rend_template');
-    if (!tmplRaw) throw new Error('No hay plantilla configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
-    const tmpl = JSON.parse(tmplRaw);
-    const { siteId, folderId: mesId } = await rendResolveDestFolder(token);
-
-    showMsg(statusId,'loading','Creando la carpeta de la rendición...');
+// Genera UNA rendición (carpeta + Excel de la plantilla + comprobantes) dentro de la carpeta mesId. Devuelve { ok, texto }.
+async function rendGenerarUna(token, tmpl, siteId, mesId, items, doneFiles, statusId, ultimo, pre) {
+    showMsg(statusId,'loading',pre + 'Creando la carpeta de la rendición...');
     const carpeta = await rendCrearCarpetaRendicion(token, siteId, mesId), folderId = carpeta.id;
-    showMsg(statusId,'loading','Copiando plantilla...');
+    showMsg(statusId,'loading',pre + 'Copiando plantilla...');
     const newFileName = carpeta.nombre + '.xlsx';
     // La plantilla (rend_template) y la carpeta destino (rend_base_folder) son dos
     // referencias de SharePoint configuradas por separado, y pueden vivir en
@@ -4366,14 +4519,14 @@ async function rendGenerarNueva() {
             if (monData.status === 'failed') throw new Error('Falló la copia de la plantilla en SharePoint.');
           } else if (monResp.status === 404) { completado = true; break; } // ya terminó y el monitor dejó de existir
         } catch(_e) { /* seguir intentando */ }
-        showMsg(statusId,'loading',`Copiando plantilla... (${i+1})`);
+        showMsg(statusId,'loading',pre + `Copiando plantilla... (${i+1})`);
         await new Promise(r=>setTimeout(r,1500));
       }
     } else {
       await new Promise(r=>setTimeout(r,2500)); // respaldo si Graph no mandó el header de monitoreo
     }
 
-    showMsg(statusId,'loading','Buscando el archivo copiado...');
+    showMsg(statusId,'loading',pre + 'Buscando el archivo copiado...');
     let copiedItem = null;
     for (let i = 0; i < 6 && !copiedItem; i++) {
       if (i > 0) await new Promise(r=>setTimeout(r,1500));
@@ -4383,12 +4536,46 @@ async function rendGenerarNueva() {
     }
     if (!copiedItem) throw new Error('La copia de la plantilla está tardando más de lo normal — esperá un minuto y probá "Insertar en última rendición" (probablemente ya esté creada) en vez de "Generar nueva rendición" de nuevo.');
 
-    showMsg(statusId,'loading','Insertando datos...');
+    showMsg(statusId,'loading',pre + 'Insertando datos...');
     const sheetsResp = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${copiedItem.id}/workbook/worksheets`, {headers:{Authorization:'Bearer '+token}});
     const sheetsData = await sheetsResp.json();
     const sheetName = sheetsData.value?.[0]?.name || 'Hoja1';
-    const fin = await rendFinalizarLote(token, siteId, folderId, copiedItem.id, sheetName, doneFiles, newFileName, statusId, 'nueva');
-    showMsg(statusId, fin.ok ? 'success' : 'error', fin.ok ? `✓ Rendición "${carpeta.nombre}" generada (carpeta con el Excel y ${fin.cantidad} comprobante(s)) y movida al historial.` : fin.mensaje);
+    const fin = await rendFinalizarLote(token, siteId, folderId, copiedItem.id, sheetName, doneFiles, newFileName, statusId, 'nueva', items, ultimo);
+    return { ok: fin.ok, texto: fin.ok ? `✓ Rendición "${carpeta.nombre}" generada (carpeta con el Excel y ${fin.cantidad} comprobante(s))` : fin.mensaje };
+}
+
+async function rendGenerarNueva() {
+  if (!results.length) { alert('No hay comprobantes para guardar: analizá archivos con IA o cargá uno a mano.'); return; }
+  const missingMsg = rendValidateRequiredFields();
+  if (missingMsg) { alert(missingMsg); return; }
+  if (!rendConfirmarAdvertencias()) return;
+  const doneFiles = await rendArchivosParaSubir();
+  if (!rendConfirmarSinArchivo(doneFiles)) return;
+  const statusId = 'rend-save-status';
+  showMsg(statusId,'loading','Conectando...');
+  try {
+    // supaConfigGet devuelve null tanto si la config no existe como si hubo
+    // cualquier problema para leerla (sesión de MAIA vencida, red, etc.) — se
+    // chequea la sesión primero para no confundir un problema de sesión con
+    // "no está configurado".
+    const sesionMaia = JSON.parse(localStorage.getItem('daia_session')||'null');
+    if (!sesionMaia?.token) throw new Error('Tu sesión de MAIA venció o no es válida — recargá la página e iniciá sesión de nuevo antes de reintentar.');
+    const token = await getMsToken();
+    const tmplRaw = await rendCfgGet('rend_template');
+    if (!tmplRaw) throw new Error('No hay plantilla configurada. Pedile a un Admin que la configure en Cfg Rendiciones.');
+    const tmpl = JSON.parse(tmplRaw);
+    const dest = await rendDestinosLote(token);
+    const textos = []; let todoOk = true;
+    for (let di = 0; di < dest.length; di++) {
+      const d = dest[di], pre = d.etiqueta ? '[' + d.etiqueta + '] ' : '';
+      try {
+        const filesG = dest.length > 1 ? rendArchivosDeLote(doneFiles, d.items) : doneFiles;
+        const r = await rendGenerarUna(token, tmpl, d.siteId, d.mesId, d.items, filesG, statusId, di === dest.length - 1, pre);
+        if (!r.ok) todoOk = false;
+        textos.push(pre + r.texto);
+      } catch (e) { todoOk = false; textos.push(`${pre}✕ Error: ${e.message}`); }
+    }
+    showMsg(statusId, todoOk ? 'success' : 'error', textos.join(' · ') + (todoOk ? ' y movida al historial.' : ''));
   } catch(e) {
     showMsg(statusId,'error','✕ Error: ' + e.message);
   }
@@ -24278,6 +24465,12 @@ function fbSelectCurrent() {
     fbClose();
     rendCfgSet('rend_base_folder', JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label }))
       .catch(e => alert('No se pudo guardar la carpeta base: ' + e.message));
+    return;
+  } else if (fbTarget === 'rend-tarjeta-base') {
+    document.getElementById('cfg-rend-tarjeta-base-label').textContent = label;
+    fbClose();
+    supaConfigSet(rendTarjKeyBase(), JSON.stringify({ path, id: itemId, siteId: fbCurrentSiteId, label })).then(() => rendTarjLimpiarCache())
+      .catch(e => alert('No se pudo guardar la carpeta base de tarjetas: ' + e.message));
     return;
   } else if (fbTarget === 'concil-banco-folder') {
     fbClose();
